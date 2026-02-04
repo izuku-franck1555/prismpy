@@ -1,0 +1,126 @@
+# Test configuration with GENERIC parameters (platform agnostic)
+# This config demonstrates the single-config-for-all-platforms approach
+# The same config can be used for SARRA-Py, CRAFT, PYTHIA, and ACEA
+
+project:
+  name: "segou_maize_test"
+  description: "Test SARRA-Py translation with generic config"
+  version: "1.0"
+
+# Region definition
+region:
+  name: "Segou"
+  country: "Mali"
+  country_iso3: "MLI"
+
+  boundary:
+    source: "manual"
+    gadm_level: 2
+    gadm_filter_field: "NAME_2"
+    gadm_filter_value: "Segou"
+    manual_bounds:
+      minx: -6.912767886999973
+      miny: 13.094364167000151
+      maxx: -5.155559062999885
+      maxy: 14.480210305000128
+
+# Crop configuration with GENERIC parameters
+crop:
+  name: "Maize"
+  name_short: "mai"
+  variety: "west_africa_opv"
+
+  calendar:
+    planting_doy: 166    # June 15
+    maturity_doy: 285    # October 12
+
+  # GENERIC phenology in thermal time (GDD) - works for ALL platforms
+  phenology:
+    emergence_gdd: 90.0
+    vegetative_phase_gdd: 500.0
+    reproductive_phase_gdd: 400.0
+    grain_filling_gdd: 700.0
+    photoperiod_sensitivity: 0.0
+
+  # GENERIC physiology parameters - works for ALL platforms
+  physiology:
+    base_temperature: 8.0
+    optimal_temperature: 26.0
+    max_temperature: 44.0
+    radiation_use_efficiency: 5.8
+    harvest_index: 0.4
+
+# GENERIC management parameters - works for ALL platforms
+management:
+  planting_density: 62500.0
+  sowing_mode: "opportunistic"
+  sowing_threshold_mm: 10.0
+  irrigation: false
+  irrigation_target: 0.0
+
+# GENERIC soil configuration - works for ALL platforms
+soil_config:
+  source: "isda"
+  default_depth_m: 1.5
+
+# Temporal settings
+temporal:
+  start_year: 2017
+  end_year: 2017
+  spinup_years: 0
+
+# Target platforms (can target multiple)
+targets:
+  - sarra_py
+
+# Platform-specific settings (only resolution/sources, NOT templates)
+platform_config:
+  sarra_py:
+    enabled: true
+    resolution: 0.0375
+    climate_sources:
+      rainfall: tamsat
+      temperature: agera5
+      radiation: agera5
+    soil_source: isda
+    # Sowing search configuration (SARRA-Py specific)
+    sowing_search_month: 5
+    sowing_search_day: 1
+
+# Data sources
+data_sources:
+  gadm:
+    version: "4.1"
+    base_path: "../SARRA-PY/data/gadm/"
+
+  # Existing climate data paths (pre-downloaded)
+  climate:
+    rainfall_dir: "SARRA-PY/data/3_output/TAMSAT_v3.1_SA©gou_rfe_filled/"
+    agera5_dir: "SARRA-PY/data/3_output/AgERA5_SA©gou/"
+
+  # Soil assets
+  soil:
+    isda_dir: "SARRA-PY/data/assets/"
+
+  cache_enabled: true
+  cache_dir: "data/cache/"
+
+# Output configuration
+output:
+  base_dir: "output/segou_test/"
+  structure: "by_platform"
+  copy_to_simulation_data: false
+
+# Provenance tracking
+provenance:
+  enabled: true
+  storage: "json"
+  # output_dir defaults to "provenance/" at project root
+  include_hashes: true
+  include_parameters: true
+
+# Processing options
+processing:
+  parallel: false
+  verbose: true
+  log_level: "DEBUG"

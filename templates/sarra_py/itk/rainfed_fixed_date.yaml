@@ -1,0 +1,45 @@
+# Rainfed fixed date sowing template for West Africa
+# Based on SARRA-Py Koutiala maize calibration
+# For fixed sowing: DateSemis on or after simulation start
+# Model sows at DateSemis regardless of soil moisture
+
+# Sowing parameters - FIXED DATE MODE
+# DateSemis must be ON or AFTER simulation start date!
+# Set to actual planting date for the region
+DateSemis: 2017-6-15      # Mid-June typical for Sudanian zone
+seuilEauSemis: 10.0       # Still needed for emergence check
+nbjTestSemis: 0           # Days to test sowing conditions
+profRacIni: 0.0           # Initial root depth (mm)
+
+# Plant density (plants/ha) - crop specific defaults
+# Millet: 53333, Maize: 62500, Sorghum: 55000
+densite: 62500.0
+
+# Nitrogen intensification
+NI: .nan                  # Not considered if .nan
+
+# Irrigation parameters (rainfed = no irrigation)
+irrigAuto: false
+irrigAutoTarget: 0.0
+maxIrrig: 0.0
+
+# Mulch parameters (no mulch for basic rainfed)
+coefMc: 0.0               # Mulch effect on evaporation
+surfMc: 1.0               # Mulch covering capacity (ha/t)
+biomIniMc: 0.0            # Initial mulch biomass (kg/ha)
+humSatMc: 0.0             # Mulch saturation humidity
+mulch: 1.0                # Permanent mulch effect
+
+# Mulch decomposition coefficients
+KI: 0.0
+KNLit: 0.0
+KNUp: 0.0
+KT: 0.0
+
+# Additional parameters (required by SARRA-Py)
+DisMc: 0
+TxRecolte: 0.0
+TxaTerre: 0.0
+NbUBT: 10.0
+dateFin: 300.0
+precision: 0.0

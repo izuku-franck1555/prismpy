@@ -1,0 +1,116 @@
+# prismpy ACEA Test Configuration - Kenya Wheat
+# Tests dynamic value handling with a different region/crop
+#
+# Region: Nairobi, Kenya
+# Crop: Wheat
+# Platform: ACEA (AquaCrop)
+
+# Project information
+project:
+  name: "Kenya_Wheat_Test"
+  description: "Test ACEA translator with different region/crop (Kenya/Wheat)"
+  version: "1.0"
+
+# Region configuration - Kenya highlands
+region:
+  name: "Nairobi"
+  country: "Kenya"
+  country_iso3: "KEN"
+  boundary:
+    source: "manual"  # Use manual bounds instead of GADM
+    manual_bounds:
+      minx: 36.5
+      miny: -1.5
+      maxx: 37.5
+      maxy: -0.5
+
+# Crop configuration - Wheat (different from Maize)
+crop:
+  name: "Wheat"
+  name_short: "whe"
+  variety: "kenya_highland"
+
+  calendar:
+    planting_doy: 90   # Late March (Kenya long rains)
+    maturity_doy: 210  # Late July
+
+  # Wheat-specific phenology in thermal time (GDD)
+  # Base temp 0C (wheat is a cool season crop)
+  phenology:
+    emergence_gdd: 80.0
+    vegetative_phase_gdd: 400.0
+    reproductive_phase_gdd: 300.0
+    grain_filling_gdd: 500.0
+    photoperiod_sensitivity: 0.2
+
+  # Wheat physiology parameters
+  physiology:
+    base_temperature: 0.0   # Wheat base temp is 0C
+    optimal_temperature: 18.0
+    max_temperature: 35.0
+    radiation_use_efficiency: 3.0
+    harvest_index: 0.45
+
+# Management parameters
+management:
+  planting_density: 300.0  # kg/ha seed rate for wheat
+  sowing_mode: "fixed_date"  # Valid options: opportunistic, fixed_date
+  irrigation: false
+
+# Soil configuration
+soil_config:
+  source: "hwsd"
+  default_depth_m: 2.0
+
+# Temporal scope
+temporal:
+  start_year: 2018
+  end_year: 2020
+  spinup_years: 2
+
+# Target platforms
+targets:
+  - acea
+
+# Platform-specific configuration
+platform_config:
+  acea:
+    enabled: true
+    resolution: "5arcmin"
+    climate_source: nasa_power
+    soil_source: hwsd
+    compute_et0: true
+    # Self-contained package settings
+    download_climate: true
+    climate_download_delay: 2.0
+
+    # HWSD soil data paths (for self-contained packages)
+    hwsd_bil_path: "/path/to/HWSD2_RASTER/HWSD2.bil"
+    hwsd_mdb_path: "/path/to/HWSD2.mdb"
+    include_soil_in_package: true
+
+    # SPAM harvested area data
+    # spam_data_dir: "/path/to/spam2020"  # Uncomment if available
+    include_spam_in_package: true
+
+    # GAEZ crop suitability data (auto-download from FAO)
+    gaez_auto_download: true
+    include_gaez_in_package: true
+
+# Data sources
+data_sources:
+  climate:
+    source: "nasa_power"
+  soil:
+    source: "hwsd"
+  cache_enabled: true
+
+# Output configuration
+output:
+  base_dir: "output/kenya_wheat_test/"
+  structure: "by_platform"
+
+# Provenance tracking
+provenance:
+  enabled: true
+  storage: "json"

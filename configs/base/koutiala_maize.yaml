@@ -1,0 +1,182 @@
+# ICASA-Compliant Base Configuration - Koutiala Maize
+# Region: Koutiala, Mali (Sudanian climate zone)
+# Crop: Maize (improved OPV)
+#
+# This file contains platform-agnostic agronomic data following ICASA standards.
+# Use with a platform DOME (configs/domes/) for translation.
+#
+# References:
+# - ICASA v2.0: White et al. (2013)
+# - DOME concept: Porter et al. (2014)
+
+_meta:
+  format: "icasa_ace"
+  version: "2.0"
+  description: "ICASA-compliant base config for Koutiala maize simulations"
+
+# =============================================================================
+# Project Information
+# =============================================================================
+project:
+  name: "Koutiala_Maize"
+  description: "Maize simulation for Koutiala, Mali - Sudanian climate zone"
+  version: "1.0"
+
+# =============================================================================
+# Region Configuration (ICASA Location Fields)
+# =============================================================================
+region:
+  name: "Koutiala"
+  country: "Mali"
+  country_iso3: "MLI"
+
+  # ICASA location fields
+  FL_LAT: 12.4            # Field latitude (decimal degrees)
+  FL_LONG: -5.6           # Field longitude (decimal degrees)
+  FLELE: 350              # Elevation (m)
+
+  # Boundary specification
+  boundary:
+    source: "manual"
+    manual_bounds:
+      minx: -6.2
+      miny: 11.8
+      maxx: -5.0
+      maxy: 12.8
+
+# =============================================================================
+# Crop Configuration (ICASA Crop Fields)
+# =============================================================================
+crop:
+  # Crop identification
+  CRID: "MZ"              # ICASA crop code (Maize)
+  name: "Maize"           # Human-readable name
+  name_short: "MZ"        # REQUIRED: Short crop code for filenames
+  GENO_NAME: "OBATANPA"   # Genotype/cultivar name
+  variety: "OBATANPA"     # Use actual cultivar name
+
+  # Crop calendar (ICASA timing)
+  calendar:
+    PDATE: 155            # ICASA: Planting DOY (June 4)
+    planting_doy: 155     # Alias
+    maturity_doy: 285     # October 12
+    harvest_doy: 285
+
+  # =============================================================================
+  # Phenology (Thermal Time) - ICASA codes + human-readable aliases
+  # =============================================================================
+  phenology:
+    # ICASA codes
+    P1: 80.0              # GDD from sowing to end juvenile phase
+    P2: 0.0               # Photoperiod sensitivity coefficient
+    P5: 450.0             # GDD from silking to physiological maturity
+    PHINT: 40.0           # Phyllochron interval (GDD between leaf tips)
+
+    # Human-readable aliases (same values)
+    emergence_gdd: 80.0
+    photoperiod_sensitivity: 0.0
+    grain_filling_gdd: 450.0
+
+    # Additional phases (for SARRA-Py compatibility)
+    vegetative_phase_gdd: 350.0
+    reproductive_phase_gdd: 350.0
+
+  # =============================================================================
+  # Physiology - ICASA codes + human-readable aliases
+  # =============================================================================
+  physiology:
+    # ICASA codes
+    TB: 8.0               # Base temperature for development (C)
+    TO: 30.0              # Optimal temperature for growth (C)
+    TM: 42.0              # Maximum temperature (C)
+    RUEF: 3.5             # Radiation use efficiency (g/MJ PAR)
+    HI: 0.50              # Harvest index (grain/total biomass)
+
+    # Human-readable aliases
+    base_temperature: 8.0
+    optimal_temperature: 30.0
+    max_temperature: 42.0
+    radiation_use_efficiency: 3.5
+    harvest_index: 0.50
+
+# =============================================================================
+# Management Configuration (ICASA Management Fields)
+# =============================================================================
+management:
+  # Planting (ICASA codes)
+  PPOP: 5.5               # Plant population (plants/m2)
+  PLRS: 75                # Row spacing (cm)
+  PLDP: 5                 # Planting depth (cm)
+  PLME: "S"               # Planting method: S=seed, T=transplant
+  PLDS: "R"               # Plant distribution: R=rows, B=broadcast
+
+  # Human-readable aliases
+  planting_density: 55000       # plants/ha (= PPOP * 10000)
+  row_spacing_cm: 75
+  sowing_mode: "fixed_date"
+  irrigation: false
+
+# =============================================================================
+# Fertilizer Configuration (ICASA Fertilizer Fields)
+# =============================================================================
+fertilizer:
+  # Total amounts (ICASA codes)
+  FEAMN: 40.0             # Total nitrogen applied (kg N/ha)
+  FEAMP: 10.0             # Total P2O5 applied (kg/ha)
+  FEAMK: 10.0             # Total K2O applied (kg/ha)
+
+  # Human-readable aliases
+  fertilizer_n_total: 40.0
+  fertilizer_p_total: 10.0
+  fertilizer_k_total: 10.0
+
+  # Application splits (platform-agnostic)
+  splits:
+    - dap: 24             # Days after planting
+      n_fraction: 0.25    # 25% of N
+      p_applied: true     # All P in first application
+      k_applied: true     # All K in first application
+    - dap: 34
+      n_fraction: 0.75    # 75% of N
+
+# =============================================================================
+# Soil Configuration (Generic)
+# =============================================================================
+soil:
+  SLDP: 150               # ICASA: Soil profile depth (cm)
+  default_depth_m: 1.5    # Alias in meters
+
+soil_config:
+  source: "isda"          # Default soil source
+  default_depth_m: 1.5
+
+# =============================================================================
+# Temporal Configuration
+# =============================================================================
+temporal:
+  start_year: 2010
+  end_year: 2020
+  spinup_years: 2
+
+# =============================================================================
+# Target Platforms (for legacy compatibility)
+# =============================================================================
+targets:
+  - craft
+  - pythia
+  - acea
+  - sarra_py
+
+# =============================================================================
+# Output Configuration
+# =============================================================================
+output:
+  base_dir: "output/koutiala/"
+  structure: "by_platform"
+
+# =============================================================================
+# Provenance
+# =============================================================================
+provenance:
+  enabled: true
+  storage: "json"

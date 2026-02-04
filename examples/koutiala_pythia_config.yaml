@@ -1,0 +1,123 @@
+# prismpy PYTHIA Test Configuration
+# Uses the same generic parameters as SARRA-Py to demonstrate platform-agnostic config
+#
+# Region: Koutiala, Mali (GADM Level 2)
+# Crop: Maize
+# Platform: PYTHIA (Spatial DSSAT)
+
+# Project information
+project:
+  name: "koutiala_maize_pythia"
+  description: "Test PYTHIA translation with generic config for Koutiala, Mali"
+  version: "1.0"
+
+# Region configuration
+region:
+  name: "Koutiala"
+  country: "Mali"
+  country_iso3: "MLI"
+  boundary:
+    # Use the SAME GADM polygon boundary as the legacy module
+    # This ensures prismpy generates sites the same way as legacy:
+    # gadm41_MLI_2.shp (polygon) → filter to Koutiala → grid at 0.0833° → clip → sites
+    source: "gadm"
+    gadm_level: 2
+    gadm_filter_field: "NAME_2"
+    gadm_filter_value: "Koutiala"
+    # Fallback manual bounds if GADM loading fails
+    manual_bounds:
+      minx: -6.23
+      miny: 11.84
+      maxx: -4.98
+      maxy: 12.76
+
+# Crop configuration with GENERIC parameters (platform agnostic)
+crop:
+  name: "Maize"
+  name_short: "MZ"
+  variety: "west_africa_opv"
+
+  calendar:
+    planting_doy: 166  # June 15
+    maturity_doy: 285  # October 12
+
+  # GENERIC phenology in thermal time (GDD)
+  # Same values as SARRA-Py test - proves platform independence
+  phenology:
+    emergence_gdd: 90.0
+    vegetative_phase_gdd: 500.0
+    reproductive_phase_gdd: 400.0
+    grain_filling_gdd: 700.0
+    photoperiod_sensitivity: 0.0
+
+  # GENERIC physiology parameters
+  physiology:
+    base_temperature: 8.0
+    optimal_temperature: 26.0
+    max_temperature: 44.0
+    radiation_use_efficiency: 5.8
+    harvest_index: 0.4
+
+# GENERIC management parameters (platform agnostic)
+management:
+  planting_density: 62500.0  # plants/ha
+  sowing_mode: "opportunistic"
+  sowing_threshold_mm: 10.0
+  irrigation: false
+
+# GENERIC soil configuration
+soil_config:
+  source: "eghr"  # eGHR for PYTHIA
+  default_depth_m: 1.5
+
+# Temporal scope
+temporal:
+  start_year: 2010
+  end_year: 2019  # 10-year simulation
+  spinup_years: 0
+
+# Target platforms
+targets:
+  - pythia
+
+# Platform-specific configuration (only technical settings, NOT crop parameters)
+platform_config:
+  pythia:
+    enabled: true
+    grid_resolution: 0.0833  # ~10km spacing
+    climate_source: nasa_power
+    soil_source: eghr
+    dssat_version: "4.8"
+    # Data paths for full package generation
+    eghr_raster_path: "PYTHIA/Simulation_Data/raster/ggcmi_soils_2.tif"
+    eghr_database_path: "PYTHIA/Simulation_Data/eGHR/GHR.db"
+    eghr_sol_dir: "PYTHIA/Simulation_Data/eGHR/"
+    spam_raster_dir: "PYTHIA/Simulation_Data/raster/"
+    spam_version: "2020"
+    # Weather download settings (optional - defaults to temporal config)
+    # climate_start_date: "1984-01-01"
+    # climate_end_date: "2020-12-31"
+    weather_download_delay: 2.0
+
+# Data sources
+data_sources:
+  gadm:
+    # Same GADM file location as legacy module 01-SITE-GENERATION
+    base_path: "PYTHIA/01-SITE-GENERATION/INPUT/"
+  climate:
+    # PYTHIA uses NASA POWER (downloaded per-site)
+    source: "nasa_power"
+  soil:
+    source: "eghr"
+    database_path: "PYTHIA/Simulation_Data/eGHR/GHR.db"
+  cache_enabled: true
+
+# Output configuration
+output:
+  base_dir: "output/koutiala_pythia_test/"
+  structure: "by_platform"
+
+# Provenance tracking
+provenance:
+  enabled: true
+  storage: "json"

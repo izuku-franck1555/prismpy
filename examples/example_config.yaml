@@ -1,0 +1,133 @@
+# Example prismpy project configuration
+# This file demonstrates all available configuration options
+
+project:
+  name: "mali_maize_example"
+  description: "Example maize simulation for Koutiala district, Mali"
+  version: "1.0"
+  created: "2024-01-18"
+
+# Region definition
+region:
+  name: "Koutiala"
+  country: "Mali"
+  country_iso3: "MLI"
+
+  boundary:
+    source: "gadm"  # Options: gadm, shapefile, manual
+    gadm_level: 2   # 0=country, 1=region, 2=district
+    gadm_filter_field: "NAME_2"
+    gadm_filter_value: "Koutiala"
+
+    # For source: "manual"
+    # manual_bounds:
+    #   minx: -6.0
+    #   miny: 11.5
+    #   maxx: -5.0
+    #   maxy: 12.5
+
+# Crop configuration
+crop:
+  name: "Maize"
+  name_short: "mai"
+  variety: "improved_opv"
+
+  calendar:
+    planting_doy: 166    # June 15
+    maturity_doy: 285    # October 12 (~120 days)
+    source: "literature"
+    reference: "Traore et al. (2013)"
+
+# Temporal settings
+temporal:
+  start_year: 2015
+  end_year: 2020
+  spinup_years: 2  # Extra years for model initialization
+
+# Target platforms
+targets:
+  - sarra_py
+  - craft
+  - pythia
+  - acea
+
+# Platform-specific configurations
+platform_config:
+  sarra_py:
+    enabled: true
+    resolution: 0.0375  # ~4km native resolution
+    climate_sources:
+      rainfall: tamsat
+      temperature: agera5
+      radiation: agera5
+    soil_source: isda
+    itk_template: "rainfed_opportunistic"
+    variety_template: "maize_west_africa"
+
+  craft:
+    enabled: true
+    resolution_arcmin: 5
+    climate_source: nasa_power
+    soil_source: hwsd
+
+  pythia:
+    enabled: true
+    grid_resolution: 0.0833  # ~10km
+    climate_source: nasa_power
+    soil_source: eghr
+    dssat_version: "4.8"
+
+  acea:
+    enabled: true
+    resolution: "5arcmin"  # or "30arcmin"
+    climate_source: nasa_power
+    soil_source: hwsd
+    compute_et0: true
+
+# Data sources configuration
+data_sources:
+  gadm:
+    version: "4.1"
+    base_path: "data/gadm/"
+
+  nasa_power:
+    timeout: 120
+    retry_count: 3
+    request_delay: 1.0
+
+  cache_enabled: true
+  cache_dir: "data/cache/"
+
+# Output configuration
+output:
+  base_dir: "output/"
+  structure: "by_platform"  # or "by_region"
+  copy_to_simulation_data: false
+
+# Provenance tracking
+provenance:
+  enabled: true
+  storage: "json"  # or "sqlite" or "both"
+  # output_dir: "provenance/"  # Default - pipeline logs go here
+  include_hashes: true
+  include_parameters: true
+
+# Processing options
+processing:
+  parallel: false
+  max_workers: 4
+  verbose: true
+  log_level: "INFO"
+
+# Validation settings
+validation:
+  climate:
+    tmax_range: [-40, 60]
+    tmin_range: [-50, 50]
+    precip_range: [0, 500]
+    srad_range: [0, 40]
+    et0_range: [0, 20]
+  soil:
+    sand_range: [0, 100]
+    clay_range: [0, 100]
+    silt_range: [0, 100]

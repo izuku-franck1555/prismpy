@@ -1,0 +1,27 @@
+# Default soil parameters for West Africa
+# Based on SARRA-Py Koutiala calibration
+# Use iSDA for region-specific values when available
+
+# Soil layer depths (mm)
+epaisseurSurf: 200.0      # Surface layer thickness
+epaisseurProf: 1300.0     # Deep layer thickness
+
+# Initial water stock (mm)
+stockIniSurf: 30.0        # Initial surface layer water
+stockIniProf: 170.0       # Initial deep layer water
+
+# Runoff parameters
+seuilRuiss: 20.0          # Runoff threshold (mm)
+pourcRuiss: 0.3           # Runoff coefficient (fraction)
+
+# Root zone capacity
+ru: 132.0                 # Total available water (mm)
+
+# Soil hydraulic properties
+# Used for detailed water balance calculations
+HumCR: 0.32               # Critical humidity
+HumFC: 0.32               # Field capacity (vol fraction)
+HumPF: 0.18               # Permanent wilting point
+HumSat: 0.48              # Saturation humidity
+Pevap: 0.2                # Evaporation parameter
+PercolationMax: 5.0       # Maximum daily percolation (mm)

@@ -1,0 +1,93 @@
+# prismpy ACEA Test Configuration - Mali Maize
+# Tests self-contained package with different region
+#
+# Region: Sikasso, Mali
+# Crop: Maize
+# Platform: ACEA (AquaCrop)
+
+project:
+  name: "Mali_Maize_Test"
+  description: "Test ACEA self-contained package with Mali/Maize"
+  version: "1.0"
+
+region:
+  name: "Sikasso"
+  country: "Mali"
+  country_iso3: "MLI"
+  boundary:
+    source: "manual"
+    manual_bounds:
+      minx: -6.0
+      miny: 10.5
+      maxx: -5.0
+      maxy: 11.5
+
+crop:
+  name: "Maize"
+  name_short: "mze"
+  variety: "mali_local"
+
+  calendar:
+    planting_doy: 150
+    maturity_doy: 270
+
+  phenology:
+    emergence_gdd: 90.0
+    vegetative_phase_gdd: 600.0
+    reproductive_phase_gdd: 400.0
+    grain_filling_gdd: 500.0
+    photoperiod_sensitivity: 0.0
+
+  physiology:
+    base_temperature: 8.0
+    optimal_temperature: 30.0
+    max_temperature: 40.0
+    radiation_use_efficiency: 3.8
+    harvest_index: 0.48
+
+management:
+  planting_density: 60000.0
+  sowing_mode: "fixed_date"
+  irrigation: false
+
+soil_config:
+  source: "hwsd"
+  default_depth_m: 2.0
+
+temporal:
+  start_year: 2018
+  end_year: 2020
+  spinup_years: 2
+
+targets:
+  - acea
+
+platform_config:
+  acea:
+    enabled: true
+    resolution: "5arcmin"
+    climate_source: nasa_power
+    soil_source: hwsd
+    compute_et0: true
+    download_climate: true
+    climate_download_delay: 2.0
+    hwsd_bil_path: "/path/to/HWSD2_RASTER/HWSD2.bil"
+    hwsd_mdb_path: "/path/to/HWSD2.mdb"
+    include_soil_in_package: true
+    gaez_auto_download: true
+    include_gaez_in_package: true
+
+data_sources:
+  climate:
+    source: "nasa_power"
+  soil:
+    source: "hwsd"
+  cache_enabled: true
+
+output:
+  base_dir: "output/mali_maize_test/"
+  structure: "by_platform"
+
+provenance:
+  enabled: true
+  storage: "json"

@@ -1,0 +1,109 @@
+# prismpy ACEA Test Configuration
+# Uses the same region as the validated legacy ACEA package
+#
+# Region: Sikasso, Mali (GADM Level 2)
+# Crop: Maize
+# Platform: ACEA (AquaCrop)
+
+# Project information
+project:
+  name: "Sikasso_Maize"
+  description: "Test ACEA translation with generic config for Sikasso, Mali"
+  version: "1.0"
+
+# Region configuration - matching legacy
+region:
+  name: "Sikasso"
+  country: "Mali"
+  country_iso3: "MLI"
+  boundary:
+    source: "gadm"
+    gadm_level: 2
+    gadm_filter_field: "NAME_2"
+    gadm_filter_value: "Sikasso"
+    # Fallback manual bounds if GADM loading fails
+    manual_bounds:
+      minx: -6.5
+      miny: 10.5
+      maxx: -5.0
+      maxy: 12.0
+
+# Crop configuration with GENERIC parameters (platform agnostic)
+crop:
+  name: "Maize"
+  name_short: "mai"
+  variety: "west_africa_opv"
+
+  calendar:
+    planting_doy: 166  # June 15
+    maturity_doy: 285  # October 12
+
+  # GENERIC phenology in thermal time (GDD)
+  phenology:
+    emergence_gdd: 60.0
+    vegetative_phase_gdd: 500.0
+    reproductive_phase_gdd: 400.0
+    grain_filling_gdd: 700.0
+    photoperiod_sensitivity: 0.0
+
+  # GENERIC physiology parameters
+  physiology:
+    base_temperature: 8.0
+    optimal_temperature: 26.0
+    max_temperature: 44.0
+    radiation_use_efficiency: 5.8
+    harvest_index: 0.4
+
+# GENERIC management parameters (platform agnostic)
+management:
+  planting_density: 62500.0  # plants/ha
+  sowing_mode: "opportunistic"
+  sowing_threshold_mm: 10.0
+  irrigation: false
+
+# GENERIC soil configuration
+soil_config:
+  source: "hwsd"  # HWSD for ACEA
+  default_depth_m: 3.0
+
+# Temporal scope - matching legacy
+temporal:
+  start_year: 2015
+  end_year: 2020
+  spinup_years: 2
+
+# Target platforms
+targets:
+  - acea
+
+# Platform-specific configuration (only technical settings, NOT crop parameters)
+platform_config:
+  acea:
+    enabled: true
+    resolution: "5arcmin"
+    climate_source: nasa_power
+    soil_source: hwsd
+    compute_et0: true
+    # Self-contained package settings
+    download_climate: true  # Download NASA POWER data if missing
+    climate_download_delay: 2.0  # Delay between API requests (seconds)
+
+# Data sources
+data_sources:
+  gadm:
+    base_path: "ACEA/TEST_DATA/gadm/"
+  climate:
+    source: "nasa_power"
+  soil:
+    source: "hwsd"
+  cache_enabled: true
+
+# Output configuration
+output:
+  base_dir: "output/sikasso_acea_test/"
+  structure: "by_platform"
+
+# Provenance tracking
+provenance:
+  enabled: true
+  storage: "json"

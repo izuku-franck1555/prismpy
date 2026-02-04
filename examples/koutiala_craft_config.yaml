@@ -1,0 +1,339 @@
+# prismpy CRAFT Configuration - Koutiala Maize
+# Region: Koutiala, Mali (CMDT cotton/maize zone)
+# Crop: Maize
+# Platform: CRAFT (DSSAT-based regional forecasting)
+#
+# NOTE: All parameters below are configurable for ANY region and crop.
+# Change region, country, cultivar, fertilizer, and planting settings
+# to match your target area and crop management practices.
+
+# Project information
+project:
+  name: "Koutiala_Maize_CRAFT"
+  description: "CRAFT package for Koutiala, Mali - Maize simulation"
+  version: "1.0"
+
+# Region configuration
+# REQUIRED: country and country_iso3 are needed for soil file naming
+region:
+  name: "Koutiala"
+  country: "Mali"
+  country_iso3: "MLI"
+  boundary:
+    source: "manual"  # Use manual bounds
+    manual_bounds:
+      minx: -6.2
+      miny: 11.8
+      maxx: -5.0
+      maxy: 12.8
+
+# Crop configuration
+crop:
+  name: "Maize"
+  name_short: "MZ"
+  variety: "OBATANPA"
+
+  # REQUIRED: Crop calendar with planting DOY
+  # Used for management file and converted to MMDD for planting data
+  calendar:
+    planting_doy: 155   # June 4 (converted to MMDD: 0604)
+    maturity_doy: 285   # October 12
+    harvest_doy: 285
+
+  # Maize phenology in thermal time (GDD)
+  phenology:
+    emergence_gdd: 80.0
+    vegetative_phase_gdd: 350.0
+    reproductive_phase_gdd: 350.0
+    grain_filling_gdd: 450.0
+    photoperiod_sensitivity: 0.0
+
+  # Maize physiology parameters
+  physiology:
+    base_temperature: 8.0
+    optimal_temperature: 30.0
+    max_temperature: 42.0
+    radiation_use_efficiency: 3.5
+    harvest_index: 0.50
+
+# =========================================================================
+# MANAGEMENT CONFIGURATION (Framework-Agnostic Defaults)
+# =========================================================================
+# These values apply to ALL cells unless overridden by management_zones.
+# Works for all platforms (CRAFT, Pythia, ACEA, etc.)
+# =========================================================================
+management:
+  planting_density: 55000       # plants/ha
+  row_spacing_cm: 75            # cm between rows
+  sowing_mode: "fixed_date"
+  irrigation: false
+
+  # Cultivar configuration (DSSAT cultivar code)
+  # Common maize cultivars: GH0010 (OBATANPA), IB0001 (PIO3382)
+  default_cultivar: "GH0010"
+
+  # Fertilizer configuration
+  fertilizer_n_total: 40.0      # Total N (kg N/ha, split across applications)
+  fertilizer_n_splits: [24, 34]  # DAP for each application
+  fertilizer_n_fractions: [0.25, 0.75]  # Fraction of N at each split (sum = 1.0)
+
+# =========================================================================
+# MANAGEMENT ZONES (Optional, Framework-Agnostic)
+# =========================================================================
+# Define zones for spatial variability in management. Cells matching a zone
+# get that zone's overrides applied. Cells not matching any zone use defaults.
+#
+# Two filter types:
+#   - bounding_box: Filter by lat/lon coordinates (user knows geography)
+#   - admin_level: Filter by admin boundary names (requires Python schema)
+#
+# First matching zone wins if zones overlap.
+#
+# UNCOMMENT the section below to enable zone-based management variability.
+# =========================================================================
+# management_zones:
+#   # Example 1: Southern zone - earlier planting (onset arrives first)
+#   - zone_name: "South_HighRainfall"
+#     filter:
+#       type: "bounding_box"
+#       lat_min: 11.8          # Southern boundary of Koutiala
+#       lat_max: 12.3          # Just south of center
+#       lon_min: -6.2          # Western boundary
+#       lon_max: -5.0          # Eastern boundary
+#     overrides:
+#       fertilizer_n_total: 60.0    # Higher N due to better moisture
+#       planting_date_mmdd: "0525"  # May 25 - earlier onset in south
+#       # Other params inherit from management: defaults
+#
+#   # Example 2: Northern zone - later planting, short-season cultivar
+#   - zone_name: "North_LowRainfall"
+#     filter:
+#       type: "bounding_box"
+#       lat_min: 12.3          # Northern half of Koutiala
+#       lat_max: 12.8
+#       lon_min: -6.2
+#       lon_max: -5.0
+#     overrides:
+#       fertilizer_n_total: 25.0    # Lower N due to drought risk
+#       fertilizer_n_fractions: [0.40, 0.60]  # More at planting (uncertain second rain)
+#       cultivar: "IB0001"          # Short-season cultivar for drier north
+#       planting_date_mmdd: "0615"  # June 15 - later onset in north
+
+#   # Example 3: Planting-date-only zone (same fertilizer/cultivar, different timing)
+#   # - zone_name: "LateOnset_Zone"
+#   #   filter:
+#   #     type: "bounding_box"
+#   #     lat_min: 12.5
+#   #     lat_max: 12.8
+#   #     lon_min: -6.2
+#   #     lon_max: -5.0
+#   #   overrides:
+#   #     planting_date_mmdd: "0620"  # June 20 - very late onset area
+#
+#   # Example 4: Admin-based zone (requires Python schema with Level2Name)
+#   # - zone_name: "Sikasso_Extension"
+#   #   filter:
+#   #     type: "admin_level"
+#   #     admin_level: 2          # Level 2 = State/Region
+#   #     names: ["Sikasso"]      # Match cells in Sikasso region
+#   #   overrides:
+#   #     fertilizer_n_total: 50.0
+#   #     cultivar: "GH0010"      # Extension program recommends OBATANPA
+#   #     planting_date_mmdd: "0601"  # June 1 - regional recommendation
+
+# Soil configuration
+soil_config:
+  source: "hwsd"
+  default_depth_m: 1.5
+
+# Temporal scope
+temporal:
+  start_year: 2010
+  end_year: 2020
+  spinup_years: 2
+
+# Target platforms
+targets:
+  - craft
+
+# =========================================================================
+# CRAFT Platform-Specific Configuration
+# =========================================================================
+# All values here are fully configurable. Change them for different
+# regions, crops, and management practices.
+# =========================================================================
+platform_config:
+  craft:
+    enabled: true
+    resolution_arcmin: 5
+    climate_source: nasa_power
+    soil_source: hwsd
+
+    # --- Soil mask generation ---
+    include_soil_mask: true
+
+    # --- Cultivar configuration (REQUIRED) ---
+    # DSSAT cultivar codes vary by crop:
+    #   Maize: GH0010 (OBATANPA), IB0001 (PIO3382)
+    #   Wheat: IB0001 (NEWTON), IB0002 (KATEPWA)
+    #   Sorghum: IB0001 (ATX623 x MARTINZ)
+    #   Rice: IB0001 (IR 64)
+    default_cultivar: "GH0010"  # OBATANPA maize
+
+    # --- Agronomic parameters ---
+    plant_population: 5.5     # plants/m² (= 55,000 plants/ha)
+    row_spacing_cm: 75        # cm between rows
+    planting_depth_cm: 5      # cm
+    planting_method: "S"      # S=seed, T=transplant
+    plant_distribution: "R"   # R=rows, B=broadcast
+
+    # --- Fertilizer configuration ---
+    # Total N split across 2 applications
+    default_fertilizer_n: 40.0    # Total nitrogen (kg N/ha)
+    default_fertilizer_p: 10.0    # P2O5 (kg/ha, applied with first application)
+    default_fertilizer_k: 10.0    # K2O (kg/ha, applied with first application)
+    fertilizer_split_ratio: 0.25  # Fraction of N in first app (rest in second)
+    fertilizer_app1_dap: 24       # Days after planting for first application
+    fertilizer_app2_dap: 34       # Days after planting for second application
+
+    # DSSAT fertilizer codes
+    fertilizer_material_code: "FE005"   # FE005=Urea/NPK
+    fertilizer_application_code: "AP002" # AP002=Broadcast incorporated
+    fertilizer_depth_cm: 5              # Incorporation depth (cm)
+
+    # --- Planting date override (optional) ---
+    # If set, overrides crop.calendar.planting_doy for CRAFT-specific MMDD format
+    # If not set, planting_doy from crop.calendar is converted to MMDD automatically
+    planting_date_mmdd: "0604"  # June 4
+
+    # =========================================================================
+    # HWSD SOIL DATA (for per-SMU soil profiles)
+    # =========================================================================
+    # When HWSD paths are configured, the translator will:
+    # 1. Query HWSD to get Soil Mapping Unit (SMU) ID for each cell
+    # 2. Group cells by SMU to identify unique soil types
+    # 3. Generate .SOL with one profile per unique SMU (fewer profiles than cells)
+    # 4. Generate soil_mask.txt mapping each CellID to its SMU's profile
+    #
+    # This creates a self-contained soil package where multiple cells can
+    # share the same soil profile (more realistic and smaller .SOL file).
+    #
+    # Without HWSD: Creates a single default profile for all cells.
+    #
+    # Download HWSD2 from: https://www.fao.org/soils-portal/data-hub/soil-maps-and-databases/harmonized-world-soil-database-v2/
+    # After downloading, uncomment and update these paths:
+    # =========================================================================
+    hwsd_bil_path: "/path/to/HWSD2_RASTER/HWSD2.bil"
+    hwsd_mdb_path: "/path/to/HWSD2.mdb"
+    #
+    # Without HWSD paths: A single default soil profile will be used for all cells.
+    # With HWSD paths: Real soil data extracted per cell (recommended for accuracy).
+
+    # =========================================================================
+    # CROP MASK CONFIGURATION (SPAM Raster)
+    # =========================================================================
+    # The crop mask indicates what fraction of each cell has the target crop.
+    # Two modes:
+    #   - Uniform: All cells get same percentage (default 100%)
+    #   - SPAM Raster: Extract from SPAM 2020 harvested area GeoTIFF
+    #
+    # SPAM 2020 data: https://www.mapspam.info/data/
+    # File naming: spam2020_V2r0_global_H_{CROP}_A.tif
+    #   H = harvested area, CROP = MAIZ/WHEA/RICE/SORG/etc., A = all technologies
+    #
+    # Formula: Percent = SPAM_hectares / cell_area_hectares
+    # =========================================================================
+    spam_raster_path: "/path/to/spam2020_MAIZ.tif"
+    spam_cap_at_100_percent: true   # Cap values > 1.0 (resolution mismatch)
+    spam_na_to_zero: true           # Replace NA with 0 (no crop)
+    #
+    # Without SPAM raster: Uses uniform crop mask (100% coverage for all cells).
+    # With SPAM raster: Real harvested area fractions (recommended for accuracy).
+
+    # Fallback if SPAM not available (uniform mode)
+    # crop_mask_percent: 1.0        # 100% coverage for all cells
+
+    # =========================================================================
+    # CRAFT SCHEMA GENERATION (using GADM)
+    # =========================================================================
+    # CRAFT requires schemas in hierarchical admin levels for database upload:
+    #   Level1 = Country (e.g., Mali)
+    #   Level2 = Cercle/District (e.g., Koutiala) - uses GADM Level 2
+    #   Level3 = Commune (e.g., M'Pessoba) - uses GADM Level 3
+    #
+    # Output structure: CRAFT_Schema/Level{N}/Schema/5m_{AdminNames}.txt
+    #
+    # GADM provides accurate admin boundaries for calculating SharePercent
+    # (percentage of cell covered by admin area) and Area (km² within boundary).
+    # =========================================================================
+
+    # Admin level for schema generation (1=country, 2=cercle, 3=commune)
+    schema_level: 2  # Koutiala is at CRAFT Level 2 (cercle level)
+
+    # Admin names for CRAFT schema file naming
+    admin_level1_name: "Mali"        # Country name (Level 1)
+    admin_level2_name: "Koutiala"    # Cercle name (Level 2)
+    # admin_level3_name: null        # Commune name (Level 3, optional)
+
+    # =========================================================================
+    # GADM CONFIGURATION (RECOMMENDED for accurate boundary-based schemas)
+    # =========================================================================
+    # GADM (Global Administrative Areas) provides official admin boundaries.
+    # Download from: https://gadm.org/download_country.html
+    #
+    # GADM file naming: gadm41_{ISO3}_{level}.shp
+    # GADM levels vary by country (check GADM website for structure):
+    #   Level 0: Country
+    #   Level 1: State/Region/Province
+    #   Level 2: District/Cercle/LGA
+    #   Level 3: Commune/Ward
+    # =========================================================================
+
+    # Path to directory containing GADM shapefiles
+    # Download GADM for your country and extract to a local directory
+    gadm_data_path: "CRAFT/CRAFT-Notes-Python/01-SCHEMA-GENERATION/archive/MALI-SHP"
+    #
+    # Without GADM: Uses bounding box mode (less accurate SharePercent values).
+    # With GADM: Real admin boundaries for accurate area calculations (recommended).
+
+    # ISO 3-letter country code for GADM lookup (e.g., MLI, NGA, KEN, ETH)
+    gadm_country_iso3: "MLI"
+
+    # Admin name to filter from GADM (must match NAME_{level} column)
+    gadm_admin_name: "Koutiala"
+
+    # GADM level to use (check GADM attribute table for your country)
+    # Common patterns:
+    #   West Africa (Mali, Nigeria): Districts at Level 2
+    #   East Africa (Kenya, Ethiopia): Counties at Level 1
+    gadm_level: 2
+
+    # =========================================================================
+    # LEGACY: Manual shapefile path (alternative to GADM)
+    # =========================================================================
+    # If GADM is not available, you can provide a custom shapefile directly:
+    # admin_shapefile_path: "/path/to/custom_boundary.shp"
+
+    # Generate Python_Schemas format for internal scripts (02-08)
+    generate_python_schema: true
+
+    # Decimal places for SharePercent values (0-6)
+    schema_decimal_places: 2
+
+# Data sources
+data_sources:
+  climate:
+    source: "nasa_power"
+  soil:
+    source: "hwsd"
+  cache_enabled: true
+
+# Output configuration
+output:
+  base_dir: "output/koutiala_craft/"
+  structure: "by_platform"
+
+# Provenance tracking
+provenance:
+  enabled: true
+  storage: "json"

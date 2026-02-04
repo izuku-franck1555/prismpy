@@ -1,0 +1,94 @@
+# prismpy ACEA Test Configuration - Senegal Millet
+# Final verification test - completely new region and crop
+#
+# Region: Thies, Senegal
+# Crop: Millet (Pearl Millet)
+# Platform: ACEA (AquaCrop)
+
+project:
+  name: "Senegal_Millet_Test"
+  description: "Final verification test with Senegal/Millet"
+  version: "1.0"
+
+region:
+  name: "Thies"
+  country: "Senegal"
+  country_iso3: "SEN"
+  boundary:
+    source: "manual"
+    manual_bounds:
+      minx: -17.0
+      miny: 14.5
+      maxx: -16.0
+      maxy: 15.5
+
+crop:
+  name: "Millet"
+  name_short: "mil"
+  variety: "senegal_local"
+
+  calendar:
+    planting_doy: 180   # Late June (rainy season)
+    maturity_doy: 290   # Mid October
+
+  phenology:
+    emergence_gdd: 50.0
+    vegetative_phase_gdd: 450.0
+    reproductive_phase_gdd: 350.0
+    grain_filling_gdd: 400.0
+    photoperiod_sensitivity: 0.4
+
+  physiology:
+    base_temperature: 10.0
+    optimal_temperature: 32.0
+    max_temperature: 45.0
+    radiation_use_efficiency: 3.2
+    harvest_index: 0.25
+
+management:
+  planting_density: 30000.0
+  sowing_mode: "fixed_date"
+  irrigation: false
+
+soil_config:
+  source: "hwsd"
+  default_depth_m: 2.0
+
+temporal:
+  start_year: 2018
+  end_year: 2020
+  spinup_years: 2
+
+targets:
+  - acea
+
+platform_config:
+  acea:
+    enabled: true
+    resolution: "5arcmin"
+    climate_source: nasa_power
+    soil_source: hwsd
+    compute_et0: true
+    download_climate: true
+    climate_download_delay: 2.0
+    hwsd_bil_path: "/path/to/HWSD2_RASTER/HWSD2.bil"
+    hwsd_mdb_path: "/path/to/HWSD2.mdb"
+    include_soil_in_package: true
+    include_spam_in_package: true
+    gaez_auto_download: true
+    include_gaez_in_package: true
+
+data_sources:
+  climate:
+    source: "nasa_power"
+  soil:
+    source: "hwsd"
+  cache_enabled: true
+
+output:
+  base_dir: "output/senegal_millet_test/"
+  structure: "by_platform"
+
+provenance:
+  enabled: true
+  storage: "json"

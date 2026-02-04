@@ -1,0 +1,44 @@
+# Rainfed opportunistic sowing template for MAIZE in West Africa
+# Based on SARRA-Py calibration
+# For opportunistic sowing: DateSemis BEFORE simulation start triggers
+# automatic sowing when seuilEauSemis threshold is met
+
+# Sowing parameters - OPPORTUNISTIC MODE
+# DateSemis must be BEFORE simulation start date!
+# Example: If sim starts 2017-05-01, set DateSemis to 2016-05-01
+DateSemis: 2016-5-1       # One year before = opportunistic trigger
+seuilEauSemis: 10.0       # Soil moisture threshold for emergence (mm)
+nbjTestSemis: 0           # Days to test sowing conditions
+profRacIni: 0.0           # Initial root depth (mm)
+
+# Plant density (plants/ha) - MAIZE specific
+densite: 62500.0
+
+# Nitrogen intensification
+NI: .nan                  # Not considered if .nan
+
+# Irrigation parameters (rainfed = no irrigation)
+irrigAuto: false
+irrigAutoTarget: 0.0
+maxIrrig: 0.0
+
+# Mulch parameters (no mulch for basic rainfed)
+coefMc: 0.0               # Mulch effect on evaporation
+surfMc: 1.0               # Mulch covering capacity (ha/t)
+biomIniMc: 0.0            # Initial mulch biomass (kg/ha)
+humSatMc: 0.0             # Mulch saturation humidity
+mulch: 1.0                # Permanent mulch effect
+
+# Mulch decomposition coefficients
+KI: 0.0
+KNLit: 0.0
+KNUp: 0.0
+KT: 0.0
+
+# Additional parameters (required by SARRA-Py)
+DisMc: 0
+TxRecolte: 0.0
+TxaTerre: 0.0
+NbUBT: 10.0
+dateFin: 300.0
+precision: 0.0

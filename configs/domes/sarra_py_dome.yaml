@@ -1,0 +1,29 @@
+# SARRA-Py Platform DOME (Data Overlay for Multi-model Export)
+# Platform: SARRA-Py (Système d'Analyse Régionale des Risques Agroclimatiques)
+#
+# DESIGN PRINCIPLE: This DOME contains ALL platform-specific settings explicitly.
+#
+# Usage: prismpy translate --base configs/base/X.yaml --dome configs/domes/sarra_py_dome.yaml
+
+dome_type: "platform_overlay"
+platform: "sarra_py"
+description: "SARRA-Py (West African crop-water balance model) - Complete platform configuration"
+
+# =============================================================================
+# PLATFORM CONFIG (Complete - matches legacy format exactly)
+# =============================================================================
+platform_config:
+  sarra_py:
+    enabled: true
+    resolution: 0.0375
+    soil_source: isda
+
+    # --- Climate Sources ---
+    climate_sources:
+      rainfall: tamsat
+      temperature: agera5
+      radiation: agera5
+
+    # --- Sowing Search ---
+    sowing_search_month: 5
+    sowing_search_day: 1

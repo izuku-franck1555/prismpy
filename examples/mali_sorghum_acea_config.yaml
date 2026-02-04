@@ -1,0 +1,113 @@
+# prismpy ACEA Test Configuration - Mali Sorghum
+# Tests self-contained package with different region/crop
+#
+# Region: Sikasso, Mali
+# Crop: Sorghum
+# Platform: ACEA (AquaCrop)
+
+# Project information
+project:
+  name: "Mali_Sorghum_Test"
+  description: "Test ACEA self-contained package with Mali/Sorghum"
+  version: "1.0"
+
+# Region configuration - Southern Mali
+region:
+  name: "Sikasso"
+  country: "Mali"
+  country_iso3: "MLI"
+  boundary:
+    source: "manual"
+    manual_bounds:
+      minx: -6.0
+      miny: 10.5
+      maxx: -5.0
+      maxy: 11.5
+
+# Crop configuration - Sorghum
+crop:
+  name: "Sorghum"
+  name_short: "sor"
+  variety: "mali_local"
+
+  calendar:
+    planting_doy: 150   # Late May (start of rainy season)
+    maturity_doy: 270   # Late September
+
+  # Sorghum phenology in thermal time (GDD)
+  phenology:
+    emergence_gdd: 85.0
+    vegetative_phase_gdd: 500.0
+    reproductive_phase_gdd: 400.0
+    grain_filling_gdd: 500.0
+    photoperiod_sensitivity: 0.3
+
+  # Sorghum physiology parameters
+  physiology:
+    base_temperature: 10.0
+    optimal_temperature: 30.0
+    max_temperature: 45.0
+    radiation_use_efficiency: 3.5
+    harvest_index: 0.35
+
+# Management parameters
+management:
+  planting_density: 80000.0  # plants/ha
+  sowing_mode: "fixed_date"
+  irrigation: false
+
+# Soil configuration
+soil_config:
+  source: "hwsd"
+  default_depth_m: 2.0
+
+# Temporal scope
+temporal:
+  start_year: 2018
+  end_year: 2020
+  spinup_years: 2
+
+# Target platforms
+targets:
+  - acea
+
+# Platform-specific configuration
+platform_config:
+  acea:
+    enabled: true
+    resolution: "5arcmin"
+    climate_source: nasa_power
+    soil_source: hwsd
+    compute_et0: true
+    download_climate: true
+    climate_download_delay: 2.0
+
+    # HWSD soil data paths
+    hwsd_bil_path: "/path/to/HWSD2_RASTER/HWSD2.bil"
+    hwsd_mdb_path: "/path/to/HWSD2.mdb"
+    include_soil_in_package: true
+
+    # SPAM harvested area data
+    include_spam_in_package: true
+
+    # GAEZ data (auto-download from FAO)
+    gaez_auto_download: true
+    include_gaez_in_package: true
+
+# Data sources
+data_sources:
+  climate:
+    source: "nasa_power"
+  soil:
+    source: "hwsd"
+  cache_enabled: true
+
+# Output configuration
+output:
+  base_dir: "output/mali_sorghum_test/"
+  structure: "by_platform"
+
+# Provenance tracking
+provenance:
+  enabled: true
+  storage: "json"

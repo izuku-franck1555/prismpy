@@ -1,0 +1,73 @@
+# CRAFT Platform DOME (Data Overlay for Multi-model Export)
+# Platform: CRAFT (DSSAT-based regional forecasting)
+#
+# DESIGN PRINCIPLE: This DOME contains ALL platform-specific settings explicitly.
+# No hidden translation - what you see is what the translator receives.
+#
+# Usage: prismpy translate --base configs/base/X.yaml --dome configs/domes/craft_dome.yaml
+
+dome_type: "platform_overlay"
+platform: "craft"
+description: "CRAFT (DSSAT-based regional forecasting) - Complete platform configuration"
+
+# =============================================================================
+# PLATFORM CONFIG (Complete - matches legacy format exactly)
+# =============================================================================
+platform_config:
+  craft:
+    enabled: true
+    resolution_arcmin: 5
+    climate_source: nasa_power
+    soil_source: hwsd
+
+    # --- Soil mask generation ---
+    include_soil_mask: true
+
+    # --- Cultivar (DSSAT codes) ---
+    default_cultivar: "GH0010"        # OBATANPA maize
+
+    # --- Agronomic parameters ---
+    plant_population: 5.5             # plants/m² (= 55,000 plants/ha)
+    row_spacing_cm: 75
+    planting_depth_cm: 5
+    planting_method: "S"              # S=seed, T=transplant
+    plant_distribution: "R"           # R=rows, B=broadcast
+
+    # --- Planting date (MMDD format for CRAFT) ---
+    planting_date_mmdd: "0604"        # June 4
+
+    # --- Fertilizer configuration ---
+    default_fertilizer_n: 40.0        # Total N (kg/ha)
+    default_fertilizer_p: 10.0        # P2O5 (kg/ha)
+    default_fertilizer_k: 10.0        # K2O (kg/ha)
+    fertilizer_split_ratio: 0.25      # Fraction in first application
+    fertilizer_app1_dap: 24           # Days after planting
+    fertilizer_app2_dap: 34
+
+    # DSSAT fertilizer codes
+    fertilizer_material_code: "FE005"   # Urea/NPK
+    fertilizer_application_code: "AP002" # Broadcast incorporated
+    fertilizer_depth_cm: 5
+
+    # --- HWSD Soil Data ---
+    # UPDATE THESE PATHS for your system
+    hwsd_bil_path: "/path/to/HWSD2_RASTER/HWSD2.bil"
+    hwsd_mdb_path: "/path/to/HWSD2.mdb"
+
+    # --- SPAM Crop Mask ---
+    spam_raster_path: "/path/to/spam2020_MAIZ.tif"
+    spam_cap_at_100_percent: true
+    spam_na_to_zero: true
+
+    # --- GADM Admin Boundaries ---
+    gadm_data_path: "CRAFT/CRAFT-Notes-Python/01-SCHEMA-GENERATION/archive/MALI-SHP"
+    gadm_country_iso3: "MLI"
+    gadm_admin_name: "Koutiala"
+    gadm_level: 2
+
+    # --- Schema Generation ---
+    schema_level: 2
+    admin_level1_name: "Mali"
+    admin_level2_name: "Koutiala"
+    generate_python_schema: true
+    schema_decimal_places: 2

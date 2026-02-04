@@ -1,0 +1,691 @@
+# ICASA Master Variable List Mapping for prismpy
+# ======================================================
+#
+# This file provides bidirectional mapping between:
+# - Human-readable names (used in prismpy configs)
+# - ICASA codes (international standard for agricultural data)
+#
+# References:
+# - Porter et al. (2014): Harmonization and translation of crop modeling data
+# - White et al. (2013): ICASA Version 2.0 data standards
+# - ICASA Dictionary: https://github.com/agmip/ICASA-Dictionary
+#
+# Version: 2.0 (aligned with ICASA-Dictionary 2025)
+
+_meta:
+  version: "2.0"
+  icasa_reference: "ICASA-Dictionary v2025"
+  last_updated: "2026-01-29"
+  description: "Bidirectional mapping between prismpy and ICASA standards"
+
+# =============================================================================
+# CROP IDENTIFICATION
+# =============================================================================
+crop:
+  name:
+    icasa_code: "CRID"
+    icasa_name: "crop_id"
+    description: "Crop species identifier code"
+    unit: "code"
+    example: "MZ"
+    codes:
+      MZ: "Maize"
+      WH: "Wheat"
+      RI: "Rice"
+      SB: "Soybean"
+      SG: "Sorghum"
+      ML: "Millet"
+      PN: "Peanut"
+      CT: "Cotton"
+      CS: "Cassava"
+      BN: "Dry bean"
+      CP: "Cowpea"
+
+  variety:
+    icasa_code: "GENO_NAME"
+    icasa_name: "genotype_name"
+    description: "Preferred genotype identifier (cultivar, variety, hybrid)"
+    unit: "text"
+    example: "OBATANPA"
+
+  cultivar_code:
+    icasa_code: "CU"
+    icasa_name: "cultivar_level"
+    description: "Cultivar level identifier in treatment structure"
+    unit: "code"
+    platform_mappings:
+      dssat: "INGENO"
+      apsim: "Cultivar"
+
+# =============================================================================
+# PHENOLOGY (Thermal Time / GDD)
+# =============================================================================
+phenology:
+  emergence_gdd:
+    icasa_code: "P1"
+    icasa_name: "thermal_time_emergence"
+    description: "Thermal time from planting to end of juvenile phase"
+    unit: "°C days"
+    min: 30
+    max: 200
+    typical_maize: 90
+    platform_mappings:
+      dssat: "P1"
+      sarra_py: "SDJLevee"
+      aquacrop: "gdd_emergence"
+      apsim: "tt_emerg_to_endjuv"
+
+  vegetative_phase_gdd:
+    icasa_code: "P2"
+    icasa_name: "thermal_time_vegetative"
+    description: "Extent to which development is delayed for each hour photoperiod > 12.5h"
+    unit: "°C days"
+    min: 0
+    max: 1000
+    typical_maize: 0.0
+    note: "For photoperiod-insensitive varieties, set to 0"
+    platform_mappings:
+      dssat: "P2"
+      sarra_py: "SDJBVP"
+      aquacrop: "gdd_to_flowering"
+
+  photoperiod_sensitivity:
+    icasa_code: "P2"
+    icasa_name: "photoperiod_sensitivity"
+    description: "Photoperiod sensitivity coefficient"
+    unit: "days/hour"
+    min: 0.0
+    max: 1.0
+    typical_maize: 0.0
+    platform_mappings:
+      dssat: "P2"
+      sarra_py: "SensiPhot"
+
+  reproductive_phase_gdd:
+    icasa_code: "P3"
+    icasa_name: "thermal_time_reproductive"
+    description: "Thermal time from silking to physiological maturity"
+    unit: "°C days"
+    min: 200
+    max: 800
+    typical_maize: 400
+    platform_mappings:
+      dssat: "P5"  # Note: DSSAT uses P5 for grain filling
+      sarra_py: "SDJMatu1"
+
+  grain_filling_gdd:
+    icasa_code: "P5"
+    icasa_name: "thermal_time_grain_fill"
+    description: "Thermal time from silking to physiological maturity"
+    unit: "°C days"
+    min: 400
+    max: 1200
+    typical_maize: 700
+    platform_mappings:
+      dssat: "P5"
+      sarra_py: "SDJMatu1"
+      aquacrop: "gdd_duration_yield_form"
+      apsim: "tt_flower_to_maturity"
+
+  phyllochron:
+    icasa_code: "PHINT"
+    icasa_name: "phyllochron_interval"
+    description: "Phyllochron interval (degree days between leaf tip appearances)"
+    unit: "°C days"
+    min: 30
+    max: 80
+    typical_maize: 40
+    platform_mappings:
+      dssat: "PHINT"
+      apsim: "phyllochron"
+
+  maturity_gdd:
+    icasa_code: "TSUM"
+    icasa_name: "thermal_time_maturity"
+    description: "Total thermal time from emergence to maturity"
+    unit: "°C days"
+    min: 800
+    max: 2500
+    typical_maize: 1500
+    platform_mappings:
+      sarra_py: "SommeDegresJours"
+      wofost: "TSUM1 + TSUM2"
+
+# =============================================================================
+# PHYSIOLOGY (Temperature Response)
+# =============================================================================
+physiology:
+  base_temperature:
+    icasa_code: "TB"
+    icasa_name: "base_temperature"
+    description: "Base temperature below which no development occurs"
+    unit: "°C"
+    min: 0
+    max: 15
+    typical_maize: 8.0
+    platform_mappings:
+      dssat: "TBASE"
+      sarra_py: "TBase"
+      aquacrop: "Tbase"
+      apsim: "x_temp"
+      wofost: "TBASEM"
+
+  optimal_temperature:
+    icasa_code: "TO"
+    icasa_name: "optimal_temperature"
+    description: "Optimal temperature for maximum development rate"
+    unit: "°C"
+    min: 20
+    max: 35
+    typical_maize: 26.0
+    platform_mappings:
+      dssat: "TOPT"
+      sarra_py: "TOpt1"
+      aquacrop: "Tupper"
+      wofost: "TEFFMX"
+
+  max_temperature:
+    icasa_code: "TM"
+    icasa_name: "maximum_temperature"
+    description: "Maximum temperature above which development stops"
+    unit: "°C"
+    min: 35
+    max: 50
+    typical_maize: 44.0
+    platform_mappings:
+      dssat: "TMAX"
+      sarra_py: "TLim"
+      aquacrop: "Tcold_stress"
+
+  radiation_use_efficiency:
+    icasa_code: "RUEF"
+    icasa_name: "radiation_use_efficiency"
+    description: "Dry matter produced per unit intercepted radiation"
+    unit: "g/MJ"
+    min: 1.0
+    max: 8.0
+    typical_maize: 5.8
+    platform_mappings:
+      dssat: "RUE"
+      sarra_py: "EffRg"
+      apsim: "rue"
+      wofost: "CVO"
+
+  harvest_index:
+    icasa_code: "HI"
+    icasa_name: "harvest_index"
+    description: "Ratio of grain dry matter to total aboveground biomass"
+    unit: "fraction"
+    min: 0.2
+    max: 0.6
+    typical_maize: 0.45
+    platform_mappings:
+      dssat: "G3"
+      sarra_py: "txConversion"
+      aquacrop: "HI0"
+      apsim: "hi_max_pot"
+      wofost: "SPAN"
+
+  max_lai:
+    icasa_code: "LAIM"
+    icasa_name: "maximum_leaf_area_index"
+    description: "Maximum leaf area index"
+    unit: "m²/m²"
+    min: 2.0
+    max: 8.0
+    typical_maize: 5.0
+    platform_mappings:
+      sarra_py: "LAImax"
+      aquacrop: "CCx"
+
+  specific_leaf_area:
+    icasa_code: "SLA"
+    icasa_name: "specific_leaf_area"
+    description: "Leaf area per unit leaf dry weight"
+    unit: "cm²/g"
+    min: 150
+    max: 400
+    typical_maize: 250
+    platform_mappings:
+      dssat: "SLAX"
+      apsim: "sla_max"
+      wofost: "SLATB"
+
+# =============================================================================
+# MANAGEMENT - PLANTING
+# =============================================================================
+management:
+  planting_doy:
+    icasa_code: "PDATE"
+    icasa_name: "planting_date"
+    description: "Planting date as day of year"
+    unit: "DOY"
+    min: 1
+    max: 366
+    platform_mappings:
+      dssat: "PDATE"
+      sarra_py: "DateSemis"
+      aquacrop: "Planting"
+
+  planting_date:
+    icasa_code: "PDATE"
+    icasa_name: "planting_date"
+    description: "Planting date (YYYY-MM-DD or DOY)"
+    unit: "date"
+    format: "YYYY-MM-DD or DOY"
+    platform_mappings:
+      dssat: "PDATE"
+
+  planting_density:
+    icasa_code: "PPOP"
+    icasa_name: "plant_population"
+    description: "Plant population at seeding"
+    unit: "plants/m²"
+    min: 1
+    max: 20
+    typical_maize: 6.25
+    note: "prismpy uses plants/ha internally, divide by 10000 for ICASA"
+    conversion:
+      to_icasa: "divide_by_10000"
+      from_icasa: "multiply_by_10000"
+    platform_mappings:
+      dssat: "PPOP"
+      sarra_py: "Densite"
+      aquacrop: "PlantDensity"
+      apsim: "Population"
+
+  row_spacing_cm:
+    icasa_code: "PLRS"
+    icasa_name: "planting_row_spacing"
+    description: "Distance between rows at planting"
+    unit: "cm"
+    min: 20
+    max: 150
+    typical_maize: 75
+    platform_mappings:
+      dssat: "PLRS"
+      aquacrop: "RowWidth"
+
+  planting_depth_cm:
+    icasa_code: "PLDP"
+    icasa_name: "planting_depth"
+    description: "Depth of seed placement"
+    unit: "cm"
+    min: 2
+    max: 15
+    typical_maize: 5
+    platform_mappings:
+      dssat: "PLDP"
+      aquacrop: "SowingDepth"
+
+  planting_method:
+    icasa_code: "PLME"
+    icasa_name: "planting_method"
+    description: "Method of planting"
+    unit: "code"
+    codes:
+      S: "Seed"
+      T: "Transplant"
+      R: "Ratoon"
+      P: "Pregerminated seed"
+      N: "Nursery"
+    platform_mappings:
+      dssat: "PLME"
+
+  plant_distribution:
+    icasa_code: "PLDS"
+    icasa_name: "plant_distribution"
+    description: "Plant distribution in field"
+    unit: "code"
+    codes:
+      R: "Rows"
+      B: "Broadcast"
+      H: "Hill"
+    platform_mappings:
+      dssat: "PLDS"
+
+  sowing_mode:
+    icasa_code: "PLMA"
+    icasa_name: "planting_material_age"
+    description: "Sowing trigger mode"
+    unit: "code"
+    note: "Extension for spatial modeling"
+    codes:
+      fixed_date: "Fixed calendar date"
+      opportunistic: "Triggered by soil moisture threshold"
+      window: "Within planting window when conditions met"
+
+# =============================================================================
+# MANAGEMENT - FERTILIZER
+# =============================================================================
+fertilizer:
+  fertilizer_n_total:
+    icasa_code: "FEAMN"
+    icasa_name: "fertilizer_n_amount"
+    description: "Total nitrogen fertilizer applied"
+    unit: "kg N/ha"
+    min: 0
+    max: 300
+    typical_maize: 80
+    platform_mappings:
+      dssat: "FAMN"
+      sarra_py: "DoseNApworteeTotale"
+      aquacrop: "Nfert"
+
+  fertilizer_p_total:
+    icasa_code: "FEAMP"
+    icasa_name: "fertilizer_p_amount"
+    description: "Total phosphorus fertilizer applied (as P2O5)"
+    unit: "kg P2O5/ha"
+    min: 0
+    max: 150
+    typical_maize: 20
+    platform_mappings:
+      dssat: "FAMP"
+
+  fertilizer_k_total:
+    icasa_code: "FEAMK"
+    icasa_name: "fertilizer_k_amount"
+    description: "Total potassium fertilizer applied (as K2O)"
+    unit: "kg K2O/ha"
+    min: 0
+    max: 150
+    typical_maize: 20
+    platform_mappings:
+      dssat: "FAMK"
+
+  fertilizer_application_dap:
+    icasa_code: "FDAY"
+    icasa_name: "fertilizer_day"
+    description: "Days after planting for fertilizer application"
+    unit: "days"
+    min: 0
+    max: 120
+    platform_mappings:
+      dssat: "FDAY"
+
+  fertilizer_material_code:
+    icasa_code: "FECD"
+    icasa_name: "fertilizer_material"
+    description: "ICASA code for fertilizer material"
+    unit: "code"
+    codes:
+      FE001: "Ammonium nitrate"
+      FE002: "Ammonium sulfate"
+      FE003: "Anhydrous ammonia"
+      FE004: "Calcium ammonium nitrate"
+      FE005: "Urea"
+      FE006: "DAP (Diammonium phosphate)"
+      FE007: "MAP (Monoammonium phosphate)"
+      FE008: "TSP (Triple superphosphate)"
+      FE009: "SSP (Single superphosphate)"
+      FE010: "NPK compound"
+      FE011: "Potassium chloride (KCl)"
+      FE012: "Potassium sulfate"
+    platform_mappings:
+      dssat: "FMCD"
+
+  fertilizer_application_code:
+    icasa_code: "FEACD"
+    icasa_name: "fertilizer_application"
+    description: "ICASA code for fertilizer application method"
+    unit: "code"
+    codes:
+      AP001: "Broadcast, not incorporated"
+      AP002: "Broadcast, incorporated"
+      AP003: "Banded on surface"
+      AP004: "Banded beneath surface"
+      AP005: "Applied in irrigation water"
+      AP006: "Foliar spray"
+      AP007: "Bottom of hole"
+      AP008: "On the seed"
+      AP009: "Injected"
+    platform_mappings:
+      dssat: "FACD"
+
+  fertilizer_depth_cm:
+    icasa_code: "FEDP"
+    icasa_name: "fertilizer_depth"
+    description: "Depth of fertilizer incorporation"
+    unit: "cm"
+    min: 0
+    max: 30
+    typical: 5
+    platform_mappings:
+      dssat: "FDEP"
+
+# =============================================================================
+# MANAGEMENT - IRRIGATION
+# =============================================================================
+irrigation:
+  irrigation_enabled:
+    icasa_code: "IRRIG"
+    icasa_name: "irrigation_applied"
+    description: "Whether irrigation is applied"
+    unit: "boolean"
+    platform_mappings:
+      dssat: "IRRIG"
+      aquacrop: "IrrMethod"
+
+  irrigation_method:
+    icasa_code: "IROP"
+    icasa_name: "irrigation_operation"
+    description: "Irrigation application method"
+    unit: "code"
+    codes:
+      IR001: "Furrow"
+      IR002: "Flood"
+      IR003: "Sprinkler"
+      IR004: "Drip"
+      IR005: "Center pivot"
+      IR006: "Seepage"
+    platform_mappings:
+      dssat: "IROP"
+      aquacrop: "IrrMethod"
+
+  irrigation_amount:
+    icasa_code: "IRVAL"
+    icasa_name: "irrigation_amount"
+    description: "Amount of irrigation water applied"
+    unit: "mm"
+    min: 0
+    max: 200
+    platform_mappings:
+      dssat: "IRVAL"
+
+# =============================================================================
+# SOIL
+# =============================================================================
+soil:
+  soil_depth_cm:
+    icasa_code: "SLDP"
+    icasa_name: "soil_depth"
+    description: "Total soil profile depth"
+    unit: "cm"
+    min: 30
+    max: 400
+    typical: 150
+    platform_mappings:
+      dssat: "SLDP"
+      sarra_py: "ProfSol"
+      aquacrop: "SoilDepth"
+
+  soil_depth_m:
+    icasa_code: "SLDP"
+    icasa_name: "soil_depth"
+    description: "Total soil profile depth"
+    unit: "m"
+    conversion:
+      to_icasa: "multiply_by_100"
+      from_icasa: "divide_by_100"
+
+  soil_texture:
+    icasa_code: "SLTX"
+    icasa_name: "soil_texture"
+    description: "Soil texture class"
+    unit: "code"
+    codes:
+      C: "Clay"
+      CL: "Clay loam"
+      L: "Loam"
+      LS: "Loamy sand"
+      S: "Sand"
+      SC: "Sandy clay"
+      SCL: "Sandy clay loam"
+      SI: "Silt"
+      SIC: "Silty clay"
+      SICL: "Silty clay loam"
+      SIL: "Silt loam"
+      SL: "Sandy loam"
+
+  soil_albedo:
+    icasa_code: "SALB"
+    icasa_name: "soil_albedo"
+    description: "Soil albedo (dry soil)"
+    unit: "fraction"
+    min: 0.05
+    max: 0.30
+    typical: 0.13
+    platform_mappings:
+      dssat: "SALB"
+
+  soil_runoff_curve:
+    icasa_code: "SLRO"
+    icasa_name: "soil_runoff_curve_number"
+    description: "SCS runoff curve number"
+    unit: "number"
+    min: 30
+    max: 100
+    typical: 76
+    platform_mappings:
+      dssat: "SLRO"
+
+  soil_drainage:
+    icasa_code: "DRAINAGE"
+    icasa_name: "soil_drainage_class"
+    description: "Soil profile drainage class"
+    unit: "code"
+    codes:
+      VD: "Very poorly drained"
+      PD: "Poorly drained"
+      SP: "Somewhat poorly drained"
+      MW: "Moderately well drained"
+      WD: "Well drained"
+      SW: "Somewhat excessively drained"
+      EX: "Excessively drained"
+
+# =============================================================================
+# TEMPORAL
+# =============================================================================
+temporal:
+  start_year:
+    icasa_code: "SC_YEAR"
+    icasa_name: "simulation_start_year"
+    description: "First year of simulation"
+    unit: "year"
+    min: 1900
+    max: 2100
+
+  end_year:
+    icasa_code: "ENDSIM"
+    icasa_name: "simulation_end_year"
+    description: "Last year of simulation"
+    unit: "year"
+    min: 1900
+    max: 2100
+
+  spinup_years:
+    icasa_code: "NYERS"
+    icasa_name: "number_years_spinup"
+    description: "Number of years for model spin-up"
+    unit: "years"
+    min: 0
+    max: 20
+    note: "Extension for long-term simulations"
+
+# =============================================================================
+# LOCATION / EXPERIMENT METADATA
+# =============================================================================
+location:
+  latitude:
+    icasa_code: "FL_LAT"
+    icasa_name: "field_latitude"
+    description: "Latitude of field or region centroid"
+    unit: "decimal degrees"
+    min: -90
+    max: 90
+
+  longitude:
+    icasa_code: "FL_LONG"
+    icasa_name: "field_longitude"
+    description: "Longitude of field or region centroid"
+    unit: "decimal degrees"
+    min: -180
+    max: 180
+
+  elevation:
+    icasa_code: "FLELE"
+    icasa_name: "field_elevation"
+    description: "Elevation above sea level"
+    unit: "m"
+    min: -100
+    max: 5000
+
+  experiment_name:
+    icasa_code: "EXNAME"
+    icasa_name: "experiment_name"
+    description: "Experiment name or identifier"
+    unit: "text"
+
+  region_name:
+    icasa_code: "FL_LOC_1"
+    icasa_name: "location_name_1"
+    description: "First level location name (e.g., region)"
+    unit: "text"
+    note: "Extension for spatial modeling"
+
+  country:
+    icasa_code: "FL_LOC_2"
+    icasa_name: "location_name_2"
+    description: "Second level location name (e.g., country)"
+    unit: "text"
+
+# =============================================================================
+# DATA SOURCES (Extension for prismpy)
+# =============================================================================
+data_sources:
+  soil_source:
+    description: "Source database for soil data"
+    unit: "code"
+    note: "prismpy extension - not in ICASA"
+    codes:
+      hwsd: "Harmonized World Soil Database v2.0"
+      eghr: "Global eGHR soil database"
+      isda: "iSDA Africa soil dataset"
+      soilgrids: "SoilGrids 250m"
+
+  climate_source:
+    description: "Source for climate/weather data"
+    unit: "code"
+    note: "prismpy extension - not in ICASA"
+    codes:
+      nasa_power: "NASA POWER daily data"
+      tamsat: "TAMSAT rainfall estimates"
+      agera5: "AgERA5 reanalysis"
+      chirps: "CHIRPS rainfall"
+
+  boundary_source:
+    description: "Source for administrative boundaries"
+    unit: "code"
+    note: "prismpy extension - not in ICASA"
+    codes:
+      gadm: "GADM administrative boundaries"
+      manual: "User-specified bounding box"
+
+  crop_mask_source:
+    description: "Source for crop area data"
+    unit: "code"
+    note: "prismpy extension - not in ICASA"
+    codes:
+      spam: "SPAM harvested area"
+      uniform: "Uniform 100% coverage"

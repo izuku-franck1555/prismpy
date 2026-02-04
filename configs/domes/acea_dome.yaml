@@ -1,0 +1,25 @@
+# ACEA Platform DOME (Data Overlay for Multi-model Export)
+# Platform: ACEA (AquaCrop Earth Observation framework)
+#
+# DESIGN PRINCIPLE: This DOME contains ALL platform-specific settings explicitly.
+#
+# Usage: prismpy translate --base configs/base/X.yaml --dome configs/domes/acea_dome.yaml
+
+dome_type: "platform_overlay"
+platform: "acea"
+description: "ACEA (AquaCrop Earth Observation) - Complete platform configuration"
+
+# =============================================================================
+# PLATFORM CONFIG (Complete - matches legacy format exactly)
+# =============================================================================
+platform_config:
+  acea:
+    enabled: true
+    resolution: "5arcmin"
+    climate_source: nasa_power
+    soil_source: hwsd
+
+    # --- Processing Settings ---
+    compute_et0: true
+    download_climate: true
+    climate_download_delay: 2.0

@@ -1,0 +1,34 @@
+# Pythia Platform DOME (Data Overlay for Multi-model Export)
+# Platform: Pythia (DSSAT-based global yield forecasting)
+#
+# DESIGN PRINCIPLE: This DOME contains ALL platform-specific settings explicitly.
+#
+# Usage: prismpy translate --base configs/base/X.yaml --dome configs/domes/pythia_dome.yaml
+
+dome_type: "platform_overlay"
+platform: "pythia"
+description: "Pythia (DSSAT-based global yield forecasting) - Complete platform configuration"
+
+# =============================================================================
+# PLATFORM CONFIG (Complete - matches legacy format exactly)
+# =============================================================================
+platform_config:
+  pythia:
+    enabled: true
+    grid_resolution: 0.0833
+    climate_source: nasa_power
+    soil_source: eghr
+    dssat_version: "4.8"
+
+    # --- eGHR Soil Data ---
+    # UPDATE THESE PATHS for your system
+    eghr_raster_path: "PYTHIA/Simulation_Data/raster/ggcmi_soils_2.tif"
+    eghr_database_path: "PYTHIA/Simulation_Data/eGHR/GHR.db"
+    eghr_sol_dir: "PYTHIA/Simulation_Data/eGHR/"
+
+    # --- SPAM Crop Distribution ---
+    spam_raster_dir: "PYTHIA/Simulation_Data/raster/"
+    spam_version: "2020"
+
+    # --- Weather Download ---
+    weather_download_delay: 2.0

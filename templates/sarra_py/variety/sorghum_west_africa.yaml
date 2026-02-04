@@ -1,0 +1,77 @@
+# Sorghum variety parameters for West Africa
+# Generic Sahel calibration (interpolated from millet and maize)
+# Suitable for Sudan and Sudan-Sahel zones
+
+# Phenology (thermal time in degree-days)
+SDJLevee: 60.0       # Emergence
+SDJBVP: 600.0        # Basic vegetative phase
+SDJRPR: 350.0        # Reproductive phase
+SDJMatu1: 400.0      # Grain filling 1
+SDJMatu2: 175.0      # Grain filling 2
+
+# Yield potential coefficients
+KRdtPotA: 0.45       # Harvest index parameter A
+KRdtPotB: 150.0      # Harvest index parameter B
+
+# Photoperiod sensitivity
+PPExp: 0.08          # Photoperiod exponent
+SeuilPP: 13.6        # Critical day length threshold (hours)
+PPsens: 2.0          # Photoperiod sensitivity coefficient
+PPCrit: 11.0         # Critical photoperiod
+
+# Temperature thresholds
+TBase: 10.0          # Base temperature (°C)
+TOpt1: 30.0          # Lower optimal temperature (°C)
+TOpt2: 35.0          # Upper optimal temperature (°C)
+TLim: 45.0           # Lethal temperature (°C)
+
+# Biomass allocation and conversion
+pcReallocFeuille: 0.65
+txConversion: 5.2    # Radiation use efficiency (g/MJ)
+txAssimBVP: 1.0
+txAssimMatu1: 0.9
+txAssimMatu2: 0.5
+kRespMaint: 0.01
+
+# Aerial biomass partitioning
+aeroTotBase: 0.6
+aeroTotPente: 4.5e-05
+feuilAeroBase: 0.62
+feuilAeroPente: -0.00015
+txRealloc: 0.4
+
+# Other parameters
+tempMaint: 25.0
+kcMax: 1.2
+PFactor: 0.50
+seuilCstrMortality: 3.0
+kdf: 0.4
+txResGrain: 0.52
+
+# Root growth rates (mm/day per degree-day)
+VRacLevee: 32.0
+VRacBVP: 25.0
+VRacPSP: 25.0
+VRacRPR: 25.0
+VRacMatu1: 18.0
+VRacMatu2: 18.0
+
+# Specific leaf area (m2/g)
+slaMin: 0.0018
+slaMax: 0.007
+slaPente: 0.4
+
+# Density response
+densiteA: 0.7
+densiteP: 4.5
+
+# Supplementary parameters
+densOpti: 55000.0
+AGauss: 1.0
+KRdtBiom: 0.0
+LGauss: 1.0
+NIYo: 1.0
+NIp: 0.0
+phaseDevVeg: 0
+poidsSecGrain: 0.035
+senCO2: 10.0
