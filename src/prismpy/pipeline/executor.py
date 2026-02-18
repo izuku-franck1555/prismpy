@@ -7,7 +7,7 @@ complete data-to-model translation workflow through five stages:
 2. HARMONIZE - Align, gap-fill, and validate data
 3. TRANSLATE - Convert to platform-specific formats
 4. VALIDATE - Check outputs against requirements
-5. DOCUMENT - Generate provenance reports
+5. PACKAGE - Generate self-documenting data packages
 """
 
 from dataclasses import dataclass, field
@@ -29,6 +29,7 @@ from prismpy.translators.base import (
     UnifiedData,
     TranslationResult,
 )
+from prismpy.validators.base import BaseValidator, ValidationResult
 
 
 class PipelineStage(str, Enum):
@@ -37,7 +38,7 @@ class PipelineStage(str, Enum):
     HARMONIZE = "harmonize"
     TRANSLATE = "translate"
     VALIDATE = "validate"
-    DOCUMENT = "document"
+    PACKAGE = "package"
 
 
 @dataclass
@@ -83,7 +84,7 @@ class TranslationPipeline:
 
     Orchestrates the complete data-to-model translation workflow,
     coordinating data retrieval, harmonization, translation, validation,
-    and documentation across all enabled platforms.
+    and packaging across all enabled platforms.
 
     Example usage:
         ```python
@@ -139,8 +140,9 @@ class TranslationPipeline:
         # Set configuration hash
         self.provenance.set_config_hash(config.model_dump())
 
-        # Initialize translators (lazy loading)
+        # Initialize translators and validators (lazy loading)
         self._translators: Dict[Platform, BaseTranslator] = {}
+        self._validators: Dict[Platform, BaseValidator] = {}
 
     def _get_translator(self, platform: Platform) -> Optional[BaseTranslator]:
         """Get or create translator for a platform.
@@ -192,6 +194,48 @@ class TranslationPipeline:
 
         except Exception as e:
             self.logger.error(f"Failed to create translator for {platform.value}: {e}")
+            return None
+
+    def _get_validator(self, platform: Platform, output_dir: Path) -> Optional[BaseValidator]:
+        """Get or create validator for a platform.
+
+        Args:
+            platform: Target platform
+            output_dir: Directory containing platform outputs to validate
+
+        Returns:
+            Validator instance or None if not available
+        """
+        if platform in self._validators:
+            return self._validators[platform]
+
+        try:
+            from prismpy.validators import (
+                SarraPyValidator,
+                CraftValidator,
+                PythiaValidator,
+                AceaValidator,
+            )
+
+            validator_map = {
+                Platform.SARRA_PY: SarraPyValidator,
+                Platform.CRAFT: CraftValidator,
+                Platform.PYTHIA: PythiaValidator,
+                Platform.ACEA: AceaValidator,
+            }
+
+            validator_class = validator_map.get(platform)
+            if validator_class is None:
+                self.logger.warning(f"No validator available for {platform.value}")
+                return None
+
+            validator = validator_class(output_dir=output_dir)
+            self._validators[platform] = validator
+            self.logger.debug(f"Created validator for {platform.value}")
+            return validator
+
+        except Exception as e:
+            self.logger.error(f"Failed to create validator for {platform.value}: {e}")
             return None
 
     def _execute_retrieve(self) -> StageResult:
@@ -842,7 +886,8 @@ class TranslationPipeline:
     ) -> StageResult:
         """Execute the VALIDATE stage.
 
-        Validates all generated outputs against platform requirements.
+        Validates all generated outputs against platform requirements
+        using the dedicated BaseValidator hierarchy.
 
         Args:
             translation_results: Results from TRANSLATE stage
@@ -862,26 +907,36 @@ class TranslationPipeline:
                 errors.extend([f"{platform_name}: {e}" for e in result.errors])
                 continue
 
-            # Run platform-specific validation
+            # Run platform-specific validation via BaseValidator hierarchy
             platform = Platform(platform_name)
-            translator = self._get_translator(platform)
+            validator = self._get_validator(platform, result.output_dir)
 
-            if translator:
+            if validator:
                 try:
-                    validation_errors = translator.validate_outputs()
-                    if validation_errors:
-                        errors.extend([f"{platform_name}: {e}" for e in validation_errors])
+                    val_result: ValidationResult = validator.validate()
+                    if val_result.errors:
+                        errors.extend(
+                            [f"{platform_name}: {issue}" for issue in val_result.errors]
+                        )
+                    if val_result.warnings:
+                        warnings.extend(
+                            [f"{platform_name}: {issue}" for issue in val_result.warnings]
+                        )
                     validation_summary[platform_name] = {
-                        "valid": len(validation_errors) == 0,
-                        "errors": validation_errors,
+                        "valid": val_result.valid,
+                        "errors_count": val_result.n_errors,
+                        "warnings_count": val_result.n_warnings,
+                        "files_checked": val_result.files_checked,
                     }
+                    self.logger.info(f"  {val_result.summary()}")
                 except Exception as e:
                     warnings.append(f"{platform_name}: Validation skipped ({e})")
             else:
                 validation_summary[platform_name] = {
                     "valid": True,
-                    "errors": [],
-                    "note": "Validation not implemented",
+                    "errors_count": 0,
+                    "warnings_count": 0,
+                    "note": "No validator available",
                 }
 
         duration = (datetime.now() - start_time).total_seconds()
@@ -894,42 +949,77 @@ class TranslationPipeline:
             duration_seconds=duration,
         )
 
-    def _execute_document(self) -> StageResult:
-        """Execute the DOCUMENT stage.
+    def _execute_package(
+        self,
+        unified_data: Optional[UnifiedData],
+        translation_results: Dict[str, TranslationResult],
+    ) -> StageResult:
+        """Execute the PACKAGE stage.
 
-        Generates provenance reports and saves audit trail.
+        Generates self-documenting data packages for each platform
+        (manifest, provenance, README) and saves the pipeline-level
+        provenance audit trail.
+
+        Args:
+            unified_data: Harmonized data from HARMONIZE stage
+            translation_results: Results from TRANSLATE stage
 
         Returns:
-            StageResult with documentation summary
+            StageResult with packaging summary
         """
         start_time = datetime.now()
-        self.logger.info("Stage 5: DOCUMENT - Generating provenance report")
+        self.logger.info("Stage 5: PACKAGE - Generating data packages")
 
         errors = []
         warnings = []
         provenance_path = None
+        package_summary = {}
 
+        # Generate per-platform packages via translator.generate_package()
+        for platform_name, result in translation_results.items():
+            if not result.success:
+                continue
+
+            platform = Platform(platform_name)
+            translator = self._translators.get(platform)
+
+            if translator and unified_data:
+                try:
+                    package_files = translator.generate_package(
+                        unified_data, result.output_files
+                    )
+                    result.output_files.extend(package_files)
+                    package_summary[platform_name] = {
+                        "package_files": len(package_files),
+                        "files": [str(f.name) for f in package_files],
+                    }
+                    self.logger.info(
+                        f"  {platform_name}: {len(package_files)} package files generated"
+                    )
+                except Exception as e:
+                    warnings.append(f"{platform_name}: Package generation failed: {e}")
+                    self.logger.warning(f"Package generation failed for {platform_name}: {e}")
+
+        # Save pipeline-level provenance
         try:
-            # Save provenance record
             provenance_path = self.provenance.save()
 
-            # Generate human-readable report
             report = self.provenance.get_report()
             report_path = provenance_path.parent / f"{self.provenance.session_id}_report.txt"
             with open(report_path, "w") as f:
                 f.write(report)
 
-            self.logger.info(f"Provenance saved to {provenance_path}")
+            self.logger.info(f"Pipeline provenance saved to {provenance_path}")
 
         except Exception as e:
-            errors.append(f"Documentation failed: {str(e)}")
-            self.logger.error(f"Documentation error: {e}")
+            errors.append(f"Provenance save failed: {str(e)}")
+            self.logger.error(f"Provenance save error: {e}")
 
         duration = (datetime.now() - start_time).total_seconds()
         return StageResult(
-            stage=PipelineStage.DOCUMENT,
+            stage=PipelineStage.PACKAGE,
             success=len(errors) == 0,
-            data={"provenance_path": provenance_path},
+            data={"provenance_path": provenance_path, "packages": package_summary},
             errors=errors,
             warnings=warnings,
             duration_seconds=duration,
@@ -1004,10 +1094,13 @@ class TranslationPipeline:
                 result = self._execute_validate(translation_results)
                 stage_results["validate"] = result
 
-            # Stage 5: DOCUMENT
-            if PipelineStage.DOCUMENT in stages:
-                result = self._execute_document()
-                stage_results["document"] = result
+            # Stage 5: PACKAGE
+            if PipelineStage.PACKAGE in stages:
+                unified_data = stage_results.get("harmonize", StageResult(
+                    stage=PipelineStage.HARMONIZE, success=True, data=None
+                )).data
+                result = self._execute_package(unified_data, translation_results)
+                stage_results["package"] = result
                 if result.data:
                     provenance_path = result.data.get("provenance_path")
 

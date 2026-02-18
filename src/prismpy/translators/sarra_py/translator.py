@@ -185,15 +185,11 @@ class SarraPyTranslator(SarraPyTranslatorBase):
                 )
                 output_files.extend(climate_files)
 
-            # 5. Generate packaging files (manifest, provenance, README)
-            package_files = self._generate_package_files(data, output_files)
-            output_files.extend(package_files)
-
-            # 6. Generate validation report
+            # 5. Generate validation report
             validation_file = self._generate_validation_report(data)
             output_files.append(validation_file)
 
-            # 7. Validate outputs
+            # 6. Validate outputs
             validation_errors = self.validate_outputs()
             if validation_errors:
                 warnings.extend(validation_errors)
@@ -269,23 +265,37 @@ class SarraPyTranslator(SarraPyTranslatorBase):
             if not subdir_path.exists():
                 errors.append(f"Missing output subdirectory: {subdir}")
 
-        # Check standardized package files
-        package_files = [
-            "README.md",
-            "manifest.json",
-            "provenance.json",
+        # Check translated data files (package files checked in PACKAGE stage)
+        data_files = [
             "data/boundaries/bounds.json",
             "parameters/variety.yaml",
             "parameters/itk.yaml",
             "parameters/soil.yaml",
             "validation/validation_report.json",
         ]
-        for pkg_file in package_files:
-            file_path = self.output_dir / pkg_file
+        for data_file in data_files:
+            file_path = self.output_dir / data_file
             if not file_path.exists():
-                errors.append(f"Missing package file: {pkg_file}")
+                errors.append(f"Missing data file: {data_file}")
 
         return errors
+
+    def generate_package(
+        self, data: UnifiedData, output_files: List[Path]
+    ) -> List[Path]:
+        """Generate package metadata files (manifest, provenance, README).
+
+        Called by the pipeline's PACKAGE stage after translation and
+        validation are complete.
+
+        Args:
+            data: Unified data container
+            output_files: List of files generated during translation
+
+        Returns:
+            List of generated package file paths
+        """
+        return self._generate_package_files(data, output_files)
 
     def _generate_config_yaml(self, data: UnifiedData) -> Path:
         """Generate the main SARRA-Py configuration YAML file.

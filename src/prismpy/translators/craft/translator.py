@@ -242,14 +242,6 @@ class CraftTranslator(CraftTranslatorBase):
             if validation_errors:
                 warnings.extend(validation_errors)
 
-            # 10. Generate package metadata files (manifest, README, provenance)
-            try:
-                package_files = self._generate_package_metadata(data, output_files)
-                output_files.extend(package_files)
-            except Exception as pkg_error:
-                logger.warning(f"Failed to generate package metadata: {pkg_error}")
-                warnings.append(f"Package metadata generation failed: {pkg_error}")
-
         except Exception as e:
             logger.error(f"CRAFT translation failed: {e}")
             errors.append(str(e))
@@ -331,6 +323,27 @@ class CraftTranslator(CraftTranslatorBase):
             errors.append(f"Missing soil directory at {soil_dir}")
 
         return errors
+
+    def generate_package(
+        self, data: UnifiedData, output_files: List[Path]
+    ) -> List[Path]:
+        """Generate package metadata files (manifest, provenance, README).
+
+        Called by the pipeline's PACKAGE stage after translation and
+        validation are complete.
+
+        Args:
+            data: Unified data container
+            output_files: List of files generated during translation
+
+        Returns:
+            List of generated package file paths
+        """
+        try:
+            return self._generate_package_metadata(data, output_files)
+        except Exception as e:
+            logger.warning(f"Failed to generate package metadata: {e}")
+            return []
 
     def _to_craft_cellid(self, cell_id_0: int) -> int:
         """Convert 0-indexed cell ID to CRAFT 1-indexed format.

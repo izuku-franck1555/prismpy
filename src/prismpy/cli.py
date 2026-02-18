@@ -131,7 +131,7 @@ def cmd_translate(args: argparse.Namespace) -> int:
             except ValueError:
                 logger.error(f"Unknown target platform: {t}")
                 return 1
-        # Note: Would need to modify config to update targets
+        config.targets = targets
         logger.info(f"Target platforms: {[t.value for t in targets]}")
 
     # Create and run pipeline
@@ -148,7 +148,7 @@ def cmd_translate(args: argparse.Namespace) -> int:
         if args.stage:
             stage = PipelineStage(args.stage)
             logger.info(f"Running single stage: {stage.value}")
-            result = pipeline.run_stage(stage)
+            result = pipeline.execute(stages=[stage])
         else:
             logger.info("Running full pipeline...")
             result = pipeline.execute()
@@ -596,7 +596,7 @@ For more information, see: https://github.com/your-repo/prismpy
     )
     translate_parser.add_argument(
         "-s", "--stage",
-        choices=["retrieve", "harmonize", "translate", "validate", "document"],
+        choices=["retrieve", "harmonize", "translate", "validate", "package"],
         help="Run only a specific pipeline stage",
     )
     translate_parser.set_defaults(func=cmd_translate)

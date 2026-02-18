@@ -30,5 +30,14 @@ platform_config:
     spam_raster_dir: "PYTHIA/Simulation_Data/raster/"
     spam_version: "2020"
 
+    # --- DSSAT Crop Model Selection ---
+    # These are auto-detected from crop name if not set.
+    # Set explicitly for non-standard crops or to override auto-detection.
+    # dssat_smodel: "MZCER"         # CERES-Maize (auto for cereals)
+    # dssat_smodel: "CROPGRO"       # CROPGRO (auto for legumes: cowpea, soybean, etc.)
+    # dssat_cultivar_ingeno: null    # DSSAT cultivar code (e.g., "II0003" for IT90K-277-2 cowpea)
+    # dssat_cultivar_cname: null     # DSSAT cultivar name (e.g., "IT90K-277-2")
+    # dssat_symbiosis: null          # Symbiotic N fixation (Y/N, auto: Y for legumes)
+
     # --- Weather Download ---
     weather_download_delay: 2.0

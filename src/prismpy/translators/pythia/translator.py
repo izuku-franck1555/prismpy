@@ -189,12 +189,7 @@ class PythiaTranslator(PythiaTranslatorBase):
             config_file = self._generate_pythia_json(data)
             output_files.append(config_file)
 
-            # 9. Generate package files (manifest, provenance, README)
-            logger.info("Step 9/9: Generating package metadata...")
-            package_files = self._generate_package_files(data)
-            output_files.extend(package_files)
-
-            # Validate outputs
+            # 9. Validate outputs
             validation_errors = self.validate_outputs()
             if validation_errors:
                 warnings.extend(validation_errors)
@@ -282,6 +277,23 @@ class PythiaTranslator(PythiaTranslatorBase):
                 errors.append("No shapefile generated in shapes/")
 
         return errors
+
+    def generate_package(
+        self, data: UnifiedData, output_files: List[Path]
+    ) -> List[Path]:
+        """Generate package metadata files (manifest, provenance, README).
+
+        Called by the pipeline's PACKAGE stage after translation and
+        validation are complete.
+
+        Args:
+            data: Unified data container
+            output_files: List of files generated during translation
+
+        Returns:
+            List of generated package file paths
+        """
+        return self._generate_package_files(data)
 
     def _generate_sites_shapefile(
         self,
@@ -598,8 +610,8 @@ class PythiaTranslator(PythiaTranslatorBase):
                 dst.update_tags(
                     units="zone_id",
                     description="Cultivar zone",
-                    cultivar_code=cultivar_params.get("ingeno", "990002"),
-                    cultivar_name=cultivar_params.get("cname", "MEDIUM_SEASON"),
+                    cultivar_code=cultivar_params.get("ingeno", self._get_default_cultivar_ingeno()),
+                    cultivar_name=cultivar_params.get("cname", self._get_default_cultivar_cname()),
                 )
 
             output_files.append(cult_path)
@@ -770,14 +782,102 @@ class PythiaTranslator(PythiaTranslatorBase):
             "irrig": irrig,
         }
 
+    # DSSAT crop model families for auto-detection
+    _LEGUME_CROPS = frozenset({
+        "cowpea", "soybean", "soya bean", "bean", "beans", "dry bean",
+        "chickpea", "groundnut", "peanut", "pigeon pea", "pigeonpea",
+        "lentil", "faba bean", "velvet bean", "mung bean",
+    })
+
+    def _get_pythia_config(self):
+        """Get PythiaConfig from platform_config, or None."""
+        if self.config.platform_config and hasattr(self.config.platform_config, 'pythia'):
+            return self.config.platform_config.pythia
+        return None
+
+    def _get_dssat_smodel(self) -> str:
+        """Get the DSSAT simulation model code (SMODEL) for the configured crop.
+
+        Resolution order:
+        1. Explicit override via PythiaConfig.dssat_smodel (e.g., 'CPGRO')
+        2. Auto-detect from crop name: legumes → 'CROPGRO', cereals → '{crop_code}CER'
+
+        Returns:
+            6-character DSSAT SMODEL string (e.g., 'MZCER ', 'CROPGRO')
+        """
+        pythia_cfg = self._get_pythia_config()
+
+        # Priority 1: explicit override
+        if pythia_cfg and pythia_cfg.dssat_smodel:
+            smodel = pythia_cfg.dssat_smodel.strip()
+            logger.info(f"Using explicit DSSAT SMODEL: {smodel}")
+            return smodel
+
+        # Priority 2: auto-detect from crop name
+        crop_name = self.config.crop.name.lower().strip()
+        crop_code = self.config.crop.name_short.upper()[:2]
+
+        if crop_name in self._LEGUME_CROPS:
+            logger.info(
+                f"Auto-detected legume crop '{crop_name}' → SMODEL=CROPGRO"
+            )
+            return "CROPGRO"
+
+        # Default: CERES family ({crop_code}CER)
+        smodel = f"{crop_code}CER"
+        logger.info(f"Using CERES SMODEL for '{crop_name}': {smodel}")
+        return smodel
+
+    def _get_dssat_symbiosis(self) -> str:
+        """Get the DSSAT symbiotic N fixation switch for the configured crop.
+
+        Resolution order:
+        1. Explicit override via PythiaConfig.dssat_symbiosis
+        2. Auto-detect: legumes → 'Y', others → 'N'
+
+        Returns:
+            'Y' or 'N'
+        """
+        pythia_cfg = self._get_pythia_config()
+
+        # Priority 1: explicit override
+        if pythia_cfg and pythia_cfg.dssat_symbiosis:
+            symbi = pythia_cfg.dssat_symbiosis.strip().upper()
+            if symbi in ('Y', 'N'):
+                return symbi
+            logger.warning(
+                f"Invalid dssat_symbiosis value '{symbi}', expected Y or N. "
+                f"Falling back to auto-detection."
+            )
+
+        # Priority 2: auto-detect from crop name
+        crop_name = self.config.crop.name.lower().strip()
+        if crop_name in self._LEGUME_CROPS:
+            return "Y"
+        return "N"
+
+    def _get_default_cultivar_ingeno(self) -> str:
+        """Get default cultivar INGENO, checking config override first."""
+        pythia_cfg = self._get_pythia_config()
+        if pythia_cfg and pythia_cfg.dssat_cultivar_ingeno:
+            return pythia_cfg.dssat_cultivar_ingeno
+        return "990002"
+
+    def _get_default_cultivar_cname(self) -> str:
+        """Get default cultivar CNAME, checking config override first."""
+        pythia_cfg = self._get_pythia_config()
+        if pythia_cfg and pythia_cfg.dssat_cultivar_cname:
+            return pythia_cfg.dssat_cultivar_cname
+        return "MEDIUM_SEASON"
+
     def _map_generic_to_cultivar(self) -> Dict[str, Any]:
         """Map generic phenology to DSSAT cultivar selection.
 
-        Uses total thermal time (GDD) to select appropriate cultivar maturity class.
-        For maize, this maps to DSSAT cultivar codes:
-        - 990001: SHORT_SEASON (fast maturing)
-        - 990002: MEDIUM_SEASON (intermediate)
-        - 990003: LONG_SEASON (slow maturing)
+        Resolution order:
+        1. Explicit cultivar override via PythiaConfig.dssat_cultivar_ingeno
+           (for CROPGRO crops or when a specific cultivar is needed)
+        2. GDD-based maturity class mapping using CERES-Maize generic codes
+           (990001/990002/990003) — only appropriate for CERES crops
 
         GDD thresholds are configurable via PythiaConfig.short_season_gdd_max
         and PythiaConfig.medium_season_gdd_max.
@@ -785,6 +885,23 @@ class PythiaTranslator(PythiaTranslatorBase):
         Returns:
             Dictionary with cultivar parameters
         """
+        pythia_config = self._get_pythia_config()
+
+        # Priority 1: Explicit cultivar override (required for CROPGRO crops)
+        if pythia_config and pythia_config.dssat_cultivar_ingeno:
+            ingeno = pythia_config.dssat_cultivar_ingeno
+            cname = pythia_config.dssat_cultivar_cname or "USER_DEFINED"
+            logger.info(
+                f"Using explicit DSSAT cultivar: INGENO={ingeno}, CNAME={cname}"
+            )
+            return {
+                "ingeno": ingeno,
+                "cname": cname,
+                "maturity_class": "user_defined",
+                "total_gdd": None,
+            }
+
+        # Priority 2: GDD-based maturity class mapping (CERES crops only)
         pheno = self.config.crop.phenology
 
         # Use defaults if not provided
@@ -799,13 +916,19 @@ class PythiaTranslator(PythiaTranslatorBase):
             pheno.grain_filling_gdd
         )
 
+        # Warn if using CERES cultivar codes for a non-CERES crop
+        crop_name = self.config.crop.name.lower().strip()
+        if crop_name in self._LEGUME_CROPS:
+            logger.warning(
+                f"Crop '{crop_name}' is a legume but no dssat_cultivar_ingeno "
+                f"was provided. The GDD-based cultivar codes (990001-990003) "
+                f"are CERES-Maize specific and will NOT work with CROPGRO. "
+                f"Set platform_config.pythia.dssat_cultivar_ingeno in your config."
+            )
+
         # Get GDD thresholds from config (with defaults)
         short_gdd_max = 1400.0
         medium_gdd_max = 1700.0
-
-        pythia_config = None
-        if self.config.platform_config and hasattr(self.config.platform_config, 'pythia'):
-            pythia_config = self.config.platform_config.pythia
 
         if pythia_config:
             if hasattr(pythia_config, 'short_season_gdd_max'):
@@ -1052,9 +1175,14 @@ class PythiaTranslator(PythiaTranslatorBase):
             irrig = "A" if mgmt and mgmt.irrigation else "N"
             fen_tot = mgmt.fertilizer_n_total if mgmt and hasattr(mgmt, 'fertilizer_n_total') else 60
 
-            # Use default cultivar mapping (medium season)
-            ingeno = "990002"
-            cname = "MEDIUM_SEASON"
+            # Use cultivar from config override or default mapping
+            pythia_cfg = self._get_pythia_config()
+            if pythia_cfg and pythia_cfg.dssat_cultivar_ingeno:
+                ingeno = pythia_cfg.dssat_cultivar_ingeno
+                cname = pythia_cfg.dssat_cultivar_cname or "USER_DEFINED"
+            else:
+                ingeno = "990002"
+                cname = "MEDIUM_SEASON"
 
         # Get start year for runs
         start_year = int(sdate.split("-")[0])
@@ -1767,6 +1895,10 @@ class PythiaTranslator(PythiaTranslatorBase):
         # Get DSSAT crop code
         crop_code = self.config.crop.name_short.upper()[:2]
 
+        # Get DSSAT SMODEL (CERES vs CROPGRO) and SYMBI switch
+        smodel = self._get_dssat_smodel()
+        symbi = self._get_dssat_symbiosis()
+
         # Build treatment name - must be exactly 25 characters
         # Format: "{crop_name} rainfed" padded to 25 chars
         base_tname = f"{crop_name} rainfed"
@@ -1832,9 +1964,9 @@ class PythiaTranslator(PythiaTranslatorBase):
 
 *SIMULATION CONTROLS
 @N GENERAL     NYERS NREPS START SDATE RSEED SNAME.................... SMODEL
- 1 GE          {{{{ nyers }}}}     1     S {{{{ sdate }}}}  2150 Rainfed                   {crop_code}CER
+ 1 GE          {{{{ nyers }}}}     1     S {{{{ sdate }}}}  2150 Rainfed                   {smodel}
 @N OPTIONS     WATER NITRO SYMBI PHOSP POTAS DISES  CHEM  TILL   CO2
- 1 OP              Y     Y     N     N     N     N     N     N     M
+ 1 OP              Y     Y     {symbi}     N     N     N     N     N     M
 @N METHODS     WTHER INCON LIGHT EVAPO INFIL PHOTO HYDRO NSWIT MESOM MESEV MESOL
  1 ME              M     M     E     R     S     L     R     1     P     S     2
 @N MANAGEMENT  PLANT IRRIG FERTI RESID HARVS

@@ -371,17 +371,19 @@ class AceaTranslator(AceaTranslatorBase):
             (self.output_dir / subdir).mkdir(parents=True, exist_ok=True)
 
         try:
-            # Compute 30-arcmin cell IDs
+            # Compute 30-arcmin cell IDs (stored for PACKAGE stage)
             cell_ids_30arcmin = self._compute_30arcmin_cell_ids(data.grid)
+            self._cell_ids_30arcmin = cell_ids_30arcmin
 
             # Validate cell IDs are 30-arcmin
             if not self._validate_30arcmin_ids(cell_ids_30arcmin):
                 warnings.append("Some cell IDs exceed 30-arcmin maximum. "
                               "Verify grid resolution.")
 
-            # Generate climate_name early (used for pickle files and config)
+            # Generate climate_name early (stored for PACKAGE stage)
             region_name = data.region.name if data.region else "region"
             climate_name = f"{region_name.lower().replace(' ', '_')}_nasapower"
+            self._climate_name = climate_name
 
             # 1. Generate climate pickle files
             # Check if we have enough climate data for all cells
@@ -561,13 +563,7 @@ class AceaTranslator(AceaTranslatorBase):
             install_script = self._generate_install_script(data)
             output_files.append(install_script)
 
-            # 10. Generate package metadata (README, manifest, provenance)
-            metadata_files = self._generate_package_metadata(
-                data, cell_ids_30arcmin, climate_name, output_files
-            )
-            output_files.extend(metadata_files)
-
-            # Validate outputs
+            # 10. Validate outputs
             validation_errors = self.validate_outputs()
             if validation_errors:
                 warnings.extend(validation_errors)
@@ -645,6 +641,27 @@ class AceaTranslator(AceaTranslatorBase):
                 errors.append("No climate pickle files generated")
 
         return errors
+
+    def generate_package(
+        self, data: UnifiedData, output_files: List[Path]
+    ) -> List[Path]:
+        """Generate package metadata files (manifest, provenance, README).
+
+        Called by the pipeline's PACKAGE stage after translation and
+        validation are complete.
+
+        Args:
+            data: Unified data container
+            output_files: List of files generated during translation
+
+        Returns:
+            List of generated package file paths
+        """
+        cell_ids = getattr(self, '_cell_ids_30arcmin', [])
+        climate_name = getattr(self, '_climate_name', 'region_nasapower')
+        return self._generate_package_metadata(
+            data, cell_ids, climate_name, output_files
+        )
 
     def _compute_30arcmin_cell_ids(self, grid: Optional[SpatialGrid]) -> List[int]:
         """Compute UNIQUE 30-arcmin cell IDs from grid.

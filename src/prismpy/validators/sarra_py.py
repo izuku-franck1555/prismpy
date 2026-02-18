@@ -59,11 +59,8 @@ class SarraPyValidator(BaseValidator):
         "validation",
     ]
 
-    # Required package files
+    # Required translated data files (package files generated in PACKAGE stage)
     REQUIRED_FILES = [
-        "README.md",
-        "manifest.json",
-        "provenance.json",
         "config/project_config.yaml",
         "data/boundaries/bounds.json",
         "parameters/variety.yaml",

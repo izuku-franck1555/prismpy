@@ -230,6 +230,24 @@ class BaseTranslator(ABC):
             metadata=metadata or {},
         )
 
+    def generate_package(
+        self, data: UnifiedData, output_files: List[Path]
+    ) -> List[Path]:
+        """Generate package metadata files (manifest, provenance, README).
+
+        Called by the pipeline's PACKAGE stage after translation and
+        validation are complete. Subclasses should override this to
+        provide platform-specific package generation.
+
+        Args:
+            data: Unified data container
+            output_files: List of files generated during translation
+
+        Returns:
+            List of generated package file paths
+        """
+        return []
+
     def log_translation_start(self, data: UnifiedData) -> None:
         """Log the start of translation."""
         self.logger.info(

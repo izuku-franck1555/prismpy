@@ -1045,6 +1045,37 @@ class PythiaConfig(BaseModel):
         description="Maximum GDD for medium-season cultivar classification"
     )
 
+    # DSSAT crop model selection (CERES vs CROPGRO)
+    dssat_smodel: Optional[str] = Field(
+        default=None,
+        description=(
+            "DSSAT simulation model code (e.g., 'MZCER' for CERES-Maize, "
+            "'CPGRO' for CROPGRO-Cowpea). Auto-detected from crop name if not set: "
+            "cereals use {crop_code}CER, legumes use CROPGRO."
+        )
+    )
+    dssat_cultivar_ingeno: Optional[str] = Field(
+        default=None,
+        description=(
+            "DSSAT cultivar code (INGENO) override. If set, bypasses the "
+            "GDD-based maturity class mapping. E.g., 'II0003' for IT90K-277-2 cowpea."
+        )
+    )
+    dssat_cultivar_cname: Optional[str] = Field(
+        default=None,
+        description=(
+            "DSSAT cultivar name (CNAME) override. Used with dssat_cultivar_ingeno. "
+            "E.g., 'IT90K-277-2'."
+        )
+    )
+    dssat_symbiosis: Optional[str] = Field(
+        default=None,
+        description=(
+            "DSSAT symbiotic N fixation switch (Y/N). Auto-detected from crop name "
+            "if not set: Y for legumes (cowpea, soybean, groundnut, etc.), N otherwise."
+        )
+    )
+
 
 class AceaConfig(BaseModel):
     """Platform-specific configuration for ACEA."""
