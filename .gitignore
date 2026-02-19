@@ -72,7 +72,8 @@ venv.bak/
 # Data and output directories (local only)
 data/
 output/
-provenance/
+# Provenance output files (but NOT src/prismpy/provenance/ source code)
+/provenance/
 
 # Cache directories
 .prismpy/

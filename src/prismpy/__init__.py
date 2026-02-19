@@ -17,11 +17,19 @@ The framework provides:
 __version__ = "0.1.0"
 __author__ = "Crop Modeling Research Team"
 
-from prismpy.config.schema import ProjectConfig
-from prismpy.pipeline.executor import TranslationPipeline
-
 __all__ = [
     "ProjectConfig",
     "TranslationPipeline",
     "__version__",
 ]
+
+
+def __getattr__(name: str):
+    """Lazy imports — heavy modules load only when accessed."""
+    if name == "ProjectConfig":
+        from prismpy.config.schema import ProjectConfig
+        return ProjectConfig
+    if name == "TranslationPipeline":
+        from prismpy.pipeline.executor import TranslationPipeline
+        return TranslationPipeline
+    raise AttributeError(f"module 'prismpy' has no attribute {name!r}")
