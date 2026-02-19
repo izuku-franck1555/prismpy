@@ -483,7 +483,9 @@ class CraftValidator(BaseValidator):
     def _validate_craft_schema(self, file_path: Path) -> List[ValidationIssue]:
         """Validate CRAFT_Schema file (5m_*.txt format).
 
-        Expected format: Tab-separated with CellID, Lat, Lon columns.
+        Expected format: CELLID\\tSHAREPERCENT (tab-separated, 2 columns)
+        - CELLID: integer, 1-indexed global grid cell ID
+        - SHAREPERCENT: 0-100, percentage of cell covered by admin boundary
 
         Args:
             file_path: Path to CRAFT schema file
@@ -491,12 +493,112 @@ class CraftValidator(BaseValidator):
         Returns:
             List of validation issues
         """
-        return self._validate_schema(file_path)
+        issues = []
+
+        try:
+            with open(file_path, 'r') as f:
+                lines = f.readlines()
+
+            if not lines:
+                issues.append(ValidationIssue(
+                    severity='error',
+                    category='schema',
+                    message="CRAFT schema file is empty",
+                    file_path=file_path,
+                ))
+                return issues
+
+            header = lines[0].strip().split('\t')
+
+            # CRAFT schema uses CELLID and SHAREPERCENT (uppercase)
+            required_cols = ["CELLID", "SHAREPERCENT"]
+            for col in required_cols:
+                if col not in header:
+                    issues.append(ValidationIssue(
+                        severity='error',
+                        category='schema',
+                        message=f"Missing required column: {col}",
+                        file_path=file_path,
+                    ))
+
+            if any(i.severity == 'error' for i in issues):
+                return issues
+
+            cellid_idx = header.index("CELLID")
+            share_idx = header.index("SHAREPERCENT")
+
+            prev_cellid = -1
+            for i, line in enumerate(lines[1:], start=2):
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split('\t')
+                if len(parts) < 2:
+                    issues.append(ValidationIssue(
+                        severity='error',
+                        category='schema',
+                        message=f"Line {i}: expected 2 columns, got {len(parts)}",
+                        file_path=file_path,
+                    ))
+                    continue
+
+                try:
+                    cellid = int(parts[cellid_idx])
+                    if cellid < 1 or cellid > 9331200:
+                        issues.append(ValidationIssue(
+                            severity='error',
+                            category='schema',
+                            message=f"Line {i}: CellID {cellid} out of valid range [1, 9331200]",
+                            file_path=file_path,
+                        ))
+                    if cellid <= prev_cellid:
+                        issues.append(ValidationIssue(
+                            severity='warning',
+                            category='schema',
+                            message=f"Line {i}: CellID {cellid} not in ascending order",
+                            file_path=file_path,
+                        ))
+                    prev_cellid = cellid
+                except ValueError:
+                    issues.append(ValidationIssue(
+                        severity='error',
+                        category='schema',
+                        message=f"Line {i}: invalid CellID '{parts[cellid_idx]}'",
+                        file_path=file_path,
+                    ))
+
+                try:
+                    share = float(parts[share_idx])
+                    if share < 0 or share > 100:
+                        issues.append(ValidationIssue(
+                            severity='error',
+                            category='schema',
+                            message=f"Line {i}: SharePercent {share} out of range [0, 100]",
+                            file_path=file_path,
+                        ))
+                except ValueError:
+                    issues.append(ValidationIssue(
+                        severity='error',
+                        category='schema',
+                        message=f"Line {i}: invalid SharePercent '{parts[share_idx]}'",
+                        file_path=file_path,
+                    ))
+
+        except Exception as e:
+            issues.append(ValidationIssue(
+                severity='error',
+                category='schema',
+                message=f"Failed to read CRAFT schema: {e}",
+                file_path=file_path,
+            ))
+
+        return issues
 
     def _validate_python_schema(self, file_path: Path) -> List[ValidationIssue]:
         """Validate Python_Schema file (Schema_*.txt format).
 
-        Expected format: Tab-separated with CellID, Lat, Lon columns.
+        Expected format: CellID\\tLatitude\\tLongitude\\tElevation\\tArea\\tLevel{N}Name
+        (tab-separated, 5+ columns)
 
         Args:
             file_path: Path to Python schema file
@@ -504,7 +606,115 @@ class CraftValidator(BaseValidator):
         Returns:
             List of validation issues
         """
-        return self._validate_schema(file_path)
+        issues = []
+
+        try:
+            with open(file_path, 'r') as f:
+                lines = f.readlines()
+
+            if not lines:
+                issues.append(ValidationIssue(
+                    severity='error',
+                    category='schema',
+                    message="Python schema file is empty",
+                    file_path=file_path,
+                ))
+                return issues
+
+            header = lines[0].strip().split('\t')
+
+            # Python schema uses CellID, Latitude, Longitude (not Lat/Lon)
+            required_cols = ["CellID", "Latitude", "Longitude", "Area"]
+            for col in required_cols:
+                if col not in header:
+                    issues.append(ValidationIssue(
+                        severity='error',
+                        category='schema',
+                        message=f"Missing required column: {col}",
+                        file_path=file_path,
+                    ))
+
+            if any(i.severity == 'error' for i in issues):
+                return issues
+
+            cellid_idx = header.index("CellID")
+            lat_idx = header.index("Latitude")
+            lon_idx = header.index("Longitude")
+
+            for i, line in enumerate(lines[1:], start=2):
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split('\t')
+                if len(parts) < len(required_cols):
+                    issues.append(ValidationIssue(
+                        severity='error',
+                        category='schema',
+                        message=f"Line {i}: expected at least {len(required_cols)} columns, got {len(parts)}",
+                        file_path=file_path,
+                    ))
+                    continue
+
+                try:
+                    cellid = int(parts[cellid_idx])
+                    if cellid < 1 or cellid > 9331200:
+                        issues.append(ValidationIssue(
+                            severity='error',
+                            category='schema',
+                            message=f"Line {i}: CellID {cellid} out of valid range",
+                            file_path=file_path,
+                        ))
+                except ValueError:
+                    issues.append(ValidationIssue(
+                        severity='error',
+                        category='schema',
+                        message=f"Line {i}: invalid CellID '{parts[cellid_idx]}'",
+                        file_path=file_path,
+                    ))
+
+                try:
+                    lat = float(parts[lat_idx])
+                    if lat < -90 or lat > 90:
+                        issues.append(ValidationIssue(
+                            severity='error',
+                            category='schema',
+                            message=f"Line {i}: Latitude {lat} out of range [-90, 90]",
+                            file_path=file_path,
+                        ))
+                except ValueError:
+                    issues.append(ValidationIssue(
+                        severity='error',
+                        category='schema',
+                        message=f"Line {i}: invalid Latitude",
+                        file_path=file_path,
+                    ))
+
+                try:
+                    lon = float(parts[lon_idx])
+                    if lon < -180 or lon > 180:
+                        issues.append(ValidationIssue(
+                            severity='error',
+                            category='schema',
+                            message=f"Line {i}: Longitude {lon} out of range [-180, 180]",
+                            file_path=file_path,
+                        ))
+                except ValueError:
+                    issues.append(ValidationIssue(
+                        severity='error',
+                        category='schema',
+                        message=f"Line {i}: invalid Longitude",
+                        file_path=file_path,
+                    ))
+
+        except Exception as e:
+            issues.append(ValidationIssue(
+                severity='error',
+                category='schema',
+                message=f"Failed to read Python schema: {e}",
+                file_path=file_path,
+            ))
+
+        return issues
 
     def _validate_sol_file(self, file_path: Path) -> List[ValidationIssue]:
         """Validate DSSAT soil file (*.SOL format).

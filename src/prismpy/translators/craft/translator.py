@@ -426,6 +426,7 @@ class CraftTranslator(CraftTranslatorBase):
 
         # Get schema configuration from platform config
         schema_level = 2  # Default to Level 2 (state/region)
+        craft_level = schema_level  # Default, overridden if platform_config exists
         admin_level1_name = None
         admin_level2_name = None
         admin_level3_name = None
@@ -435,12 +436,16 @@ class CraftTranslator(CraftTranslatorBase):
         gadm_data_path = None
         gadm_country_iso3 = None
         gadm_admin_name = None
+        gadm_level = None
 
         # Legacy shapefile path
         shapefile_path = None
 
         if platform_config:
             schema_level = getattr(platform_config, 'schema_level', 2)
+            # craft_level: controls WHICH CRAFT folder to write to (project-relative)
+            # Falls back to schema_level for backward compatibility
+            craft_level = getattr(platform_config, 'craft_level', None) or schema_level
             admin_level1_name = getattr(platform_config, 'admin_level1_name', None)
             admin_level2_name = getattr(platform_config, 'admin_level2_name', None)
             admin_level3_name = getattr(platform_config, 'admin_level3_name', None)
@@ -450,6 +455,7 @@ class CraftTranslator(CraftTranslatorBase):
             gadm_data_path = getattr(platform_config, 'gadm_data_path', None)
             gadm_country_iso3 = getattr(platform_config, 'gadm_country_iso3', None)
             gadm_admin_name = getattr(platform_config, 'gadm_admin_name', None)
+            gadm_level = getattr(platform_config, 'gadm_level', None)
 
             # Legacy shapefile path
             shapefile_path = getattr(platform_config, 'admin_shapefile_path', None)
@@ -462,14 +468,16 @@ class CraftTranslator(CraftTranslatorBase):
         if not gadm_admin_name:
             gadm_admin_name = region.name  # Use region name for GADM filtering
 
-        # Create CRAFT_Schema directory structure (inside schema/)
-        level_dir = self.output_dir / "schema" / "CRAFT_Schema" / f"Level{schema_level}" / "Schema"
+        # Create CRAFT_Schema directory structure using craft_level (project-relative)
+        level_dir = self.output_dir / "schema" / "CRAFT_Schema" / f"Level{craft_level}" / "Schema"
         level_dir.mkdir(parents=True, exist_ok=True)
+        shape_dir = self.output_dir / "schema" / "CRAFT_Schema" / f"Level{craft_level}" / "Shape"
+        shape_dir.mkdir(parents=True, exist_ok=True)
 
-        # Build filename based on level
-        if schema_level == 1:
+        # Build filename based on craft_level (project-relative hierarchy)
+        if craft_level == 1:
             filename = f"5m_{admin_level1_name}.txt"
-        elif schema_level == 2:
+        elif craft_level == 2:
             filename = f"5m_{admin_level1_name}_{admin_level2_name}.txt"
         else:  # Level 3
             if not admin_level3_name:
@@ -505,14 +513,35 @@ class CraftTranslator(CraftTranslatorBase):
                            f"(management files will use same cells)")
 
                 # Write CRAFT schema file from GADM data
-                with open(schema_path, 'w') as f:
+                # Use CRLF line endings for Windows/CRAFT compatibility
+                with open(schema_path, 'w', newline='\r\n') as f:
                     f.write("CELLID\tSHAREPERCENT\n")
                     for row in craft_schema_rows:
-                        f.write(f"{row['cellid']}\t{row['share_percent']}\n")
+                        sp = row['share_percent']
+                        # Format integer values without decimal (100 not 100.0)
+                        if sp == int(sp):
+                            f.write(f"{row['cellid']}\t{int(sp)}\n")
+                        else:
+                            f.write(f"{row['cellid']}\t{sp}\n")
 
                 output_files.append(schema_path)
                 logger.info(f"Generated CRAFT schema from GADM: {schema_path} "
-                           f"({len(craft_schema_rows)} cells, level {schema_level})")
+                           f"({len(craft_schema_rows)} cells, craft_level {craft_level})")
+
+                # Copy GADM shapefile to Shape/ directory within the package
+                # (CRAFT requires shapefiles alongside schema for basemap rendering)
+                effective_gadm_level = gadm_level if gadm_level is not None else schema_level - 1
+                self._copy_gadm_shapefile_to_shape_dir(
+                    gadm_data_path, gadm_country_iso3,
+                    effective_gadm_level,
+                    shape_dir, admin_level1_name, craft_level
+                )
+
+                # Generate 5m_area.txt within the package
+                # (user must copy this to C:/CCAFSToolkit/ for CRAFT to find it)
+                if python_schema_rows:
+                    self._generate_area_file(python_schema_rows)
+
                 return output_files
             else:
                 logger.warning("GADM schema generation returned no cells - falling back to grid-based method")
@@ -524,10 +553,10 @@ class CraftTranslator(CraftTranslatorBase):
         share_percents = self._calculate_share_percent(grid, shapefile_path, decimal_places)
 
         # Write CRAFT schema file
-        with open(schema_path, 'w') as f:
+        # Use CRLF line endings for Windows/CRAFT compatibility
+        with open(schema_path, 'w', newline='\r\n') as f:
             f.write("CELLID\tSHAREPERCENT\n")
 
-            # Write cells sorted by CELLID descending (CRAFT convention)
             cells_with_share = []
             for cell in grid.cells:
                 craft_cellid = self._to_craft_cellid(cell.cell_id)
@@ -536,14 +565,18 @@ class CraftTranslator(CraftTranslatorBase):
                 if share_pct > 0:
                     cells_with_share.append((craft_cellid, share_pct))
 
-            # Sort descending by CellID
-            cells_with_share.sort(key=lambda x: x[0], reverse=True)
+            # Sort ascending by CellID (matching CRAFT's working schema)
+            cells_with_share.sort(key=lambda x: x[0])
 
             for cellid, share_pct in cells_with_share:
-                f.write(f"{cellid}\t{share_pct}\n")
+                # Format integer values without decimal (100 not 100.0)
+                if share_pct == int(share_pct):
+                    f.write(f"{cellid}\t{int(share_pct)}\n")
+                else:
+                    f.write(f"{cellid}\t{share_pct}\n")
 
         output_files.append(schema_path)
-        logger.info(f"Generated CRAFT schema: {schema_path} ({len(cells_with_share)} cells, level {schema_level})")
+        logger.info(f"Generated CRAFT schema: {schema_path} ({len(cells_with_share)} cells, craft_level {craft_level})")
 
         return output_files
 
@@ -616,6 +649,97 @@ class CraftTranslator(CraftTranslatorBase):
 
         return craft_rows, python_rows
 
+    def _copy_gadm_shapefile_to_shape_dir(
+        self,
+        gadm_data_path: str,
+        country_iso3: str,
+        gadm_level: int,
+        shape_dir: Path,
+        level1_name: str,
+        craft_level: int,
+    ) -> None:
+        """Copy GADM shapefile components to the package's Shape/ directory.
+
+        CRAFT requires shapefiles alongside schema files for basemap rendering
+        and ODBC validation. Files are placed WITHIN the output package — the
+        user is responsible for copying the package to the CRAFT machine.
+        """
+        import shutil
+
+        gadm_path = Path(gadm_data_path)
+        shp_name = f"gadm41_{country_iso3.upper()}_{gadm_level}"
+
+        # Search for the shapefile in common locations
+        search_paths = [
+            gadm_path / f"{shp_name}.shp",
+            gadm_path / country_iso3.upper() / f"{shp_name}.shp",
+            gadm_path / "GADM" / f"{shp_name}.shp",
+        ]
+
+        shp_source = None
+        for sp in search_paths:
+            if sp.exists():
+                shp_source = sp
+                break
+
+        if not shp_source:
+            logger.warning(f"GADM shapefile not found for copying to Shape/. "
+                          f"Searched: {[str(p) for p in search_paths]}. "
+                          f"CRAFT basemap may not display correctly.")
+            return
+
+        # Copy all shapefile components
+        shp_stem = shp_source.stem
+        shp_dir = shp_source.parent
+        extensions = [".shp", ".dbf", ".prj", ".shx", ".cpg", ".sbn", ".sbx", ".shp.xml"]
+        copied = 0
+
+        for ext in extensions:
+            src = shp_dir / f"{shp_stem}{ext}"
+            if src.exists():
+                shutil.copy2(src, shape_dir / f"{shp_stem}{ext}")
+                copied += 1
+
+        logger.info(f"Copied {copied} shapefile components to {shape_dir}")
+
+        # Ensure Level1Name attribute exists in the copied shapefile
+        # (CRAFT uses this column for basemap labeling)
+        copied_shp = shape_dir / f"{shp_stem}.shp"
+        if copied_shp.exists():
+            try:
+                import geopandas as _gpd
+                gdf = _gpd.read_file(copied_shp)
+                if "Level1Name" not in gdf.columns:
+                    gdf["Level1Name"] = level1_name
+                    if "ObjectId" not in gdf.columns:
+                        gdf["ObjectId"] = range(1, len(gdf) + 1)
+                    gdf.to_file(copied_shp)
+                    logger.info(f"Added Level1Name='{level1_name}' attribute to shapefile")
+            except Exception as e:
+                logger.warning(f"Could not add Level1Name attribute: {e}")
+
+    def _generate_area_file(self, python_schema_rows: list) -> None:
+        """Generate 5m_area.txt file within the output package.
+
+        CRAFT checks for this file at C:/CCAFSToolkit/5m_area.txt after schema
+        generation. We place it in the package's schema/ directory — the user
+        must copy it to the CRAFT root directory on the target machine.
+
+        Format: CELLID\\tArea (tab-separated, area in km², 6 decimal places)
+        """
+        area_path = self.output_dir / "schema" / "5m_area.txt"
+
+        # Sort ascending by CellID
+        sorted_rows = sorted(python_schema_rows, key=lambda x: x['cellid'])
+
+        with open(area_path, 'w', newline='\r\n') as f:
+            f.write("CELLID\tArea\n")
+            for row in sorted_rows:
+                area = row.get('area', 0.0)
+                f.write(f"{row['cellid']}\t{area:.6f}\n")
+
+        logger.info(f"Generated 5m_area.txt: {area_path} ({len(sorted_rows)} cells)")
+
     def _generate_python_schema(self, grid: SpatialGrid, region: Region) -> List[Path]:
         """Generate Python schema files for internal use (scripts 02-08).
 
@@ -643,6 +767,7 @@ class CraftTranslator(CraftTranslatorBase):
 
         # Get schema configuration
         schema_level = 2
+        craft_level = schema_level  # Default, overridden if platform_config exists
         admin_level1_name = None
         admin_level2_name = None
         admin_level3_name = None
@@ -658,6 +783,7 @@ class CraftTranslator(CraftTranslatorBase):
 
         if platform_config:
             schema_level = getattr(platform_config, 'schema_level', 2)
+            craft_level = getattr(platform_config, 'craft_level', None) or schema_level
             admin_level1_name = getattr(platform_config, 'admin_level1_name', None)
             admin_level2_name = getattr(platform_config, 'admin_level2_name', None)
             admin_level3_name = getattr(platform_config, 'admin_level3_name', None)
@@ -679,14 +805,14 @@ class CraftTranslator(CraftTranslatorBase):
         if not gadm_admin_name:
             gadm_admin_name = region.name
 
-        # Create Python_Schemas directory (inside schema/)
-        python_schema_dir = self.output_dir / "schema" / "Python_Schemas" / f"Level{schema_level}"
+        # Create Python_Schemas directory using craft_level
+        python_schema_dir = self.output_dir / "schema" / "Python_Schemas" / f"Level{craft_level}"
         python_schema_dir.mkdir(parents=True, exist_ok=True)
 
-        # Build filename
-        if schema_level == 1:
+        # Build filename using craft_level
+        if craft_level == 1:
             filename = f"Schema_{admin_level1_name}.txt"
-        elif schema_level == 2:
+        elif craft_level == 2:
             filename = f"Schema_{admin_level1_name}_{admin_level2_name}.txt"
         else:  # Level 3
             if not admin_level3_name:
@@ -710,13 +836,13 @@ class CraftTranslator(CraftTranslatorBase):
             if python_schema_rows:
                 # Write Python schema file from GADM data
                 with open(python_schema_path, 'w') as f:
-                    # Build header based on level
+                    # Build header based on craft_level (project-relative hierarchy)
                     header_cols = ["CellID", "Latitude", "Longitude", "Elevation", "Area"]
-                    if schema_level >= 1:
+                    if craft_level >= 1:
                         header_cols.append("Level1Name")
-                    if schema_level >= 2:
+                    if craft_level >= 2:
                         header_cols.append("Level2Name")
-                    if schema_level >= 3:
+                    if craft_level >= 3:
                         header_cols.append("Level3Name")
                     f.write("\t".join(header_cols) + "\n")
 
@@ -729,12 +855,12 @@ class CraftTranslator(CraftTranslatorBase):
                             f"{row_data['area']:.12f}",
                         ]
 
-                        # Add admin names based on level
-                        if schema_level >= 1:
+                        # Add admin names based on craft_level
+                        if craft_level >= 1:
                             row.append(admin_level1_name)
-                        if schema_level >= 2:
+                        if craft_level >= 2:
                             row.append(admin_level2_name)
-                        if schema_level >= 3:
+                        if craft_level >= 3:
                             row.append(admin_level3_name or admin_level2_name)
 
                         f.write("\t".join(row) + "\n")
@@ -753,18 +879,18 @@ class CraftTranslator(CraftTranslatorBase):
 
         # Write Python schema file
         with open(python_schema_path, 'w') as f:
-            # Build header based on level
+            # Build header based on craft_level (project-relative hierarchy)
             header_cols = ["CellID", "Latitude", "Longitude", "Elevation", "Area"]
-            if schema_level >= 1:
+            if craft_level >= 1:
                 header_cols.append("Level1Name")
-            if schema_level >= 2:
+            if craft_level >= 2:
                 header_cols.append("Level2Name")
-            if schema_level >= 3:
+            if craft_level >= 3:
                 header_cols.append("Level3Name")
             f.write("\t".join(header_cols) + "\n")
 
-            # Write cells sorted by CellID descending
-            cells_sorted = sorted(grid.cells, key=lambda c: c.cell_id, reverse=True)
+            # Write cells sorted by CellID ascending (matching CRAFT working schema)
+            cells_sorted = sorted(grid.cells, key=lambda c: c.cell_id)
 
             for cell in cells_sorted:
                 craft_cellid = self._to_craft_cellid(cell.cell_id)
@@ -786,12 +912,12 @@ class CraftTranslator(CraftTranslatorBase):
                     f"{area_km2:.12f}",
                 ]
 
-                # Add admin names based on level
-                if schema_level >= 1:
+                # Add admin names based on craft_level
+                if craft_level >= 1:
                     row.append(admin_level1_name)
-                if schema_level >= 2:
+                if craft_level >= 2:
                     row.append(admin_level2_name)
-                if schema_level >= 3:
+                if craft_level >= 3:
                     row.append(admin_level3_name or admin_level2_name)
 
                 f.write("\t".join(row) + "\n")
@@ -2427,6 +2553,7 @@ class CraftTranslator(CraftTranslatorBase):
             'n_cells': n_cells,
             'n_soil_profiles': n_soil_profiles,
             'schema_level': getattr(platform_config, 'schema_level', 2) if platform_config else 2,
+            'craft_level': (getattr(platform_config, 'craft_level', None) or getattr(platform_config, 'schema_level', 2)) if platform_config else 2,
             'admin_names': admin_names,
 
             # Data sources
@@ -2512,8 +2639,8 @@ class CraftTranslator(CraftTranslatorBase):
                     "n_cells": n_cells,
                 },
                 outputs=[
-                    f"schema/CRAFT_Schema/Level{package_config['schema_level']}/Schema/5m_{admin_names}.txt",
-                    f"schema/Python_Schemas/Level{package_config['schema_level']}/Schema_{admin_names}.txt",
+                    f"schema/CRAFT_Schema/Level{package_config['craft_level']}/Schema/5m_{admin_names}.txt",
+                    f"schema/Python_Schemas/Level{package_config['craft_level']}/Schema_{admin_names}.txt",
                 ],
                 decisions=[
                     create_decision(

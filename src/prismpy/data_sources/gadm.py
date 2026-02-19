@@ -441,9 +441,9 @@ class GADMDataSource:
 
                 python_schema_rows.append(python_row)
 
-        # Sort by CellID descending (CRAFT convention)
-        craft_schema_rows.sort(key=lambda x: x['cellid'], reverse=True)
-        python_schema_rows.sort(key=lambda x: x['cellid'], reverse=True)
+        # Sort by CellID ascending (matching CRAFT's actual working schema files)
+        craft_schema_rows.sort(key=lambda x: x['cellid'])
+        python_schema_rows.sort(key=lambda x: x['cellid'])
 
         logger.info(f"Schema generation: {cells_checked} cells checked, "
                    f"{cells_intersecting} intersecting with boundary")

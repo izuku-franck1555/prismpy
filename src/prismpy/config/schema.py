@@ -809,13 +809,22 @@ class CraftConfig(BaseModel):
         default=2,
         ge=1,
         le=3,
-        description="""Admin level for CRAFT schema (1=country, 2=state/region, 3=district).
-        IMPORTANT: The appropriate level varies by country and analysis scale.
-        - West Africa (Mali, Burkina, Niger): 2 (cercles/provinces at GADM L2)
-        - Nigeria: 2 (LGAs at GADM L2)
-        - Kenya: 1 (counties at GADM L1) or 2 (sub-counties)
-        - Ethiopia: 1 (zones at GADM L1) or 2 (woredas)
-        Check GADM admin structure for your country at gadm.org"""
+        description="""DEPRECATED: Use craft_level + gadm_level instead.
+        Kept for backward compatibility. If craft_level is not set, schema_level
+        is used as the CRAFT output folder level AND for GADM level derivation.
+        New configs should set craft_level and gadm_level explicitly."""
+    )
+    craft_level: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=3,
+        description="""CRAFT output folder level (1, 2, or 3). This is PROJECT-RELATIVE:
+        Level 1 = your top study area (e.g., Koutiala cercle)
+        Level 2 = subdivisions within Level 1 (e.g., communes)
+        Level 3 = sub-subdivisions within Level 2
+        IMPORTANT: This is independent of GADM admin levels.
+        A cercle at GADM Level 2 can be CRAFT Level 1 if it's your top study area.
+        If not set, falls back to schema_level for backward compatibility."""
     )
     admin_level1_name: Optional[str] = Field(
         default=None,
@@ -872,10 +881,13 @@ class CraftConfig(BaseModel):
     gadm_level: Optional[int] = Field(
         default=None,
         ge=0,
-        le=3,
-        description="GADM level to use (0=country, 1=state, 2=district). "
-                    "If not set, defaults to schema_level - 1. Override when admin structure differs "
-                    "(e.g., Mali cercles are at GADM L2, not L1, so set gadm_level: 2 for CRAFT L2)."
+        le=4,
+        description="GADM admin level for boundary polygon selection (0=country, 1=state, "
+                    "2=district/cercle, 3=commune/ward, 4=village). Controls WHICH GADM boundary "
+                    "to use, NOT which CRAFT folder to write to. If not set, defaults to "
+                    "schema_level - 1. WARNING: Some admin names exist at multiple GADM levels "
+                    "(e.g., 'Koutiala' is both a cercle at L2 and a commune at L3). Always verify "
+                    "gadm_level matches the geographic scope you intend."
     )
 
     # =========================================================================

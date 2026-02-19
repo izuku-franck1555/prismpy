@@ -267,13 +267,28 @@ platform_config:
     # (percentage of cell covered by admin area) and Area (km² within boundary).
     # =========================================================================
 
-    # Admin level for schema generation (1=country, 2=cercle, 3=commune)
-    schema_level: 2  # Koutiala is at CRAFT Level 2 (cercle level)
+    # -------------------------------------------------------------------------
+    # CRAFT Level vs GADM Level (IMPORTANT DISTINCTION):
+    #   craft_level = which CRAFT output folder to write to (project-relative)
+    #   gadm_level  = which GADM admin boundary polygon to use
+    #
+    # For a single-cercle study like Koutiala:
+    #   - Koutiala cercle IS your top study area → craft_level: 1
+    #   - Koutiala cercle is at GADM Level 2    → gadm_level: 2
+    #
+    # WARNING: "Koutiala" exists at multiple GADM levels:
+    #   GADM L2: Koutiala cercle (9,447 km², 6 communes) ← we want this
+    #   GADM L3: Koutiala commune (1,760 km², just the town area)
+    #   GADM L4: Koutiala town/village
+    #   Always set gadm_level explicitly to avoid selecting the wrong boundary.
+    # -------------------------------------------------------------------------
+    craft_level: 1   # Koutiala cercle = top level of this project
 
     # Admin names for CRAFT schema file naming
-    admin_level1_name: "Mali"        # Country name (Level 1)
-    admin_level2_name: "Koutiala"    # Cercle name (Level 2)
-    # admin_level3_name: null        # Commune name (Level 3, optional)
+    # Level 1 name = the name of your top study area
+    admin_level1_name: "Koutiala"    # CRAFT Level 1 (top of project hierarchy)
+    # admin_level2_name: null        # Only needed if craft_level >= 2
+    # admin_level3_name: null        # Only needed if craft_level = 3
 
     # =========================================================================
     # GADM CONFIGURATION (RECOMMENDED for accurate boundary-based schemas)
@@ -291,7 +306,7 @@ platform_config:
 
     # Path to directory containing GADM shapefiles
     # Download GADM for your country and extract to a local directory
-    gadm_data_path: "CRAFT/CRAFT-Notes-Python/01-SCHEMA-GENERATION/archive/MALI-SHP"
+    gadm_data_path: "C:/Users/Franck/Downloads/claude-craft/MALI-SHP"
     #
     # Without GADM: Uses bounding box mode (less accurate SharePercent values).
     # With GADM: Real admin boundaries for accurate area calculations (recommended).
@@ -302,11 +317,13 @@ platform_config:
     # Admin name to filter from GADM (must match NAME_{level} column)
     gadm_admin_name: "Koutiala"
 
-    # GADM level to use (check GADM attribute table for your country)
-    # Common patterns:
-    #   West Africa (Mali, Nigeria): Districts at Level 2
-    #   East Africa (Kenya, Ethiopia): Counties at Level 1
-    gadm_level: 2
+    # GADM level for boundary polygon selection (independent of craft_level)
+    # This tells prismpy WHICH GADM admin boundary to use:
+    #   GADM Level 0 = Country boundary
+    #   GADM Level 1 = State/Region (Sikasso)
+    #   GADM Level 2 = District/Cercle (Koutiala cercle — 9,447 km²)
+    #   GADM Level 3 = Commune/Ward (Koutiala commune — 1,760 km², much smaller!)
+    gadm_level: 2  # Koutiala cercle = GADM Level 2
 
     # =========================================================================
     # LEGACY: Manual shapefile path (alternative to GADM)
@@ -330,7 +347,7 @@ data_sources:
 
 # Output configuration
 output:
-  base_dir: "output/koutiala_craft/"
+  base_dir: "C:/Users/Franck/Downloads/claude-craft/output/koutiala_craft/"
   structure: "by_platform"
 
 # Provenance tracking

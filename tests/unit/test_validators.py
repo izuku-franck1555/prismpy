@@ -232,13 +232,15 @@ class TestCraftValidator:
         (temp_data_dir / "crop_mask").mkdir(exist_ok=True)
         (temp_data_dir / "management").mkdir(exist_ok=True)
 
-        # Create CRAFT_Schema file (5m_*.txt format)
-        schema_content = "CellID\tLat\tLon\tRow\tCol\tAdminName\n"
-        schema_content += "100000\t12.0\t-5.5\t100\t200\tKoutiala\n"
-        (temp_data_dir / "schema" / "CRAFT_Schema" / "Level2" / "Schema" / "5m_Mali_Koutiala.txt").write_text(schema_content)
+        # Create CRAFT_Schema file (5m_*.txt format): CELLID\tSHAREPERCENT
+        craft_schema = "CELLID\tSHAREPERCENT\n"
+        craft_schema += "100000\t100\n"
+        (temp_data_dir / "schema" / "CRAFT_Schema" / "Level2" / "Schema" / "5m_Mali_Koutiala.txt").write_text(craft_schema)
 
-        # Create Python_Schema file (Schema_*.txt format)
-        (temp_data_dir / "schema" / "Python_Schemas" / "Level2" / "Schema_Mali_Koutiala.txt").write_text(schema_content)
+        # Create Python_Schema file (Schema_*.txt format): CellID\tLatitude\tLongitude\tElevation\tArea\tLevel1Name
+        python_schema = "CellID\tLatitude\tLongitude\tElevation\tArea\tLevel1Name\tLevel2Name\n"
+        python_schema += "100000\t12.00000000\t-5.50000000\t-99.00\t83.123456789012\tMali\tKoutiala\n"
+        (temp_data_dir / "schema" / "Python_Schemas" / "Level2" / "Schema_Mali_Koutiala.txt").write_text(python_schema)
 
         # Create ML.SOL
         soil_content = "*SOIL001  MALI LOAM\n@SITE\n TEST\n"
@@ -271,9 +273,9 @@ class TestCraftValidator:
         (temp_data_dir / "crop_mask").mkdir(exist_ok=True)
         (temp_data_dir / "management").mkdir(exist_ok=True)
 
-        # Create CRAFT_Schema with invalid cell ID (99999999 > MAX_CELL_ID = 9331199)
-        schema_content = "CellID\tLat\tLon\tRow\tCol\tAdminName\n"
-        schema_content += "99999999\t12.0\t-5.5\t100\t200\tKoutiala\n"
+        # Create CRAFT_Schema with invalid cell ID (99999999 > MAX_CELL_ID = 9331200)
+        schema_content = "CELLID\tSHAREPERCENT\n"
+        schema_content += "99999999\t100\n"
         (temp_data_dir / "schema" / "CRAFT_Schema" / "Level2" / "Schema" / "5m_Mali_Test.txt").write_text(schema_content)
 
         # Create ML.SOL so structure validation passes
@@ -282,8 +284,8 @@ class TestCraftValidator:
         validator = CraftValidator(temp_data_dir)
         result = validator.validate()
 
-        # Should have cell ID range error
-        range_errors = [i for i in result.issues if i.category == 'range']
+        # Should have cell ID range error (category is 'schema' in CRAFT validator)
+        range_errors = [i for i in result.issues if 'CellID' in i.message and 'range' in i.message]
         assert len(range_errors) > 0
 
     def test_missing_schema_file(self, temp_data_dir):
