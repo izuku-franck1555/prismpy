@@ -19,13 +19,22 @@ platform_config:
     climate_source: nasa_power
     soil_source: hwsd
 
+    # --- HWSD Soil Data ---
+    hwsd_bil_path: "data/hwsd/HWSD2.bil"
+    hwsd_mdb_path: "data/hwsd/HWSD2.mdb"
+
+    # --- SPAM Crop Mask ---
+    spam_raster_path: "data/spam/spam2020_V2r0_global_H_RICE_A.tif"
+
     # --- Processing Settings ---
     compute_et0: true
     download_climate: true
     climate_download_delay: 2.0
 
-    # --- Rice irrigation (CS3: Kaly 2016) ---
+    # --- GAEZ Crop Suitability Data ---
     gaez_auto_download: true
+
+    # --- Rice irrigation (CS3: Kaly 2016) ---
     bunds: true
     bunds_dz: 0.3
     irr_thresholds: [0, 0, 0, 0]

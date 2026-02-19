@@ -5,9 +5,13 @@ Downloads GAEZ v4 data from FAO S3 bucket for crop suitability
 and potential yield estimates used by ACEA.
 
 Reference: FAO GAEZ Data Portal - https://gaez.fao.org/
+
+Retry logic and crop code fixes based on hardened standalone downloader
+(ACEA/07-GAEZ-DATA-PREPARATION/download_gaez_data.py).
 """
 
 import logging
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -15,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 # GAEZ cultivar name to 4-letter code mapping
+# NOTE: Rice codes are ricw/ricd (NOT wric/dric — those return 403)
 GAEZ_CROP_CODES = {
     # Maize cultivars
     'Highland maize': 'hmze',
@@ -29,11 +34,11 @@ GAEZ_CROP_CODES = {
     'Winter wheat': 'wwhe',
     'Spring_wheat': 'swhe',
     'Winter_wheat': 'wwhe',
-    # Rice cultivars
-    'Wetland rice': 'wric',
-    'Dryland rice': 'dric',
-    'Wetland_rice': 'wric',
-    'Dryland_rice': 'dric',
+    # Rice cultivars (wetland = paddy, dryland = upland)
+    'Wetland rice': 'ricw',
+    'Dryland rice': 'ricd',
+    'Wetland_rice': 'ricw',
+    'Dryland_rice': 'ricd',
     # Sorghum cultivars
     'Highland sorghum': 'hsor',
     'Lowland sorghum': 'lsor',
@@ -84,31 +89,92 @@ class GAEZDownloader:
     GAEZ provides global crop suitability and potential yield estimates
     at various input levels (management intensity).
 
+    Includes retry with exponential backoff and categorized error reporting.
+
     Attributes:
         cache_dir: Directory to cache downloaded files
+        retries: Number of retry attempts per file
+        backoff: Backoff multiplier between retries
     """
 
     DEFAULT_CACHE_DIR = Path.home() / ".prismpy" / "cache" / "gaez"
 
-    def __init__(self, cache_dir: Optional[Path] = None):
-        """Initialize the GAEZ downloader.
-
-        Args:
-            cache_dir: Directory for caching downloads
-        """
+    def __init__(
+        self,
+        cache_dir: Optional[Path] = None,
+        retries: int = 3,
+        backoff: float = 1.5,
+    ):
         self.cache_dir = Path(cache_dir) if cache_dir else self.DEFAULT_CACHE_DIR
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.retries = retries
+        self.backoff = backoff
 
     def get_cultivars_for_crop(self, crop_name: str) -> List[str]:
-        """Get GAEZ cultivar names for a crop.
+        """Get GAEZ cultivar names for a crop."""
+        return GAEZ_CULTIVAR_MAP.get(crop_name, [crop_name])
 
-        Args:
-            crop_name: Crop name (e.g., 'Wheat', 'Maize')
+    def _download_with_retry(
+        self,
+        url: str,
+        output_path: Path,
+        overwrite: bool = False,
+    ) -> Tuple[bool, str]:
+        """Download a file with retry and exponential backoff.
 
         Returns:
-            List of cultivar names
+            Tuple of (success, message)
         """
-        return GAEZ_CULTIVAR_MAP.get(crop_name, [crop_name])
+        try:
+            import requests
+        except ImportError:
+            return False, "requests library not installed"
+
+        if output_path.exists() and not overwrite:
+            logger.debug(f"Using cached: {output_path}")
+            return True, "cached"
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        attempt = 0
+        wait = 1.0
+
+        while attempt <= self.retries:
+            try:
+                response = requests.get(url.strip(), timeout=30, stream=True)
+                response.raise_for_status()
+
+                total_size = 0
+                with open(output_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                        total_size += len(chunk)
+
+                logger.info(f"Downloaded {output_path.name} ({total_size / 1024:.0f} KB)")
+                return True, f"{total_size} bytes"
+
+            except requests.exceptions.HTTPError as e:
+                status = e.response.status_code if e.response else "unknown"
+                msg = f"HTTP {status}"
+            except requests.exceptions.Timeout:
+                msg = "TIMEOUT"
+            except requests.exceptions.ConnectionError:
+                msg = "CONNECTION_ERROR"
+            except requests.exceptions.RequestException as e:
+                msg = f"REQUEST_ERROR: {e}"
+            except Exception as e:
+                msg = f"ERROR: {e}"
+
+            attempt += 1
+            if attempt > self.retries:
+                logger.error(f"Failed to download {url}: {msg} (after {self.retries} retries)")
+                return False, msg
+
+            logger.warning(f"Retry {attempt}/{self.retries} for {output_path.name} ({msg})")
+            time.sleep(wait)
+            wait *= self.backoff
+
+        return False, "max retries exceeded"
 
     def download_cultivar(
         self,
@@ -117,23 +183,7 @@ class GAEZDownloader:
         input_levels: Optional[List[str]] = None,
         overwrite: bool = False,
     ) -> Dict[str, Path]:
-        """Download GAEZ data for a cultivar.
-
-        Args:
-            cultivar: Cultivar name (e.g., 'Spring_wheat')
-            water_supply: 'irr' (irrigated) or 'rf' (rainfed)
-            input_levels: List of input levels to download
-            overwrite: Whether to re-download existing files
-
-        Returns:
-            Dictionary mapping variable name to downloaded file path
-        """
-        try:
-            import requests
-        except ImportError:
-            logger.error("requests library required for GAEZ download")
-            return {}
-
+        """Download GAEZ data for a cultivar with retry/backoff."""
         if input_levels is None:
             input_levels = ['High', 'Low']
 
@@ -151,39 +201,20 @@ class GAEZDownloader:
                 continue
 
             for acea_var, gaez_var in GAEZ_VARIABLES.items():
-                # Source URL
                 gaez_filename = f"{crop_code}200{water_code}_{gaez_var}.tif"
                 url = f"{BASE_URL}/{input_path}/{gaez_filename}"
 
-                # Target filename (ACEA naming convention)
                 cultivar_fname = cultivar.replace(' ', '_')
                 acea_filename = f"{acea_var}_{cultivar_fname}_{water_supply}_{input_level}_1981_2010.tif"
 
-                # Cache path
                 cache_path = self.cache_dir / acea_var / acea_filename
 
-                if cache_path.exists() and not overwrite:
-                    logger.debug(f"Using cached: {cache_path}")
+                success, msg = self._download_with_retry(
+                    url, cache_path, overwrite=overwrite
+                )
+
+                if success:
                     downloaded[f"{acea_var}_{cultivar}_{water_supply}_{input_level}"] = cache_path
-                    continue
-
-                # Download
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-
-                try:
-                    logger.info(f"Downloading {acea_filename}...")
-                    response = requests.get(url, timeout=120, stream=True)
-                    response.raise_for_status()
-
-                    with open(cache_path, 'wb') as f:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            f.write(chunk)
-
-                    downloaded[f"{acea_var}_{cultivar}_{water_supply}_{input_level}"] = cache_path
-                    logger.info(f"Downloaded: {cache_path}")
-
-                except Exception as e:
-                    logger.error(f"Failed to download {url}: {e}")
 
         return downloaded
 
@@ -193,16 +224,7 @@ class GAEZDownloader:
         water_supply: str = 'irr',
         input_levels: Optional[List[str]] = None,
     ) -> Dict[str, Path]:
-        """Download GAEZ data for all cultivars of a crop.
-
-        Args:
-            crop_name: Crop name (e.g., 'Wheat')
-            water_supply: 'irr' or 'rf'
-            input_levels: Input levels to download
-
-        Returns:
-            Dictionary mapping file keys to paths
-        """
+        """Download GAEZ data for all cultivars of a crop."""
         all_downloaded = {}
         cultivars = self.get_cultivars_for_crop(crop_name)
 
@@ -223,17 +245,7 @@ class GAEZDownloader:
         water_supplies: Optional[List[str]] = None,
         input_levels: Optional[List[str]] = None,
     ) -> List[Path]:
-        """Download GAEZ data and copy to output directory.
-
-        Args:
-            crop_name: Crop name
-            output_dir: Output directory (gaez/)
-            water_supplies: List of water supply types
-            input_levels: List of input levels
-
-        Returns:
-            List of output file paths
-        """
+        """Download GAEZ data and copy to output directory."""
         import shutil
 
         if water_supplies is None:
@@ -255,7 +267,6 @@ class GAEZDownloader:
                 if not src_path.exists():
                     continue
 
-                # Determine subdirectory (LUT, PotentialYield, F3)
                 for var in GAEZ_VARIABLES.keys():
                     if key.startswith(var):
                         subdir = var
@@ -274,14 +285,7 @@ class GAEZDownloader:
         return output_files
 
     def check_cached(self, crop_name: str) -> Dict[str, bool]:
-        """Check which GAEZ files are already cached.
-
-        Args:
-            crop_name: Crop name
-
-        Returns:
-            Dictionary mapping file keys to existence status
-        """
+        """Check which GAEZ files are already cached."""
         cached = {}
         cultivars = self.get_cultivars_for_crop(crop_name)
 
