@@ -1354,9 +1354,8 @@ class PythiaTranslator(PythiaTranslatorBase):
         # Resolve path relative to project root
         eghr_path = Path(pythia_config.eghr_raster_path)
         if not eghr_path.is_absolute():
-            # Try to resolve relative to project root
-            project_root = Path(__file__).parent.parent.parent.parent
-            eghr_path = project_root / eghr_path
+            # Resolve relative to current working directory (matches CRAFT behavior)
+            eghr_path = Path.cwd() / eghr_path
 
         if not eghr_path.exists():
             logger.error(f"eGHR raster not found: {eghr_path}")
@@ -1420,8 +1419,7 @@ class PythiaTranslator(PythiaTranslatorBase):
         # Resolve path
         spam_dir = Path(pythia_config.spam_raster_dir)
         if not spam_dir.is_absolute():
-            project_root = Path(__file__).parent.parent.parent.parent
-            spam_dir = project_root / spam_dir
+            spam_dir = Path.cwd() / spam_dir
 
         spam_path = spam_dir / spam_filename
 
@@ -1558,8 +1556,7 @@ class PythiaTranslator(PythiaTranslatorBase):
 
         db_path = Path(pythia_config.eghr_database_path)
         if not db_path.is_absolute():
-            project_root = Path(__file__).parent.parent.parent.parent
-            db_path = project_root / db_path
+            db_path = Path.cwd() / db_path
 
         if not db_path.exists():
             logger.warning(f"GHR.db not found at {db_path}")
@@ -1651,8 +1648,7 @@ class PythiaTranslator(PythiaTranslatorBase):
             src_db = Path(pythia_config.eghr_database_path)
             # Resolve relative path
             if not src_db.is_absolute():
-                project_root = Path(__file__).parent.parent.parent.parent
-                src_db = project_root / src_db
+                src_db = Path.cwd() / src_db
 
             if src_db.exists():
                 dst_db = eghr_output / "GHR.db"
@@ -1667,8 +1663,7 @@ class PythiaTranslator(PythiaTranslatorBase):
             src_sol_dir = Path(pythia_config.eghr_sol_dir)
             # Resolve relative path
             if not src_sol_dir.is_absolute():
-                project_root = Path(__file__).parent.parent.parent.parent
-                src_sol_dir = project_root / src_sol_dir
+                src_sol_dir = Path.cwd() / src_sol_dir
 
             if src_sol_dir.exists():
                 sol_files_copied = 0

@@ -1,0 +1,95 @@
+# Case Study 3: Saint-Louis Rice Water Balance
+# Platform: ACEA | Region: Saint-Louis, Senegal (SRV) | Crop: Rice (Sahel 134)
+# Source: Kaly et al. (2016), J. Animal Plant Sci. 30(3), 4781-4796
+
+_meta:
+  format: "icasa_ace"
+  version: "2.0"
+
+project:
+  name: "SaintLouis_Rice"
+  description: "Irrigated rice water balance analysis for Saint-Louis, Senegal"
+
+region:
+  name: "Saint-Louis"
+  country: "Senegal"
+  country_iso3: "SEN"
+  FL_LAT: 15.9
+  FL_LONG: -15.5
+  FLELE: 5
+  boundary:
+    source: "gadm"
+    gadm_level: 1
+    gadm_filter_field: "NAME_1"
+    gadm_filter_value: "Saint-Louis"
+
+crop:
+  CRID: "RI"
+  name: "Rice"
+  name_short: "RI"
+  GENO_NAME: "Sahel 134"
+  variety: "Sahel 134"
+  calendar:
+    planting_doy: 54
+    PDATE: 54
+    maturity_doy: 172
+    source: "literature"
+    reference: "Kaly et al. (2016)"
+  phenology:
+    emergence_gdd: 100.0
+    vegetative_phase_gdd: 1400.0
+    grain_filling_gdd: 720.0
+    photoperiod_sensitivity: 0.0
+  physiology:
+    base_temperature: 10.0
+    optimal_temperature: 30.0
+    harvest_index: 0.43
+
+management:
+  PPOP: 200.0
+  PLME: "S"
+  PLDS: "B"
+  planting_density: 2000000
+  sowing_mode: "fixed_date"
+  irrigation: true
+
+  # Fertilizer splits — Kaly et al. (2016): 110 kg N/ha, 33% basal + 67% at DAP 45
+  fertilizer_n_total: 110.0
+  fertilizer_n_splits: [0, 45]
+  fertilizer_n_fractions: [0.33, 0.67]
+
+fertilizer:
+  FEAMN: 110.0
+  FEAMP: 46.0
+  FEAMK: 0.0
+  fertilizer_n_total: 110.0
+  splits:
+    - dap: 0
+      n_fraction: 0.33
+      p_applied: true
+    - dap: 45
+      n_fraction: 0.67
+
+soil:
+  SLDP: 150
+  default_depth_m: 1.5
+
+soil_config:
+  source: "hwsd"
+  default_depth_m: 1.5
+
+temporal:
+  start_year: 2015
+  end_year: 2023
+  spinup_years: 2
+
+targets:
+  - acea
+
+output:
+  base_dir: "output/saint_louis_rice/"
+  structure: "by_platform"
+
+provenance:
+  enabled: true
+  storage: "json"

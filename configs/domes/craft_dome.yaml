@@ -37,12 +37,12 @@ platform_config:
     planting_date_mmdd: "0604"        # June 4
 
     # --- Fertilizer configuration ---
-    default_fertilizer_n: 40.0        # Total N (kg/ha)
+    default_fertilizer_n: 60.0        # Total N (kg/ha)
     default_fertilizer_p: 10.0        # P2O5 (kg/ha)
     default_fertilizer_k: 10.0        # K2O (kg/ha)
     fertilizer_split_ratio: 0.25      # Fraction in first application
-    fertilizer_app1_dap: 24           # Days after planting
-    fertilizer_app2_dap: 34
+    fertilizer_app1_dap: 10           # Days after planting
+    fertilizer_app2_dap: 36
 
     # DSSAT fertilizer codes
     fertilizer_material_code: "FE005"   # Urea/NPK
@@ -50,24 +50,22 @@ platform_config:
     fertilizer_depth_cm: 5
 
     # --- HWSD Soil Data ---
-    # UPDATE THESE PATHS for your system
-    hwsd_bil_path: "/path/to/HWSD2_RASTER/HWSD2.bil"
-    hwsd_mdb_path: "/path/to/HWSD2.mdb"
+    hwsd_bil_path: "data/hwsd/HWSD2.bil"
+    hwsd_mdb_path: "data/hwsd/HWSD2.mdb"
 
     # --- SPAM Crop Mask ---
-    spam_raster_path: "/path/to/spam2020_MAIZ.tif"
+    spam_raster_path: "data/spam/spam2020_V2r0_global_A_MAIZ_R.tif"
     spam_cap_at_100_percent: true
     spam_na_to_zero: true
 
     # --- GADM Admin Boundaries ---
-    gadm_data_path: "CRAFT/CRAFT-Notes-Python/01-SCHEMA-GENERATION/archive/MALI-SHP"
+    gadm_data_path: "data/gadm/MLI"
     gadm_country_iso3: "MLI"
     gadm_admin_name: "Koutiala"
     gadm_level: 2
+    craft_level: 1
 
     # --- Schema Generation ---
-    schema_level: 2
-    admin_level1_name: "Mali"
-    admin_level2_name: "Koutiala"
+    admin_level1_name: "Koutiala"
     generate_python_schema: true
     schema_decimal_places: 2

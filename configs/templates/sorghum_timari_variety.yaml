@@ -1,0 +1,76 @@
+# Sorghum variety: Timari-type (Niger/Maradi)
+# Base: sorghum_west_africa.yaml (Generic Sahel calibration)
+# Modified: Dingkuhn et al. (2008), Sultan et al. (2013)
+# [CHANGED] = modified from template  |  [TEMPLATE] = retained
+
+# Phenological phases (deg-Cd)
+SDJLevee: 60.0          # [TEMPLATE]
+SDJBVP: 390.0           # [CHANGED] from 600; Dingkuhn (2008) Table 4
+SDJRPR: 450.0           # [CHANGED] from 350; Dingkuhn (2008) Sec 3.5
+SDJMatu1: 400.0         # [TEMPLATE]
+SDJMatu2: 175.0         # [TEMPLATE]
+
+# Cardinal temperatures (deg-C)
+TBase: 11.0             # [CHANGED] from 10; Dingkuhn (2008) p.77
+TOpt1: 28.0             # [CHANGED] from 30; Dingkuhn (2008) p.78
+TOpt2: 35.0             # [TEMPLATE]
+TLim: 44.0              # [CHANGED] from 45; Dingkuhn (2008) p.77
+
+# Photoperiod
+PPExp: 0.10             # [CHANGED] from 0.08; Dingkuhn (2008) Table 4
+SeuilPP: 13.6           # [TEMPLATE]
+PPsens: 0.39            # [CHANGED] from 2.0; Dingkuhn (2008) Table 4
+PPCrit: 11.0            # [TEMPLATE]
+
+# Biomass and conversion
+txConversion: 5.2       # [TEMPLATE]
+KRdtPotA: 0.45          # [TEMPLATE]
+KRdtPotB: 150.0         # [TEMPLATE]
+txResGrain: 0.52        # [TEMPLATE]
+KRdtBiom: 0.0           # [TEMPLATE]
+
+# Canopy and assimilation
+pcReallocFeuille: 0.65  # [TEMPLATE]
+txAssimBVP: 1.0         # [TEMPLATE]
+txAssimMatu1: 0.9       # [TEMPLATE]
+txAssimMatu2: 0.5       # [TEMPLATE]
+kRespMaint: 0.01        # [TEMPLATE]
+txRealloc: 0.4          # [TEMPLATE]
+tempMaint: 25.0         # [TEMPLATE]
+kcMax: 1.2              # [TEMPLATE]
+PFactor: 0.50           # [TEMPLATE]
+seuilCstrMortality: 3.0 # [TEMPLATE]
+kdf: 0.4                # [TEMPLATE]
+
+# SLA parameters
+slaMin: 0.0018          # [TEMPLATE]
+slaMax: 0.007           # [TEMPLATE]
+slaPente: 0.4           # [TEMPLATE]
+
+# Density
+densiteA: 0.7           # [TEMPLATE]
+densiteP: 4.5           # [TEMPLATE]
+densOpti: 62500.0       # [CHANGED] from 55000; Sahel sorghum 6.25 pl/m2
+
+# Aero parameters
+aeroTotBase: 0.6        # [TEMPLATE]
+aeroTotPente: 4.5e-05   # [TEMPLATE]
+feuilAeroBase: 0.62     # [TEMPLATE]
+feuilAeroPente: -0.00015 # [TEMPLATE]
+
+# Root growth rates (mm/deg-Cd)
+VRacLevee: 32.0         # [TEMPLATE]
+VRacBVP: 25.0           # [TEMPLATE]
+VRacPSP: 25.0           # [TEMPLATE]
+VRacRPR: 25.0           # [TEMPLATE]
+VRacMatu1: 18.0         # [TEMPLATE]
+VRacMatu2: 18.0         # [TEMPLATE]
+
+# Misc
+AGauss: 1.0             # [TEMPLATE]
+LGauss: 1.0             # [TEMPLATE]
+NIYo: 1.0               # [TEMPLATE]
+NIp: 0.0                # [TEMPLATE]
+phaseDevVeg: 0          # [TEMPLATE]
+poidsSecGrain: 0.035    # [TEMPLATE]
+senCO2: 10.0            # [TEMPLATE]

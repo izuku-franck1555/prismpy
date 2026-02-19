@@ -290,9 +290,9 @@ class project_conf:
     # FIELD MANAGEMENT SETTINGS
     # ==================================================================
     off_season = True
-    irr_thresholds = [50] * 4
-    bunds = False
-    bunds_dz = 0.3
+    irr_thresholds = {irr_thresholds}
+    bunds = {bunds}
+    bunds_dz = {bunds_dz}
     mulching = False
     mulching_area = 0.9
     mulching_factor = 0.8
@@ -2361,11 +2361,17 @@ if __name__ == "__main__":
         optimal_temp = (crop_params.get_param('optimal_temp') if hasattr(crop_params, 'get_param')
                         else getattr(crop_params, 'optimal_temp', None)) or 30.0
 
+        # Check AceaConfig for GDD overrides (e.g., from literature calibration)
+        platform_config = self.get_platform_config()
+        gdd_maturity_override = getattr(platform_config, 'gdd_maturity', None) if platform_config else None
+        gdd_senescence_override = getattr(platform_config, 'gdd_senescence', None) if platform_config else None
+        gdd_max_root_override = getattr(platform_config, 'gdd_max_root', None) if platform_config else None
+
         return {
             'gdd_emergence': getattr(crop_params, 'emergence_gdd', None) or defaults['gdd_emergence'],
-            'gdd_max_root': defaults['gdd_max_root'],
-            'gdd_senescence': defaults['gdd_senescence'],
-            'gdd_maturity': defaults['gdd_maturity'],
+            'gdd_max_root': gdd_max_root_override or defaults['gdd_max_root'],
+            'gdd_senescence': gdd_senescence_override or defaults['gdd_senescence'],
+            'gdd_maturity': gdd_maturity_override or defaults['gdd_maturity'],
             'gdd_yield_form': defaults['gdd_yield_form'],
             'gdd_duration_flowering': defaults['gdd_duration_flowering'],
             'gdd_duration_yield_form': defaults['gdd_duration_yield_form'],
@@ -2503,6 +2509,12 @@ if __name__ == "__main__":
         scenarios = [1]  # ACEA: 1=rainfed, 2=irrigated (integers!)
         soil_fertility = 0
 
+        # Irrigation and field management defaults
+        irr_thresholds = [50] * 4
+        bunds = False
+        bunds_dz = 0.3
+        virtual_irrigation = 'Lowinput'
+
         if platform_config:
             if hasattr(platform_config, 'resolution'):
                 # Convert resolution string to ACEA integer
@@ -2513,6 +2525,27 @@ if __name__ == "__main__":
                     resolution = 1  # Default to 5arcmin
             if hasattr(platform_config, 'scenarios'):
                 scenarios = platform_config.scenarios
+            # Irrigation config from AceaConfig
+            if hasattr(platform_config, 'bunds'):
+                bunds = platform_config.bunds
+            if hasattr(platform_config, 'bunds_dz'):
+                bunds_dz = platform_config.bunds_dz
+            if hasattr(platform_config, 'irr_thresholds') and platform_config.irr_thresholds is not None:
+                irr_thresholds = platform_config.irr_thresholds
+            if hasattr(platform_config, 'virtual_irrigation'):
+                virtual_irrigation = platform_config.virtual_irrigation
+
+        # Auto-detect irrigation from management config if not explicitly set in platform config
+        management = self.config.management if hasattr(self.config, 'management') else None
+        if management and getattr(management, 'irrigation', False):
+            # If management.irrigation is True and platform config didn't explicitly set values,
+            # upgrade to irrigated defaults
+            if not (platform_config and getattr(platform_config, 'bunds', False)):
+                # Only auto-set if not already configured
+                if virtual_irrigation == 'Lowinput':
+                    virtual_irrigation = 'Highinput'
+            if scenarios == [1]:
+                scenarios = [1, 2]  # Add irrigated scenario
 
         # Generate config content
         config_content = ACEA_CONFIG_TEMPLATE.format(
@@ -2538,7 +2571,10 @@ if __name__ == "__main__":
             climate_name=climate_name,
             co2_name=co2_name,
             scenarios=scenarios,
-            virtual_irrigation='Lowinput',  # ACEA valid values: Lowinput, Lowvirt, Highvirt, Highinput
+            virtual_irrigation=virtual_irrigation,
+            irr_thresholds=irr_thresholds,
+            bunds=bunds,
+            bunds_dz=bunds_dz,
             soil_fertility=soil_fertility,
             multi_core='True',
             cpus=4,

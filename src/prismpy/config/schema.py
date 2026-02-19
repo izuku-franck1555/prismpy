@@ -1163,6 +1163,52 @@ class AceaConfig(BaseModel):
         description="Include clipped GAEZ data in output package"
     )
 
+    # Irrigation and field management
+    bunds: bool = Field(
+        default=False,
+        description=(
+            "Enable bunds for paddy rice simulation. When True, AquaCrop "
+            "simulates soil water ponding (flooding). Required for irrigated rice."
+        )
+    )
+    bunds_dz: float = Field(
+        default=0.3,
+        description="Bund height in meters (only used when bunds=True)"
+    )
+    irr_thresholds: Optional[list] = Field(
+        default=None,
+        description=(
+            "Irrigation depletion thresholds per AquaCrop growth stage (list of 4 integers). "
+            "Each value is the % of readily available water depletion that triggers irrigation. "
+            "Default [50,50,50,50]. Use [0,0,0,0] for continuous flooding (paddy rice)."
+        )
+    )
+    virtual_irrigation: str = Field(
+        default="Lowinput",
+        description=(
+            "ACEA virtual irrigation mode. Valid values: "
+            "'Lowinput' (rainfed-like), 'Lowvirt', 'Highvirt', 'Highinput' (fully irrigated)"
+        )
+    )
+
+    # GDD overrides (optional — override CROP_GDD_DEFAULTS when provided)
+    gdd_maturity: Optional[float] = Field(
+        default=None,
+        description=(
+            "Override GDD from sowing to maturity (°Cd). If not set, uses "
+            "CROP_GDD_DEFAULTS for the crop. Set when literature-calibrated "
+            "values differ from global defaults (e.g., Sahel rice)."
+        )
+    )
+    gdd_senescence: Optional[float] = Field(
+        default=None,
+        description="Override GDD from sowing to senescence (°Cd)"
+    )
+    gdd_max_root: Optional[float] = Field(
+        default=None,
+        description="Override GDD from sowing to max rooting depth (°Cd)"
+    )
+
 
 class PlatformConfigGroup(BaseModel):
     """Container for all platform-specific configurations."""

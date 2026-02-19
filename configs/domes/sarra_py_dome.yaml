@@ -25,5 +25,6 @@ platform_config:
       radiation: agera5
 
     # --- Sowing Search ---
-    sowing_search_month: 5
+    sowing_search_month: 6
     sowing_search_day: 1
+    variety_template_file: "configs/templates/sorghum_timari_variety.yaml"

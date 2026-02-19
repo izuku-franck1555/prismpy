@@ -15,7 +15,7 @@ description: "ACEA (AquaCrop Earth Observation) - Complete platform configuratio
 platform_config:
   acea:
     enabled: true
-    resolution: "5arcmin"
+    resolution: "30arcmin"
     climate_source: nasa_power
     soil_source: hwsd
 
@@ -23,3 +23,14 @@ platform_config:
     compute_et0: true
     download_climate: true
     climate_download_delay: 2.0
+
+    # --- Rice irrigation (CS3: Kaly 2016) ---
+    gaez_auto_download: true
+    bunds: true
+    bunds_dz: 0.3
+    irr_thresholds: [0, 0, 0, 0]
+    virtual_irrigation: "Highinput"
+
+    # --- GDD overrides (Kaly 2016, Tbase=10, 18 deg-Cd/day) ---
+    gdd_maturity: 2124
+    gdd_senescence: 1854

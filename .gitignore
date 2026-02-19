@@ -72,6 +72,7 @@ venv.bak/
 # Data and output directories (local only)
 data/
 output/
+output_BEFORE_refactor/
 # Provenance output files (but NOT src/prismpy/provenance/ source code)
 /provenance/
 

@@ -22,12 +22,12 @@ platform_config:
 
     # --- eGHR Soil Data ---
     # UPDATE THESE PATHS for your system
-    eghr_raster_path: "PYTHIA/Simulation_Data/raster/ggcmi_soils_2.tif"
-    eghr_database_path: "PYTHIA/Simulation_Data/eGHR/GHR.db"
-    eghr_sol_dir: "PYTHIA/Simulation_Data/eGHR/"
+    eghr_raster_path: "data/eGHR/ggcmi_soils_2.tif"
+    eghr_database_path: "data/eGHR/GHR.db"
+    eghr_sol_dir: "data/eGHR/"
 
     # --- SPAM Crop Distribution ---
-    spam_raster_dir: "PYTHIA/Simulation_Data/raster/"
+    spam_raster_dir: "data/spam/"
     spam_version: "2020"
 
     # --- DSSAT Crop Model Selection ---
@@ -38,6 +38,10 @@ platform_config:
     # dssat_cultivar_ingeno: null    # DSSAT cultivar code (e.g., "II0003" for IT90K-277-2 cowpea)
     # dssat_cultivar_cname: null     # DSSAT cultivar name (e.g., "IT90K-277-2")
     # dssat_symbiosis: null          # Symbiotic N fixation (Y/N, auto: Y for legumes)
+
+    dssat_cultivar_ingeno: "II0003"
+    dssat_cultivar_cname: "IT90K-277-2"
+    planting_window_days: 30
 
     # --- Weather Download ---
     weather_download_delay: 2.0

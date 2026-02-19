@@ -1,0 +1,88 @@
+# Case Study 4: Maradi Sorghum Climate Risk Assessment
+# Platform: SARRA-Py | Region: Maradi, Niger | Crop: Sorghum (Timari)
+# Sources: Sultan et al. (2013), Dingkuhn et al. (2008)
+# NOTE: phenology and physiology deliberately omitted — defined in variety template
+
+_meta:
+  format: "icasa_ace"
+  version: "2.0"
+
+project:
+  name: "Maradi_Sorghum"
+  description: "Sorghum climate risk assessment for Maradi, Niger"
+
+region:
+  name: "Maradi"
+  country: "Niger"
+  country_iso3: "NER"
+  FL_LAT: 14.3
+  FL_LONG: 7.3
+  FLELE: 400
+  boundary:
+    source: "gadm"
+    gadm_level: 1
+    gadm_filter_field: "NAME_1"
+    gadm_filter_value: "Maradi"
+
+crop:
+  CRID: "SG"
+  name: "Sorghum"
+  name_short: "SG"
+  GENO_NAME: "Timari"
+  variety: "Timari"
+  calendar:
+    planting_doy: 175
+    maturity_doy: 294
+    source: "literature"
+    reference: "Sultan et al. (2013)"
+
+management:
+  PPOP: 6.25
+  PLRS: 80
+  PLME: "S"
+  PLDS: "R"
+  planting_density: 62500
+  row_spacing_cm: 80
+  sowing_mode: "opportunistic"
+  sowing_threshold_mm: 10.0
+  irrigation: false
+
+  # Fertilizer splits — Sultan et al. (2013): 20 kg N/ha, single application at planting
+  fertilizer_n_total: 20.0
+  fertilizer_n_splits: [0]
+  fertilizer_n_fractions: [1.0]
+
+fertilizer:
+  FEAMN: 20.0
+  FEAMP: 0.0
+  FEAMK: 0.0
+  fertilizer_n_total: 20.0
+  splits:
+    - dap: 0
+      n_fraction: 1.0
+      p_applied: false
+      k_applied: false
+
+soil:
+  SLDP: 150
+  default_depth_m: 1.5
+
+soil_config:
+  source: "isda"
+  default_depth_m: 1.5
+
+temporal:
+  start_year: 2015
+  end_year: 2023
+  spinup_years: 2
+
+targets:
+  - sarra_py
+
+output:
+  base_dir: "output/maradi_sorghum/"
+  structure: "by_platform"
+
+provenance:
+  enabled: true
+  storage: "json"

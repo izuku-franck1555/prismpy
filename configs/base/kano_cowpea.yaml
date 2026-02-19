@@ -1,0 +1,99 @@
+# Case Study 2: Kano Cowpea Sowing Window Analysis
+# Platform: PYTHIA | Region: Kano, Nigeria | Crop: Cowpea (SAMPEA 9)
+# Source: Kamara et al. (2025), FCR 331, 109988
+
+_meta:
+  format: "icasa_ace"
+  version: "2.0"
+
+project:
+  name: "Kano_Cowpea"
+  description: "Cowpea sowing window analysis for Kano State, Nigeria"
+
+region:
+  name: "Kano"
+  country: "Nigeria"
+  country_iso3: "NGA"
+  FL_LAT: 12.0
+  FL_LONG: 8.5
+  FLELE: 480
+  boundary:
+    source: "gadm"
+    gadm_level: 1
+    gadm_filter_field: "NAME_1"
+    gadm_filter_value: "Kano"
+
+crop:
+  CRID: "CP"
+  name: "Cowpea"
+  name_short: "CP"
+  GENO_NAME: "SAMPEA 9"
+  variety: "SAMPEA 9"
+  calendar:
+    planting_doy: 182
+    PDATE: 182
+    maturity_doy: 260
+    source: "literature"
+    reference: "Kamara et al. (2025)"
+  phenology:
+    emergence_gdd: 95.0
+    vegetative_phase_gdd: 650.0
+    grain_filling_gdd: 380.0
+    photoperiod_sensitivity: 0.3
+  physiology:
+    base_temperature: 9.0
+    optimal_temperature: 30.0
+    max_temperature: 45.0
+    harvest_index: 0.35
+
+management:
+  PPOP: 13.3
+  PLRS: 75
+  PLDP: 5
+  PLME: "S"
+  PLDS: "R"
+  planting_density: 133000
+  row_spacing_cm: 75
+  sowing_mode: "fixed_date"
+  irrigation: false
+  default_cultivar: "II0003"
+
+  # Fertilizer splits — Kamara et al. (2025): N=0 (legume BNF), all P/K at planting
+  fertilizer_n_total: 0.0
+  fertilizer_n_splits: [0]
+  fertilizer_n_fractions: [1.0]
+
+fertilizer:
+  FEAMN: 0.0
+  FEAMP: 40.0
+  FEAMK: 40.0
+  fertilizer_n_total: 0.0
+  splits:
+    - dap: 0
+      n_fraction: 1.0
+      p_applied: true
+      k_applied: true
+
+soil:
+  SLDP: 150
+  default_depth_m: 1.5
+
+soil_config:
+  source: "eghr"
+  default_depth_m: 1.5
+
+temporal:
+  start_year: 2015
+  end_year: 2023
+  spinup_years: 2
+
+targets:
+  - pythia
+
+output:
+  base_dir: "output/kano_cowpea/"
+  structure: "by_platform"
+
+provenance:
+  enabled: true
+  storage: "json"
