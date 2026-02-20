@@ -2534,6 +2534,8 @@ if __name__ == "__main__":
                 irr_thresholds = platform_config.irr_thresholds
             if hasattr(platform_config, 'virtual_irrigation'):
                 virtual_irrigation = platform_config.virtual_irrigation
+            if hasattr(platform_config, 'soil_fertility') and platform_config.soil_fertility is not None:
+                soil_fertility = platform_config.soil_fertility
 
         # Auto-detect irrigation from management config if not explicitly set in platform config
         management = self.config.management if hasattr(self.config, 'management') else None

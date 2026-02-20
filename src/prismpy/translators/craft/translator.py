@@ -1480,17 +1480,34 @@ class CraftTranslator(CraftTranslatorBase):
                 profile_name = f"{country_code}{smu_id:08d}"[:10]
                 smu_to_profile_name[smu_id] = profile_name
 
-                f.write(f"*{profile_name}\n")
+                # Profile header: *ID  ISO3  Texture  Depth  Source
+                texture_compact = (profile.surface_texture or "Unknown").replace(" ", "")
+                depth_cm = int((profile.total_depth or 0.2) * 100)
+                source_desc = f"HWSD v2 SMU {smu_id}"
+                f.write(f"*{profile_name:<10}    {region.country_iso3 or 'XXX':<6} {texture_compact:<10} {depth_cm:>3d}    {source_desc}\n")
 
-                # Site line
+                # Site line (DSSAT format: 1X,A11,1X,A12,F8.3,F8.3,5X,A50)
+                # LAT at indices 26-33, LONG at indices 34-41 — column positions are critical
                 f.write("@SITE        COUNTRY          LAT     LONG SCS FAMILY\n")
-                site_name = sanitize_admin_name(region.name)[:12]
+                site_name = sanitize_admin_name(region.name)[:11]
                 texture = profile.surface_texture or "Unknown"
-                f.write(f" {site_name:<12} {region.country or 'Unknown':<15} ")
-                f.write(f"{profile.lat:7.3f} {profile.lon:8.3f}  {texture}\n")
+                country_short = (region.country_iso3 or region.country or 'XX')[:12]
+                f.write(f" {site_name:<11} {country_short:<12} {profile.lat:8.3f}{profile.lon:8.3f}     {texture}\n")
 
-                # Layer header
-                f.write("@  SLB  SLLL  SDUL  SSAT  SSKS  SBDM  SLOC  SLCL  SLSI  SLCF  SLNI  SLHW  SLHB\n")
+                # Surface properties block (DSSAT required)
+                top_sand = profile.layers[0].sand if profile.layers else 60.0
+                top_clay = profile.layers[0].clay if profile.layers else 18.0
+                if top_sand > 70:
+                    salb, sldr, slro = 0.13, 0.60, 60.0
+                elif top_clay > 40:
+                    salb, sldr, slro = 0.09, 0.20, 85.0
+                else:
+                    salb, sldr, slro = 0.11, 0.40, 73.0
+                f.write("@ SCOM  SALB  SLU1  SLDR  SLRO  SLNF  SLPF  SMHB  SMPX  SMKE\n")
+                f.write(f"    -9  {salb:4.2f}  6.00  {sldr:4.2f} {slro:5.2f}  1.00  1.00 IB001 IB001 IB001\n")
+
+                # Layer header (with SLMH, SRGF, SCEC, SADC)
+                f.write("@  SLB  SLMH  SLLL  SDUL  SSAT  SRGF  SSKS  SBDM  SLOC  SLCL  SLSI  SLCF  SLNI  SLHW  SLHB  SCEC  SADC\n")
 
                 # Layer data
                 for layer in profile.layers:
@@ -1510,11 +1527,29 @@ class CraftTranslator(CraftTranslatorBase):
                     slni = 0.0
                     slhw = layer.ph or 6.5
                     slhb = layer.ph or 6.5
+                    srgf = max(0.0, 1.0 - (layer.depth_bottom / (profile.total_depth or 1.0)) * 0.8)
 
-                    f.write(f"  {slb:3d} {slll:5.3f} {sdul:5.3f} {ssat:5.3f} ")
-                    f.write(f"{ssks:5.1f} {sbdm:5.2f} {sloc:5.2f} ")
-                    f.write(f"{slcl:5.1f} {slsi:5.1f} {slcf:5.1f} ")
-                    f.write(f"{slni:5.2f} {slhw:5.1f} {slhb:5.1f}\n")
+                    # DSSAT fixed-width: every field is exactly 6 characters
+                    f.write(
+                        f"{slb:6d}"
+                        f" {'-9':<5s}"
+                        f"{slll:6.3f}"
+                        f"{sdul:6.3f}"
+                        f"{ssat:6.3f}"
+                        f"{srgf:6.2f}"
+                        f"{ssks:6.2f}"
+                        f"{sbdm:6.2f}"
+                        f"{sloc:6.2f}"
+                        f"{slcl:6.1f}"
+                        f"{slsi:6.1f}"
+                        f"{slcf:6.1f}"
+                        f"{slni:6.2f}"
+                        f"{slhw:6.1f}"
+                        f"{slhb:6.1f}"
+                        f"{-99.0:6.1f}"
+                        f"{-99.0:6.1f}"
+                        "\n"
+                    )
 
                 f.write("\n")
 

@@ -34,6 +34,9 @@ platform_config:
     # --- GAEZ Crop Suitability Data ---
     gaez_auto_download: true
 
+    # --- Soil fertility calibration (GAEZ-based) ---
+    soil_fertility: 1
+
     # --- Rice irrigation (CS3: Kaly 2016) ---
     bunds: true
     bunds_dz: 0.3
