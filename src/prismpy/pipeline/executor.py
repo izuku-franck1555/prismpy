@@ -383,7 +383,7 @@ class TranslationPipeline:
                     self.logger.info(f"Loaded GADM bounds: {region.bounds.to_gis_format()}")
                 else:
                     # GADM loading failed — try pygadm (downloads from web, caches locally)
-                    self.logger.warning(f"GADM loading failed: {result.errors}")
+                    self.logger.debug(f"GADM shapefiles not found, trying pygadm: {result.errors}")
                     region = None
 
                     try:
@@ -766,10 +766,10 @@ class TranslationPipeline:
                 self.logger.info(f"iSDA: Variables available: {list(result.data.variables.keys())}")
                 return {"isda": result.data}
             else:
-                self.logger.warning(f"iSDA retrieval failed: {result.errors}")
+                self.logger.debug(f"iSDA local files not found: {result.errors} (will use HWSD/iSDA at harmonize)")
 
         except Exception as e:
-            self.logger.warning(f"iSDA retrieval error: {e}")
+            self.logger.debug(f"iSDA retrieval error: {e}")
 
         return None
 
