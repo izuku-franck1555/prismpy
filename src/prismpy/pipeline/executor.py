@@ -506,8 +506,24 @@ class TranslationPipeline:
                 data["soil"] = soil_data
                 self.logger.info(f"Loaded soil data for {len(soil_data)} profiles")
             else:
-                warnings.append("Soil data not available - using placeholder")
-                # Create minimal placeholder soil data
+                # Check if HWSD/iSDA will be available at harmonize time
+                # (per-cell soil retrieval happens after grid creation)
+                has_hwsd = False
+                for plat in self.config.get_enabled_platforms():
+                    pcfg = self.config.get_platform_config(plat)
+                    if pcfg and getattr(pcfg, 'hwsd_bil_path', None):
+                        has_hwsd = True
+                        break
+                has_isda_local = any(
+                    (Path(d) / "sand_content_1km.tif").exists()
+                    for d in [
+                        "data/isda",
+                        str(Path(__file__).resolve().parents[4] / "data" / "isda"),
+                    ]
+                )
+                if not has_hwsd and not has_isda_local:
+                    warnings.append("Soil data not available - using placeholder")
+                # Create minimal placeholder soil data (replaced at harmonize if HWSD/iSDA found)
                 data["soil"] = self._create_placeholder_soil(region)
 
             # Load crop parameters
@@ -614,32 +630,53 @@ class TranslationPipeline:
         has_sarra_py = any(p == Platform.SARRA_PY for p in enabled_platforms)
 
         if has_sarra_py:
-            try:
-                from prismpy.sources.climate.tamsat import TAMSATSource, TAMSATConfig
+            cache_dir = Path(self.config.data_sources.cache_dir) if hasattr(self.config.data_sources, 'cache_dir') and self.config.data_sources.cache_dir else Path("data/cache")
+            got_data = False
 
-                cache_dir = Path(self.config.data_sources.cache_dir) if hasattr(self.config.data_sources, 'cache_dir') and self.config.data_sources.cache_dir else Path("data/cache")
+            # Download TAMSAT rainfall
+            try:
+                from prismpy.sources.climate.tamsat import TAMSATSource
+
                 tamsat = TAMSATSource(cache_dir=cache_dir, provenance=self.provenance)
                 if tamsat.sarra_download_available:
                     self.logger.info("Downloading TAMSAT rainfall data...")
                     tamsat_result = tamsat.retrieve(
-                        region=region,
-                        start_date=start_date,
-                        end_date=end_date,
-                        download=True,
+                        region=region, start_date=start_date,
+                        end_date=end_date, download=True,
                     )
                     if tamsat_result.success and tamsat_result.data:
                         climate_data["rainfall_dir"] = tamsat_result.data.data_dir
                         climate_data["rainfall_file_count"] = tamsat_result.data.file_count
-                        self.logger.info(
-                            f"TAMSAT: {tamsat_result.data.file_count} files downloaded"
-                        )
-                        return climate_data
+                        self.logger.info(f"TAMSAT: {tamsat_result.data.file_count} files")
+                        got_data = True
                     else:
                         self.logger.warning(f"TAMSAT download failed: {tamsat_result.errors}")
-                else:
-                    self.logger.warning("SARRA_data_download not installed — cannot download TAMSAT")
             except Exception as e:
                 self.logger.warning(f"TAMSAT download error: {e}")
+
+            # Download AgERA5 temperature/radiation
+            try:
+                from prismpy.sources.climate.agera5 import AgERA5Source
+
+                agera5 = AgERA5Source(cache_dir=cache_dir, provenance=self.provenance)
+                if agera5.sarra_download_available:
+                    self.logger.info("Downloading AgERA5 temperature data...")
+                    agera5_result = agera5.retrieve(
+                        region=region, start_date=start_date,
+                        end_date=end_date, download=True,
+                    )
+                    if agera5_result.success and agera5_result.data:
+                        climate_data["agera5_dir"] = agera5_result.data.data_dir
+                        climate_data["agera5_variables"] = agera5_result.data.variables
+                        self.logger.info(f"AgERA5: {agera5_result.data.variables}")
+                        got_data = True
+                    else:
+                        self.logger.warning(f"AgERA5 download failed: {agera5_result.errors}")
+            except Exception as e:
+                self.logger.warning(f"AgERA5 download error: {e}")
+
+            if got_data:
+                return climate_data
 
         self.logger.warning("No pre-configured climate data paths found.")
         return None

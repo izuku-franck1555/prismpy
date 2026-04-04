@@ -465,6 +465,7 @@ class AgERA5Source(DataSource):
             output_dir: Output directory
             region_name: Region name
         """
+        import shutil
         from SARRA_data_download.get_AgERA5_data import download_AgERA5_year
 
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -481,6 +482,42 @@ class AgERA5Source(DataSource):
                 save_path=str(output_dir),
                 version="SARRA-Py",
             )
+
+        # SARRA_data_download writes final GeoTIFFs to a hardcoded path
+        # (../data/3_output/AgERA5_{region}/ relative to CWD, or under save_path).
+        # Check both locations and relocate to our cache directory.
+        target_dir = output_dir / f"AgERA5_{region_name}"
+        hardcoded_dir = None
+        for candidate in [
+            output_dir / "3_output" / f"AgERA5_{region_name}",
+            Path("../data/3_output") / f"AgERA5_{region_name}",
+        ]:
+            if candidate.exists():
+                hardcoded_dir = candidate
+                break
+
+        if hardcoded_dir:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            total_relocated = 0
+            for var_dir in hardcoded_dir.iterdir():
+                if var_dir.is_dir():
+                    dest_var_dir = target_dir / var_dir.name
+                    dest_var_dir.mkdir(parents=True, exist_ok=True)
+                    for tif in var_dir.glob("*.tif"):
+                        shutil.move(str(tif), str(dest_var_dir / tif.name))
+                        total_relocated += 1
+            if total_relocated:
+                self.logger.info(
+                    f"Relocated {total_relocated} AgERA5 .tif files to {target_dir}"
+                )
+            # Clean up hardcoded directories
+            try:
+                shutil.rmtree(output_dir / "3_output", ignore_errors=True)
+                shutil.rmtree(output_dir / "2_conversion", ignore_errors=True)
+                shutil.rmtree(output_dir / "1_extraction", ignore_errors=True)
+                shutil.rmtree(output_dir / "0_downloads", ignore_errors=True)
+            except OSError:
+                pass
 
     def _validate_local_files(
         self,

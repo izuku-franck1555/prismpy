@@ -1424,8 +1424,16 @@ class PythiaTranslator(PythiaTranslatorBase):
         spam_path = spam_dir / spam_filename
 
         if not spam_path.exists():
-            logger.error(f"SPAM raster not found: {spam_path}")
-            return None
+            # Try simplified naming convention (e.g., spam2020_cowpea.tif)
+            crop_lower = self.config.crop.name.lower()
+            alt_filename = f"spam{spam_version}_{crop_lower}.tif"
+            alt_path = spam_dir / alt_filename
+            if alt_path.exists():
+                spam_path = alt_path
+                logger.info(f"Using simplified SPAM filename: {alt_filename}")
+            else:
+                logger.error(f"SPAM raster not found: {spam_path} or {alt_path}")
+                return None
 
         # Calculate bounds from grid
         if data.grid and data.grid.cells:
