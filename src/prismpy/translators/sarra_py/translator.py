@@ -1089,13 +1089,14 @@ class SarraPyTranslator(SarraPyTranslatorBase):
     # =========================================================================
 
     def _generate_variety_yaml(self, crop_params: Optional[CropParameters]) -> Path:
-        """Generate variety.yaml from generic config, template, or crop_params.
+        """Generate variety.yaml from calibrated database, template, or config.
 
         Priority order:
-        1. Generic config (crop.phenology/physiology) - platform agnostic
-        2. Template file (variety_template_file or templates_dir)
-        3. crop_params.parameters (from data loading)
-        4. Error - no variety source available
+        1. Calibrated variety database (prismpy/data/sarra_py_varieties/{crop}.yaml)
+        2. Explicit template file (variety_template_file or templates_dir)
+        3. Generic config mapping (crop.phenology/physiology)
+        4. crop_params.parameters (from data loading)
+        5. Error - no variety source available
 
         Args:
             crop_params: CropParameters object or None
@@ -1105,18 +1106,34 @@ class SarraPyTranslator(SarraPyTranslatorBase):
         """
         variety_params = None
 
-        # Priority 1: Use generic mapping if phenology/physiology available
-        if self.config.crop.phenology is not None or self.config.crop.physiology is not None:
-            variety_params = self._map_generic_to_sarra_py_variety()
-            logger.info("Generated variety params from generic config (phenology/physiology)")
+        # Priority 1: Load from calibrated variety database (field-validated params)
+        if variety_params is None:
+            crop_lower = self.config.crop.name.lower()
+            variety_db_dirs = [
+                Path(__file__).resolve().parents[4] / "data" / "sarra_py_varieties",
+                Path("data/sarra_py_varieties"),
+            ]
+            for db_dir in variety_db_dirs:
+                variety_file = db_dir / f"{crop_lower}.yaml"
+                if variety_file.exists():
+                    with open(variety_file, 'r') as f:
+                        variety_params = yaml.safe_load(f)
+                    logger.info(f"Loaded calibrated variety params from {variety_file}")
+                    break
 
-        # Priority 2: Try to load from template
+        # Priority 2: Try to load from explicit template
         if variety_params is None:
             variety_params = self._load_template('variety')
             if variety_params:
                 logger.info("Loaded variety params from template")
 
-        # Priority 3: Fall back to crop_params
+        # Priority 3: Use generic mapping if phenology/physiology available
+        if variety_params is None:
+            if self.config.crop.phenology is not None or self.config.crop.physiology is not None:
+                variety_params = self._map_generic_to_sarra_py_variety()
+                logger.info("Generated variety params from generic config (phenology/physiology)")
+
+        # Priority 4: Fall back to crop_params
         if variety_params is None and crop_params:
             if hasattr(crop_params, 'parameters') and crop_params.parameters:
                 variety_params = crop_params.parameters
@@ -1129,9 +1146,9 @@ class SarraPyTranslator(SarraPyTranslatorBase):
         if variety_params is None:
             raise ValueError(
                 "No variety parameters available. Please specify either:\n"
-                "  - crop.phenology/physiology: generic parameters in config\n"
+                "  - A calibrated YAML in prismpy/data/sarra_py_varieties/\n"
                 "  - variety_template_file: explicit path to YAML file\n"
-                "  - templates_dir + variety_template: template directory and name\n"
+                "  - crop.phenology/physiology: generic parameters in config\n"
                 "  - Ensure crop_params has parameters"
             )
 

@@ -1,0 +1,75 @@
+# Sorghum variety parameters — Timari (Niger, Sahel)
+# Source: SARRA-Py calibration database (SyntheseCalibrationVarietes)
+# Region: Sudano-Sahelian zone (Niger, Mali, Burkina Faso)
+# Reference: prismpy CS4 Maradi/Niger validated package
+
+# Phenology (thermal time in degree-days)
+# SARRA  |---Levee---|---BVP---|---PSP---|---RPR---|---MATU1---|---MATU2---|
+SDJLevee: 60.0
+SDJBVP: 390.0
+SDJRPR: 450.0
+SDJMatu1: 400.0
+SDJMatu2: 175.0
+
+# Temperature thresholds
+TBase: 11.0
+TOpt1: 28.0
+TOpt2: 35.0
+TLim: 44.0
+
+# Photoperiod sensitivity
+PPExp: 0.1
+SeuilPP: 13.6
+PPsens: 0.39
+PPCrit: 11.0
+
+# Biomass conversion and allocation
+txConversion: 5.2
+KRdtPotA: 0.45
+KRdtPotB: 150.0
+txResGrain: 0.52
+KRdtBiom: 0.0
+pcReallocFeuille: 0.65
+txAssimBVP: 1.0
+txAssimMatu1: 0.9
+txAssimMatu2: 0.5
+kRespMaint: 0.01
+txRealloc: 0.4
+tempMaint: 25.0
+
+# Water stress parameters
+kcMax: 1.2
+PFactor: 0.5
+seuilCstrMortality: 3.0
+kdf: 0.4
+
+# Specific leaf area (m2/g)
+slaMin: 0.0018
+slaMax: 0.007
+slaPente: 0.4
+
+# Aerial biomass partitioning
+densiteA: 0.7
+densiteP: 4.5
+densOpti: 62500.0
+aeroTotBase: 0.6
+aeroTotPente: 4.5e-05
+feuilAeroBase: 0.62
+feuilAeroPente: -0.00015
+
+# Root growth rates (mm/day per degree-day)
+VRacLevee: 32.0
+VRacBVP: 25.0
+VRacPSP: 25.0
+VRacRPR: 25.0
+VRacMatu1: 18.0
+VRacMatu2: 18.0
+
+# Supplementary parameters
+AGauss: 1.0
+LGauss: 1.0
+NIYo: 1.0
+NIp: 0.0
+phaseDevVeg: 0
+poidsSecGrain: 0.035
+senCO2: 10.0

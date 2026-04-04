@@ -1,0 +1,82 @@
+# Maize variety parameters for Koutiala, Mali
+# Based on SARRA-Py Cameroon maize calibration (MaisOPV_MLIV42)
+# Reference: SyntheseCalibrationVarietes_04_2020
+
+# Phenology (thermal time in degree-days)
+# SARRA  |---Levee---|---BVP---|---PSP---|---RPR---|---MATU1---|---MATU2---|
+SDJLevee: 90.0       # Emergence: 90 GDD
+SDJBVP: 500.0        # Basic vegetative phase: 500 GDD
+SDJRPR: 400.0        # Reproductive phase: 400 GDD
+SDJMatu1: 500.0      # Grain filling 1: 500 GDD (key for yield!)
+SDJMatu2: 200.0      # Grain filling 2: 200 GDD
+
+# Yield potential coefficients (critical for harvest index)
+KRdtPotA: 0.4        # Harvest index parameter A
+KRdtPotB: 200.0      # Harvest index parameter B (doubled from before)
+
+# Photoperiod sensitivity
+PPExp: 0.0           # Photoperiod exponent
+SeuilPP: 13.6        # Critical day length threshold (hours)
+PPsens: 5.0          # Photoperiod sensitivity coefficient
+PPCrit: 11.0         # Critical photoperiod
+
+# Temperature thresholds
+TBase: 8.0           # Base temperature (°C)
+TOpt1: 26.0          # Lower optimal temperature (°C)
+TOpt2: 34.0          # Upper optimal temperature (°C)
+TLim: 44.0           # Lethal temperature (°C)
+
+# Biomass allocation and conversion
+pcReallocFeuille: 0.7  # Leaf reallocation coefficient
+txConversion: 5.8      # Radiation use efficiency (g/MJ) - increased
+txAssimBVP: 1.0        # Assimilation rate during BVP
+txAssimMatu1: 0.9      # Assimilation rate during Matu1
+txAssimMatu2: 0.1      # Assimilation rate during Matu2 (reduced)
+kRespMaint: 0.01       # Maintenance respiration coefficient
+
+# Aerial biomass partitioning
+aeroTotBase: 0.6       # Base aerial fraction
+aeroTotPente: 3.5e-05  # Aerial fraction slope
+feuilAeroBase: 0.60    # Base leaf fraction
+feuilAeroPente: -1.4e-04  # Leaf fraction slope
+txRealloc: 0.4         # Reallocation rate
+
+# Other physiological parameters
+tempMaint: 25.0        # Reference temperature for maintenance
+
+# Water stress parameters
+kcMax: 1.25            # Maximum crop coefficient
+PFactor: 0.45          # Soil water depletion factor
+seuilCstrMortality: 3.0  # Mortality stress threshold
+kdf: 0.4               # Light extinction coefficient
+
+# Grain parameters
+txResGrain: 0.55       # Grain reserve fraction (increased)
+
+# Root growth rates (mm/day per degree-day)
+VRacLevee: 30.0
+VRacBVP: 15.0
+VRacPSP: 15.0
+VRacRPR: 15.0
+VRacMatu1: 12.0
+VRacMatu2: 12.0
+
+# Specific leaf area (m2/g)
+slaMin: 0.002          # Minimum SLA
+slaMax: 0.006          # Maximum SLA
+slaPente: 0.4          # SLA slope
+
+# Density response
+densiteA: 0.7
+densiteP: 4.5
+
+# Supplementary parameters
+densOpti: 65000.0      # Optimal density (plants/ha)
+AGauss: 1.0
+KRdtBiom: 0.0
+LGauss: 1.0
+NIYo: 1.0
+NIp: 0.0
+phaseDevVeg: 0
+poidsSecGrain: 0.38    # Dry grain weight (g)
+senCO2: 10.0
