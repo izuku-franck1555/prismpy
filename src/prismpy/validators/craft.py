@@ -125,15 +125,15 @@ class CraftValidator(BaseValidator):
                 file_path=soil_dir,
             ))
 
-        # Check weather directory has files
+        # Check weather directory has input.csv (CRAFT downloads weather at runtime)
         weather_dir = self.output_dir / "weather"
         if weather_dir.exists():
-            weather_files = list(weather_dir.glob("*.txt"))
-            if not weather_files:
+            input_csv = weather_dir / "input.csv"
+            if not input_csv.exists():
                 issues.append(ValidationIssue(
                     severity='warning',
                     category='structure',
-                    message="No weather files found in weather/",
+                    message="Missing weather/input.csv for CRAFT weather download",
                     file_path=weather_dir,
                 ))
 
@@ -462,11 +462,11 @@ class CraftValidator(BaseValidator):
 
             # Check header
             header = lines[0].strip().split('\t')
-            if "CellID" not in header:
+            if "CellId" not in header:
                 issues.append(ValidationIssue(
                     severity='warning',
                     category='mask',
-                    message="Missing CellID column in crop mask",
+                    message="Missing CellId column in crop mask",
                     file_path=file_path,
                 ))
 

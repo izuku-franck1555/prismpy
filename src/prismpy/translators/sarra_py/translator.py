@@ -26,6 +26,21 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import yaml
 
+
+def _to_native(obj):
+    """Convert numpy types to Python native for YAML serialization."""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {k: _to_native(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return type(obj)(_to_native(v) for v in obj)
+    return obj
+
 from prismpy.config.schema import (
     Platform,
     PhenologyConfig,
@@ -391,7 +406,7 @@ class SarraPyTranslator(SarraPyTranslatorBase):
         config_path = self.output_dir / "config" / "project_config.yaml"
         config_path.parent.mkdir(parents=True, exist_ok=True)
         with open(config_path, 'w') as f:
-            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+            yaml.dump(_to_native(config), f, default_flow_style=False, sort_keys=False)
 
         logger.info(f"Generated SARRA-Py config: {config_path}")
         return config_path
@@ -611,15 +626,16 @@ class SarraPyTranslator(SarraPyTranslatorBase):
             dest_dir = self.output_dir / "data" / "climate" / "rainfall"
             dest_dir.mkdir(parents=True, exist_ok=True)
 
-            tif_files = list(rainfall_dir.glob("*.tif"))
-            logger.info(f"Copying {len(tif_files)} rainfall GeoTIFF files...")
+            # Copy both .tif (pre-existing) and .nc (TAMSAT download) files
+            climate_files = list(rainfall_dir.glob("*.tif")) + list(rainfall_dir.glob("*.nc"))
+            logger.info(f"Copying {len(climate_files)} rainfall files...")
 
-            for src_file in tif_files:
+            for src_file in climate_files:
                 dest_file = dest_dir / src_file.name
                 shutil.copy2(src_file, dest_file)
                 output_files.append(dest_file)
 
-            logger.info(f"Copied rainfall data: {len(tif_files)} files")
+            logger.info(f"Copied rainfall data: {len(climate_files)} files")
 
         # Copy AgERA5 variable files
         agera5_dir = climate_data.get('agera5_dir')
@@ -632,11 +648,11 @@ class SarraPyTranslator(SarraPyTranslatorBase):
                 dest_dir = self.output_dir / "data" / "climate" / var_name
                 dest_dir.mkdir(parents=True, exist_ok=True)
 
-                tif_files = list(var_dir.glob("*.tif"))
-                if tif_files:
-                    logger.info(f"Copying {len(tif_files)} {var_name} GeoTIFF files...")
+                climate_files = list(var_dir.glob("*.tif")) + list(var_dir.glob("*.nc"))
+                if climate_files:
+                    logger.info(f"Copying {len(climate_files)} {var_name} files...")
 
-                    for src_file in tif_files:
+                    for src_file in climate_files:
                         dest_file = dest_dir / src_file.name
                         shutil.copy2(src_file, dest_file)
                         output_files.append(dest_file)

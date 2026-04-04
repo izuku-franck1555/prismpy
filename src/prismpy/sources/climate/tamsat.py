@@ -472,6 +472,7 @@ class TAMSATSource(DataSource):
             output_dir: Output directory
             region_name: Region name for file naming
         """
+        import shutil
         from SARRA_data_download.get_satellite_rainfall_estimates import (
             download_TAMSAT_year_parallel,
         )
@@ -485,6 +486,23 @@ class TAMSATSource(DataSource):
         for year in years:
             self.logger.info(f"Downloading TAMSAT data for {year}...")
             download_TAMSAT_year_parallel(year, area, region_name, str(output_dir))
+
+        # SARRA_data_download writes cropped .tif files to a hardcoded relative
+        # path (../data/3_output/TAMSAT_v3.1_{region}_rfe_filled/) instead of
+        # output_dir. Relocate them to our cache directory.
+        hardcoded_dir = Path("../data/3_output") / f"TAMSAT_v3.1_{region_name}_rfe_filled"
+        if hardcoded_dir.exists():
+            relocated = 0
+            for tif in hardcoded_dir.glob("*.tif"):
+                shutil.move(str(tif), str(output_dir / tif.name))
+                relocated += 1
+            if relocated:
+                self.logger.info(f"Relocated {relocated} TAMSAT .tif files to {output_dir}")
+            # Clean up empty hardcoded directory
+            try:
+                hardcoded_dir.rmdir()
+            except OSError:
+                pass
 
     def _validate_local_files(
         self,

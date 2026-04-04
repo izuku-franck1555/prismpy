@@ -228,10 +228,13 @@ class CraftTranslator(CraftTranslatorBase):
                 fertilizer_file = self._generate_fertilizer_data(data.grid)
                 output_files.append(fertilizer_file)
 
-            # 8b. Generate organic fertilizer data (residue)
+            # 8b. Generate organic fertilizer data (residue) — only if enabled
             if data.grid:
-                organic_fert_file = self._generate_organic_fertilizer_data(data.grid)
-                output_files.append(organic_fert_file)
+                platform_config = self.get_platform_config()
+                organic_enabled = platform_config and getattr(platform_config, 'organic_fertilizer_enabled', False)
+                if organic_enabled:
+                    organic_fert_file = self._generate_organic_fertilizer_data(data.grid)
+                    output_files.append(organic_fert_file)
 
             # 9. Generate legacy management file (for backward compatibility)
             management_file = self._generate_management(data.crop_params, data.crop_calendar)
@@ -545,6 +548,53 @@ class CraftTranslator(CraftTranslatorBase):
                 return output_files
             else:
                 logger.warning("GADM schema generation returned no cells - falling back to grid-based method")
+
+        # =====================================================================
+        # OPTION 1b: Use region geometry (from pygadm) for accurate schema
+        # =====================================================================
+        if hasattr(region, 'geometry_wkt') and region.geometry_wkt:
+            try:
+                import geopandas as gpd
+                from shapely import wkt as shapely_wkt
+
+                geom = shapely_wkt.loads(region.geometry_wkt)
+                gdf_pygadm = gpd.GeoDataFrame(geometry=[geom], crs="EPSG:4326")
+
+                gadm = GADMDataSource(gadm_path=None)
+                craft_schema_rows, python_schema_rows = gadm.generate_schema_data(
+                    gdf=gdf_pygadm,
+                    resolution_deg=5 / 60,
+                    decimal_places=decimal_places,
+                )
+
+                if craft_schema_rows:
+                    self._valid_cellids = {row['cellid'] for row in craft_schema_rows}
+                    self._gadm_cells = python_schema_rows
+
+                    logger.info(f"pygadm geometry schema: {len(self._valid_cellids)} cells")
+
+                    with open(schema_path, 'w', newline='\r\n') as f:
+                        f.write("CELLID\tSHAREPERCENT\n")
+                        for row in craft_schema_rows:
+                            sp = row['share_percent']
+                            if sp == int(sp):
+                                f.write(f"{row['cellid']}\t{int(sp)}\n")
+                            else:
+                                f.write(f"{row['cellid']}\t{sp}\n")
+
+                    output_files.append(schema_path)
+                    logger.info(
+                        f"Generated CRAFT schema from pygadm geometry: {schema_path} "
+                        f"({len(craft_schema_rows)} cells, craft_level {craft_level})"
+                    )
+
+                    if python_schema_rows:
+                        self._generate_area_file(python_schema_rows)
+
+                    return output_files
+
+            except Exception as e:
+                logger.warning(f"pygadm geometry schema generation failed: {e}")
 
         # =====================================================================
         # OPTION 2: Use grid cells + shapefile/bounding box (fallback)
@@ -870,6 +920,58 @@ class CraftTranslator(CraftTranslatorBase):
                 return output_files
             else:
                 logger.warning("GADM schema generation returned no cells - falling back to grid-based method")
+
+        # =====================================================================
+        # OPTION 1b: Use region geometry (from pygadm) for Python schema
+        # =====================================================================
+        if not output_files and hasattr(region, 'geometry_wkt') and region.geometry_wkt:
+            try:
+                import geopandas as gpd
+                from shapely import wkt as shapely_wkt
+
+                geom = shapely_wkt.loads(region.geometry_wkt)
+                gdf_pygadm = gpd.GeoDataFrame(geometry=[geom], crs="EPSG:4326")
+
+                gadm = GADMDataSource(gadm_path=None)
+                _, python_schema_rows = gadm.generate_schema_data(
+                    gdf=gdf_pygadm,
+                    resolution_deg=5 / 60,
+                    decimal_places=decimal_places,
+                )
+
+                if python_schema_rows:
+                    with open(python_schema_path, 'w', newline='\r\n') as f:
+                        header_cols = ["CellID", "Latitude", "Longitude", "Elevation", "Area"]
+                        if craft_level >= 1:
+                            header_cols.append("Level1Name")
+                        if craft_level >= 2:
+                            header_cols.append("Level2Name")
+                        if craft_level >= 3:
+                            header_cols.append("Level3Name")
+                        f.write("\t".join(header_cols) + "\n")
+
+                        for row_data in python_schema_rows:
+                            row = [
+                                str(row_data['cellid']),
+                                f"{row_data['lat']:.8f}",
+                                f"{row_data['lon']:.8f}",
+                                f"{row_data['elevation']:.2f}",
+                                f"{row_data['area']:.12f}",
+                            ]
+                            if craft_level >= 1:
+                                row.append(admin_level1_name)
+                            if craft_level >= 2:
+                                row.append(admin_level2_name)
+                            if craft_level >= 3:
+                                row.append(admin_level3_name or admin_level2_name)
+                            f.write("\t".join(row) + "\n")
+
+                    output_files.append(python_schema_path)
+                    logger.info(f"Generated Python schema from pygadm geometry: {python_schema_path} ({len(python_schema_rows)} cells)")
+                    return output_files
+
+            except Exception as e:
+                logger.warning(f"pygadm geometry Python schema generation failed: {e}")
 
         # =====================================================================
         # OPTION 2: Use grid cells + shapefile/bounding box (fallback)
@@ -1356,7 +1458,21 @@ class CraftTranslator(CraftTranslatorBase):
         smu_to_profile: Dict[int, SoilProfile] = {}  # SMU ID -> profile
         cell_to_smu: Dict[int, int] = {}  # cell_id -> SMU ID
 
-        if hwsd_bil_path and hwsd_mdb_path:
+        # Skip BIL/MDB query if executor already provided per-cell HWSD profiles
+        executor_has_soil = (
+            existing_soil_data
+            and len(existing_soil_data) > 1
+            and any(
+                p.source == "hwsd" for p in existing_soil_data.values()
+                if hasattr(p, 'source')
+            )
+        )
+        if executor_has_soil:
+            logger.info(
+                f"Using {len(existing_soil_data)} HWSD profiles from executor "
+                f"(skipping redundant BIL/MDB query)"
+            )
+        elif hwsd_bil_path and hwsd_mdb_path:
             logger.info(f"Querying HWSD for {len(filtered_cells)} cells...")
             try:
                 hwsd_source = HWSDSource(
@@ -2011,8 +2127,22 @@ class CraftTranslator(CraftTranslatorBase):
             default_cultivar = getattr(platform_config, 'default_cultivar', None)
 
         if not default_cultivar:
-            logger.error("No cultivar specified. Set management.default_cultivar or platform_config.craft.default_cultivar")
-            raise ValueError("Cultivar is required - DSSAT cultivar codes are crop/region-specific")
+            # Use a generic DSSAT cultivar code as fallback so the pipeline can complete.
+            # The researcher should set a region-specific cultivar for actual simulations.
+            crop_name = (self.config.crop.name or "").lower()
+            generic_cultivars = {
+                "maize": "990002",
+                "sorghum": "IB0001",
+                "millet": "IB0001",
+                "rice": "IB0001",
+                "cowpea": "IB0001",
+                "groundnut": "IB0001",
+            }
+            default_cultivar = generic_cultivars.get(crop_name, "990002")
+            logger.warning(
+                f"No cultivar specified — using generic default '{default_cultivar}'. "
+                f"Set management.default_cultivar for region-specific results."
+            )
 
         logger.info(f"Default cultivar: {default_cultivar}")
 
@@ -2128,12 +2258,12 @@ class CraftTranslator(CraftTranslatorBase):
         pldp = 5
 
         if platform_config:
-            ppop = getattr(platform_config, 'plant_population', 5.5)
-            plme = getattr(platform_config, 'planting_method', 'S')
-            plds = getattr(platform_config, 'plant_distribution', 'R')
-            plrs = int(getattr(platform_config, 'row_spacing_cm', 75))  # Integer for CRAFT format
-            plrd = int(getattr(platform_config, 'planting_row_direction', 0))  # Integer for CRAFT format
-            pldp = int(getattr(platform_config, 'planting_depth_cm', 5))  # Integer for CRAFT format
+            ppop = getattr(platform_config, 'plant_population', None) or 5.5
+            plme = getattr(platform_config, 'planting_method', None) or 'S'
+            plds = getattr(platform_config, 'plant_distribution', None) or 'R'
+            plrs = int(getattr(platform_config, 'row_spacing_cm', None) or 75)
+            plrd = int(getattr(platform_config, 'planting_row_direction', None) or 0)
+            pldp = int(getattr(platform_config, 'planting_depth_cm', None) or 5)
 
         # Log planting settings for transparency
         logger.info(f"Planting settings: population={ppop} plants/m², spacing={plrs}cm, depth={pldp}cm")
@@ -2419,15 +2549,17 @@ class CraftTranslator(CraftTranslatorBase):
         platform_config = self.get_platform_config()
 
         # Get organic fertilizer configuration
+        # When disabled, ALL numeric fields must be -99 (DSSAT "not applicable").
+        # CRAFT validates each field against its valid range and rejects 0.
         organic_enabled = False
         rcod = "RE001"  # Default: crop residue
-        ramt = 0        # Amount (kg/ha dry weight)
-        rdate = 0       # Days after planting
-        resn = 0        # N content (%)
-        resp = 0        # P content (%)
-        resk = 0        # K content (%)
-        rinp = 0        # Incorporation %
-        rdep = 0        # Depth (cm)
+        ramt = -99      # Amount (kg/ha dry weight)
+        rdate = -99     # Days after planting
+        resn = -99      # N content (%)
+        resp = -99      # P content (%)
+        resk = -99      # K content (%)
+        rinp = -99      # Incorporation %
+        rdep = -99      # Depth (cm)
         rmet = -99      # Method code
         rename = -99    # Name
 

@@ -1261,6 +1261,14 @@ class SoilSourceConfig(BaseModel):
     """Configuration for soil data sources."""
     isda_dir: Optional[Path] = Field(default=None, description="Path to iSDA soil data")
     hwsd_dir: Optional[Path] = Field(default=None, description="Path to HWSD soil data")
+    hwsd_bil_path: Optional[Path] = Field(
+        default=None,
+        description="Path to HWSD2.bil raster file (shared across platforms)"
+    )
+    hwsd_mdb_path: Optional[Path] = Field(
+        default=None,
+        description="Path to HWSD2.mdb database file (shared across platforms)"
+    )
 
 
 class DataSourcesConfig(BaseModel):

@@ -274,12 +274,20 @@ class TranslationPipeline:
                     maxx=mb.maxx,
                     maxy=mb.maxy,
                 )
+
+                # Construct rectangle polygon for clipping + SharePercent
+                geometry_wkt = (
+                    f"POLYGON(({mb.minx} {mb.miny}, {mb.maxx} {mb.miny}, "
+                    f"{mb.maxx} {mb.maxy}, {mb.minx} {mb.maxy}, {mb.minx} {mb.miny}))"
+                )
+
                 region = Region(
                     name=self.config.region.name,
                     country=self.config.region.country,
                     country_iso3=self.config.region.country_iso3,
                     bounds=bounds,
                     gadm_level=self.config.region.boundary.gadm_level or 2,
+                    geometry_wkt=geometry_wkt,
                 )
                 self.logger.info(f"Using manual bounds: {bounds.to_gis_format()}")
 
@@ -374,21 +382,80 @@ class TranslationPipeline:
                     region = result.data
                     self.logger.info(f"Loaded GADM bounds: {region.bounds.to_gis_format()}")
                 else:
-                    # GADM loading failed - fall back to manual bounds if available
+                    # GADM loading failed — try pygadm (downloads from web, caches locally)
                     self.logger.warning(f"GADM loading failed: {result.errors}")
-                    if self.config.region.boundary.manual_bounds:
-                        mb = self.config.region.boundary.manual_bounds
-                        bounds = BoundingBox(minx=mb.minx, miny=mb.miny, maxx=mb.maxx, maxy=mb.maxy)
-                        region = Region(
-                            name=self.config.region.name,
-                            country=self.config.region.country,
-                            country_iso3=self.config.region.country_iso3,
-                            bounds=bounds,
-                            gadm_level=gadm_level,
+                    region = None
+
+                    try:
+                        import pygadm
+
+                        self.logger.info(
+                            f"Trying pygadm fallback: {country_iso3} level {gadm_level} "
+                            f"filter='{filter_value}'"
                         )
-                        warnings.append(f"GADM loading failed, using manual bounds fallback: {result.errors}")
-                    else:
-                        raise ValueError(f"GADM loading failed and no manual bounds available: {result.errors}")
+
+                        names_df = pygadm.Names(
+                            admin=country_iso3, content_level=gadm_level
+                        )
+                        name_col = f"NAME_{gadm_level}"
+                        gid_col = f"GID_{gadm_level}"
+
+                        match = names_df[names_df[name_col] == filter_value]
+                        if len(match) > 0:
+                            gid = match.iloc[0][gid_col]
+                            gdf = pygadm.Items(admin=gid)
+
+                            if gdf is not None and len(gdf) > 0:
+                                if len(gdf) > 1:
+                                    gdf = gdf.dissolve()
+
+                                bounds_tuple = gdf.total_bounds
+                                bounds = BoundingBox(
+                                    minx=bounds_tuple[0],
+                                    miny=bounds_tuple[1],
+                                    maxx=bounds_tuple[2],
+                                    maxy=bounds_tuple[3],
+                                )
+
+                                geometry_wkt = gdf.geometry.iloc[0].wkt
+
+                                region = Region(
+                                    name=self.config.region.name,
+                                    country=self.config.region.country,
+                                    country_iso3=country_iso3,
+                                    bounds=bounds,
+                                    gadm_level=gadm_level,
+                                    geometry_wkt=geometry_wkt,
+                                )
+                                self.logger.info(
+                                    f"Loaded boundary via pygadm: {bounds.to_gis_format()}"
+                                )
+                        else:
+                            self.logger.warning(
+                                f"pygadm: '{filter_value}' not found at level {gadm_level}"
+                            )
+
+                    except Exception as e:
+                        self.logger.warning(f"pygadm fallback failed: {e}")
+
+                    # If pygadm also failed, fall back to manual bounds
+                    if region is None:
+                        if self.config.region.boundary.manual_bounds:
+                            mb = self.config.region.boundary.manual_bounds
+                            bounds = BoundingBox(minx=mb.minx, miny=mb.miny, maxx=mb.maxx, maxy=mb.maxy)
+                            region = Region(
+                                name=self.config.region.name,
+                                country=self.config.region.country,
+                                country_iso3=self.config.region.country_iso3,
+                                bounds=bounds,
+                                gadm_level=gadm_level,
+                            )
+                            warnings.append(f"GADM and pygadm failed, using manual bounds fallback: {result.errors}")
+                        else:
+                            raise ValueError(
+                                f"GADM loading failed, pygadm fallback failed, and no manual bounds available: "
+                                f"{result.errors}"
+                            )
 
             else:
                 # No valid boundary source - use manual bounds as fallback
@@ -422,7 +489,13 @@ class TranslationPipeline:
                 data["climate"] = climate_data
                 self.logger.info(f"Loaded climate data for {len(climate_data)} locations")
             else:
-                warnings.append("Climate data not available - using placeholder")
+                # CRAFT downloads weather at runtime via input.csv — not a warning
+                craft_only = all(
+                    p == Platform.CRAFT
+                    for p in self.config.get_enabled_platforms()
+                )
+                if not craft_only:
+                    warnings.append("Climate data not available - using placeholder")
                 # Create minimal placeholder climate data
                 data["climate"] = self._create_placeholder_climate(region)
 
@@ -536,10 +609,39 @@ class TranslationPipeline:
         if climate_data["rainfall_dir"] or climate_data["agera5_dir"]:
             return climate_data
 
-        # No configured paths - try to download (if library available)
-        self.logger.warning("No pre-configured climate data paths found.")
-        self.logger.warning("Please set data_sources.climate.rainfall_dir and agera5_dir in config.")
+        # No configured paths — try TAMSAT/AgERA5 download for SARRA-Py
+        enabled_platforms = self.config.get_enabled_platforms()
+        has_sarra_py = any(p == Platform.SARRA_PY for p in enabled_platforms)
 
+        if has_sarra_py:
+            try:
+                from prismpy.sources.climate.tamsat import TAMSATSource, TAMSATConfig
+
+                cache_dir = Path(self.config.data_sources.cache_dir) if hasattr(self.config.data_sources, 'cache_dir') and self.config.data_sources.cache_dir else Path("data/cache")
+                tamsat = TAMSATSource(cache_dir=cache_dir, provenance=self.provenance)
+                if tamsat.sarra_download_available:
+                    self.logger.info("Downloading TAMSAT rainfall data...")
+                    tamsat_result = tamsat.retrieve(
+                        region=region,
+                        start_date=start_date,
+                        end_date=end_date,
+                        download=True,
+                    )
+                    if tamsat_result.success and tamsat_result.data:
+                        climate_data["rainfall_dir"] = tamsat_result.data.data_dir
+                        climate_data["rainfall_file_count"] = tamsat_result.data.file_count
+                        self.logger.info(
+                            f"TAMSAT: {tamsat_result.data.file_count} files downloaded"
+                        )
+                        return climate_data
+                    else:
+                        self.logger.warning(f"TAMSAT download failed: {tamsat_result.errors}")
+                else:
+                    self.logger.warning("SARRA_data_download not installed — cannot download TAMSAT")
+            except Exception as e:
+                self.logger.warning(f"TAMSAT download error: {e}")
+
+        self.logger.warning("No pre-configured climate data paths found.")
         return None
 
     def _create_placeholder_climate(
@@ -682,6 +784,274 @@ class TranslationPipeline:
 
         return {0: profile}
 
+    def _retrieve_isda_api_for_grid(
+        self, grid, region: Region
+    ) -> Optional[Dict[int, SoilProfile]]:
+        """Retrieve per-cell soil data from iSDA cloud-optimized GeoTIFFs on S3.
+
+        Reads directly from public S3 bucket (no auth needed). Each property
+        is a single COG covering Africa at 30m. Band mapping:
+          Band 1: mean at 0-20cm
+          Band 2: mean at 20-50cm
+          Band 3: error at 0-20cm
+          Band 4: error at 20-50cm
+
+        Scale factors: ph values ÷10, bulk_density ÷100, carbon_organic as-is (g/kg).
+
+        Only runs when SARRA-Py is enabled (iSDA is Africa-only).
+
+        Args:
+            grid: SpatialGrid with cell coordinates
+            region: Region for metadata
+
+        Returns:
+            Dictionary of cell_id -> SoilProfile, or None
+        """
+        enabled = self.config.get_enabled_platforms()
+        if Platform.SARRA_PY not in enabled:
+            return None
+
+        try:
+            import rasterio
+            from pyproj import Transformer
+        except ImportError:
+            self.logger.warning("rasterio/pyproj not available for iSDA retrieval")
+            return None
+
+        S3_BASE = "https://isdasoil.s3.amazonaws.com/soil_data"
+        PROPERTIES = {
+            "sand_content": {"scale": 1.0, "unit": "%"},
+            "clay_content": {"scale": 1.0, "unit": "%"},
+            "silt_content": {"scale": 1.0, "unit": "%"},
+            "carbon_organic": {"scale": 1.0, "unit": "g/kg"},
+            "ph": {"scale": 0.1, "unit": ""},
+            "bulk_density": {"scale": 0.01, "unit": "g/cm3"},
+        }
+
+        # Check for local 1km files first (PRISMWEB_DATA_DIR/isda/)
+        local_isda_dir = None
+        for search_dir in [
+            Path(self.config.data_sources.cache_dir).parent / "isda" if hasattr(self.config.data_sources, 'cache_dir') and self.config.data_sources.cache_dir else None,
+            Path("data/isda"),
+            Path(__file__).resolve().parents[4] / "data" / "isda",
+        ]:
+            if search_dir and search_dir.exists():
+                # Check if all property files exist locally
+                local_files = {p: search_dir / f"{p}_1km.tif" for p in PROPERTIES}
+                if all(f.exists() for f in local_files.values()):
+                    local_isda_dir = search_dir
+                    self.logger.info(f"Found local iSDA 1km data at {search_dir}")
+                    break
+
+        cells = grid.cells if grid else []
+        if not cells:
+            return None
+
+        # Transform cell coords from WGS84 to EPSG:3857 (iSDA CRS)
+        transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+        cell_coords_3857 = []
+        for cell in cells:
+            x, y = transformer.transform(cell.lon, cell.lat)
+            cell_coords_3857.append((x, y))
+
+        total = len(cells)
+        self.logger.info(f"Reading iSDA soil data from S3 for {total} cells...")
+
+        # Read each property from S3 COGs
+        cell_data = {cell.cell_id: {} for cell in cells}
+
+        try:
+            for prop_name, prop_info in PROPERTIES.items():
+                if local_isda_dir:
+                    url = str(local_isda_dir / f"{prop_name}_1km.tif")
+                    self.logger.info(f"  Reading {prop_name} from local cache...")
+                else:
+                    url = f"{S3_BASE}/{prop_name}/{prop_name}.tif"
+                    self.logger.info(f"  Reading {prop_name} from S3...")
+
+                with rasterio.open(url) as src:
+                    for i, cell in enumerate(cells):
+                        x, y = cell_coords_3857[i]
+                        row, col = src.index(x, y)
+                        # Read bands 1 (0-20cm mean) and 2 (20-50cm mean)
+                        window = rasterio.windows.Window(col, row, 1, 1)
+                        b1 = float(src.read(1, window=window)[0][0])
+                        b2 = float(src.read(2, window=window)[0][0])
+
+                        scale = prop_info["scale"]
+                        cell_data[cell.cell_id][f"{prop_name}_0-20"] = b1 * scale
+                        cell_data[cell.cell_id][f"{prop_name}_20-50"] = b2 * scale
+
+            # Build SoilProfile objects
+            profiles = {}
+            for cell in cells:
+                d = cell_data[cell.cell_id]
+                if not d.get("sand_content_0-20"):
+                    continue
+
+                layers = []
+                for depth, (top, bot) in [("0-20", (0.0, 0.2)), ("20-50", (0.2, 0.5))]:
+                    sand = d.get(f"sand_content_{depth}")
+                    clay = d.get(f"clay_content_{depth}")
+                    silt = d.get(f"silt_content_{depth}")
+                    oc = d.get(f"carbon_organic_{depth}")
+                    ph = d.get(f"ph_{depth}")
+                    bd = d.get(f"bulk_density_{depth}")
+
+                    if sand is not None:
+                        layers.append(SoilLayer(
+                            depth_top=top, depth_bottom=bot,
+                            sand=sand, clay=clay or 0,
+                            silt=silt or 0,
+                            organic_carbon=oc / 10.0 if oc else None,
+                            ph=ph, bulk_density=bd,
+                        ))
+
+                if layers:
+                    profiles[cell.cell_id] = SoilProfile(
+                        profile_id=f"isda_{cell.cell_id}",
+                        lat=cell.lat, lon=cell.lon,
+                        source="iSDA S3 (30m)",
+                        layers=layers,
+                    )
+
+            if profiles:
+                self.logger.info(f"iSDA S3: Retrieved {len(profiles)}/{total} soil profiles")
+                return profiles
+
+        except Exception as e:
+            self.logger.warning(f"iSDA S3 retrieval failed: {e}")
+
+        return None
+
+    def _retrieve_hwsd_for_grid(
+        self, grid, region: Region
+    ) -> Optional[Dict[int, SoilProfile]]:
+        """Retrieve per-cell HWSD soil data for ACEA/CRAFT platforms.
+
+        NOTE: This retrieval runs in the HARMONIZE stage because it needs
+        the spatial grid (cell coordinates) which is only available after
+        grid generation. Ideally, the RETRIEVE stage would have two phases:
+        pre-grid (boundaries, climate metadata) and post-grid (per-cell
+        soil, crop masks). This is a pragmatic workaround until the pipeline
+        is restructured to support two-phase retrieval.
+
+        TODO: Move to a post-grid RETRIEVE phase when the pipeline
+        architecture supports it.
+
+        Runs after grid creation in the HARMONIZE stage. Checks for HWSD
+        paths in three places (in order):
+          1. data_sources.soil.hwsd_bil_path / hwsd_mdb_path (top-level)
+          2. Platform-specific config (ACEA or CRAFT hwsd_bil_path)
+          3. Auto-discovery in known locations
+
+        Only runs when HWSD-dependent platforms (ACEA, CRAFT) are enabled.
+
+        Args:
+            grid: SpatialGrid with cell coordinates
+            region: Region for metadata
+
+        Returns:
+            Dictionary of cell_id -> SoilProfile, or None if unavailable
+        """
+        # Check if any platform that can use HWSD soil data is enabled
+        enabled = self.config.get_enabled_platforms()
+        hwsd_platforms = {Platform.ACEA, Platform.CRAFT, Platform.SARRA_PY, Platform.PYTHIA}
+        if not hwsd_platforms.intersection(set(enabled)):
+            return None
+
+        # Resolve HWSD paths: top-level data_sources > platform config > auto-discovery
+        bil_path = None
+        mdb_path = None
+
+        # 1. Top-level data_sources.soil config
+        soil_cfg = self.config.data_sources.soil
+        if soil_cfg.hwsd_bil_path and soil_cfg.hwsd_mdb_path:
+            bil_path = Path(soil_cfg.hwsd_bil_path)
+            mdb_path = Path(soil_cfg.hwsd_mdb_path)
+
+        # 2. Platform-specific config fallback (check all platforms that may have HWSD paths)
+        if not (bil_path and mdb_path):
+            for plat in [Platform.CRAFT, Platform.ACEA, Platform.SARRA_PY, Platform.PYTHIA]:
+                pcfg = self.config.get_platform_config(plat)
+                if pcfg:
+                    p_bil = getattr(pcfg, 'hwsd_bil_path', None)
+                    p_mdb = getattr(pcfg, 'hwsd_mdb_path', None)
+                    if p_bil and p_mdb:
+                        bil_path = Path(p_bil)
+                        mdb_path = Path(p_mdb)
+                        break
+
+        # 3. Auto-discovery in known locations
+        if not (bil_path and mdb_path):
+            search_dirs = [
+                Path("data/hwsd"),
+                Path(__file__).resolve().parents[4] / "data" / "hwsd",
+            ]
+            for d in search_dirs:
+                candidate_bil = d / "HWSD2.bil"
+                candidate_mdb = d / "HWSD2.mdb"
+                if candidate_bil.exists() and candidate_mdb.exists():
+                    bil_path = candidate_bil
+                    mdb_path = candidate_mdb
+                    self.logger.info(f"Auto-discovered HWSD at {d}")
+                    break
+
+        if not (bil_path and mdb_path and bil_path.exists() and mdb_path.exists()):
+            self.logger.debug("HWSD paths not configured or not found, skipping per-cell retrieval")
+            return None
+
+        # Build cell coordinates from grid
+        cell_coords = [(cell.lat, cell.lon) for cell in grid.cells]
+        cell_ids = [cell.cell_id for cell in grid.cells]
+
+        self.logger.info(
+            f"Retrieving HWSD soil data for {len(cell_coords)} grid cells..."
+        )
+
+        try:
+            from prismpy.sources.soil.hwsd import HWSDSource, HWSDConfig
+
+            hwsd_source = HWSDSource(
+                config=HWSDConfig(
+                    bil_path=bil_path,
+                    mdb_path=mdb_path,
+                    use_defaults=True,
+                ),
+                provenance=self.provenance,
+            )
+
+            result = hwsd_source.retrieve(
+                region=region,
+                cell_coords=cell_coords,
+            )
+
+            if result.success and result.data:
+                raw_profiles = result.data.profiles
+                # Re-key profiles by cell_id (HWSDSource keys by index)
+                profiles = {}
+                for i, cell_id in enumerate(cell_ids):
+                    if i in raw_profiles:
+                        profiles[cell_id] = raw_profiles[i]
+
+                n_real = sum(
+                    1 for p in profiles.values()
+                    if not p.metadata.get('is_default', False)
+                )
+                self.logger.info(
+                    f"HWSD: {n_real} real profiles, "
+                    f"{len(profiles) - n_real} defaults, "
+                    f"{len(profiles)} total for {len(cell_ids)} cells"
+                )
+                return profiles
+            else:
+                self.logger.warning(f"HWSD retrieval failed: {result.errors}")
+
+        except Exception as e:
+            self.logger.warning(f"HWSD retrieval error: {e}")
+
+        return None
+
     def _load_crop_params(self) -> Optional[CropParameters]:
         """Load crop parameters from templates or config.
 
@@ -792,11 +1162,23 @@ class TranslationPipeline:
                 )
                 self.logger.info(f"Created grid with {grid.n_cells} cells")
 
+            # Retrieve per-cell soil data: try iSDA API first (Africa, 30m),
+            # then HWSD fallback (global, 1km)
+            soil_data = retrieved_data.get("soil")
+            if grid and region:
+                isda_soil = self._retrieve_isda_api_for_grid(grid, region)
+                if isda_soil:
+                    soil_data = isda_soil
+                else:
+                    hwsd_soil = self._retrieve_hwsd_for_grid(grid, region)
+                    if hwsd_soil:
+                        soil_data = hwsd_soil
+
             unified_data = UnifiedData(
                 region=region,
                 grid=grid,
                 climate=retrieved_data.get("climate"),
-                soil=retrieved_data.get("soil"),
+                soil=soil_data,
                 crop_params=retrieved_data.get("crop_params"),
                 crop_calendar=retrieved_data.get("crop_calendar"),
                 metadata={
