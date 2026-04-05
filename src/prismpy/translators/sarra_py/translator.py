@@ -626,9 +626,10 @@ class SarraPyTranslator(SarraPyTranslatorBase):
             dest_dir = self.output_dir / "data" / "climate" / "rainfall"
             dest_dir.mkdir(parents=True, exist_ok=True)
 
-            # Copy both .tif (pre-existing) and .nc (TAMSAT download) files
-            climate_files = list(rainfall_dir.glob("*.tif")) + list(rainfall_dir.glob("*.nc"))
-            logger.info(f"Copying {len(climate_files)} rainfall files...")
+            # Copy only .tif files — SARRA-Py consumes daily GeoTIFFs only.
+            # Raw .nc files (TAMSAT pentad downloads) must NOT be included.
+            climate_files = list(rainfall_dir.glob("*.tif"))
+            logger.info(f"Copying {len(climate_files)} rainfall GeoTIFF files...")
 
             for src_file in climate_files:
                 dest_file = dest_dir / src_file.name
@@ -648,9 +649,9 @@ class SarraPyTranslator(SarraPyTranslatorBase):
                 dest_dir = self.output_dir / "data" / "climate" / var_name
                 dest_dir.mkdir(parents=True, exist_ok=True)
 
-                climate_files = list(var_dir.glob("*.tif")) + list(var_dir.glob("*.nc"))
+                climate_files = list(var_dir.glob("*.tif"))
                 if climate_files:
-                    logger.info(f"Copying {len(climate_files)} {var_name} files...")
+                    logger.info(f"Copying {len(climate_files)} {var_name} GeoTIFF files...")
 
                     for src_file in climate_files:
                         dest_file = dest_dir / src_file.name

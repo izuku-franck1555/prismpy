@@ -127,6 +127,28 @@ class AceaValidator(BaseValidator):
                     file_path=climate_dir,
                 ))
 
+        # Validate file types in key directories
+        issues.extend(self.validate_file_types(
+            self.output_dir / "climate", ['.pckl', '.pickle'], dir_label="climate"
+        ))
+        issues.extend(self.validate_file_types(
+            self.output_dir / "config", ['.py', '.json'], dir_label="config"
+        ))
+        issues.extend(self.validate_file_types(
+            self.output_dir / "soil", ['.nc', '.nc4', '.csv'], dir_label="soil"
+        ))
+        issues.extend(self.validate_file_types(
+            self.output_dir / "crop_params", ['.nc', '.nc4', '.yaml', '.yml'], dir_label="crop_params"
+        ))
+        # Check GAEZ subdirectories
+        gaez_dir = self.output_dir / "gaez"
+        if gaez_dir.exists():
+            for sub in gaez_dir.iterdir():
+                if sub.is_dir():
+                    issues.extend(self.validate_file_types(
+                        sub, ['.tif', '.tiff'], dir_label=f"gaez/{sub.name}"
+                    ))
+
         return issues
 
     def validate_files(self) -> List[ValidationIssue]:

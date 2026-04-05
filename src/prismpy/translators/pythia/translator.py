@@ -815,7 +815,7 @@ class PythiaTranslator(PythiaTranslatorBase):
 
         # Priority 2: auto-detect from crop name
         crop_name = self.config.crop.name.lower().strip()
-        crop_code = self.config.crop.name_short.upper()[:2]
+        crop_code = self._get_dssat_crop_code()
 
         if crop_name in self._LEGUME_CROPS:
             logger.info(
@@ -998,14 +998,33 @@ class PythiaTranslator(PythiaTranslatorBase):
             "fer_pct": fer_pct,
         }
 
+    # DSSAT 2-character crop codes (experiment filename convention)
+    DSSAT_CROP_CODES = {
+        'maize': 'MZ', 'corn': 'MZ',
+        'sorghum': 'SG', 'millet': 'ML',
+        'rice': 'RI', 'cowpea': 'CP',
+        'groundnut': 'PN', 'peanut': 'PN',
+        'soybean': 'SB', 'wheat': 'WH',
+        'barley': 'BA', 'bean': 'BN',
+        'cotton': 'CO', 'sunflower': 'SU',
+        'potato': 'PT', 'cassava': 'CS',
+    }
+
+    def _get_dssat_crop_code(self) -> str:
+        """Get 2-character DSSAT crop code for experiment filenames."""
+        crop_lower = self.config.crop.name.lower()
+        return self.DSSAT_CROP_CODES.get(crop_lower, self.config.crop.name_short[:2].upper())
+
     def _get_template_filename(self) -> str:
         """Get the actual template filename based on region and crop.
 
+        DSSAT convention: exactly 8 characters (e.g., KACP8001.SNX).
+
         Returns:
-            Template filename (e.g., KOMZ8001.SNX)
+            Template filename
         """
         region_code = self.config.region.name[:2].upper()
-        crop_code = self.config.crop.name_short.upper()
+        crop_code = self._get_dssat_crop_code()
         return f"{region_code}{crop_code}8001.SNX"
 
     # ISO3 to ISO2 country code mapping - comprehensive global coverage
@@ -1816,9 +1835,9 @@ class PythiaTranslator(PythiaTranslatorBase):
         Returns:
             Path to generated SNX template
         """
-        # Generate experiment ID
+        # Generate experiment ID (DSSAT: exactly 8 chars)
         region_code = data.region.name[:2].upper()
-        crop_code = self.config.crop.name_short.upper()
+        crop_code = self._get_dssat_crop_code()
         exp_id = f"{region_code}{crop_code}8001"
 
         # Get mapped parameters
@@ -1895,8 +1914,8 @@ class PythiaTranslator(PythiaTranslatorBase):
         Returns:
             SNX file content as string
         """
-        # Get DSSAT crop code
-        crop_code = self.config.crop.name_short.upper()[:2]
+        # Get DSSAT crop code (from centralized mapping)
+        crop_code = self._get_dssat_crop_code()
 
         # Get DSSAT SMODEL (CERES vs CROPGRO) and SYMBI switch
         smodel = self._get_dssat_smodel()

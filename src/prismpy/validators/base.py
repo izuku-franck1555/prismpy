@@ -159,6 +159,48 @@ class BaseValidator(ABC):
         """
         pass
 
+    def validate_file_types(
+        self,
+        directory: Path,
+        allowed_extensions: List[str],
+        dir_label: str = "",
+    ) -> List[ValidationIssue]:
+        """Check that a directory contains only expected file types.
+
+        Packages should only contain final files the target framework consumes.
+        Intermediate files (raw .nc downloads, temp files) must not leak in.
+
+        Args:
+            directory: Path to check
+            allowed_extensions: List of allowed extensions (e.g., ['.tif', '.tiff'])
+            dir_label: Human-readable directory name for messages
+
+        Returns:
+            List of validation issues for unexpected files
+        """
+        issues = []
+        if not directory.exists() or not directory.is_dir():
+            return issues
+
+        label = dir_label or directory.name
+        non_matching = [
+            f for f in directory.iterdir()
+            if f.is_file() and f.suffix.lower() not in [e.lower() for e in allowed_extensions]
+        ]
+        if non_matching:
+            extensions = set(f.suffix for f in non_matching)
+            issues.append(ValidationIssue(
+                severity='warning',
+                category='file_type',
+                message=(
+                    f"{label}/ contains {len(non_matching)} unexpected file(s) "
+                    f"(found {', '.join(sorted(extensions))}; "
+                    f"expected {', '.join(allowed_extensions)})"
+                ),
+                file_path=directory,
+            ))
+        return issues
+
     def validate_required_structure(self) -> List[ValidationIssue]:
         """Check that required files and directories exist.
 

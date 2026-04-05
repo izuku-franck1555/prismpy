@@ -163,6 +163,11 @@ class SarraPyValidator(BaseValidator):
                         file_path=var_dir,
                     ))
 
+                # Flag non-.tif files (e.g., raw .nc intermediates)
+                issues.extend(self.validate_file_types(
+                    var_dir, ['.tif', '.tiff'], dir_label=var
+                ))
+
         return issues
 
     def _validate_package_files(self) -> List[ValidationIssue]:

@@ -132,6 +132,20 @@ class PythiaValidator(BaseValidator):
                     file_path=shapes_dir,
                 ))
 
+        # Validate file types in key directories
+        issues.extend(self.validate_file_types(
+            self.output_dir / "weather", ['.WTH', '.wth'], dir_label="weather"
+        ))
+        issues.extend(self.validate_file_types(
+            self.output_dir / "config", ['.json'], dir_label="config"
+        ))
+        issues.extend(self.validate_file_types(
+            self.output_dir / "templates", ['.SNX', '.snx'], dir_label="templates"
+        ))
+        issues.extend(self.validate_file_types(
+            self.output_dir / "raster", ['.tif', '.tiff'], dir_label="raster"
+        ))
+
         return issues
 
     def validate_files(self) -> List[ValidationIssue]:

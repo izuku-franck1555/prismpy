@@ -137,6 +137,20 @@ class CraftValidator(BaseValidator):
                     file_path=weather_dir,
                 ))
 
+        # Validate file types in key directories
+        issues.extend(self.validate_file_types(
+            self.output_dir / "weather", ['.csv'], dir_label="weather"
+        ))
+        issues.extend(self.validate_file_types(
+            self.output_dir / "soil", ['.SOL', '.sol', '.txt'], dir_label="soil"
+        ))
+        issues.extend(self.validate_file_types(
+            self.output_dir / "crop_mask", ['.txt'], dir_label="crop_mask"
+        ))
+        issues.extend(self.validate_file_types(
+            self.output_dir / "management", ['.txt'], dir_label="management"
+        ))
+
         return issues
 
     def validate_files(self) -> List[ValidationIssue]:

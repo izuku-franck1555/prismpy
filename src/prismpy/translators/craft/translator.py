@@ -591,6 +591,12 @@ class CraftTranslator(CraftTranslatorBase):
                     if python_schema_rows:
                         self._generate_area_file(python_schema_rows)
 
+                    # Generate GADM shapefiles from pygadm geometry
+                    # (CRAFT requires shapefiles for basemap rendering)
+                    self._generate_shapefile_from_geometry(
+                        gdf_pygadm, shape_dir, region, craft_level
+                    )
+
                     return output_files
 
             except Exception as e:
@@ -767,6 +773,53 @@ class CraftTranslator(CraftTranslatorBase):
                     logger.info(f"Added Level1Name='{level1_name}' attribute to shapefile")
             except Exception as e:
                 logger.warning(f"Could not add Level1Name attribute: {e}")
+
+    def _generate_shapefile_from_geometry(
+        self,
+        gdf,
+        shape_dir: Path,
+        region,
+        craft_level: int,
+    ) -> None:
+        """Generate GADM shapefiles from pygadm geometry for CRAFT basemap.
+
+        When local GADM shapefiles aren't available, this creates them from
+        the pygadm-downloaded geometry so the package is self-contained.
+
+        Args:
+            gdf: GeoDataFrame with the boundary geometry
+            shape_dir: Output Shape/ directory in the package
+            region: Region object with name/country info
+            craft_level: CRAFT level for naming
+        """
+        try:
+            import geopandas as _gpd
+
+            shape_dir.mkdir(parents=True, exist_ok=True)
+            country_iso3 = region.country_iso3 if hasattr(region, 'country_iso3') else 'UNK'
+            gadm_level = region.gadm_level if hasattr(region, 'gadm_level') else 2
+            shp_name = f"gadm41_{country_iso3.upper()}_{gadm_level}"
+
+            # Ensure CRS is set
+            if gdf.crs is None:
+                gdf = gdf.set_crs("EPSG:4326")
+
+            # Add attributes CRAFT expects
+            if "Level1Name" not in gdf.columns:
+                gdf["Level1Name"] = region.name
+            if "ObjectId" not in gdf.columns:
+                gdf["ObjectId"] = range(1, len(gdf) + 1)
+            if f"NAME_{gadm_level}" not in gdf.columns:
+                gdf[f"NAME_{gadm_level}"] = region.name
+
+            output_path = shape_dir / f"{shp_name}.shp"
+            gdf.to_file(output_path)
+
+            n_files = len([f for f in shape_dir.iterdir() if f.is_file()])
+            logger.info(f"Generated {n_files} shapefile components from pygadm geometry at {shape_dir}")
+
+        except Exception as e:
+            logger.warning(f"Could not generate shapefile from pygadm geometry: {e}")
 
     def _generate_area_file(self, python_schema_rows: list) -> None:
         """Generate 5m_area.txt file within the output package.

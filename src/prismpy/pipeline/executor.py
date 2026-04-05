@@ -489,12 +489,11 @@ class TranslationPipeline:
                 data["climate"] = climate_data
                 self.logger.info(f"Loaded climate data for {len(climate_data)} locations")
             else:
-                # CRAFT downloads weather at runtime via input.csv — not a warning
-                craft_only = all(
-                    p == Platform.CRAFT
-                    for p in self.config.get_enabled_platforms()
-                )
-                if not craft_only:
+                # CRAFT/PYTHIA/ACEA download weather at translate time — not a warning
+                # Only warn if a platform needs pre-loaded climate (currently none do)
+                platforms_that_self_download = {Platform.CRAFT, Platform.PYTHIA, Platform.ACEA, Platform.SARRA_PY}
+                enabled = set(self.config.get_enabled_platforms())
+                if not enabled.issubset(platforms_that_self_download):
                     warnings.append("Climate data not available - using placeholder")
                 # Create minimal placeholder climate data
                 data["climate"] = self._create_placeholder_climate(region)
@@ -1192,6 +1191,9 @@ class TranslationPipeline:
                     except Exception as e:
                         self.logger.warning(f"Failed to load geometry for clipping: {e}")
 
+                # Always use 5-arcmin grid for maximum boundary precision.
+                # Platforms that need coarser grids (ACEA=30arcmin) handle
+                # the mapping internally (e.g., _compute_30arcmin_cell_ids).
                 grid = SpatialGrid.from_bounds(
                     region.bounds,
                     resolution="5arcmin",
@@ -1495,7 +1497,9 @@ class TranslationPipeline:
                     stage=PipelineStage.HARMONIZE, success=True, data=UnifiedData(region=None)
                 )).data
                 if unified_data:
+                    translate_start = datetime.now()
                     translation_results = self._execute_translate(unified_data)
+                    translate_duration = (datetime.now() - translate_start).total_seconds()
                     stage_results["translate"] = StageResult(
                         stage=PipelineStage.TRANSLATE,
                         success=all(r.success for r in translation_results.values()),
@@ -1506,6 +1510,7 @@ class TranslationPipeline:
                         warnings=[
                             w for r in translation_results.values() for w in r.warnings
                         ],
+                        duration_seconds=translate_duration,
                     )
 
             # Stage 4: VALIDATE

@@ -412,10 +412,13 @@ class AceaTranslator(AceaTranslatorBase):
                 start_date = date(start_year - spinup, 1, 1)
                 end_date = date(end_year, 12, 31)
 
-                # Download climate data
-                downloaded_climate = self._download_nasa_power_climate(
-                    data.grid, start_date, end_date,
-                    request_delay=download_delay
+                # Download climate for unique 30-arcmin cells only (not all 5-arcmin).
+                # NASA POWER's native resolution is ~0.5° (30-arcmin), so multiple
+                # 5-arcmin cells within the same 30-arcmin tile get identical data.
+                # This reduces API calls from ~244 to ~17 for Saint-Louis.
+                downloaded_climate = self._download_climate_30arcmin(
+                    data.grid, cell_ids_30arcmin, start_date, end_date,
+                    request_delay=download_delay,
                 )
 
                 # Merge with existing climate data
@@ -969,6 +972,87 @@ class AceaTranslator(AceaTranslatorBase):
         logger.info(f"Downloaded climate data for {len(climate_data)}/{total_cells} cells")
         return climate_data
 
+    def _download_climate_30arcmin(
+        self,
+        grid: SpatialGrid,
+        cell_ids_30arcmin: List[int],
+        start_date: date,
+        end_date: date,
+        request_delay: float = 2.0,
+    ) -> Dict[int, 'ClimateTimeSeries']:
+        """Download NASA POWER climate for unique 30-arcmin cells only.
+
+        Maps the 5-arcmin grid to unique 30-arcmin cell centers, downloads
+        once per unique cell, then assigns results to all child 5-arcmin IDs.
+        This matches the reference package approach (17 downloads for
+        Saint-Louis instead of 244).
+
+        Args:
+            grid: 5-arcmin SpatialGrid
+            cell_ids_30arcmin: Unique 30-arcmin cell IDs
+            start_date: Start date
+            end_date: End date
+            request_delay: Delay between API calls
+
+        Returns:
+            Climate data keyed by 5-arcmin cell IDs (for compatibility)
+        """
+        try:
+            from prismpy.sources.climate.nasa_power import (
+                NASAPowerSource, NASAPowerConfig
+            )
+        except ImportError:
+            logger.error("NASAPowerSource not available")
+            return {}
+
+        resolution = 30 / 60  # 0.5 degrees
+
+        # Compute 30-arcmin cell centers
+        centers_30 = {}
+        for cell_id in cell_ids_30arcmin:
+            row = cell_id // self.GRID_COLS_30ARCMIN
+            col = cell_id % self.GRID_COLS_30ARCMIN
+            lat = 90 - (row + 0.5) * resolution
+            lon = -180 + (col + 0.5) * resolution
+            centers_30[cell_id] = (lat, lon)
+
+        logger.info(f"Downloading NASA POWER for {len(centers_30)} unique 30-arcmin cells "
+                    f"(mapped from {len(grid.cells)} 5-arcmin cells)")
+
+        config = NASAPowerConfig(
+            request_delay=request_delay,
+            parameters=["T2M_MAX", "T2M_MIN", "PRECTOTCORR", "ALLSKY_SFC_SW_DWN"]
+        )
+        source = NASAPowerSource(config)
+
+        # Download per unique 30-arcmin cell
+        climate_30 = {}
+        for i, (cell_id, (lat, lon)) in enumerate(centers_30.items()):
+            logger.info(f"Downloading climate for 30arcmin cell {i+1}/{len(centers_30)} "
+                       f"(ID={cell_id}, lat={lat:.2f}, lon={lon:.2f})")
+            try:
+                result = source.retrieve(lat=lat, lon=lon, start_date=start_date, end_date=end_date)
+                if result.success and result.data:
+                    climate_30[cell_id] = result.data
+            except Exception as e:
+                logger.error(f"Error downloading climate for 30arcmin cell {cell_id}: {e}")
+
+        logger.info(f"Downloaded {len(climate_30)}/{len(centers_30)} unique 30-arcmin cells")
+
+        # Map back to 5-arcmin cell IDs for compatibility with the rest of the translator
+        climate_data = {}
+        COLS_5 = 4320
+        for cell in grid.cells:
+            row_5 = cell.cell_id // COLS_5
+            col_5 = cell.cell_id % COLS_5
+            row_30 = row_5 // 6
+            col_30 = col_5 // 6
+            parent_30 = row_30 * self.GRID_COLS_30ARCMIN + col_30
+            if parent_30 in climate_30:
+                climate_data[cell.cell_id] = climate_30[parent_30]
+
+        return climate_data
+
     def _generate_soil_csv(
         self,
         soil_profiles: Dict[int, SoilProfile],
@@ -1410,10 +1494,12 @@ class AceaTranslator(AceaTranslatorBase):
         for tech in tech_levels:
             # Try different file naming patterns
             patterns = [
-                f"spam2020V2r0_global_H_{spam_code}_{tech}.tif",
-                f"spam2020v2r0_global_H_{spam_code}_{tech}.tif",
-                f"spam2010V1r0_global_H_{spam_code}_{tech}.tif",
-                f"*{spam_code}*_{tech}.tif",
+                f"spam2020V2r0_global_H_{spam_code}_{tech}.tif",      # SPAM code naming
+                f"spam2020_V2r0_global_H_{spam_code}_{tech}.tif",     # Original ZIP naming (underscore after year)
+                f"spam2020V2r0_global_H_{acea_fao_code}_{tech}.tif",  # FAO code naming (ACEA convention)
+                f"spam2020v2r0_global_H_{spam_code}_{tech}.tif",      # Lowercase version
+                f"spam2010V1r0_global_H_{spam_code}_{tech}.tif",      # Older SPAM 2010
+                f"*{spam_code}*_{tech}.tif",                           # Wildcard fallback
             ]
 
             input_path = None
@@ -2655,7 +2741,9 @@ if __name__ == "__main__":
                 if virtual_irrigation == 'Lowinput':
                     virtual_irrigation = 'Highinput'
             if scenarios == [1]:
-                scenarios = [1, 2]  # Add irrigated scenario
+                # Scenario 3 = surface irrigation (no groundwater data needed)
+                # Scenario 2 = groundwater irrigation (requires GW_monthly_5arcmin_50m.nc)
+                scenarios = [1, 3]
 
         # Generate config content
         config_content = ACEA_CONFIG_TEMPLATE.format(
