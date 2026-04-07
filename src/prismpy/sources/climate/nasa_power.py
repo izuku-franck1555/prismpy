@@ -128,7 +128,8 @@ class NASAPowerSource(DataSource):
         """Retrieve climate data from NASA POWER API.
 
         Can retrieve data for a single point (lat/lon) or for the center
-        of a Region's bounding box.
+        of a Region's bounding box. Uses per-year caching so overlapping
+        date ranges reuse already-downloaded years.
 
         Args:
             region: Region object (uses center point if lat/lon not provided)
@@ -181,53 +182,106 @@ class NASAPowerSource(DataSource):
         # Determine parameters
         params_to_fetch = parameters or self.config.parameters
 
-        # Check cache
+        # Determine which years span the requested range
+        years_needed = list(range(start_date.year, end_date.year + 1))
+        cached_records = []
+        years_to_fetch = []
+
         if use_cache:
-            cache_path = self._get_climate_cache_path(lat, lon, start_date, end_date)
-            if cache_path.exists():
+            for year in years_needed:
+                year_cache_path = self._get_year_cache_path(lat, lon, year)
+                if year_cache_path.exists():
+                    try:
+                        year_ts = self._load_cached_climate(year_cache_path)
+                        cached_records.extend(year_ts.records)
+                        self.logger.info(f"Loaded cached year {year} for ({lat}, {lon})")
+                    except Exception as e:
+                        warnings.append(f"Cache read failed for year {year}: {e}")
+                        years_to_fetch.append(year)
+                else:
+                    # Fallback: check old per-date-range cache for the full span
+                    years_to_fetch.append(year)
+
+            # If all years cached, check old-style cache as additional fallback
+            if years_to_fetch and not cached_records:
+                old_cache_path = self._get_climate_cache_path(lat, lon, start_date, end_date)
+                if old_cache_path.exists():
+                    try:
+                        cached_data = self._load_cached_climate(old_cache_path)
+                        self.logger.info(
+                            f"Loaded old-style cached climate data for ({lat}, {lon})"
+                        )
+                        # Migrate: save as per-year cache files
+                        self._save_per_year_cache(cached_data, lat, lon)
+                        metadata["from_cache"] = True
+                        metadata["migrated_from_old_cache"] = True
+                        # Filter to requested date range
+                        filtered = self._filter_records_to_range(
+                            cached_data.records, start_date, end_date
+                        )
+                        cached_data.records = filtered
+                        return self.create_result(
+                            success=True,
+                            data=cached_data,
+                            metadata=metadata,
+                        )
+                    except Exception as e:
+                        warnings.append(f"Old cache read failed, fetching fresh: {e}")
+        else:
+            years_to_fetch = years_needed
+
+        # Fetch missing years from API
+        for year in years_to_fetch:
+            year_start = date(year, 1, 1)
+            year_end = date(year, 12, 31)
+            # Clamp to actual request bounds for first/last year isn't needed —
+            # we always cache full years for maximum reuse
+            try:
+                nasa_data = self._fetch_from_api(
+                    lat=lat,
+                    lon=lon,
+                    start_date=year_start,
+                    end_date=year_end,
+                    parameters=params_to_fetch,
+                )
+                year_ts = self._convert_to_climate_timeseries(
+                    nasa_data=nasa_data,
+                    lat=lat,
+                    lon=lon,
+                    location_id=location_id,
+                )
+                cached_records.extend(year_ts.records)
+
+                # Cache this year
+                year_cache_path = self._get_year_cache_path(lat, lon, year)
                 try:
-                    cached_data = self._load_cached_climate(cache_path)
-                    self.logger.info(f"Loaded cached climate data for ({lat}, {lon})")
-                    metadata["from_cache"] = True
-                    return self.create_result(
-                        success=True,
-                        data=cached_data,
-                        output_path=cache_path,
-                        metadata=metadata,
-                    )
+                    self._save_climate_cache(year_ts, year_cache_path)
                 except Exception as e:
-                    warnings.append(f"Cache read failed, fetching fresh: {e}")
+                    warnings.append(f"Failed to cache year {year}: {e}")
 
-        # Fetch from API
-        try:
-            nasa_data = self._fetch_from_api(
-                lat=lat,
-                lon=lon,
-                start_date=start_date,
-                end_date=end_date,
-                parameters=params_to_fetch,
-            )
-        except Exception as e:
-            return self.create_result(
-                success=False,
-                errors=[f"API request failed: {e}"],
-                metadata=metadata,
-            )
+                # Rate limiting between year requests
+                if year != years_to_fetch[-1]:
+                    time.sleep(self.config.request_delay)
 
-        # Convert to ClimateTimeSeries
-        try:
-            climate_ts = self._convert_to_climate_timeseries(
-                nasa_data=nasa_data,
-                lat=lat,
-                lon=lon,
-                location_id=location_id,
-            )
-        except Exception as e:
-            return self.create_result(
-                success=False,
-                errors=[f"Data conversion failed: {e}"],
-                metadata=metadata,
-            )
+            except Exception as e:
+                return self.create_result(
+                    success=False,
+                    errors=[f"API request failed for year {year}: {e}"],
+                    metadata=metadata,
+                )
+
+        # Filter combined records to the exact requested date range and sort
+        filtered_records = self._filter_records_to_range(
+            cached_records, start_date, end_date
+        )
+
+        climate_ts = ClimateTimeSeries(
+            location_id=location_id or 0,
+            lat=lat,
+            lon=lon,
+            source=self.NAME,
+            records=filtered_records,
+        )
 
         # Validate the data
         validation_errors = self.validate(climate_ts)
@@ -249,15 +303,9 @@ class NASAPowerSource(DataSource):
                 decisions=[],
             )
 
-        # Cache the result
-        cache_path = self._get_climate_cache_path(lat, lon, start_date, end_date)
-        try:
-            self._save_climate_cache(climate_ts, cache_path)
-            metadata["cache_path"] = str(cache_path)
-        except Exception as e:
-            warnings.append(f"Failed to cache data: {e}")
-
-        metadata["from_cache"] = False
+        metadata["from_cache"] = len(years_to_fetch) == 0
+        metadata["years_cached"] = [y for y in years_needed if y not in years_to_fetch]
+        metadata["years_fetched"] = years_to_fetch
         metadata["record_count"] = len(climate_ts.records)
         metadata["parameters_retrieved"] = params_to_fetch
 
@@ -503,6 +551,45 @@ class NASAPowerSource(DataSource):
         if isinstance(date_input, date):
             return date_input
         return datetime.strptime(date_input, "%Y-%m-%d").date()
+
+    def _filter_records_to_range(
+        self,
+        records: List[ClimateRecord],
+        start_date: date,
+        end_date: date,
+    ) -> List[ClimateRecord]:
+        """Filter and sort records to the requested date range."""
+        filtered = [r for r in records if start_date <= r.date <= end_date]
+        filtered.sort(key=lambda r: r.date)
+        return filtered
+
+    def _get_year_cache_path(self, lat: float, lon: float, year: int) -> Path:
+        """Get per-year cache file path for climate data."""
+        lat_key = f"{lat:.4f}".replace(".", "_").replace("-", "m")
+        lon_key = f"{lon:.4f}".replace(".", "_").replace("-", "m")
+        filename = f"nasapower_{lat_key}_{lon_key}_{year}.json"
+        return self.cache_dir / "climate" / filename
+
+    def _save_per_year_cache(
+        self, climate_ts: ClimateTimeSeries, lat: float, lon: float
+    ) -> None:
+        """Split a ClimateTimeSeries into per-year cache files."""
+        by_year: Dict[int, List[ClimateRecord]] = {}
+        for r in climate_ts.records:
+            by_year.setdefault(r.date.year, []).append(r)
+        for year, records in by_year.items():
+            year_ts = ClimateTimeSeries(
+                location_id=climate_ts.location_id,
+                lat=climate_ts.lat,
+                lon=climate_ts.lon,
+                source=climate_ts.source,
+                records=sorted(records, key=lambda r: r.date),
+            )
+            year_path = self._get_year_cache_path(lat, lon, year)
+            try:
+                self._save_climate_cache(year_ts, year_path)
+            except Exception as e:
+                self.logger.warning(f"Failed to migrate cache for year {year}: {e}")
 
     def _get_climate_cache_path(
         self,

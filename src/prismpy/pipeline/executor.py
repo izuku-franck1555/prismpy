@@ -1449,11 +1449,16 @@ class TranslationPipeline:
     def execute(
         self,
         stages: Optional[List[PipelineStage]] = None,
+        progress_callback=None,
     ) -> PipelineResult:
         """Execute the translation pipeline.
 
         Args:
             stages: Optional list of stages to run. If None, runs all stages.
+            progress_callback: Optional callback for per-stage progress updates.
+                Must implement on_stage_start(stage, description),
+                on_stage_complete(stage, result), and optionally
+                on_substage_progress(stage, task, current, total, detail).
 
         Returns:
             PipelineResult with all stage results and final status
@@ -1469,11 +1474,27 @@ class TranslationPipeline:
         translation_results: Dict[str, TranslationResult] = {}
         provenance_path = None
 
+        def _notify_start(stage_name, description):
+            if progress_callback:
+                try:
+                    progress_callback.on_stage_start(stage_name, description)
+                except Exception:
+                    pass
+
+        def _notify_complete(stage_name, result):
+            if progress_callback:
+                try:
+                    progress_callback.on_stage_complete(stage_name, result)
+                except Exception:
+                    pass
+
         try:
             # Stage 1: RETRIEVE
             if PipelineStage.RETRIEVE in stages:
+                _notify_start("retrieve", "Gathering your data")
                 result = self._execute_retrieve()
                 stage_results["retrieve"] = result
+                _notify_complete("retrieve", result)
                 if not result.success:
                     return self._build_result(
                         False, stage_results, translation_results, None, start_time
@@ -1481,11 +1502,13 @@ class TranslationPipeline:
 
             # Stage 2: HARMONIZE
             if PipelineStage.HARMONIZE in stages:
+                _notify_start("harmonize", "Aligning and checking")
                 retrieved_data = stage_results.get("retrieve", StageResult(
                     stage=PipelineStage.RETRIEVE, success=True, data={}
                 )).data or {}
                 result = self._execute_harmonize(retrieved_data)
                 stage_results["harmonize"] = result
+                _notify_complete("harmonize", result)
                 if not result.success:
                     return self._build_result(
                         False, stage_results, translation_results, None, start_time
@@ -1493,6 +1516,7 @@ class TranslationPipeline:
 
             # Stage 3: TRANSLATE
             if PipelineStage.TRANSLATE in stages:
+                _notify_start("translate", "Building platform files")
                 unified_data = stage_results.get("harmonize", StageResult(
                     stage=PipelineStage.HARMONIZE, success=True, data=UnifiedData(region=None)
                 )).data
@@ -1500,7 +1524,7 @@ class TranslationPipeline:
                     translate_start = datetime.now()
                     translation_results = self._execute_translate(unified_data)
                     translate_duration = (datetime.now() - translate_start).total_seconds()
-                    stage_results["translate"] = StageResult(
+                    result = StageResult(
                         stage=PipelineStage.TRANSLATE,
                         success=all(r.success for r in translation_results.values()),
                         data=translation_results,
@@ -1512,19 +1536,25 @@ class TranslationPipeline:
                         ],
                         duration_seconds=translate_duration,
                     )
+                    stage_results["translate"] = result
+                    _notify_complete("translate", result)
 
             # Stage 4: VALIDATE
             if PipelineStage.VALIDATE in stages and translation_results:
+                _notify_start("validate", "Verifying outputs")
                 result = self._execute_validate(translation_results)
                 stage_results["validate"] = result
+                _notify_complete("validate", result)
 
             # Stage 5: PACKAGE
             if PipelineStage.PACKAGE in stages:
+                _notify_start("package", "Preparing your package")
                 unified_data = stage_results.get("harmonize", StageResult(
                     stage=PipelineStage.HARMONIZE, success=True, data=None
                 )).data
                 result = self._execute_package(unified_data, translation_results)
                 stage_results["package"] = result
+                _notify_complete("package", result)
                 if result.data:
                     provenance_path = result.data.get("provenance_path")
 
