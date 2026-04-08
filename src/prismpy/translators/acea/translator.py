@@ -416,9 +416,20 @@ class AceaTranslator(AceaTranslatorBase):
                 # NASA POWER's native resolution is ~0.5° (30-arcmin), so multiple
                 # 5-arcmin cells within the same 30-arcmin tile get identical data.
                 # This reduces API calls from ~244 to ~17 for Saint-Louis.
+                # Wire progress callback for substage reporting
+                def _acea_progress(current, total):
+                    cb = getattr(self, 'progress_callback', None)
+                    if cb and hasattr(cb, 'on_substage_progress'):
+                        cb.on_substage_progress(
+                            'translate',
+                            'Downloading climate from NASA POWER',
+                            current, total,
+                            f'cell {current} of {total}',
+                        )
                 downloaded_climate = self._download_climate_30arcmin(
                     data.grid, cell_ids_30arcmin, start_date, end_date,
                     request_delay=download_delay,
+                    progress_callback=_acea_progress,
                 )
 
                 # Merge with existing climate data
@@ -979,6 +990,7 @@ class AceaTranslator(AceaTranslatorBase):
         start_date: date,
         end_date: date,
         request_delay: float = 2.0,
+        progress_callback=None,
     ) -> Dict[int, 'ClimateTimeSeries']:
         """Download NASA POWER climate for unique 30-arcmin cells only.
 
@@ -1028,6 +1040,8 @@ class AceaTranslator(AceaTranslatorBase):
         # Download per unique 30-arcmin cell
         climate_30 = {}
         for i, (cell_id, (lat, lon)) in enumerate(centers_30.items()):
+            if progress_callback:
+                progress_callback(i + 1, len(centers_30))
             logger.info(f"Downloading climate for 30arcmin cell {i+1}/{len(centers_30)} "
                        f"(ID={cell_id}, lat={lat:.2f}, lon={lon:.2f})")
             try:

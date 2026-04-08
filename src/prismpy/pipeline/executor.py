@@ -1268,6 +1268,8 @@ class TranslationPipeline:
 
             translator = self._get_translator(platform)
             if translator:
+                # Pass progress callback to translator for substage reporting
+                translator.progress_callback = getattr(self, '_progress_callback', None)
                 try:
                     result = translator.translate(unified_data)
                     results[platform.value] = result
@@ -1463,6 +1465,7 @@ class TranslationPipeline:
         Returns:
             PipelineResult with all stage results and final status
         """
+        self._progress_callback = progress_callback
         start_time = datetime.now()
         stages = stages or list(PipelineStage)
 

@@ -139,7 +139,17 @@ class PythiaTranslator(PythiaTranslatorBase):
             if n_climate < n_sites and data.grid:
                 logger.info(f"Insufficient climate data ({n_climate}/{n_sites} sites), "
                            f"downloading from NASA POWER...")
-                climate_data = self._download_site_weather(data)
+                # Wire progress callback for substage reporting
+                def _pythia_progress(current, total):
+                    cb = getattr(self, 'progress_callback', None)
+                    if cb and hasattr(cb, 'on_substage_progress'):
+                        cb.on_substage_progress(
+                            'translate',
+                            'Downloading weather from NASA POWER',
+                            current, total,
+                            f'site {current} of {total}',
+                        )
+                climate_data = self._download_site_weather(data, progress_callback=_pythia_progress)
 
             if climate_data:
                 weather_files = self._generate_weather_files(climate_data)
