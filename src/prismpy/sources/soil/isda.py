@@ -185,6 +185,7 @@ class iSDASource(DataSource):
                     available_vars=available_vars,
                     grid_points=grid_points,
                     region=region,
+                    progress_callback=kwargs.get('progress_callback'),
                 )
                 isda_data.profiles = profiles
                 metadata["profile_count"] = len(profiles)
@@ -301,6 +302,7 @@ class iSDASource(DataSource):
         available_vars: Dict[str, Path],
         grid_points: List[Tuple[float, float]],
         region: Region,
+        progress_callback=None,
     ) -> Dict[int, SoilProfile]:
         """Extract soil profiles at grid points.
 
@@ -316,8 +318,11 @@ class iSDASource(DataSource):
 
         # Sample each variable at all points
         var_values = {}
-        for var_name, file_path in available_vars.items():
-            var_values[var_name] = self.sample_at_points(file_path, grid_points)
+        var_names = list(available_vars.keys())
+        for idx, var_name in enumerate(var_names):
+            if progress_callback:
+                progress_callback(idx + 1, len(var_names))
+            var_values[var_name] = self.sample_at_points(available_vars[var_name], grid_points)
 
         # Create profiles
         for i, (lat, lon) in enumerate(grid_points):

@@ -246,6 +246,7 @@ class TAMSATSource(DataSource):
                     end_date=end_date,
                     output_dir=data_dir,
                     region_name=region.name,
+                    progress_callback=kwargs.get('progress_callback'),
                 )
 
                 # Re-validate after download
@@ -462,6 +463,7 @@ class TAMSATSource(DataSource):
         end_date: date,
         output_dir: Path,
         region_name: str,
+        progress_callback=None,
     ) -> None:
         """Download TAMSAT data using SARRA_data_download library.
 
@@ -471,6 +473,7 @@ class TAMSATSource(DataSource):
             end_date: End date
             output_dir: Output directory
             region_name: Region name for file naming
+            progress_callback: Optional callback(current, total) for progress
         """
         import shutil
         from SARRA_data_download.get_satellite_rainfall_estimates import (
@@ -482,8 +485,10 @@ class TAMSATSource(DataSource):
         # SARRA_data_download expects area dict
         area = {region_name: bounds}
 
-        years = range(start_date.year, end_date.year + 1)
-        for year in years:
+        years = list(range(start_date.year, end_date.year + 1))
+        for i, year in enumerate(years):
+            if progress_callback:
+                progress_callback(i + 1, len(years))
             self.logger.info(f"Downloading TAMSAT data for {year}...")
             download_TAMSAT_year_parallel(year, area, region_name, str(output_dir))
 
