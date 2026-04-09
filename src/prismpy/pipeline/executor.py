@@ -23,6 +23,7 @@ from prismpy.models.region import Region
 from prismpy.models.climate import ClimateTimeSeries, ClimateRecord
 from prismpy.models.soil import SoilProfile, SoilLayer
 from prismpy.models.crop import CropParameters, CropCalendar
+from prismpy.models.provenance import DecisionType, OperationType
 from prismpy.provenance.tracker import ProvenanceTracker
 from prismpy.translators.base import (
     BaseTranslator,
@@ -484,7 +485,25 @@ class TranslationPipeline:
 
             # Load climate data
             self.logger.info("Loading climate data...")
+            # V2-19: dedicated artifact for climate lineage
+            if self.provenance.enabled:
+                self.provenance.start_artifact("climate", artifact_id="climate")
+                # V2-19 site #6: per-platform climate SOURCE_SELECTION decisions
+                self._record_climate_source_decisions()
             climate_data = self._load_climate_data(region)
+            # V2-19: record the climate retrieval transformation so any
+            # pending decisions recorded during _load_climate_data flush
+            if self.provenance.enabled:
+                self.provenance.record_retrieval(
+                    source="climate_sources",
+                    parameters={
+                        "n_locations": len(climate_data) if climate_data else 0,
+                        "enabled_platforms": [
+                            p.value for p in self.config.get_enabled_platforms()
+                        ],
+                    },
+                    artifact_id="climate",
+                )
             if climate_data:
                 data["climate"] = climate_data
                 self.logger.info(f"Loaded climate data for {len(climate_data)} locations")
@@ -500,7 +519,20 @@ class TranslationPipeline:
 
             # Load soil data
             self.logger.info("Loading soil data...")
+            # V2-19: dedicated artifact for soil lineage
+            if self.provenance.enabled:
+                self.provenance.start_artifact("soil", artifact_id="soil")
             soil_data = self._load_soil_data(region)
+            # V2-19: record the soil retrieval transformation to flush
+            # any pending decisions recorded during _load_soil_data
+            if self.provenance.enabled:
+                self.provenance.record_retrieval(
+                    source="soil_sources",
+                    parameters={
+                        "n_profiles": len(soil_data) if soil_data else 0,
+                    },
+                    artifact_id="soil",
+                )
             if soil_data:
                 data["soil"] = soil_data
                 self.logger.info(f"Loaded soil data for {len(soil_data)} profiles")
@@ -560,6 +592,72 @@ class TranslationPipeline:
             warnings=warnings,
             duration_seconds=duration,
         )
+
+    def _record_climate_source_decisions(self) -> None:
+        """V2-19 site #6: record per-platform climate SOURCE_SELECTION.
+
+        For each enabled platform, emit a decision documenting which
+        climate source(s) will be used. This surfaces the platform-
+        climate mapping that is otherwise buried in platform config.
+
+        The mapping is:
+        - SARRA-Py → TAMSAT v3.1 (rainfall) + AgERA5 (temperature, radiation)
+        - CRAFT, PYTHIA, ACEA → NASA POWER v9 (all variables)
+
+        Mappings come from Platform Defaults documented in the README
+        and enforced in the respective translators.
+        """
+        if not self.provenance or not self.provenance.enabled:
+            return
+
+        from prismpy.config.schema import Platform
+
+        # Climate source mapping per platform
+        climate_map = {
+            Platform.SARRA_PY: (
+                "TAMSAT v3.1 + AgERA5",
+                "SARRA-Py requires high-resolution rainfall (TAMSAT 4km) "
+                "and standard meteorological variables (AgERA5 9km). "
+                "NASA POWER is too coarse (~55km) for SARRA-Py's intended "
+                "field-scale simulations.",
+                ["NASA POWER (rejected: too coarse)"],
+            ),
+            Platform.CRAFT: (
+                "NASA POWER v9",
+                "CRAFT uses NASA POWER because it provides a single "
+                "unified source for all required variables (Tmax, Tmin, "
+                "precipitation, solar radiation) with consistent spatial "
+                "coverage. CRAFT runs at the administrative unit level, "
+                "so NASA POWER's ~55km resolution is acceptable.",
+                ["TAMSAT + AgERA5 (higher resolution but multi-source)"],
+            ),
+            Platform.PYTHIA: (
+                "NASA POWER v9",
+                "PYTHIA uses NASA POWER for per-site weather downloads. "
+                "Each grid cell centroid is queried individually at "
+                "translate time.",
+                ["TAMSAT + AgERA5"],
+            ),
+            Platform.ACEA: (
+                "NASA POWER v9",
+                "ACEA uses NASA POWER for per-cell weather at the 30-arcmin "
+                "grid level. Downloads happen at translate time.",
+                ["TAMSAT + AgERA5"],
+            ),
+        }
+
+        for platform in self.config.get_enabled_platforms():
+            if platform not in climate_map:
+                continue
+            source, rationale, alternatives = climate_map[platform]
+            self.provenance.record_decision(
+                decision_type=DecisionType.SOURCE_SELECTION,
+                description=f"Climate source for {platform.value}: {source}",
+                rationale=rationale,
+                alternatives=alternatives,
+                reference=f"prismpy.pipeline.executor._record_climate_source_decisions",
+                artifact_id="climate",
+            )
 
     def _load_climate_data(self, region: Region) -> Optional[Dict[str, Any]]:
         """Load climate data from configured paths or sources.
@@ -639,9 +737,15 @@ class TranslationPipeline:
                 tamsat = TAMSATSource(cache_dir=cache_dir, provenance=self.provenance)
                 if tamsat.sarra_download_available:
                     self.logger.info("Downloading TAMSAT rainfall data...")
+                    def _tamsat_progress(current, total):
+                        if self._progress_callback:
+                            self._progress_callback.on_substage_progress(
+                                'retrieve', 'Downloading TAMSAT rainfall',
+                                current, total, f'year {current} of {total}')
                     tamsat_result = tamsat.retrieve(
                         region=region, start_date=start_date,
                         end_date=end_date, download=True,
+                        progress_callback=_tamsat_progress,
                     )
                     if tamsat_result.success and tamsat_result.data:
                         climate_data["rainfall_dir"] = tamsat_result.data.data_dir
@@ -660,9 +764,15 @@ class TranslationPipeline:
                 agera5 = AgERA5Source(cache_dir=cache_dir, provenance=self.provenance)
                 if agera5.sarra_download_available:
                     self.logger.info("Downloading AgERA5 temperature data...")
+                    def _agera5_progress(current, total):
+                        if self._progress_callback:
+                            self._progress_callback.on_substage_progress(
+                                'retrieve', 'Downloading AgERA5 temperature',
+                                current, total, f'year {current} of {total}')
                     agera5_result = agera5.retrieve(
                         region=region, start_date=start_date,
                         end_date=end_date, download=True,
+                        progress_callback=_agera5_progress,
                     )
                     if agera5_result.success and agera5_result.data:
                         climate_data["agera5_dir"] = agera5_result.data.data_dir
@@ -1074,11 +1184,51 @@ class TranslationPipeline:
                     1 for p in profiles.values()
                     if not p.metadata.get('is_default', False)
                 )
+                n_total = len(profiles)
+                n_fallback = n_total - n_real
                 self.logger.info(
                     f"HWSD: {n_real} real profiles, "
-                    f"{len(profiles) - n_real} defaults, "
-                    f"{len(profiles)} total for {len(cell_ids)} cells"
+                    f"{n_fallback} defaults, "
+                    f"{n_total} total for {len(cell_ids)} cells"
                 )
+
+                # V2-19 site #5: record HWSD fallback proportion as
+                # FALLBACK_SUBSTITUTION decision. This makes the count
+                # of cells using DEFAULT_SOIL visible in provenance output.
+                if self.provenance and self.provenance.enabled and n_fallback > 0:
+                    proportion = n_fallback / max(n_total, 1)
+                    above_threshold = proportion > 0.05
+                    rationale = (
+                        f"HWSD DEFAULT_SOIL Sahel-typical profile was "
+                        f"substituted for {n_fallback} of {n_total} cells "
+                        f"({proportion * 100:.1f}%) where the HWSD BIL raster "
+                        f"lookup returned no Soil Mapping Unit (SMU). "
+                        f"This is a silent substitution with fixed values "
+                        f"(sand=60%, clay=18%, silt=22%, SOC=0.5%, pH=6.5, "
+                        f"BD=1.4 g/cm³). "
+                    )
+                    if above_threshold:
+                        rationale += (
+                            f"⚠️ Above 5% reviewer threshold — consider an "
+                            f"alternative soil source (iSDA 30m) or document "
+                            f"fallback locations explicitly in methods."
+                        )
+                    self.provenance.record_decision(
+                        decision_type=DecisionType.FALLBACK_SUBSTITUTION,
+                        description=(
+                            f"HWSD DEFAULT_SOIL fallback: {n_fallback}/{n_total} "
+                            f"cells ({proportion * 100:.1f}%)"
+                        ),
+                        rationale=rationale,
+                        alternatives=[
+                            "iSDA 30m (higher resolution, preferred for Africa)",
+                            "Regional soil-default library (V2-20)",
+                            "Interpolation from neighbouring cells (not implemented)",
+                        ],
+                        reference="prismpy.sources.soil.hwsd.DEFAULT_SOIL",
+                        artifact_id="soil",
+                    )
+
                 return profiles
             else:
                 self.logger.warning(f"HWSD retrieval failed: {result.errors}")
@@ -1181,6 +1331,10 @@ class TranslationPipeline:
 
             grid = None
             if region:
+                # V2-19: start grid artifact so grid-creation decisions bind here
+                if self.provenance.enabled:
+                    self.provenance.start_artifact("grid", artifact_id="grid")
+
                 # Get clip geometry from region if available (for polygon clipping)
                 clip_geometry = None
                 if hasattr(region, 'geometry_wkt') and region.geometry_wkt:
@@ -1201,17 +1355,111 @@ class TranslationPipeline:
                 )
                 self.logger.info(f"Created grid with {grid.n_cells} cells")
 
+                # V2-19 site #3: record AGGREGATION_METHOD decision for grid
+                # creation. The 5-arcmin resolution is hardcoded (not
+                # per-platform configurable) because all downstream
+                # platforms either use 5-arcmin directly or map to coarser
+                # grids internally at translate time.
+                if self.provenance.enabled:
+                    self.provenance.record_decision(
+                        decision_type=DecisionType.AGGREGATION_METHOD,
+                        description=(
+                            f"5-arcmin uniform grid ({grid.n_cells} cells) "
+                            f"within region bounds"
+                        ),
+                        rationale=(
+                            "5-arcmin is the hardcoded canonical grid resolution "
+                            "in prismpy. It maximises boundary precision for "
+                            "small regions and is compatible with all target "
+                            "platforms. Platforms requiring coarser grids "
+                            "(e.g., ACEA 30-arcmin) handle resolution mapping "
+                            "internally at translate time."
+                        ),
+                        alternatives=[
+                            "30-arcmin (ACEA native)",
+                            "0.5-degree (NASA POWER native)",
+                            "Per-platform native resolution (more complex)",
+                        ],
+                        reference="prismpy.pipeline.executor._execute_harmonize",
+                    )
+                    self.provenance.record_transformation(
+                        operation=OperationType.BUILD_GRID,
+                        parameters={
+                            "resolution": "5arcmin",
+                            "n_cells": grid.n_cells,
+                            "clipped": clip_geometry is not None,
+                            "bounds": region.bounds.to_gis_format()
+                            if hasattr(region.bounds, "to_gis_format") else None,
+                        },
+                        artifact_id="grid",
+                    )
+
             # Retrieve per-cell soil data: try iSDA API first (Africa, 30m),
             # then HWSD fallback (global, 1km)
             soil_data = retrieved_data.get("soil")
             if grid and region:
+                # V2-19: switch current artifact back to soil for soil-cascade
+                # decisions to bind correctly
+                if self.provenance.enabled:
+                    self.provenance._current_artifact_id = "soil"
+
                 isda_soil = self._retrieve_isda_api_for_grid(grid, region)
                 if isda_soil:
                     soil_data = isda_soil
+                    # V2-19 site #4: SOURCE_SELECTION for soil cascade
+                    if self.provenance.enabled:
+                        self.provenance.record_decision(
+                            decision_type=DecisionType.SOURCE_SELECTION,
+                            description=(
+                                f"Soil source: iSDA Africa (30m) — {len(isda_soil)} cells"
+                            ),
+                            rationale=(
+                                "iSDA provides 30-metre soil properties for continental "
+                                "Africa, the highest resolution available for the region. "
+                                "Used as the primary source when available."
+                            ),
+                            alternatives=["HWSD v2.0 (1km, global fallback)"],
+                            reference="prismpy.sources.soil.isda",
+                            artifact_id="soil",
+                        )
                 else:
                     hwsd_soil = self._retrieve_hwsd_for_grid(grid, region)
                     if hwsd_soil:
                         soil_data = hwsd_soil
+                        # V2-19 site #4: SOURCE_SELECTION falling back to HWSD
+                        if self.provenance.enabled:
+                            self.provenance.record_decision(
+                                decision_type=DecisionType.SOURCE_SELECTION,
+                                description=(
+                                    f"Soil source: HWSD v2.0 (1km, fallback) — "
+                                    f"{len(hwsd_soil)} cells"
+                                ),
+                                rationale=(
+                                    "HWSD v2.0 was used as the soil source because "
+                                    "iSDA was not available (iSDA retrieval returned "
+                                    "no profiles for this region)."
+                                ),
+                                alternatives=["iSDA Africa (30m, preferred when available)"],
+                                reference="prismpy.sources.soil.hwsd",
+                                artifact_id="soil",
+                            )
+
+                # V2-19: record the soil cascade transformation to flush
+                # any pending decisions (including fallback records from
+                # HWSD per-cell lookups)
+                if self.provenance.enabled:
+                    self.provenance.record_transformation(
+                        operation=OperationType.RETRIEVE,
+                        parameters={
+                            "cascade": "iSDA→HWSD",
+                            "final_source": (
+                                "iSDA" if isda_soil else
+                                "HWSD" if soil_data else "none"
+                            ),
+                            "n_profiles": len(soil_data) if soil_data else 0,
+                        },
+                        artifact_id="soil",
+                    )
 
             unified_data = UnifiedData(
                 region=region,
@@ -1270,9 +1518,37 @@ class TranslationPipeline:
             if translator:
                 # Pass progress callback to translator for substage reporting
                 translator.progress_callback = getattr(self, '_progress_callback', None)
+
+                # V2-19: start a dedicated artifact for this platform's translation
+                # output. This gives the FORMAT_CHOICE decision emitted by the
+                # translator (translators/*/translator.py:record_decision) a home,
+                # and the record_transformation(TRANSLATE) flush below drains it.
+                output_artifact = f"output_{platform.value}"
+                if self.provenance.enabled:
+                    self.provenance.start_artifact(
+                        artifact_type=output_artifact,
+                        artifact_id=output_artifact,
+                    )
+
                 try:
                     result = translator.translate(unified_data)
                     results[platform.value] = result
+
+                    # V2-19: explicit TRANSLATE transformation flushes pending
+                    # decisions (including the translator's FORMAT_CHOICE call)
+                    # into this output artifact's lineage.
+                    if self.provenance.enabled:
+                        self.provenance.record_transformation(
+                            operation=OperationType.TRANSLATE,
+                            parameters={
+                                "platform": platform.value,
+                                "region": self.config.region.name,
+                                "output_files": len(result.output_files)
+                                if hasattr(result, "output_files") else 0,
+                                "success": result.success,
+                            },
+                            artifact_id=output_artifact,
+                        )
                 except Exception as e:
                     self.logger.error(f"Translation error for {platform.value}: {e}")
                     from prismpy.translators.base import TranslationResult
@@ -1285,6 +1561,21 @@ class TranslationPipeline:
                         warnings=[],
                         metadata={},
                     )
+                    # V2-19: still flush pending decisions on failure
+                    if self.provenance.enabled:
+                        try:
+                            self.provenance.record_transformation(
+                                operation=OperationType.TRANSLATE,
+                                parameters={
+                                    "platform": platform.value,
+                                    "region": self.config.region.name,
+                                    "error": str(e),
+                                    "success": False,
+                                },
+                                artifact_id=output_artifact,
+                            )
+                        except Exception:
+                            pass  # never crash on provenance errors
             else:
                 # Create placeholder result for unimplemented translator
                 from prismpy.translators.base import TranslationResult
@@ -1567,6 +1858,19 @@ class TranslationPipeline:
                 False, stage_results, translation_results, None, start_time,
                 error=str(e)
             )
+        finally:
+            # V2-19 improvement 3 + 4: guarantee pending decisions flush
+            # on all exit paths (success, failure, exception). This creates
+            # a synthetic "pipeline" artifact for any straggler decisions
+            # recorded after the last transformation completed.
+            try:
+                if self.provenance and self.provenance.enabled:
+                    self.provenance.finalize()
+            except Exception as finalize_exc:
+                self.logger.warning(
+                    "Provenance finalize() failed (non-fatal): %s",
+                    finalize_exc,
+                )
 
         # Determine overall success
         success = all(r.success for r in stage_results.values())

@@ -23,6 +23,7 @@ class OperationType(str, Enum):
     TRANSLATE = "translate"
     VALIDATE = "validate"
     AGGREGATE = "aggregate"
+    BUILD_GRID = "build_grid"  # V2-19: grid creation transformation
 
 
 class DecisionType(str, Enum):
@@ -35,6 +36,10 @@ class DecisionType(str, Enum):
     QUALITY_THRESHOLD = "quality_threshold"
     PARAMETER_OVERRIDE = "parameter_override"
     FORMAT_CHOICE = "format_choice"
+    # V2-19 additions — additive, no breaking changes
+    FALLBACK_SUBSTITUTION = "fallback_substitution"  # Silent substitution when primary source fails (distinct from DEFAULT_VALUE)
+    UNIT_CONVERSION = "unit_conversion"              # Unit conversions (iSDA bd/100, pH/10, W/m² → MJ/m²/day)
+    AGGREGATION_METHOD = "aggregation_method"        # Aggregation choice (mean/sum/majority) distinct from RESAMPLING
 
 
 @dataclass
