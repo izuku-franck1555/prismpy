@@ -12,6 +12,13 @@ AgERA5 provides daily climate variables at ~10km resolution including:
 Primarily used by SARRA-Py for temperature and radiation data.
 
 Reference: SARRA-Py/02-WEATHER-PREPARATION/ implementation patterns.
+
+V2-19 note on CDS API configuration:
+    The ``AgERA5Config.dataset`` field below is the SINGLE SOURCE OF TRUTH
+    for the CDS dataset name ("sis-agrometeorological-indicators"). The
+    previous stale duplicate in ``config/defaults.py`` (CDS_API_CONFIG,
+    which had dataset="reanalysis-era5-land") was deleted in V2-19
+    CD-13 — it was never imported and drifted from this file's value.
 """
 
 import glob

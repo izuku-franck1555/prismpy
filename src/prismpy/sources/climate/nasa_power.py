@@ -5,6 +5,15 @@ This module provides functionality to download daily climate data from the
 NASA POWER (Prediction of Worldwide Energy Resources) API.
 
 Reference: PYTHIA/02-WEATHER-PREPARATION/ and ACEA/02-CLIMATE-PREPARATION/
+
+V2-19 note on climate validation:
+    After V2-19 deletions (config/defaults.py CLIMATE_VALIDATION_RANGES
+    removed as dead code; harmonizers/quality.py CLIMATE_LIMITS module
+    deleted wholesale), climate validation is distributed as inline
+    ad-hoc checks below (search for "range" or "bounds" in the module).
+    No centralized source-of-truth table exists. Add one via
+    sources/climate/_quality.py if centralization is ever needed
+    (tracked as V2-20 carryover).
 """
 
 import json
@@ -159,6 +168,37 @@ class NASAPowerSource(DataSource):
             # Use center of region
             lon, lat = region.bounds.center
             metadata["coordinate_source"] = "region_center"
+            # V2-19 B0 finding #2: NASA POWER center-point sampling is
+            # an implicit decision — the full region is reduced to a
+            # single (lat, lon) without uncertainty quantification from
+            # interior variability. Recorded here with a basic factual
+            # rationale; V2-19 C-group C6/RN-04 refines this with the
+            # full scientific justification to meet AC11 bar.
+            if self.provenance:
+                self.provenance.record_decision(
+                    decision_type=DecisionType.SOURCE_SELECTION,
+                    description=(
+                        "NASA POWER: single time series from region centre"
+                    ),
+                    rationale=(
+                        "The region bounding-box centre is used as the "
+                        "query point for NASA POWER's /point endpoint. "
+                        "Climate is assumed spatially homogeneous across "
+                        "the region at the 0.5° NASA POWER grid scale. "
+                        "Rationale to be refined to meet AC11 bar during "
+                        "V2-19 C-group review (C6/RN-04)."
+                    ),
+                    alternatives=[
+                        "Query NASA POWER at every grid cell (API-expensive)",
+                        "Use AgERA5 gridded fields (higher resolution)",
+                        "Multi-point sampling with spatial interpolation",
+                    ],
+                    reference=(
+                        "prismpy.sources.climate.nasa_power.NASAPowerSource."
+                        "retrieve line ~169 (region.bounds.center)"
+                    ),
+                    artifact_id="climate",
+                )
         else:
             metadata["coordinate_source"] = "explicit"
 

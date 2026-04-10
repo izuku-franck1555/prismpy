@@ -213,6 +213,85 @@ class TestSarraPyValidator:
         # Should not have bounding box format errors
         assert all(i.severity != 'error' for i in bbox_errors)
 
+    def test_provenance_stages_missing_warns(self, valid_sarra_py_config):
+        """V2-19 AC16 Scenario B: missing provenance_stages.json must warn.
+
+        The V2-19 dual-output save_json() is supposed to emit both
+        provenance.json (rich System A) and provenance_stages.json
+        (legacy System B compat). A validator that silently accepts a
+        missing stages file would hide synthesis failures.
+        """
+        # The valid_sarra_py_config fixture creates provenance.json
+        # but not provenance_stages.json. Assert the file is indeed
+        # absent (precondition) then run the validator.
+        stages_path = valid_sarra_py_config / "provenance_stages.json"
+        assert not stages_path.exists(), (
+            "fixture precondition: provenance_stages.json must not exist"
+        )
+
+        validator = SarraPyValidator(valid_sarra_py_config)
+        issues = validator._validate_package_files()
+
+        # Find the AC16 warning by matching on its distinctive message fragment.
+        matching = [
+            i for i in issues
+            if i.severity == 'warning'
+            and 'provenance_stages.json missing' in i.message
+        ]
+        assert matching, (
+            "expected a warning about missing provenance_stages.json, "
+            f"got issues: {[(i.severity, i.message) for i in issues]}"
+        )
+        # The warning must reference the expected file path.
+        assert matching[0].file_path == stages_path
+
+    def test_provenance_stages_present_no_warn(self, valid_sarra_py_config):
+        """V2-19 AC16 Scenario A: happy path — valid stages file, no warning.
+
+        Complement to Scenario B: when the dual-output file is present
+        with a well-formed {"stages": []} body, the validator must NOT
+        emit the Scenario-B warning.
+        """
+        stages_path = valid_sarra_py_config / "provenance_stages.json"
+        stages_path.write_text(json.dumps({"stages": []}))
+
+        validator = SarraPyValidator(valid_sarra_py_config)
+        issues = validator._validate_package_files()
+
+        missing_warnings = [
+            i for i in issues
+            if 'provenance_stages.json missing' in i.message
+        ]
+        assert not missing_warnings, (
+            "happy path must not emit the Scenario-B missing-file warning, "
+            f"got: {[i.message for i in missing_warnings]}"
+        )
+
+    def test_provenance_stages_missing_stages_field_warns(
+        self, valid_sarra_py_config
+    ):
+        """V2-19 AC16 Scenario C: empty {} file warns about missing field.
+
+        A malformed stages file that is valid JSON but lacks the
+        "stages" key should emit a distinct warning about the missing
+        field (not the Scenario-B "missing file" warning).
+        """
+        stages_path = valid_sarra_py_config / "provenance_stages.json"
+        stages_path.write_text("{}")
+
+        validator = SarraPyValidator(valid_sarra_py_config)
+        issues = validator._validate_package_files()
+
+        field_warnings = [
+            i for i in issues
+            if i.severity == 'warning'
+            and "missing 'stages' field" in i.message
+        ]
+        assert field_warnings, (
+            "expected a warning about missing 'stages' field, "
+            f"got: {[(i.severity, i.message) for i in issues]}"
+        )
+
 
 # =============================================================================
 # CRAFT Validator Tests

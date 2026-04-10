@@ -45,17 +45,11 @@ DEFAULT_SPINUP_YEARS = 2
 # Climate Defaults
 # =============================================================================
 
-# Validation ranges for climate variables
-CLIMATE_VALIDATION_RANGES = {
-    "tmax": (-40, 60),      # Max temperature (°C)
-    "tmin": (-50, 50),      # Min temperature (°C)
-    "tmean": (-45, 55),     # Mean temperature (°C)
-    "precip": (0, 500),     # Daily precipitation (mm)
-    "srad": (0, 40),        # Solar radiation (MJ/m²/day)
-    "wind": (0, 30),        # Wind speed (m/s)
-    "rh": (0, 100),         # Relative humidity (%)
-    "et0": (0, 20),         # Reference ET (mm/day)
-}
+# V2-19 CD-05: CLIMATE_VALIDATION_RANGES was deleted as dead code.
+# It was never imported anywhere. Centralized climate validation is now
+# distributed as inline checks in sources/climate/nasa_power.py. If
+# centralization is ever needed, add sources/climate/_quality.py as the
+# canonical source-of-truth (tracked as V2-20 carryover).
 
 # Gap-filling parameters
 GAP_FILL_CONFIG = {
@@ -150,11 +144,11 @@ NASA_POWER_CONFIG = {
     ],
 }
 
-CDS_API_CONFIG = {
-    "dataset": "reanalysis-era5-land",
-    "timeout": 300,
-    "retry_count": 3,
-}
+# V2-19 CD-13: CDS_API_CONFIG was deleted as dead code.
+# It was never imported anywhere, and its "dataset" value
+# ("reanalysis-era5-land") drifted from the actual dataset used by
+# sources/climate/agera5.py ("sis-agrometeorological-indicators").
+# The live CDS API config is now the single source of truth in agera5.py.
 
 # =============================================================================
 # Output Format Defaults

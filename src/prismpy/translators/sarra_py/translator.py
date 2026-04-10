@@ -493,6 +493,38 @@ class SarraPyTranslator(SarraPyTranslatorBase):
                     silt_values.append(surface.silt)
                 depths.append(profile.total_depth or 1.5)
 
+        # V2-19 B0 finding #5: SARRA-Py aggregates per-cell soil
+        # properties across the region using an unweighted arithmetic
+        # mean (np.mean). This collapses spatial variability to a
+        # single regional value without area weighting or profile-count
+        # weighting. Record the implicit choice explicitly.
+        if sand_values and self.provenance:
+            self.provenance.record_decision(
+                decision_type=DecisionType.AGGREGATION_METHOD,
+                description=(
+                    "SARRA-Py regional soil: unweighted arithmetic mean "
+                    f"of {len(sand_values)} surface-layer profiles"
+                ),
+                rationale=(
+                    "Surface sand/clay/silt values across the region are "
+                    "reduced with np.mean (no area weighting, no depth "
+                    "weighting, no category-aware grouping). SARRA-Py "
+                    "consumes a single region-level soil parameter set, "
+                    "so all spatial variability is collapsed to the mean "
+                    "here — the regional model's spatial resolution is "
+                    "coarser than this aggregation step."
+                ),
+                alternatives=[
+                    "Area-weighted mean (requires cell-area computation)",
+                    "Per-cell soil parameters (not supported by SARRA-Py config)",
+                    "Dominant soil class by majority vote (categorical only)",
+                ],
+                reference=(
+                    "prismpy.translators.sarra_py.translator "
+                    "line ~504 (np.mean(sand_values/clay_values/silt_values))"
+                ),
+            )
+
         # Calculate regional averages
         soil_params = {
             "source": "isda",

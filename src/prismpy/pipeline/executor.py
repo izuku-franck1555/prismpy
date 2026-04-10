@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 import logging
 
 from prismpy.config.schema import ProjectConfig, Platform
@@ -659,6 +659,92 @@ class TranslationPipeline:
                 artifact_id="climate",
             )
 
+    # V2-19 B1: Source native resolutions (for effective-resolution warning).
+    # Values are in decimal degrees at the equator. Where a source is
+    # documented in km rather than degrees, the km→degrees conversion uses
+    # 1° ≈ 111 km.
+    _SOURCE_RESOLUTIONS_DEG: Dict[str, float] = {
+        "NASA POWER": 0.5,            # ~55 km
+        "AgERA5": 0.1,                # ~10 km
+        "TAMSAT": 0.0375,             # ~4 km
+        "HWSD": 1.0 / 111.0,          # 1 km → ~0.009°
+        "iSDA": 30.0 / 111000.0,      # 30 m → ~0.00027°
+    }
+
+    def _record_effective_resolution_warning(
+        self,
+        target_resolution_deg: float,
+        target_resolution_label: str,
+        active_sources: List[str],
+    ) -> None:
+        """V2-19 B1: emit effective-resolution warning when target grid is finer than source.
+
+        When the target grid resolution is finer than a source's native
+        resolution, neighbouring cells will share identical values —
+        the effective resolution is the SOURCE's native resolution, not
+        the target grid. Surfacing this prevents users from interpreting
+        results at a finer spatial scale than the data actually supports.
+
+        Per crop-modeling-specialist: this is "the single highest-value
+        feature PRISM could ship." The warning being noisy is the feature,
+        not the bug — it fires whenever source ≠ target native resolution.
+
+        Args:
+            target_resolution_deg: Target grid resolution in decimal degrees
+            target_resolution_label: Human label (e.g., "5-arcmin (~9 km)")
+            active_sources: Names of sources that contributed data for this run
+        """
+        if not self.provenance or not self.provenance.enabled:
+            return
+
+        # For each active source, check if target is finer than its native
+        coarser_sources: List[Tuple[str, float]] = []
+        for source in active_sources:
+            src_res = self._SOURCE_RESOLUTIONS_DEG.get(source)
+            if src_res is None:
+                continue
+            if target_resolution_deg < src_res:
+                coarser_sources.append((source, src_res))
+
+        if not coarser_sources:
+            return  # target is coarser or equal to all sources — no warning
+
+        # Build the warning message and rationale
+        lines = [
+            f"Effective-resolution warning: target grid {target_resolution_label} "
+            f"is finer than source native resolution for:"
+        ]
+        for src, res in coarser_sources:
+            native_km = res * 111.0
+            lines.append(
+                f"  - {src}: native {res:.4f}° (~{native_km:.0f} km) — "
+                f"neighbouring cells share identical values; effective "
+                f"resolution is ~{native_km:.0f} km, NOT "
+                f"~{target_resolution_deg * 111.0:.0f} km"
+            )
+        lines.append(
+            "Consider aggregating results to the native resolution of the "
+            "coarsest source before interpreting per-cell values."
+        )
+        message = "\n".join(lines)
+
+        self.logger.warning(message)
+        self.provenance.record_decision(
+            decision_type=DecisionType.SOURCE_SELECTION,
+            description=(
+                f"Effective resolution WARNING: target {target_resolution_label} "
+                f"finer than {len(coarser_sources)} source(s)"
+            ),
+            rationale=message,
+            alternatives=[
+                "Aggregate results to coarsest source native resolution",
+                "Use only sources with native resolution ≥ target",
+                "Accept apparent-vs-effective mismatch and document explicitly",
+            ],
+            reference="prismpy.pipeline.executor._record_effective_resolution_warning",
+            artifact_id="grid",
+        )
+
     def _load_climate_data(self, region: Region) -> Optional[Dict[str, Any]]:
         """Load climate data from configured paths or sources.
 
@@ -930,6 +1016,186 @@ class TranslationPipeline:
 
         return {0: profile}
 
+    # V2-19 B3: iSDA Africa coverage bounding box.
+    # Wider-with-fallback policy (per crop-modeling-specialist recommendation):
+    # includes continental Africa + Madagascar + offshore island states.
+    # Regions outside the bbox skip iSDA and fall through to HWSD.
+    # Canary Islands (~-17°W, 28°N) are inside the bbox but iSDA has no data
+    # there — the per-cell NoData skip at sample_at_points handles that
+    # edge case gracefully (empty profiles → HWSD fallback via the outer cascade).
+    ISDA_AFRICA_BBOX = (-20.0, -40.0, 55.0, 40.0)  # (minx, miny, maxx, maxy)
+
+    def _region_in_isda_coverage(self, region: Region) -> bool:
+        """Check if a region's bounding box intersects iSDA's Africa coverage.
+
+        Returns True if any part of the region bbox overlaps the continental
+        Africa bbox (-20°W to 55°E, -40°S to 40°N). Uses axis-aligned bbox
+        intersection — a cheap, correct check for convex rectangular regions.
+        """
+        b = region.bounds
+        minx, miny, maxx, maxy = self.ISDA_AFRICA_BBOX
+        return (
+            b.maxx > minx and b.minx < maxx
+            and b.maxy > miny and b.miny < maxy
+        )
+
+    def _ensure_isda_1km_cache(
+        self,
+        prop_name: str,
+        target_dir: Path,
+    ) -> Optional[Path]:
+        """Ensure an iSDA 1km-resampled COG is available locally for ``prop_name``.
+
+        Implements the Tier 1 / Tier 2 portion of the iSDA 3-tier cascade:
+
+          * **Tier 1** — return the existing cache file if it is present and
+            non-empty.
+          * **Tier 2** — open the S3 COG and read the data at ~1 km via the
+            COG overview pyramid, then save it locally with an atomic
+            ``tmp → rename`` write.
+          * **Tier 3 fallback** — return ``None`` on any failure. The caller
+            falls through to direct 30 m per-pixel reads from the same S3 COG.
+
+        The atomic ``tmp → rename`` prevents corrupted cache files if the
+        process dies mid-download. Concurrent pipeline runs hitting the same
+        cache directory are safe because POSIX rename is atomic — at worst
+        the download work is duplicated, never the resulting file.
+
+        The target resolution is computed CRS-aware: geographic CRS use
+        ``1/111 ≈ 0.00903°`` (1 km at the equator; at Africa's maximum
+        latitude of ±37° one degree shrinks to ~89 km, producing a slightly
+        finer-than-1 km grid near the Atlas and Cape regions — acceptable
+        for average-resampled soil variables). Projected CRS use 1000 m.
+
+        ``Resampling.average`` is the correct choice for continuous soil
+        variables (sand/clay/silt/pH/bulk density/organic carbon). Categorical
+        rasters (e.g. SPAM crop masks) would require ``Resampling.nearest``,
+        which is out of scope for this helper.
+
+        Args:
+            prop_name: iSDA property name (sand_content, clay_content, etc.).
+            target_dir: Cache directory — will be created if missing.
+
+        Returns:
+            ``Path`` to the 1 km cache file if Tier 1 or Tier 2 succeeded,
+            ``None`` if both failed (caller should fall back to Tier 3).
+        """
+        cache_file = target_dir / f"{prop_name}_1km.tif"
+
+        # Tier 1: existing non-empty cache
+        if cache_file.exists() and cache_file.stat().st_size > 0:
+            return cache_file
+
+        # Tier 2: download via COG overview pyramid
+        try:
+            import rasterio
+            from rasterio.enums import Resampling
+        except ImportError:
+            self.logger.warning(
+                "rasterio unavailable for iSDA 1km cache download"
+            )
+            return None
+
+        s3_url = (
+            f"https://isdasoil.s3.amazonaws.com/soil_data/"
+            f"{prop_name}/{prop_name}.tif"
+        )
+
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.logger.warning(
+                f"iSDA cache: cannot create target dir {target_dir}: {exc}"
+            )
+            return None
+
+        tmp_file = cache_file.with_suffix(".tif.tmp")
+
+        try:
+            self.logger.info(
+                f"Downloading iSDA {prop_name} at ~1km via COG overview from S3..."
+            )
+            with rasterio.open(s3_url) as src:
+                # CRS-aware target resolution selection.
+                # Geographic (degrees): 1/111 ≈ 0.00903° (~1km at equator;
+                # ~89km per degree at Africa's max latitude ±37°, so slightly
+                # finer than 1km there — acceptable for average resampling).
+                # Projected (meters), e.g. iSDA's native EPSG:3857: 1000 m.
+                if src.crs and src.crs.is_geographic:
+                    target_res = 1.0 / 111.0
+                else:
+                    target_res = 1000.0
+
+                native_res = abs(src.transform.a)
+                if native_res <= 0:
+                    self.logger.warning(
+                        f"iSDA {prop_name}: invalid native resolution "
+                        f"{native_res}, aborting cache write"
+                    )
+                    return None
+
+                scale = native_res / target_res
+                out_height = max(1, int(src.height * scale))
+                out_width = max(1, int(src.width * scale))
+                if out_height < 10 or out_width < 10:
+                    self.logger.warning(
+                        f"iSDA {prop_name}: computed output "
+                        f"{out_height}x{out_width} too small, "
+                        f"aborting cache write"
+                    )
+                    return None
+
+                # Resampling.average is correct for continuous soil variables
+                # (sand/clay/silt/pH/bulk density/organic carbon).
+                data = src.read(
+                    out_shape=(src.count, out_height, out_width),
+                    resampling=Resampling.average,
+                )
+
+                # New transform for the downsampled grid.
+                new_transform = src.transform * src.transform.scale(
+                    src.width / out_width,
+                    src.height / out_height,
+                )
+
+                # Atomic write: tmp file then rename.
+                with rasterio.open(
+                    tmp_file, "w",
+                    driver="GTiff",
+                    height=out_height,
+                    width=out_width,
+                    count=src.count,
+                    dtype=src.dtypes[0],
+                    crs=src.crs,
+                    transform=new_transform,
+                    compress="LZW",
+                    nodata=src.nodata,
+                    tiled=True,
+                    blockxsize=256,
+                    blockysize=256,
+                ) as dst:
+                    dst.write(data)
+
+            tmp_file.rename(cache_file)
+            size_mb = cache_file.stat().st_size // (1024 * 1024)
+            self.logger.info(
+                f"  Cached iSDA {prop_name} 1km at {cache_file} (~{size_mb} MB)"
+            )
+            return cache_file
+
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(
+                f"iSDA 1km cache unavailable for {prop_name} "
+                f"({exc.__class__.__name__}: {exc}), "
+                f"falling back to 30m direct reads"
+            )
+            # Clean up partial tmp file on failure
+            try:
+                tmp_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return None
+
     def _retrieve_isda_api_for_grid(
         self, grid, region: Region
     ) -> Optional[Dict[int, SoilProfile]]:
@@ -944,7 +1210,12 @@ class TranslationPipeline:
 
         Scale factors: ph values ÷10, bulk_density ÷100, carbon_organic as-is (g/kg).
 
-        Only runs when SARRA-Py is enabled (iSDA is Africa-only).
+        V2-19 B3: runs whenever the study region's bounding box intersects
+        iSDA's Africa coverage (wider-with-fallback bbox). The previous
+        platform-based gate (SARRA-Py-only) was a misuse of geography —
+        iSDA's limitation is geographic (Africa-only), not platform-specific.
+        CRAFT/PYTHIA/ACEA users in Africa now also receive iSDA as the primary
+        soil source.
 
         Args:
             grid: SpatialGrid with cell coordinates
@@ -953,8 +1224,38 @@ class TranslationPipeline:
         Returns:
             Dictionary of cell_id -> SoilProfile, or None
         """
-        enabled = self.config.get_enabled_platforms()
-        if Platform.SARRA_PY not in enabled:
+        # V2-19 B3: geographic bbox gate replaces the platform-based gate.
+        # Previous code: `if Platform.SARRA_PY not in enabled: return None`
+        # was a misuse — iSDA's limitation is geographic, not platform-specific.
+        if not self._region_in_isda_coverage(region):
+            self.logger.info(
+                "Region %s outside iSDA Africa coverage (%s), skipping iSDA retrieval",
+                region.name,
+                region.bounds.to_gis_format()
+                if hasattr(region.bounds, "to_gis_format")
+                else "bbox unavailable",
+            )
+            # V2-19: record SOURCE_SELECTION documenting the geographic skip
+            # so the HWSD-fallback path is explicit in provenance.
+            if self.provenance and self.provenance.enabled:
+                self.provenance.record_decision(
+                    decision_type=DecisionType.SOURCE_SELECTION,
+                    description=(
+                        f"iSDA skipped: region {region.name} outside Africa bbox"
+                    ),
+                    rationale=(
+                        "iSDA provides 30-metre soil data for continental Africa "
+                        "only. The region's bounding box does not intersect the "
+                        "iSDA coverage bbox (-20°W to 55°E, -40°S to 40°N), so "
+                        "the request is skipped and the cascade falls through "
+                        "to HWSD v2.0 (1km global)."
+                    ),
+                    alternatives=[
+                        "HWSD 1km (geographic fallback — next in cascade)"
+                    ],
+                    reference="prismpy.pipeline.executor._retrieve_isda_api_for_grid",
+                    artifact_id="soil",
+                )
             return None
 
         try:
@@ -974,20 +1275,25 @@ class TranslationPipeline:
             "bulk_density": {"scale": 0.01, "unit": "g/cm3"},
         }
 
-        # Check for local 1km files first (PRISMWEB_DATA_DIR/isda/)
-        local_isda_dir = None
-        for search_dir in [
-            Path(self.config.data_sources.cache_dir).parent / "isda" if hasattr(self.config.data_sources, 'cache_dir') and self.config.data_sources.cache_dir else None,
-            Path("data/isda"),
-            Path(__file__).resolve().parents[4] / "data" / "isda",
-        ]:
-            if search_dir and search_dir.exists():
-                # Check if all property files exist locally
-                local_files = {p: search_dir / f"{p}_1km.tif" for p in PROPERTIES}
-                if all(f.exists() for f in local_files.values()):
-                    local_isda_dir = search_dir
-                    self.logger.info(f"Found local iSDA 1km data at {search_dir}")
-                    break
+        # V2-19 B3 v2: 3-tier cascade for iSDA data access.
+        #   Tier 1 — existing local 1km cache file (fast, no network)
+        #   Tier 2 — download 1km via COG overview pyramid + atomic cache write
+        #   Tier 3 — direct 30m per-pixel reads from S3 (slow fallback)
+        #
+        # Each property is resolved independently, so a single property that
+        # fails Tier 2 doesn't block the others. Partial failures are recorded
+        # as FALLBACK_SUBSTITUTION decisions after the loop.
+        if hasattr(self.config.data_sources, 'cache_dir') and self.config.data_sources.cache_dir:
+            cache_parent = Path(self.config.data_sources.cache_dir).parent
+            cache_target_dir = cache_parent / "isda"
+        else:
+            cache_target_dir = Path(__file__).resolve().parents[4] / "data" / "isda"
+
+        prop_cache_files: Dict[str, Optional[Path]] = {}
+        for prop_name in PROPERTIES:
+            prop_cache_files[prop_name] = self._ensure_isda_1km_cache(
+                prop_name, cache_target_dir
+            )
 
         cells = grid.cells if grid else []
         if not cells:
@@ -1003,17 +1309,90 @@ class TranslationPipeline:
         total = len(cells)
         self.logger.info(f"Reading iSDA soil data from S3 for {total} cells...")
 
-        # Read each property from S3 COGs
+        # V2-19 B3 v2: record cascade outcome as provenance decisions before
+        # the per-cell read loop so the decisions land regardless of per-cell
+        # success (which only affects profile-count metrics, not source choice).
+        if self.provenance and self.provenance.enabled:
+            # V2-19 B0 finding #1a: iSDA per-cell sampling uses a
+            # window-based read at the exact transformed (x, y) pixel,
+            # which is effectively nearest-neighbour (single 1×1 window,
+            # no interpolation). Record the implicit choice explicitly.
+            self.provenance.record_decision(
+                decision_type=DecisionType.RESAMPLING_METHOD,
+                description="iSDA point sampling: nearest-neighbour (1x1 window)",
+                rationale=(
+                    "Cell coordinates are transformed to the raster CRS, "
+                    "then src.index(x, y) + a 1x1 Window selects exactly "
+                    "one pixel — no bilinear/cubic interpolation. This is "
+                    "appropriate for continuous soil variables sampled at "
+                    "~1km or 30m where target cell size is comparable to "
+                    "native pixel size."
+                ),
+                alternatives=[
+                    "Bilinear interpolation (smoother but not native rasterio)",
+                    "Average over a larger window (requires grid cell extent)",
+                ],
+                reference=(
+                    "prismpy.pipeline.executor._retrieve_isda_api_for_grid "
+                    "lines ~1373-1380 (rasterio.windows.Window(col, row, 1, 1))"
+                ),
+                artifact_id="soil",
+            )
+            missing = [p for p, cf in prop_cache_files.items() if cf is None]
+            if not missing:
+                self.provenance.record_decision(
+                    decision_type=DecisionType.SOURCE_SELECTION,
+                    description="Soil source: iSDA 1km resampled from 30m COG",
+                    rationale=(
+                        "iSDA provides Africa-wide 30m native resolution. "
+                        "Resampled to ~1km via rasterio COG overview reads "
+                        "(bandwidth-efficient, no full 30m download). "
+                        f"Cache location: {cache_target_dir}"
+                    ),
+                    alternatives=[
+                        "iSDA 30m direct reads (tier 3 fallback, slower)",
+                        "HWSD 1km (lower resolution, outer-cascade fallback)",
+                    ],
+                    reference="prismpy.pipeline.executor._retrieve_isda_api_for_grid",
+                    artifact_id="soil",
+                )
+            else:
+                self.provenance.record_decision(
+                    decision_type=DecisionType.FALLBACK_SUBSTITUTION,
+                    description=(
+                        f"iSDA 1km cache failed for "
+                        f"{len(missing)}/{len(PROPERTIES)} properties"
+                    ),
+                    rationale=(
+                        f"Network or S3 issue prevented 1km cache download for: "
+                        f"{missing}. Falling back to direct 30m per-pixel reads "
+                        f"for those properties (slower but scientifically "
+                        f"equivalent — same underlying source)."
+                    ),
+                    alternatives=[
+                        "HWSD 1km fallback (outer-cascade, lower resolution)",
+                        "Skip properties (unacceptable — missing data)",
+                    ],
+                    reference="prismpy.pipeline.executor._retrieve_isda_api_for_grid",
+                    artifact_id="soil",
+                )
+
+        # Read each property from its resolved source (1km cache or S3 30m).
         cell_data = {cell.cell_id: {} for cell in cells}
 
         try:
             for prop_name, prop_info in PROPERTIES.items():
-                if local_isda_dir:
-                    url = str(local_isda_dir / f"{prop_name}_1km.tif")
-                    self.logger.info(f"  Reading {prop_name} from local cache...")
+                cache_file = prop_cache_files.get(prop_name)
+                if cache_file is not None:
+                    url = str(cache_file)
+                    self.logger.info(
+                        f"  Reading {prop_name} from 1km cache ({cache_file.name})..."
+                    )
                 else:
                     url = f"{S3_BASE}/{prop_name}/{prop_name}.tif"
-                    self.logger.info(f"  Reading {prop_name} from S3...")
+                    self.logger.info(
+                        f"  Reading {prop_name} from S3 at 30m (tier 3 fallback)..."
+                    )
 
                 with rasterio.open(url) as src:
                     for i, cell in enumerate(cells):
@@ -1166,6 +1545,34 @@ class TranslationPipeline:
                 ),
                 provenance=self.provenance,
             )
+
+            # V2-19 B0 finding #1b: HWSD per-cell sampling uses
+            # rasterio src.sample() inside HWSDSource._sample_bil_raster,
+            # which is nearest-neighbour by default (no interpolation
+            # keyword argument passed). Record the implicit choice.
+            if self.provenance and self.provenance.enabled:
+                self.provenance.record_decision(
+                    decision_type=DecisionType.RESAMPLING_METHOD,
+                    description="HWSD point sampling: nearest-neighbour (rasterio default)",
+                    rationale=(
+                        "HWSDSource._sample_bil_raster calls "
+                        "rasterio.src.sample(xy_coords) without a resampling "
+                        "keyword, so rasterio uses its nearest-neighbour "
+                        "default. Appropriate for SMU ID lookups (categorical) "
+                        "but also used for the per-cell SMU classification "
+                        "that drives soil property selection — soil-property "
+                        "smoothing between cells is therefore absent."
+                    ),
+                    alternatives=[
+                        "Bilinear on numeric properties (inappropriate for SMU IDs)",
+                        "Mode resampling over a window (more robust but slower)",
+                    ],
+                    reference=(
+                        "prismpy.sources.soil.hwsd.HWSDSource._sample_bil_raster "
+                        "line ~318 (src.sample(xy_coords))"
+                    ),
+                    artifact_id="soil",
+                )
 
             result = hwsd_source.retrieve(
                 region=region,
@@ -1392,6 +1799,36 @@ class TranslationPipeline:
                             if hasattr(region.bounds, "to_gis_format") else None,
                         },
                         artifact_id="grid",
+                    )
+
+                    # V2-19 B1: effective-resolution warning. Determine which
+                    # sources are active for this run from platform defaults,
+                    # then check if target 5-arcmin is finer than any native.
+                    active_sources: List[str] = []
+                    from prismpy.config.schema import Platform
+                    enabled_platforms = self.config.get_enabled_platforms()
+                    if Platform.SARRA_PY in enabled_platforms:
+                        active_sources.extend(["TAMSAT", "AgERA5"])
+                    if any(
+                        p in enabled_platforms
+                        for p in (Platform.CRAFT, Platform.PYTHIA, Platform.ACEA)
+                    ):
+                        active_sources.append("NASA POWER")
+                    # Soil sources — iSDA tried first for African regions,
+                    # HWSD is the fallback for non-Africa or when iSDA empty.
+                    if region and self._region_in_isda_coverage(region):
+                        active_sources.append("iSDA")
+                    active_sources.append("HWSD")
+                    # De-duplicate while preserving order
+                    seen = set()
+                    active_sources = [
+                        s for s in active_sources
+                        if not (s in seen or seen.add(s))
+                    ]
+                    self._record_effective_resolution_warning(
+                        target_resolution_deg=5.0 / 60.0,  # 5 arc-minutes
+                        target_resolution_label="5-arcmin (~9 km)",
+                        active_sources=active_sources,
                     )
 
             # Retrieve per-cell soil data: try iSDA API first (Africa, 30m),

@@ -203,8 +203,11 @@ class SarraPyValidator(BaseValidator):
                     file_path=manifest_path,
                 ))
 
-        # Check provenance.json
-        provenance_path = self.output_dir / "provenance.json"
+        # Check provenance_stages.json (V2-19 B8: stages-format compat file)
+        # The rich provenance.json format (System A) uses artifact lineages,
+        # not stages. The auto-derived provenance_stages.json companion file
+        # preserves the legacy stage-based format that SARRA-Py consumers expect.
+        provenance_path = self.output_dir / "provenance_stages.json"
         if provenance_path.exists():
             try:
                 with open(provenance_path, 'r') as f:
@@ -214,7 +217,7 @@ class SarraPyValidator(BaseValidator):
                     issues.append(ValidationIssue(
                         severity='warning',
                         category='package',
-                        message="provenance.json missing 'stages' field",
+                        message="provenance_stages.json missing 'stages' field",
                         file_path=provenance_path,
                     ))
 
@@ -222,9 +225,23 @@ class SarraPyValidator(BaseValidator):
                 issues.append(ValidationIssue(
                     severity='error',
                     category='package',
-                    message=f"Invalid JSON in provenance.json: {e}",
+                    message=f"Invalid JSON in provenance_stages.json: {e}",
                     file_path=provenance_path,
                 ))
+        else:
+            # V2-19 AC16 Scenario B: dual-output save_json() must emit
+            # both provenance.json (rich System A) and provenance_stages.json
+            # (legacy System B compat). A missing stages file signals a
+            # synthesis failure that silently dropping would hide.
+            issues.append(ValidationIssue(
+                severity='warning',
+                category='package',
+                message=(
+                    "provenance_stages.json missing "
+                    "(expected V2-19 dual-output file)"
+                ),
+                file_path=provenance_path,
+            ))
 
         # Check bounds.json
         bounds_path = self.output_dir / "data" / "boundaries" / "bounds.json"

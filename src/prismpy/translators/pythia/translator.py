@@ -476,17 +476,74 @@ class PythiaTranslator(PythiaTranslatorBase):
             return -99.0, -99.0
 
         # Calculate mean temperatures
+        tmean_fallback_used = False
         tmeans = []
         for record in ts.records:
             if record.tmean is not None:
                 tmeans.append(record.tmean)
             elif record.tmax is not None and record.tmin is not None:
                 tmeans.append((record.tmax + record.tmin) / 2)
+                tmean_fallback_used = True
 
         if not tmeans:
             return -99.0, -99.0
 
+        # V2-19 B0 finding #3: record tmean fallback (tmax+tmin)/2 as
+        # an explicit DEFAULT_VALUE decision whenever the fallback was
+        # actually exercised. This distinguishes source-provided tmean
+        # from our derived approximation.
+        if tmean_fallback_used and self.provenance:
+            self.provenance.record_decision(
+                decision_type=DecisionType.DEFAULT_VALUE,
+                description=(
+                    "PYTHIA tmean fallback: (tmax + tmin) / 2 where "
+                    "source tmean missing"
+                ),
+                rationale=(
+                    "When the climate source returns no mean temperature "
+                    "for a given day, the arithmetic mean of tmax and tmin "
+                    "is used as a best-effort approximation. This is a "
+                    "standard practice but slightly biases TAV because "
+                    "the true daytime-weighted mean is closer to 0.5 * "
+                    "(tmax + tmin + diurnal-shape correction)."
+                ),
+                alternatives=[
+                    "Drop records with missing tmean (reduces sample size)",
+                    "Use diurnal-cycle correction from sunrise/sunset times",
+                ],
+                reference=(
+                    "prismpy.translators.pythia.translator._calculate_tav_amp "
+                    "line ~484 ((tmax + tmin) / 2 fallback)"
+                ),
+            )
+
         tav = float(np.mean(tmeans))
+
+        # V2-19 B0 finding #4: TAV is an unweighted arithmetic mean over
+        # all records in the series — no seasonal or monthly weighting.
+        if self.provenance:
+            self.provenance.record_decision(
+                decision_type=DecisionType.AGGREGATION_METHOD,
+                description=(
+                    "PYTHIA TAV: unweighted arithmetic mean of daily "
+                    "mean temperatures"
+                ),
+                rationale=(
+                    "np.mean(tmeans) treats every day equally. A year "
+                    "with more days in the cool dry season is weighted "
+                    "identically to a year with more warm wet days. "
+                    "DSSAT TAV expects 'annual average temperature' and "
+                    "this matches the traditional unweighted definition."
+                ),
+                alternatives=[
+                    "Monthly average then average-of-averages (more stable)",
+                    "Area-weighted when aggregating across cells (N/A here)",
+                ],
+                reference=(
+                    "prismpy.translators.pythia.translator._calculate_tav_amp "
+                    "line ~489 (np.mean(tmeans))"
+                ),
+            )
 
         # Calculate monthly averages for AMP
         monthly_temps = {}
