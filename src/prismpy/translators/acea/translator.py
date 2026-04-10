@@ -2032,11 +2032,19 @@ if __name__ == "__main__":
 
         # Determine data sources
         climate_source = "NASA POWER"
-        soil_source = "Placeholder (pipeline default)"
-        if platform_config:
-            hwsd_bil = getattr(platform_config, 'hwsd_bil_path', None)
-            if hwsd_bil:
-                soil_source = "HWSD v2.0"
+        # V2-19b-fix Finding 7: read actual soil source from data, not
+        # config. The config always has hwsd_bil_path injected by prismweb
+        # regardless of what the pipeline actually used.
+        soil_source = "source unavailable"
+        if data.soil:
+            first_source = next(
+                (p.source for p in data.soil.values() if hasattr(p, 'source') and p.source),
+                None,
+            )
+            if first_source:
+                soil_source = first_source
+            elif not data.soil:
+                soil_source = "Placeholder (pipeline default)"
 
         spam_source = "Dummy (placeholder)"
         if platform_config:

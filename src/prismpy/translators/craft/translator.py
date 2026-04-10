@@ -2695,15 +2695,31 @@ class CraftTranslator(CraftTranslatorBase):
         )
         n_soil_profiles = len(data.soil) if data.soil else 0
 
-        # Determine data sources from config
-        soil_source = "Default profile"
-        soil_description = "Generic soil profile for simulation"
-        if platform_config:
-            hwsd_bil = getattr(platform_config, 'hwsd_bil_path', None)
-            hwsd_mdb = getattr(platform_config, 'hwsd_mdb_path', None)
-            if hwsd_bil and hwsd_mdb:
-                soil_source = "HWSD v2.0"
-                soil_description = "Per-SMU profiles from Harmonized World Soil Database"
+        # V2-19b-fix Finding 7: determine soil source from ACTUAL data, not
+        # config inference. The config always has hwsd paths injected by
+        # prismweb regardless of whether the pipeline actually used HWSD.
+        # Reading SoilProfile.source reflects what the pipeline did, not
+        # what was available to it.
+        soil_source = "source unavailable"
+        soil_description = "Soil source could not be determined"
+        if data.soil:
+            first_source = next(
+                (p.source for p in data.soil.values() if hasattr(p, 'source') and p.source),
+                None,
+            )
+            if first_source:
+                soil_source = first_source
+                if "iSDA" in first_source or "isda" in first_source:
+                    soil_description = "Per-cell profiles from iSDA Africa (30m native)"
+                elif "HWSD" in first_source or "hwsd" in first_source:
+                    soil_description = "Per-SMU profiles from Harmonized World Soil Database"
+                elif "eGHR" in first_source or "eghr" in first_source:
+                    soil_description = "Per-cell profiles from eGHR global soil database"
+                elif "placeholder" in first_source.lower():
+                    soil_source = "Default profile"
+                    soil_description = "Generic soil profile for simulation"
+                else:
+                    soil_description = f"Soil data from {first_source}"
 
         crop_mask_source = "Uniform (100%)"
         crop_mask_description = "All cells assumed to have target crop"

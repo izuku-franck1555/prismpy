@@ -431,6 +431,41 @@ class TranslationPipeline:
                                 self.logger.info(
                                     f"Loaded boundary via pygadm: {bounds.to_gis_format()}"
                                 )
+                                # V2-19b-fix Finding 3: record the pygadm
+                                # fallback as an explicit SOURCE_SELECTION
+                                # decision against the region artifact.
+                                # The primary GADMSource.retrieve() path
+                                # records its own decision at gadm.py:189,
+                                # but the pygadm fallback was previously
+                                # silent — leaving the region artifact
+                                # with zero decisions in test environments
+                                # where the standard GADM data dir is
+                                # missing or the level is not indexed.
+                                if self.provenance and self.provenance.enabled:
+                                    self.provenance.record_decision(
+                                        decision_type=DecisionType.SOURCE_SELECTION,
+                                        description=(
+                                            f"Boundary source: pygadm fallback "
+                                            f"({country_iso3} level {gadm_level} "
+                                            f"'{filter_value}')"
+                                        ),
+                                        rationale=(
+                                            "GADM standard path data was unavailable "
+                                            "(directory missing or level not indexed) "
+                                            "so the pipeline fell back to the pygadm "
+                                            "Python package, which downloads boundary "
+                                            "geometries on demand from the GADM web "
+                                            "service and caches them locally. "
+                                            "Scientifically equivalent to the primary "
+                                            "GADMSource path — same underlying GADM "
+                                            "v4.1 data, different retrieval mechanism."
+                                        ),
+                                        alternatives=[
+                                            "GADMSource standard path (preferred when data dir is present)",
+                                            "Manual bounding box from config (last-resort fallback)",
+                                        ],
+                                        reference="prismpy.pipeline.executor._execute_retrieve (pygadm fallback branch)",
+                                    )
                         else:
                             self.logger.warning(
                                 f"pygadm: '{filter_value}' not found at level {gadm_level}"
@@ -1109,7 +1144,14 @@ class TranslationPipeline:
             )
             return None
 
-        tmp_file = cache_file.with_suffix(".tif.tmp")
+        # V2-19b-fix Finding 5: per-process tmp suffix prevents concurrent
+        # pipelines from colliding on the same tmp file. Without this,
+        # both pipelines download to the same .tif.tmp, and the loser's
+        # rename fails with FileNotFoundError when the winner's rename
+        # has already moved the tmp file. The per-PID suffix ensures
+        # each pipeline writes to its own tmp path.
+        import os as _os
+        tmp_file = cache_file.with_suffix(f".tif.tmp.{_os.getpid()}")
 
         try:
             self.logger.info(
@@ -1158,7 +1200,7 @@ class TranslationPipeline:
                     src.height / out_height,
                 )
 
-                # Atomic write: tmp file then rename.
+                # Atomic write: tmp file then os.replace (atomic on POSIX).
                 with rasterio.open(
                     tmp_file, "w",
                     driver="GTiff",
@@ -1176,7 +1218,13 @@ class TranslationPipeline:
                 ) as dst:
                     dst.write(data)
 
-            tmp_file.rename(cache_file)
+            # os.replace is atomic on POSIX — if another process races us
+            # and replaces the cache file first, our replace overwrites
+            # theirs (both produced the same data, so either outcome is
+            # correct). We prefer os.replace over Path.rename because
+            # replace is unconditional on POSIX and handles the race
+            # where cache_file already exists from another process.
+            _os.replace(str(tmp_file), str(cache_file))
             size_mb = cache_file.stat().st_size // (1024 * 1024)
             self.logger.info(
                 f"  Cached iSDA {prop_name} 1km at {cache_file} (~{size_mb} MB)"
@@ -1184,6 +1232,23 @@ class TranslationPipeline:
             return cache_file
 
         except Exception as exc:  # noqa: BLE001
+            # V2-19b-fix Finding 5: race-loser detection. If our tmp file
+            # was cleaned up or renamed out from under us, but the cache
+            # file now exists (a concurrent pipeline wrote it), treat
+            # this as a Tier 1 hit — the cache is ready, just created by
+            # someone else. No phantom FALLBACK_SUBSTITUTION.
+            if cache_file.exists() and cache_file.stat().st_size > 0:
+                self.logger.info(
+                    f"  iSDA {prop_name}: cache file appeared during download "
+                    f"(concurrent pipeline won the race), using it"
+                )
+                # Clean up our own stale tmp file if it survived
+                try:
+                    tmp_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return cache_file
+
             self.logger.warning(
                 f"iSDA 1km cache unavailable for {prop_name} "
                 f"({exc.__class__.__name__}: {exc}), "
@@ -1835,11 +1900,14 @@ class TranslationPipeline:
             # then HWSD fallback (global, 1km)
             soil_data = retrieved_data.get("soil")
             if grid and region:
-                # V2-19: switch current artifact back to soil for soil-cascade
-                # decisions to bind correctly
-                if self.provenance.enabled:
-                    self.provenance._current_artifact_id = "soil"
-
+                # V2-19b-fix: deleted symptom-suppression hack that manually
+                # set `self.provenance._current_artifact_id = "soil"`. All
+                # iSDA/HWSD cascade decisions now pass explicit artifact_id=
+                # "soil", and the Finding 4 direct-attach fix in tracker.py
+                # properly honors explicit artifact_id regardless of the
+                # current-artifact pointer's state. Manipulating tracker
+                # internals from caller code is an antipattern that masks
+                # API contract violations.
                 isda_soil = self._retrieve_isda_api_for_grid(grid, region)
                 if isda_soil:
                     soil_data = isda_soil
@@ -2151,12 +2219,47 @@ class TranslationPipeline:
                     warnings.append(f"{platform_name}: Package generation failed: {e}")
                     self.logger.warning(f"Package generation failed for {platform_name}: {e}")
 
-        # Save pipeline-level provenance
+        # V2-19b-fix Finding 1 (HYBRID): save canonical provenance at the
+        # run-level output path, then copy to each platform's subdir.
+        # Single JSON serialization + N cheap file copies.
+        import shutil
         try:
-            provenance_path = self.provenance.save()
+            # Canonical run-level save — NOT cwd-relative
+            base_dir = Path(self.config.output.base_dir)
+            base_dir.mkdir(parents=True, exist_ok=True)
+            canonical_rich = base_dir / "_pipeline_provenance.json"
+            provenance_path = self.provenance.save(output_path=canonical_rich)
+            # save() writes both rich + stages files side-by-side:
+            #   _pipeline_provenance.json  (rich System A)
+            #   _pipeline_provenance_stages.json  (auto-derived System B compat)
+            canonical_stages = canonical_rich.with_name(
+                canonical_rich.stem + "_stages" + canonical_rich.suffix
+            )
+
+            # Per-platform distribution — copy both files into each
+            # enabled platform's output directory as the filenames the
+            # VS-01 validator + user ZIP packager expect.
+            for platform_name in translation_results:
+                platform_dir = base_dir / platform_name
+                if platform_dir.is_dir():
+                    # provenance.json in the platform dir is now System A
+                    # (replaces the legacy System B template that
+                    # packaging/provenance.py wrote pre-V2-19). V2-20
+                    # Day 1 (Task #56) will remove the legacy writer.
+                    shutil.copy2(
+                        canonical_rich,
+                        platform_dir / "provenance.json",
+                    )
+                    shutil.copy2(
+                        canonical_stages,
+                        platform_dir / "provenance_stages.json",
+                    )
+                    self.logger.info(
+                        f"  {platform_name}: provenance files distributed"
+                    )
 
             report = self.provenance.get_report()
-            report_path = provenance_path.parent / f"{self.provenance.session_id}_report.txt"
+            report_path = canonical_rich.parent / f"{self.provenance.session_id}_report.txt"
             with open(report_path, "w") as f:
                 f.write(report)
 

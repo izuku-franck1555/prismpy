@@ -1149,8 +1149,11 @@ def generate_readme(
             'country_code': config.get('country_code', 'ML'),
 
             # Data sources with descriptions
-            'soil_source': config.get('soil_source', 'HWSD v2.0'),
-            'soil_description': config.get('soil_description', 'Harmonized World Soil Database'),
+            # V2-19b-fix Finding 7: default to "source unavailable" not
+            # "HWSD v2.0" — the caller must set soil_source explicitly
+            # from the actual SoilProfile.source field.
+            'soil_source': config.get('soil_source', 'source unavailable'),
+            'soil_description': config.get('soil_description', 'Soil source not specified'),
             'crop_mask_source': config.get('crop_mask_source', 'SPAM 2020'),
             'crop_mask_description': config.get('crop_mask_description', 'Harvested area fractions'),
             'boundary_source': config.get('boundary_source', 'GADM v4.1'),
@@ -1181,7 +1184,8 @@ def generate_readme(
             'climate_source': config.get('climate_source', 'NASA POWER'),
 
             # Data sources
-            'soil_source': config.get('soil_source', 'HWSD v2.0'),
+            # V2-19b-fix Finding 7: same fix as CRAFT — honest default.
+            'soil_source': config.get('soil_source', 'source unavailable'),
             'spam_source': config.get('spam_source', 'Dummy (placeholder)'),
             'gaez_source': config.get('gaez_source', 'FAO GAEZ v4'),
 

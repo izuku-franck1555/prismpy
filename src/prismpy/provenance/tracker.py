@@ -343,13 +343,32 @@ class ProvenanceTracker:
         reference: Optional[str] = None,
         artifact_id: Optional[str] = None,
     ) -> DecisionRecord:
-        """Record a decision — it will be attached to the next transformation.
+        """Record a decision and bind it to the correct artifact.
 
-        V2-19: The decision is stored in a pending-list along with the
-        current artifact ID (bound at record-time, not flush-time, to
-        prevent misattribution when the current-artifact pointer moves).
-        The next call to ``record_retrieval`` or ``record_transformation``
-        drains the pending list into the resulting ``TransformationRecord``.
+        Two attachment paths exist depending on the artifact's lifecycle
+        state at record-time:
+
+        1. **Direct-attach (V2-19b-fix Finding 4)** — when an explicit
+           ``artifact_id`` is provided AND the named artifact already
+           exists AND has at least one transformation, the decision is
+           attached directly to the most recent transformation. This
+           handles the "trailing decision" case where a decision is
+           recorded AFTER the artifact's last transformation completes
+           (e.g., effective-resolution warning recorded after BUILD_GRID),
+           which the forward-only pending-list mechanism cannot handle.
+
+        2. **Pending-list (V2-19 A1)** — when no explicit ``artifact_id``
+           is provided, OR the named artifact does not yet exist, OR the
+           artifact exists but has no transformations yet, the decision is
+           queued in the pending list along with its bound artifact ID
+           (bound at record-time). The next ``record_retrieval`` /
+           ``record_transformation`` call against the bound artifact
+           drains the pending list into that transformation. This handles
+           the "leading decision" case (e.g., iSDA cascade source
+           selection recorded before the soil retrieval transformation).
+
+        Both paths preserve the V2-19 A1 invariant: a decision's binding
+        is determined at record-time, never silently reassigned later.
 
         Args:
             decision_type: Type of decision
@@ -357,9 +376,12 @@ class ProvenanceTracker:
             rationale: Why this decision was made
             alternatives: Other options considered
             reference: Citation or documentation link
-            artifact_id: Artifact ID (uses current if not specified).
-                Bound at record-time so moving the current-artifact
-                pointer between decisions does not reassign them.
+            artifact_id: Explicit artifact ID. When provided and the
+                artifact has at least one transformation, attaches
+                directly to the most recent transformation. Otherwise
+                falls back to the pending-list path with this ID as
+                the binding (or ``_current_artifact_id`` if no explicit
+                ID is given).
 
         Returns:
             The created DecisionRecord (for backward compatibility —
@@ -383,7 +405,58 @@ class ProvenanceTracker:
             reference=reference,
         )
 
-        # Improvement 2: bind artifact ID at record-time (not flush-time)
+        # V2-19b-fix Finding 4: EXPLICIT path (direct-attach or fail-fast).
+        #
+        # When the caller passes an explicit artifact_id, the semantic is
+        # STRICT: land the decision or fail loudly. Silent fallback to
+        # the pending list is the exact soft-failure mode that hid
+        # Finding 4 in V2-19a — never repeat it for the explicit case.
+        #
+        # (a) Artifact exists + has ≥1 transformation → direct-attach to
+        #     the most recent transformation.
+        # (b) Artifact exists + has 0 transformations → ProvenanceStateError
+        #     (caller should record_transformation first, or use the
+        #     implicit pending-list path instead).
+        # (c) Artifact doesn't exist → ProvenanceStateError (caller
+        #     should start_artifact first).
+        #
+        # The lock protects both the existence-check and the append from
+        # races with concurrent record_transformation calls.
+        if artifact_id is not None:
+            with self._lock:
+                existing = self.record.get_artifact(artifact_id)
+                if existing is None:
+                    # Case (c): artifact doesn't exist — true caller error.
+                    raise ProvenanceStateError(
+                        f"record_decision called with explicit artifact_id="
+                        f"'{artifact_id}' but no artifact with that ID exists. "
+                        f"Call start_artifact('{artifact_id}') first, or omit "
+                        f"the artifact_id parameter to use the implicit "
+                        f"pending-list path."
+                    )
+                if existing.transformations:
+                    # Case (a): trailing decision — direct-attach to the
+                    # most recent transformation. No future transformation
+                    # is expected to drain this from the pending list.
+                    existing.transformations[-1].decisions.append(decision)
+                    self.logger.info(
+                        "Decision recorded (direct-attach to %s): %s",
+                        artifact_id,
+                        description,
+                    )
+                    return decision
+                # Case (b): leading decision — artifact exists but has no
+                # transformations yet. Fall through to pending-list path
+                # with the explicit artifact_id as the binding. The next
+                # record_retrieval / record_transformation against this
+                # artifact will drain it. This is the normal forward-
+                # binding pattern (e.g., climate SOURCE_SELECTION recorded
+                # after start_artifact("climate") but before the climate
+                # retrieval transformation).
+
+        # IMPLICIT path (V2-19 A1 pending-list, unchanged):
+        # No explicit artifact_id → bind to _current_artifact_id at
+        # record-time to prevent misattribution if the pointer moves.
         bound_artifact = artifact_id or self._current_artifact_id
 
         with self._lock:

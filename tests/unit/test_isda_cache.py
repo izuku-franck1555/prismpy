@@ -128,13 +128,16 @@ class TestISDACacheCascade:
         assert cache_file.exists(), "cache file should exist after rename"
         assert cache_file.stat().st_size > 0, "cache file must be non-empty"
 
-        # Atomic write verification: tmp file must be gone after rename.
-        tmp_file = cache_file.with_suffix(".tif.tmp")
-        assert not tmp_file.exists(), "tmp file must be removed after rename"
+        # Atomic write verification: per-PID tmp file must be gone after replace.
+        import os
+        tmp_file = cache_file.with_suffix(f".tif.tmp.{os.getpid()}")
+        assert not tmp_file.exists(), "per-PID tmp file must be removed after replace"
 
         # One read call (S3 URL) + one write call (tmp file).
         assert len(write_calls) == 1
-        assert str(write_calls[0][0]).endswith(".tif.tmp")
+        assert ".tif.tmp." in str(write_calls[0][0]), (
+            f"write target must be a per-PID tmp file, got {write_calls[0][0]}"
+        )
 
     def test_tier_2_failure_falls_back_to_none_and_cleans_tmp(
         self, tmp_path: Path
