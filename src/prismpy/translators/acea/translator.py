@@ -607,7 +607,7 @@ class AceaTranslator(AceaTranslatorBase):
                 description=f"Generated ACEA inputs for {data.region.name}",
                 rationale="ACEA requires project_conf class with pickle climate files",
                 alternatives=["manual configuration"],
-                reference=f"Output: {self.output_dir}",
+                reference="prismpy.translators.acea.translator.translate",
             )
 
         result = self.create_result(
@@ -2567,6 +2567,42 @@ if __name__ == "__main__":
         if crop_name not in CROP_GDD_DEFAULTS:
             logger.warning(f"No GDD defaults for crop '{crop_name}', using Maize defaults. "
                           f"Known crops: {', '.join(sorted(CROP_GDD_DEFAULTS.keys()))}")
+            # V2-19 C5 (TA-05): ACEA Maize silent fallback — parallel
+            # to C2/TP-06 (PYTHIA CROPGRO→CERES). Phenology is wrong for
+            # any non-maize crop that falls through to Maize defaults.
+            if self.provenance:
+                self.provenance.record_decision(
+                    decision_type=DecisionType.FALLBACK_SUBSTITUTION,
+                    description=(
+                        f"ACEA Maize phenology fallback: crop "
+                        f"'{crop_name}' not in CROP_GDD_DEFAULTS"
+                    ),
+                    rationale=(
+                        f"Crop '{crop_name}' has no entry in "
+                        f"CROP_GDD_DEFAULTS (known: Maize, Wheat, Rice, "
+                        f"Sorghum, Millet, etc.). Falling back to Maize "
+                        f"phenology (gdd_maturity=1600, base_temp=8\u00b0C). "
+                        f"This is scientifically inappropriate — different "
+                        f"crops have fundamentally different thermal time "
+                        f"requirements, canopy dynamics (CGC/CDC), and "
+                        f"harvest indices. Results using Maize phenology "
+                        f"for a non-maize crop should be treated as "
+                        f"indicative only. V2-20 will add strict_mode "
+                        f"enforcement parallel to PYTHIA TP-06."
+                    ),
+                    alternatives=[
+                        "Add crop-specific CROP_GDD_DEFAULTS entry",
+                        "User-provided phenology overrides in config",
+                        "Raise error instead of silent fallback (V2-20)",
+                    ],
+                    reference=(
+                        "prismpy.translators.acea.translator "
+                        "CROP_GDD_DEFAULTS.get(crop_name, "
+                        "CROP_GDD_DEFAULTS['Maize'])"
+                    ),
+                    severity="warning",
+                    label=f"ACEA: '{crop_name}' using Maize phenology",
+                )
 
         # Use config values if provided, otherwise use crop-specific defaults
         # Access base_temp through get_param() method since it's not a direct attribute

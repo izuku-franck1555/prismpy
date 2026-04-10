@@ -261,7 +261,7 @@ class CraftTranslator(CraftTranslatorBase):
                 description=f"Generated CRAFT inputs for {data.region.name}",
                 rationale="CRAFT requires tab-separated files with DSSAT soil format",
                 alternatives=["manual configuration"],
-                reference=f"Output: {self.output_dir}",
+                reference="prismpy.translators.craft.translator.translate",
             )
 
         result = self.create_result(

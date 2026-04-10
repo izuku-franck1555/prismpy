@@ -40,6 +40,24 @@ class DecisionType(str, Enum):
     FALLBACK_SUBSTITUTION = "fallback_substitution"  # Silent substitution when primary source fails (distinct from DEFAULT_VALUE)
     UNIT_CONVERSION = "unit_conversion"              # Unit conversions (iSDA bd/100, pH/10, W/m² → MJ/m²/day)
     AGGREGATION_METHOD = "aggregation_method"        # Aggregation choice (mean/sum/majority) distinct from RESAMPLING
+    QUALITY_CHECK = "quality_check"                  # Validation quality check outcome (Phase 2a)
+
+
+@dataclass
+class AlternativeConsidered:
+    """A rejected alternative in a decision.
+
+    Phase 4: structured alternative with name + reason_rejected,
+    replacing the flat string list for richer UI display.
+    """
+    name: str
+    reason_rejected: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {"name": self.name}
+        if self.reason_rejected:
+            d["reason_rejected"] = self.reason_rejected
+        return d
 
 
 @dataclass
@@ -50,23 +68,45 @@ class DecisionRecord:
         decision_type: Category of the decision
         description: What was decided
         rationale: Why this decision was made
-        alternatives_considered: Other options that were available
+        alternatives_considered: Other options (structured or flat strings)
         reference: Citation or documentation link
+        severity: info (standard), warning (fallback/substitution),
+            error (known-incorrect outcome like TP-06 CROPGRO→CERES)
+        label: Short one-liner for collapsed timeline view
+            (distinct from the longer description)
+        timestamp: When the decision was recorded (enables timeline)
     """
     decision_type: DecisionType
     description: str
     rationale: str
-    alternatives_considered: List[str] = field(default_factory=list)
+    alternatives_considered: List = field(default_factory=list)
     reference: Optional[str] = None
+    severity: str = "info"
+    label: Optional[str] = None
+    timestamp: datetime = field(default_factory=datetime.now)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
+        # Serialize alternatives — support both flat strings (backward
+        # compat) and structured AlternativeConsidered objects
+        alts = []
+        for alt in self.alternatives_considered:
+            if isinstance(alt, AlternativeConsidered):
+                alts.append(alt.to_dict())
+            elif isinstance(alt, dict):
+                alts.append(alt)
+            else:
+                alts.append({"name": str(alt)})
+
         return {
             "decision_type": self.decision_type.value,
             "description": self.description,
             "rationale": self.rationale,
-            "alternatives_considered": self.alternatives_considered,
+            "alternatives_considered": alts,
             "reference": self.reference,
+            "severity": self.severity,
+            "label": self.label or self.description[:80],
+            "timestamp": self.timestamp.isoformat(),
         }
 
 
@@ -117,12 +157,15 @@ class DataLineage:
         created_at: When the artifact was created
         source_artifacts: IDs of source artifacts used to create this one
         transformations: Sequence of transformations applied
+        stage: Pipeline stage this artifact belongs to (retrieve/harmonize/
+            translate/validate). Phase 4 addition for timeline grouping.
     """
     artifact_id: str
     artifact_type: str
     created_at: datetime = field(default_factory=datetime.now)
     source_artifacts: List[str] = field(default_factory=list)
     transformations: List[TransformationRecord] = field(default_factory=list)
+    stage: Optional[str] = None
 
     def add_transformation(self, transformation: TransformationRecord) -> None:
         """Add a transformation to the lineage."""
@@ -151,7 +194,7 @@ class DataLineage:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
-        return {
+        d = {
             "artifact_id": self.artifact_id,
             "artifact_type": self.artifact_type,
             "created_at": self.created_at.isoformat(),
@@ -159,6 +202,9 @@ class DataLineage:
             "n_transformations": self.n_transformations,
             "transformations": [t.to_dict() for t in self.transformations],
         }
+        if self.stage:
+            d["stage"] = self.stage
+        return d
 
 
 @dataclass

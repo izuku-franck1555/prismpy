@@ -297,6 +297,41 @@ class HWSDSource(DataSource):
                 elif self.config.use_defaults:
                     profiles[i] = self._create_default_profile(i, lat, lon, region)
 
+        # V2-19 C9 (RH-03): HWSD secondary fallback rules rationale.
+        # Summarize fallback outcome for provenance.
+        n_real = sum(1 for p in profiles.values()
+                     if not p.metadata.get('is_default', False))
+        n_default = len(profiles) - n_real
+        if n_default > 0 and self.provenance:
+            self.provenance.record_decision(
+                decision_type=DecisionType.FALLBACK_SUBSTITUTION,
+                description=(
+                    f"HWSD SMU-lookup miss: {n_default} cells received "
+                    f"DEFAULT_SOIL profile"
+                ),
+                rationale=(
+                    f"The HWSD BIL raster returned Soil Mapping Unit IDs for "
+                    f"all queried coordinates, but {n_default} SMU IDs were "
+                    f"absent from the MDB soil-properties table (HWSD2_LAYERS). "
+                    f"This occurs for water bodies, bare rock, urban areas, or "
+                    f"HWSD mapping gaps. With use_defaults=True, these cells "
+                    f"receive the Sahel-typical DEFAULT_SOIL profile (sand=60%, "
+                    f"clay=18%, silt=22%, SOC=0.5%, pH=6.5, BD=1.4 g/cm\u00b3). "
+                    f"Valid for gap-filling in Sahelian regions where most "
+                    f"unmapped cells are sandy soils. NOT valid for regions "
+                    f"with diverse unmapped soil types (volcanic, alluvial, "
+                    f"organic). See C3/RH-01 rationale for DEFAULT_SOIL "
+                    f"scientific validity bounds."
+                ),
+                alternatives=[
+                    "iSDA 30m (higher resolution, fewer gaps in Africa)",
+                    "Spatial interpolation from neighbouring HWSD cells",
+                    "Exclude cells with no soil data (reduces coverage)",
+                ],
+                reference="prismpy.sources.soil.hwsd.HWSDSource._extract_from_bil_mdb",
+                artifact_id="soil",
+            )
+
         return profiles
 
     def _sample_bil_raster(

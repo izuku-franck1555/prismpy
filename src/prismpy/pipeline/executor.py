@@ -256,7 +256,7 @@ class TranslationPipeline:
 
         try:
             # Start provenance tracking for region
-            self.provenance.start_artifact("region")
+            self.provenance.start_artifact("region", stage="retrieve")
 
             # Load region from GADM or manual bounds
             self.logger.info(f"Loading region: {self.config.region.name}")
@@ -431,40 +431,33 @@ class TranslationPipeline:
                                 self.logger.info(
                                     f"Loaded boundary via pygadm: {bounds.to_gis_format()}"
                                 )
-                                # V2-19b-fix Finding 3: record the pygadm
-                                # fallback as an explicit SOURCE_SELECTION
-                                # decision against the region artifact.
-                                # The primary GADMSource.retrieve() path
-                                # records its own decision at gadm.py:189,
-                                # but the pygadm fallback was previously
-                                # silent — leaving the region artifact
-                                # with zero decisions in test environments
-                                # where the standard GADM data dir is
-                                # missing or the level is not indexed.
+                                # V2-19b-fix Finding 3 + terminology fix:
+                                # record pygadm as the boundary source.
+                                # In prismweb, pygadm IS the standard
+                                # boundary path (no local GADM files
+                                # shipped). Not a fallback.
                                 if self.provenance and self.provenance.enabled:
                                     self.provenance.record_decision(
                                         decision_type=DecisionType.SOURCE_SELECTION,
                                         description=(
-                                            f"Boundary source: pygadm fallback "
+                                            f"Boundary source: pygadm "
                                             f"({country_iso3} level {gadm_level} "
                                             f"'{filter_value}')"
                                         ),
                                         rationale=(
-                                            "GADM standard path data was unavailable "
-                                            "(directory missing or level not indexed) "
-                                            "so the pipeline fell back to the pygadm "
-                                            "Python package, which downloads boundary "
-                                            "geometries on demand from the GADM web "
-                                            "service and caches them locally. "
-                                            "Scientifically equivalent to the primary "
-                                            "GADMSource path — same underlying GADM "
-                                            "v4.1 data, different retrieval mechanism."
+                                            "pygadm provides programmatic access to "
+                                            "GADM v4.1 administrative boundaries "
+                                            "without requiring local data files. "
+                                            "Used as the standard boundary source "
+                                            "in prismweb. Boundaries are downloaded "
+                                            "on demand from the GADM web service "
+                                            "and cached locally for reuse."
                                         ),
                                         alternatives=[
-                                            "GADMSource standard path (preferred when data dir is present)",
-                                            "Manual bounding box from config (last-resort fallback)",
+                                            "Local GADM shapefiles (when pre-downloaded)",
+                                            "Manual bounding box from config",
                                         ],
-                                        reference="prismpy.pipeline.executor._execute_retrieve (pygadm fallback branch)",
+                                        reference="prismpy.pipeline.executor._execute_retrieve (pygadm branch)",
                                     )
                         else:
                             self.logger.warning(
@@ -522,7 +515,7 @@ class TranslationPipeline:
             self.logger.info("Loading climate data...")
             # V2-19: dedicated artifact for climate lineage
             if self.provenance.enabled:
-                self.provenance.start_artifact("climate", artifact_id="climate")
+                self.provenance.start_artifact("climate", artifact_id="climate", stage="retrieve")
                 # V2-19 site #6: per-platform climate SOURCE_SELECTION decisions
                 self._record_climate_source_decisions()
             climate_data = self._load_climate_data(region)
@@ -556,7 +549,7 @@ class TranslationPipeline:
             self.logger.info("Loading soil data...")
             # V2-19: dedicated artifact for soil lineage
             if self.provenance.enabled:
-                self.provenance.start_artifact("soil", artifact_id="soil")
+                self.provenance.start_artifact("soil", artifact_id="soil", stage="retrieve")
             soil_data = self._load_soil_data(region)
             # V2-19: record the soil retrieval transformation to flush
             # any pending decisions recorded during _load_soil_data
@@ -647,37 +640,52 @@ class TranslationPipeline:
 
         from prismpy.config.schema import Platform
 
-        # Climate source mapping per platform
+        # V2-19 C7 (CD-14): Platform climate source cascade with
+        # AC11-compliant rationales (source + positive/negative domain
+        # + reviewer pre-answer).
         climate_map = {
             Platform.SARRA_PY: (
                 "TAMSAT v3.1 + AgERA5",
-                "SARRA-Py requires high-resolution rainfall (TAMSAT 4km) "
-                "and standard meteorological variables (AgERA5 9km). "
-                "NASA POWER is too coarse (~55km) for SARRA-Py's intended "
-                "field-scale simulations.",
-                ["NASA POWER (rejected: too coarse)"],
+                "SARRA-Py requires high-resolution rainfall (TAMSAT v3.1 "
+                "at 4 km, Maidment et al. 2017) and standard met variables "
+                "(AgERA5 at 0.1\u00b0, Boogaard et al. 2020). Valid for "
+                "West African Sahel where TAMSAT is calibrated against "
+                "dense rain-gauge networks. NOT valid outside TAMSAT's "
+                "Africa domain or in regions where TAMSAT has known "
+                "biases (montane East Africa, coastal Guinean zone). "
+                "NASA POWER (0.5\u00b0) is too coarse for SARRA-Py's "
+                "field-to-district scale simulations.",
+                ["NASA POWER (rejected: 0.5\u00b0 too coarse for field scale)"],
             ),
             Platform.CRAFT: (
                 "NASA POWER v9",
-                "CRAFT uses NASA POWER because it provides a single "
-                "unified source for all required variables (Tmax, Tmin, "
-                "precipitation, solar radiation) with consistent spatial "
-                "coverage. CRAFT runs at the administrative unit level, "
-                "so NASA POWER's ~55km resolution is acceptable.",
-                ["TAMSAT + AgERA5 (higher resolution but multi-source)"],
+                "NASA POWER (Stackhouse et al. 2018) provides a unified "
+                "source for Tmax, Tmin, precipitation, solar radiation at "
+                "0.5\u00b0 (~56 km). Valid for CRAFT's admin-unit scale "
+                "(5-arcmin grid, typical study areas 5,000-50,000 km\u00b2). "
+                "NOT valid where sub-grid climate heterogeneity matters "
+                "(mountainous terrain, coastal gradients, urban heat "
+                "islands). A reviewer would ask: 'Why not use higher-"
+                "resolution gridded products?' Answer: CRAFT aggregates "
+                "to admin-unit level anyway, and NASA POWER's global "
+                "coverage eliminates multi-source fusion artifacts.",
+                ["TAMSAT + AgERA5 (higher resolution but Africa-only, "
+                 "multi-source fusion complexity)"],
             ),
             Platform.PYTHIA: (
                 "NASA POWER v9",
-                "PYTHIA uses NASA POWER for per-site weather downloads. "
-                "Each grid cell centroid is queried individually at "
-                "translate time.",
-                ["TAMSAT + AgERA5"],
+                "PYTHIA downloads per-site weather via NASA POWER /point "
+                "endpoint. Each grid cell centroid is queried individually. "
+                "Valid for site-level DSSAT simulations. NOT valid for "
+                "sub-daily or hourly weather (POWER is daily only).",
+                ["TAMSAT + AgERA5 (Africa-only)"],
             ),
             Platform.ACEA: (
                 "NASA POWER v9",
-                "ACEA uses NASA POWER for per-cell weather at the 30-arcmin "
-                "grid level. Downloads happen at translate time.",
-                ["TAMSAT + AgERA5"],
+                "ACEA uses NASA POWER at the 30-arcmin grid level. Valid "
+                "for AquaCrop's coarse resolution. NOT valid for "
+                "sub-grid irrigation scheduling.",
+                ["TAMSAT + AgERA5 (Africa-only)"],
             ),
         }
 
@@ -778,6 +786,8 @@ class TranslationPipeline:
             ],
             reference="prismpy.pipeline.executor._record_effective_resolution_warning",
             artifact_id="grid",
+            severity="warning",
+            label="Resolution mismatch: source coarser than target grid",
         )
 
     def _load_climate_data(self, region: Region) -> Optional[Dict[str, Any]]:
@@ -1300,8 +1310,8 @@ class TranslationPipeline:
                 if hasattr(region.bounds, "to_gis_format")
                 else "bbox unavailable",
             )
-            # V2-19: record SOURCE_SELECTION documenting the geographic skip
-            # so the HWSD-fallback path is explicit in provenance.
+            # V2-19 C12 (ISDA-GATE): geographic gate rationale with AC11
+            # positive/negative domain and reviewer pre-answer.
             if self.provenance and self.provenance.enabled:
                 self.provenance.record_decision(
                     decision_type=DecisionType.SOURCE_SELECTION,
@@ -1310,13 +1320,22 @@ class TranslationPipeline:
                     ),
                     rationale=(
                         "iSDA provides 30-metre soil data for continental Africa "
-                        "only. The region's bounding box does not intersect the "
-                        "iSDA coverage bbox (-20°W to 55°E, -40°S to 40°N), so "
-                        "the request is skipped and the cascade falls through "
-                        "to HWSD v2.0 (1km global)."
+                        "only (Hengl et al. 2021). The region's bounding box "
+                        "does not intersect iSDA's coverage bbox (-20\u00b0W to "
+                        "55\u00b0E, -40\u00b0S to 40\u00b0N), so the cascade "
+                        "falls through to HWSD v2.0 (1 km global, FAO/IIASA "
+                        "2023). Valid gate logic for any non-African study "
+                        "region. Wider-with-fallback policy: the bbox includes "
+                        "Madagascar and Canary Islands; edge-case NoData cells "
+                        "are handled by the per-cell skip in the sample loop. "
+                        "NOT applicable for regions that straddle the Africa "
+                        "boundary (e.g., Sinai, Canary Islands) — currently "
+                        "handled by the same per-cell NoData skip, but a "
+                        "mixed iSDA/HWSD cascade per cell is deferred to V2-20."
                     ),
                     alternatives=[
-                        "HWSD 1km (geographic fallback — next in cascade)"
+                        "HWSD 1 km (geographic fallback, next in cascade)",
+                        "Mixed per-cell iSDA/HWSD cascade (V2-20)",
                     ],
                     reference="prismpy.pipeline.executor._retrieve_isda_api_for_grid",
                     artifact_id="soil",
@@ -1412,7 +1431,7 @@ class TranslationPipeline:
                         "iSDA provides Africa-wide 30m native resolution. "
                         "Resampled to ~1km via rasterio COG overview reads "
                         "(bandwidth-efficient, no full 30m download). "
-                        f"Cache location: {cache_target_dir}"
+                        f"Cache location: local iSDA 1km cache"
                     ),
                     alternatives=[
                         "iSDA 30m direct reads (tier 3 fallback, slower)",
@@ -1664,9 +1683,8 @@ class TranslationPipeline:
                     f"{n_total} total for {len(cell_ids)} cells"
                 )
 
-                # V2-19 site #5: record HWSD fallback proportion as
-                # FALLBACK_SUBSTITUTION decision. This makes the count
-                # of cells using DEFAULT_SOIL visible in provenance output.
+                # V2-19 site #5 + C3 (RH-01): HWSD DEFAULT_SOIL fallback
+                # with AC11-compliant rationale (source + domains + pre-answer).
                 if self.provenance and self.provenance.enabled and n_fallback > 0:
                     proportion = n_fallback / max(n_total, 1)
                     above_threshold = proportion > 0.05
@@ -1674,16 +1692,31 @@ class TranslationPipeline:
                         f"HWSD DEFAULT_SOIL Sahel-typical profile was "
                         f"substituted for {n_fallback} of {n_total} cells "
                         f"({proportion * 100:.1f}%) where the HWSD BIL raster "
-                        f"lookup returned no Soil Mapping Unit (SMU). "
-                        f"This is a silent substitution with fixed values "
-                        f"(sand=60%, clay=18%, silt=22%, SOC=0.5%, pH=6.5, "
-                        f"BD=1.4 g/cm³). "
+                        f"returned no Soil Mapping Unit (SMU). Fixed values: "
+                        f"sand=60%, clay=18%, silt=22%, SOC=0.5%, pH=6.5, "
+                        f"BD=1.4 g/cm\u00b3. No source citation in code "
+                        f"(comment says 'typical Sahel'). Literature sanity "
+                        f"check: Sahelian sandy soils range sand 40-80%, "
+                        f"clay 5-25%, SOC 0.1-1.5%, pH 5.5-7.5, BD 1.3-1.7 "
+                        f"g/cm\u00b3 (Bationo et al. 2007, Vanlauwe et al. "
+                        f"2015). Current defaults sit mid-range for sandy "
+                        f"Sahelian soils. Valid for sandy Ferric Lixisols and "
+                        f"Arenosols typical of the Sahel (Niger, Mali, "
+                        f"Burkina Faso). NOT valid for Sudano-Sahelian "
+                        f"clay-loam Vertisols (clay >40%), Guinea savanna "
+                        f"Ferralsols (SOC >2%), East African volcanic "
+                        f"Andosols (BD <1.0), or Miombo woodland soils "
+                        f"(pH <5.0). A reviewer would ask: 'Are these "
+                        f"defaults appropriate for my study region?' For "
+                        f"regions outside the Sahel sandy belt, override via "
+                        f"iSDA 30m source or provide site-specific profiles."
                     )
                     if above_threshold:
                         rationale += (
-                            f"⚠️ Above 5% reviewer threshold — consider an "
-                            f"alternative soil source (iSDA 30m) or document "
-                            f"fallback locations explicitly in methods."
+                            f" \u26a0\ufe0f Above 5% reviewer threshold "
+                            f"({proportion * 100:.1f}% cells used defaults) "
+                            f"-- document fallback locations explicitly in "
+                            f"methods and verify against local soil surveys."
                         )
                     self.provenance.record_decision(
                         decision_type=DecisionType.FALLBACK_SUBSTITUTION,
@@ -1694,10 +1727,10 @@ class TranslationPipeline:
                         rationale=rationale,
                         alternatives=[
                             "iSDA 30m (higher resolution, preferred for Africa)",
-                            "Regional soil-default library (V2-20)",
+                            "Regional soil-default library by agro-ecological zone (V2-20)",
                             "Interpolation from neighbouring cells (not implemented)",
                         ],
-                        reference="prismpy.sources.soil.hwsd.DEFAULT_SOIL",
+                        reference="prismpy.sources.soil.hwsd.DEFAULT_SOIL (hwsd.py:42-49)",
                         artifact_id="soil",
                     )
 
@@ -1805,7 +1838,7 @@ class TranslationPipeline:
             if region:
                 # V2-19: start grid artifact so grid-creation decisions bind here
                 if self.provenance.enabled:
-                    self.provenance.start_artifact("grid", artifact_id="grid")
+                    self.provenance.start_artifact("grid", artifact_id="grid", stage="harmonize")
 
                 # Get clip geometry from region if available (for polygon clipping)
                 clip_geometry = None
@@ -2033,6 +2066,7 @@ class TranslationPipeline:
                     self.provenance.start_artifact(
                         artifact_type=output_artifact,
                         artifact_id=output_artifact,
+                        stage="translate",
                     )
 
                 try:
@@ -2102,17 +2136,21 @@ class TranslationPipeline:
     def _execute_validate(
         self,
         translation_results: Dict[str, TranslationResult],
+        unified_data: Optional["UnifiedData"] = None,
     ) -> StageResult:
         """Execute the VALIDATE stage.
 
-        Validates all generated outputs against platform requirements
-        using the dedicated BaseValidator hierarchy.
+        Runs two validation layers:
+        1. Platform-specific format validation (existing BaseValidator hierarchy)
+        2. Scientific data quality checks (V2-19 Phase 2a — 6 Tier 1 checks
+           from manuscript Section 2.5)
 
         Args:
             translation_results: Results from TRANSLATE stage
+            unified_data: Harmonized data for scientific validation
 
         Returns:
-            StageResult with validation summary
+            StageResult with validation summary including scientific checks
         """
         start_time = datetime.now()
         self.logger.info("Stage 4: VALIDATE - Checking outputs")
@@ -2121,12 +2159,12 @@ class TranslationPipeline:
         warnings = []
         validation_summary = {}
 
+        # Layer 1: Platform-specific format validation
         for platform_name, result in translation_results.items():
             if not result.success:
                 errors.extend([f"{platform_name}: {e}" for e in result.errors])
                 continue
 
-            # Run platform-specific validation via BaseValidator hierarchy
             platform = Platform(platform_name)
             validator = self._get_validator(platform, result.output_dir)
 
@@ -2158,6 +2196,89 @@ class TranslationPipeline:
                     "note": "No validator available",
                 }
 
+        # Layer 2: Scientific data quality checks (V2-19 Phase 2a)
+        scientific_report = None
+        if unified_data:
+            try:
+                from prismpy.validators.scientific import run_scientific_validation
+
+                enabled_platforms = [
+                    p.value for p in self.config.get_enabled_platforms()
+                ]
+                scientific_report = run_scientific_validation(
+                    unified_data, self.config, enabled_platforms
+                )
+                validation_summary["scientific"] = scientific_report
+
+                # Surface fail/warning-level checks as pipeline WARNINGS
+                # (not errors). Validation is a REPORTING mechanism, not
+                # a GATE — users should receive their package + the
+                # validation report showing what failed. Pipeline errors
+                # are reserved for actual pipeline failures (data
+                # retrieval crash, translation failure).
+                for check in scientific_report.get("checks", []):
+                    if check["result"] == "fail":
+                        warnings.append(
+                            f"Scientific validation FAIL: {check['summary']}"
+                        )
+                    elif check["result"] == "warning":
+                        warnings.append(
+                            f"Scientific validation: {check['summary']}"
+                        )
+
+                self.logger.info(
+                    f"  Scientific validation: {scientific_report['overall_result']} "
+                    f"({scientific_report['n_pass']} pass, "
+                    f"{scientific_report['n_warning']} warn, "
+                    f"{scientific_report['n_fail']} fail)"
+                )
+
+                # Wire validation into provenance
+                if self.provenance and self.provenance.enabled:
+                    self.provenance.start_artifact(
+                        "validation", artifact_id="validation",
+                        stage="validate",
+                    )
+                    self.provenance.record_transformation(
+                        operation=OperationType.VALIDATE,
+                        parameters={
+                            "n_checks": scientific_report["n_checks"],
+                            "overall_result": scientific_report["overall_result"],
+                            "n_pass": scientific_report["n_pass"],
+                            "n_warning": scientific_report["n_warning"],
+                            "n_fail": scientific_report["n_fail"],
+                        },
+                        artifact_id="validation",
+                    )
+                    # Record a QUALITY_CHECK decision summarizing the outcome
+                    self.provenance.record_decision(
+                        decision_type=DecisionType.QUALITY_CHECK,
+                        description=(
+                            f"Scientific validation: "
+                            f"{scientific_report['overall_result'].upper()} "
+                            f"({scientific_report['n_checks']} checks)"
+                        ),
+                        rationale=(
+                            f"6 Tier 1 scientific quality checks per manuscript "
+                            f"Section 2.5: temporal completeness, cross-variable "
+                            f"consistency, value range, soil completeness, format "
+                            f"compliance, spatial/temporal coverage. "
+                            f"Result: {scientific_report['n_pass']} pass, "
+                            f"{scientific_report['n_warning']} warning, "
+                            f"{scientific_report['n_fail']} fail."
+                        ),
+                        alternatives=[
+                            "Skip validation (not recommended for research use)",
+                            "Tier 2 checks: region-specific thresholds (V2-20)",
+                        ],
+                        reference="prismpy.validators.scientific.run_scientific_validation",
+                        artifact_id="validation",
+                    )
+
+            except Exception as e:
+                self.logger.warning(f"Scientific validation failed: {e}")
+                warnings.append(f"Scientific validation skipped: {e}")
+
         duration = (datetime.now() - start_time).total_seconds()
         return StageResult(
             stage=PipelineStage.VALIDATE,
@@ -2172,16 +2293,19 @@ class TranslationPipeline:
         self,
         unified_data: Optional[UnifiedData],
         translation_results: Dict[str, TranslationResult],
+        validate_result: Optional[StageResult] = None,
     ) -> StageResult:
         """Execute the PACKAGE stage.
 
         Generates self-documenting data packages for each platform
-        (manifest, provenance, README) and saves the pipeline-level
-        provenance audit trail.
+        (manifest, provenance, README, validation_report) and saves
+        the pipeline-level provenance audit trail.
 
         Args:
             unified_data: Harmonized data from HARMONIZE stage
             translation_results: Results from TRANSLATE stage
+            validate_result: Results from VALIDATE stage (includes
+                scientific validation report for ZIP inclusion)
 
         Returns:
             StageResult with packaging summary
@@ -2236,9 +2360,10 @@ class TranslationPipeline:
                 canonical_rich.stem + "_stages" + canonical_rich.suffix
             )
 
-            # Per-platform distribution — copy both files into each
-            # enabled platform's output directory as the filenames the
-            # VS-01 validator + user ZIP packager expect.
+            # Per-platform distribution — copy provenance + validation
+            # into each enabled platform's output directory. These files
+            # end up in the user-downloadable ZIP, making the package
+            # self-contained for data quality auditing.
             for platform_name in translation_results:
                 platform_dir = base_dir / platform_name
                 if platform_dir.is_dir():
@@ -2254,8 +2379,29 @@ class TranslationPipeline:
                         canonical_stages,
                         platform_dir / "provenance_stages.json",
                     )
+
+                    # V2-19 Phase 2b: save validation_report.json into
+                    # each platform dir so the ZIP is self-contained.
+                    # Researchers can audit data quality without visiting
+                    # the webapp.
+                    if validate_result and validate_result.data:
+                        import json as _json
+                        val_data = validate_result.data
+                        val_report_path = platform_dir / "validation_report.json"
+                        try:
+                            with open(val_report_path, "w", encoding="utf-8") as vf:
+                                _json.dump(val_data, vf, indent=2, default=str, ensure_ascii=False)
+                            self.logger.info(
+                                f"  {platform_name}: validation_report.json saved"
+                            )
+                        except Exception as ve:
+                            self.logger.warning(
+                                f"  {platform_name}: validation_report.json "
+                                f"save failed: {ve}"
+                            )
+
                     self.logger.info(
-                        f"  {platform_name}: provenance files distributed"
+                        f"  {platform_name}: package files distributed"
                     )
 
             report = self.provenance.get_report()
@@ -2376,7 +2522,13 @@ class TranslationPipeline:
             # Stage 4: VALIDATE
             if PipelineStage.VALIDATE in stages and translation_results:
                 _notify_start("validate", "Verifying outputs")
-                result = self._execute_validate(translation_results)
+                # Pass unified_data for scientific validation (Phase 2a)
+                harmonize_data = stage_results.get("harmonize", StageResult(
+                    stage=PipelineStage.HARMONIZE, success=True, data=None
+                )).data
+                result = self._execute_validate(
+                    translation_results, unified_data=harmonize_data
+                )
                 stage_results["validate"] = result
                 _notify_complete("validate", result)
 
@@ -2386,7 +2538,10 @@ class TranslationPipeline:
                 unified_data = stage_results.get("harmonize", StageResult(
                     stage=PipelineStage.HARMONIZE, success=True, data=None
                 )).data
-                result = self._execute_package(unified_data, translation_results)
+                validate_result = stage_results.get("validate")
+                result = self._execute_package(
+                    unified_data, translation_results, validate_result
+                )
                 stage_results["package"] = result
                 _notify_complete("package", result)
                 if result.data:

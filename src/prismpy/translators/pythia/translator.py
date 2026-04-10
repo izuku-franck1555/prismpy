@@ -222,7 +222,7 @@ class PythiaTranslator(PythiaTranslatorBase):
                 description=f"Generated PYTHIA inputs for {data.region.name}",
                 rationale="PYTHIA requires JSON config with DSSAT .WTH weather files",
                 alternatives=["manual configuration"],
-                reference=f"Output: {self.output_dir}",
+                reference="prismpy.translators.pythia.translator.translate",
             )
 
         # Count output files by type
@@ -788,6 +788,40 @@ class PythiaTranslator(PythiaTranslatorBase):
         mgmt = self.config.management
         if mgmt is None:
             mgmt = ManagementConfig(planting_density=62500.0)
+            # V2-19 C1 (TP-04): planting density fallback rationale
+            if self.provenance:
+                self.provenance.record_decision(
+                    decision_type=DecisionType.DEFAULT_VALUE,
+                    description=(
+                        "Planting density fallback: 62,500 plants/ha "
+                        "(no user-provided management config)"
+                    ),
+                    rationale=(
+                        "No source in code for the 62,500 plants/ha default. "
+                        "Literature range for tropical maize: 25,000 (Sahel "
+                        "rainfed smallholder, Traore et al. 2013) to 80,000 "
+                        "(irrigated high-input commercial, Sime et al. 2022). "
+                        "The default sits at the high end of rainfed practice "
+                        "and low end of irrigated practice (~6.25 plants/m²). "
+                        "Valid for moderate-input to high-input rainfed maize "
+                        "in the Sudan-Savanna zone of West Africa (row spacing "
+                        "70-80 cm, intra-row 20-25 cm). NOT valid for "
+                        "low-input Sahelian millet/sorghum systems (typically "
+                        "10,000-30,000 plants/ha) or irrigated commercial "
+                        "maize in southern Africa (>70,000). Users should "
+                        "override via config.management.planting_density for "
+                        "their specific agro-ecological context."
+                    ),
+                    alternatives=[
+                        "User-provided planting density from config (preferred)",
+                        "Region-specific density lookup from literature (V2-20)",
+                        "Crop-specific defaults (millet 30k, sorghum 50k, etc.)",
+                    ],
+                    reference=(
+                        "prismpy.translators.pythia.translator "
+                        "ManagementConfig(planting_density=62500.0)"
+                    ),
+                )
 
         # Get temporal config - REQUIRED
         if self.config.temporal:
@@ -855,6 +889,22 @@ class PythiaTranslator(PythiaTranslatorBase):
         "chickpea", "groundnut", "peanut", "pigeon pea", "pigeonpea",
         "lentil", "faba bean", "velvet bean", "mung bean",
     })
+
+    # V2-19: default CROPGRO cultivar codes for supported legumes.
+    # These are standard DSSAT generic cultivars that exist in the
+    # respective crop cultivar files. When a legume has a known
+    # default, _map_generic_to_cultivar uses it instead of falling
+    # through to CERES-Maize GDD codes (990001-990003).
+    _LEGUME_DEFAULT_CULTIVARS: Dict[str, Tuple[str, str]] = {
+        "cowpea": ("II0003", "IT90K-277-2"),
+        "groundnut": ("IB0001", "FLEUR_11"),
+        "peanut": ("IB0001", "FLEUR_11"),
+        "soybean": ("IB0001", "MEDIUM_GRO"),
+        "soya bean": ("IB0001", "MEDIUM_GRO"),
+        "chickpea": ("IB0001", "MEDIUM_GRO"),
+        "bean": ("IB0001", "MEDIUM_GRO"),
+        "beans": ("IB0001", "MEDIUM_GRO"),
+    }
 
     def _get_pythia_config(self):
         """Get PythiaConfig from platform_config, or None."""
@@ -968,12 +1018,60 @@ class PythiaTranslator(PythiaTranslatorBase):
                 "total_gdd": None,
             }
 
-        # Priority 2: GDD-based maturity class mapping (CERES crops only)
+        # Priority 2: CROPGRO legume default cultivar (V2-19 fix for TP-06)
+        crop_name = self.config.crop.name.lower().strip()
+        if crop_name in self._LEGUME_DEFAULT_CULTIVARS:
+            ingeno, cname = self._LEGUME_DEFAULT_CULTIVARS[crop_name]
+            logger.info(
+                f"Using CROPGRO default cultivar for '{crop_name}': "
+                f"INGENO={ingeno}, CNAME={cname}"
+            )
+            return {
+                "ingeno": ingeno,
+                "cname": cname,
+                "maturity_class": "cropgro_default",
+                "total_gdd": None,
+            }
+
+        # Priority 3: GDD-based maturity class mapping (CERES crops only)
         pheno = self.config.crop.phenology
 
         # Use defaults if not provided
         if pheno is None:
             pheno = PhenologyConfig()
+            # V2-19 C4 (TA-01): GDD defaults rationale
+            if self.provenance:
+                self.provenance.record_decision(
+                    decision_type=DecisionType.DEFAULT_VALUE,
+                    description=(
+                        "Crop GDD defaults: emergence=90, veg=500, "
+                        "repro=400, grain_fill=700 (total=1690 GDD)"
+                    ),
+                    rationale=(
+                        "No user-provided phenology config. Generic "
+                        "PhenologyConfig defaults (base_temp=8\u00b0C, "
+                        "total 1690 GDD) approximate a medium-season "
+                        "tropical maize (110-120 day). Literature range "
+                        "for maize: 1200-2000 GDD total depending on "
+                        "maturity group (Kiniry et al. 1991). Default "
+                        "is mid-range. Valid for medium-duration improved "
+                        "OPV maize in West Africa. NOT valid for "
+                        "short-season pearl millet (~1000 GDD), long-"
+                        "season sorghum (~1800 GDD), or temperate cereals "
+                        "(wheat base_temp=0\u00b0C). Users should set "
+                        "config.crop.phenology for their specific cultivar."
+                    ),
+                    alternatives=[
+                        "User-provided phenology from config (preferred)",
+                        "Crop-specific GDD lookup table (V2-20)",
+                        "DSSAT ECOTYPE/CULTIVAR file defaults",
+                    ],
+                    reference=(
+                        "prismpy.config.schema.PhenologyConfig defaults "
+                        "(emergence_gdd=90, vegetative_phase_gdd=500, "
+                        "reproductive_phase_gdd=400, grain_filling_gdd=700)"
+                    ),
+                )
 
         # Calculate total thermal time requirement
         total_gdd = (
@@ -992,6 +1090,41 @@ class PythiaTranslator(PythiaTranslatorBase):
                 f"are CERES-Maize specific and will NOT work with CROPGRO. "
                 f"Set platform_config.pythia.dssat_cultivar_ingeno in your config."
             )
+            # V2-19 C2 (TP-06): CROPGRO → CERES-Maize silent fallback.
+            # Uses crop-modeling-specialist's verbatim rationale per AC11.
+            if self.provenance:
+                self.provenance.record_decision(
+                    decision_type=DecisionType.FALLBACK_SUBSTITUTION,
+                    description=(
+                        f"CROPGRO→CERES-Maize silent fallback: legume "
+                        f"'{crop_name}' assigned CERES cultivar codes "
+                        f"(990001-990003)"
+                    ),
+                    rationale=(
+                        "Current behavior is scientifically unacceptable. "
+                        "CROPGRO models C3 legumes with symbiotic N\u2082 "
+                        "fixation; CERES-Maize models a C4 cereal with no "
+                        "N\u2082 fixation. Yields, biomass partitioning, N "
+                        "dynamics, and water-use efficiency are not "
+                        "comparable. Users who select a CROPGRO crop and "
+                        "receive CERES-Maize output should discard those "
+                        "results. V2-20 will enforce this via (1) warning "
+                        "log before fallback, (2) opt-in strict_mode flag "
+                        "that raises instead, (3) user-facing badge in "
+                        "the UI."
+                    ),
+                    alternatives=[
+                        "Explicit dssat_cultivar_ingeno override (required for CROPGRO)",
+                        "Raise error instead of silent fallback (V2-20 strict_mode)",
+                        "CROPGRO-specific cultivar database (not yet available)",
+                    ],
+                    reference=(
+                        "prismpy.translators.pythia.translator."
+                        "_map_generic_to_cultivar (legume warning branch)"
+                    ),
+                    severity="error",
+                    label="CROPGRO→CERES-Maize: invalid cultivar codes",
+                )
 
         # Get GDD thresholds from config (with defaults)
         short_gdd_max = 1400.0

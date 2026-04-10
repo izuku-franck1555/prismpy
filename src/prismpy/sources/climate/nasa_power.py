@@ -168,12 +168,7 @@ class NASAPowerSource(DataSource):
             # Use center of region
             lon, lat = region.bounds.center
             metadata["coordinate_source"] = "region_center"
-            # V2-19 B0 finding #2: NASA POWER center-point sampling is
-            # an implicit decision — the full region is reduced to a
-            # single (lat, lon) without uncertainty quantification from
-            # interior variability. Recorded here with a basic factual
-            # rationale; V2-19 C-group C6/RN-04 refines this with the
-            # full scientific justification to meet AC11 bar.
+            # V2-19 C6 (RN-04): NASA POWER center-point sampling rationale
             if self.provenance:
                 self.provenance.record_decision(
                     decision_type=DecisionType.SOURCE_SELECTION,
@@ -182,20 +177,34 @@ class NASAPowerSource(DataSource):
                     ),
                     rationale=(
                         "The region bounding-box centre is used as the "
-                        "query point for NASA POWER's /point endpoint. "
-                        "Climate is assumed spatially homogeneous across "
-                        "the region at the 0.5° NASA POWER grid scale. "
-                        "Rationale to be refined to meet AC11 bar during "
-                        "V2-19 C-group review (C6/RN-04)."
+                        "single query point for NASA POWER's /point "
+                        "endpoint. NASA POWER provides gridded reanalysis "
+                        "at 0.5\u00b0 (~56 km) native resolution (Stackhouse "
+                        "et al. 2018). For regions smaller than one NASA "
+                        "POWER grid cell (~3000 km\u00b2), the center-point "
+                        "returns the same data as any other point in the "
+                        "region — spatial homogeneity is a property of "
+                        "the source, not an assumption. Valid for "
+                        "administrative units up to ~ADM2 in West Africa "
+                        "(Koutiala \u2248 7000 km\u00b2, spans ~2 POWER cells). "
+                        "NOT valid for large regions spanning multiple "
+                        "climate zones (e.g., national-scale ADM0) where "
+                        "interior climate variability exceeds the 0.5\u00b0 "
+                        "grid — use AgERA5 gridded fields or multi-point "
+                        "sampling instead. A reviewer would ask: 'Is one "
+                        "point representative of the study area?' For "
+                        "ADM2 regions in the Sahel, yes — NASA POWER's "
+                        "56 km cell typically covers the entire district."
                     ),
                     alternatives=[
-                        "Query NASA POWER at every grid cell (API-expensive)",
-                        "Use AgERA5 gridded fields (higher resolution)",
+                        "Query NASA POWER at every grid cell (API-expensive, "
+                        "same 0.5\u00b0 data for small regions)",
+                        "AgERA5 gridded fields (0.1\u00b0 resolution, higher fidelity)",
                         "Multi-point sampling with spatial interpolation",
                     ],
                     reference=(
                         "prismpy.sources.climate.nasa_power.NASAPowerSource."
-                        "retrieve line ~169 (region.bounds.center)"
+                        "retrieve (region.bounds.center)"
                     ),
                     artifact_id="climate",
                 )

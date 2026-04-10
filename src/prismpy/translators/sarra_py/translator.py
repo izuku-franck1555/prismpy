@@ -225,7 +225,39 @@ class SarraPyTranslator(SarraPyTranslatorBase):
                 description=f"Generated SARRA-Py configuration for {data.region.name}",
                 rationale="SARRA-Py requires YAML config with NetCDF climate data",
                 alternatives=["manual configuration"],
-                reference=f"Output: {self.output_dir}",
+                reference="prismpy.translators.sarra_py.translator.translate",
+            )
+            # V2-19 C8 (TS-03): spinup period rationale
+            spinup_yrs = self.config.temporal.spinup_years
+            self.provenance.record_decision(
+                decision_type=DecisionType.DEFAULT_VALUE,
+                description=(
+                    f"Spinup period: {spinup_yrs} year(s) before "
+                    f"simulation start"
+                ),
+                rationale=(
+                    f"SARRA-Py requires a spinup period to initialize "
+                    f"soil water balance from arbitrary initial conditions. "
+                    f"The {spinup_yrs}-year spinup allows the model's "
+                    f"internal soil moisture to equilibrate with the "
+                    f"climate forcing before the analysis period begins. "
+                    f"Literature recommends 1-3 years for Sahelian crop "
+                    f"models depending on soil depth and initial moisture "
+                    f"assumptions (Sultan et al. 2005). Valid for shallow-"
+                    f"rooted annual crops in semi-arid regions (Sahel, "
+                    f"Sudan savanna). NOT valid for deep-rooted perennials "
+                    f"or irrigated systems where longer spinup (3-5 years) "
+                    f"may be needed for deep soil layers to equilibrate."
+                ),
+                alternatives=[
+                    "1-year spinup (faster, less stable for dry years)",
+                    "3-year spinup (more conservative, recommended for "
+                    "deep soils or long-term trend analysis)",
+                ],
+                reference=(
+                    "prismpy.config.schema.TemporalConfig.spinup_years "
+                    f"(default=2, current={spinup_yrs})"
+                ),
             )
 
         result = self.create_result(
@@ -364,6 +396,8 @@ class SarraPyTranslator(SarraPyTranslatorBase):
                 "start_date": start_date.isoformat(),
                 "end_date": end_date.isoformat(),
                 "spinup_years": self.config.temporal.spinup_years,
+                # V2-19 C8 (TS-03): spinup period rationale — recorded
+                # in the output config dict; the decision is wired below.
             },
             "crop": {
                 "name": self.config.crop.name,
@@ -1048,6 +1082,35 @@ class SarraPyTranslator(SarraPyTranslatorBase):
         # Use defaults if not provided
         if mgmt is None:
             mgmt = ManagementConfig(planting_density=62500.0)
+            # V2-19 C1 (TP-04): same rationale as PYTHIA — see
+            # pythia/translator.py for the full AC11-compliant text.
+            # Recorded here too because SARRA-Py consumes the density
+            # independently (as "densite" in the ITK config).
+            if self.provenance:
+                self.provenance.record_decision(
+                    decision_type=DecisionType.DEFAULT_VALUE,
+                    description=(
+                        "Planting density fallback: 62,500 plants/ha "
+                        "(no user-provided management config)"
+                    ),
+                    rationale=(
+                        "No source in code. Literature range for tropical "
+                        "maize: 25,000 (Sahel rainfed) to 80,000 (irrigated "
+                        "high-input). Default is moderate-to-high density "
+                        "(~6.25 plants/m²), appropriate for Sudan-Savanna "
+                        "improved OPV maize. NOT valid for Sahelian millet/"
+                        "sorghum (<30,000) or high-input commercial (>70,000). "
+                        "Override via config.management.planting_density."
+                    ),
+                    alternatives=[
+                        "User-provided planting density from config (preferred)",
+                        "Crop-specific defaults (V2-20)",
+                    ],
+                    reference=(
+                        "prismpy.translators.sarra_py.translator "
+                        "ManagementConfig(planting_density=62500.0)"
+                    ),
+                )
 
         # Compute opportunistic sowing date (year before start)
         sarra_config = self.config.platform_config.sarra_py if self.config.platform_config else None

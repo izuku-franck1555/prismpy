@@ -160,6 +160,7 @@ class ProvenanceTracker:
         artifact_type: str,
         source_artifacts: Optional[List[str]] = None,
         artifact_id: Optional[str] = None,
+        stage: Optional[str] = None,
     ) -> str:
         """Start tracking a new data artifact.
 
@@ -167,6 +168,8 @@ class ProvenanceTracker:
             artifact_type: Type of artifact (e.g., "climate", "soil")
             source_artifacts: IDs of source artifacts
             artifact_id: Optional custom artifact ID
+            stage: Pipeline stage (retrieve/harmonize/translate/validate)
+                for timeline grouping in the UI
 
         Returns:
             The artifact ID
@@ -181,6 +184,7 @@ class ProvenanceTracker:
             artifact_id=artifact_id,
             artifact_type=artifact_type,
             source_artifacts=source_artifacts or [],
+            stage=stage,
         )
 
         self.record.add_artifact(lineage)
@@ -339,9 +343,11 @@ class ProvenanceTracker:
         decision_type: DecisionType,
         description: str,
         rationale: str,
-        alternatives: Optional[List[str]] = None,
+        alternatives: Optional[List] = None,
         reference: Optional[str] = None,
         artifact_id: Optional[str] = None,
+        severity: str = "info",
+        label: Optional[str] = None,
     ) -> DecisionRecord:
         """Record a decision and bind it to the correct artifact.
 
@@ -395,6 +401,8 @@ class ProvenanceTracker:
                 rationale=rationale,
                 alternatives_considered=alternatives or [],
                 reference=reference,
+                severity=severity,
+                label=label,
             )
 
         decision = DecisionRecord(
@@ -403,6 +411,8 @@ class ProvenanceTracker:
             rationale=rationale,
             alternatives_considered=alternatives or [],
             reference=reference,
+            severity=severity,
+            label=label,
         )
 
         # V2-19b-fix Finding 4: EXPLICIT path (direct-attach or fail-fast).
@@ -683,7 +693,7 @@ class ProvenanceTracker:
 
             save_path.parent.mkdir(parents=True, exist_ok=True)
             with open(save_path, "w", encoding="utf-8") as f:
-                json.dump(rich_dict, f, indent=2, default=str)
+                json.dump(rich_dict, f, indent=2, default=str, ensure_ascii=False)
             self.logger.info(f"Saved provenance to {save_path}")
 
             # V2-19: emit stages compat file alongside
@@ -692,7 +702,7 @@ class ProvenanceTracker:
             )
             stages_dict = self._derive_stages_format(rich_dict)
             with open(stages_path, "w", encoding="utf-8") as f:
-                json.dump(stages_dict, f, indent=2, default=str)
+                json.dump(stages_dict, f, indent=2, default=str, ensure_ascii=False)
             self.logger.info(f"Saved stages-compat provenance to {stages_path}")
 
         return save_path
