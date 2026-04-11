@@ -58,17 +58,7 @@ def run_post_translate_validation(
         elif platform_name == "craft":
             checks.extend(_validate_craft_weather(platform_dir))
         elif platform_name == "sarra_py":
-            checks.append({
-                "check": f"post_translate_climate_{platform_name}",
-                "scope": "platform",
-                "result": "info",
-                "summary": (
-                    "SARRA-Py climate validated via GeoTIFF file-count "
-                    "check in scientific validator"
-                ),
-                "manuscript_claim": "Section 2.5: completeness check",
-                "details": {"platform": platform_name},
-            })
+            checks.extend(_validate_sarra_py_geotiffs(platform_dir, base_dir))
 
     results = [c["result"] for c in checks]
     if "fail" in results:
@@ -468,7 +458,7 @@ def _build_climate_checks(
         "scope": "per_record",
         "result": result,
         "summary": (
-            f"{platform.upper()}: {total_records} records from "
+            f"{platform.upper()}: {total_records} daily records from "
             f"{n_files} files, {fail_count} violations"
         ),
         "manuscript_claim": "Section 2.5: cross-variable consistency (real data)",
@@ -510,6 +500,165 @@ def _build_climate_checks(
                 "out_of_range_count": n_oor,
                 "total_values": len(values),
                 "data_source": "actual translator output",
+            },
+        })
+
+    return checks
+
+
+def _validate_sarra_py_geotiffs(
+    platform_dir: Path, base_dir: Path,
+) -> List[Dict[str, Any]]:
+    """Validate SARRA-Py climate by sampling GeoTIFF pixel values.
+
+    Samples up to 10 random files per variable directory, reads pixel
+    values with rasterio, and produces range checks identical in structure
+    to other platforms (post_translate_range_{platform}_{var}).
+    """
+    import random
+    import logging
+
+    logger = logging.getLogger(__name__)
+    checks = []
+
+    # Map variable dirs to our internal variable names + unit conversion
+    var_mapping = {
+        "2m_temperature_24_hour_maximum": ("tmax", -273.15),  # K→°C
+        "2m_temperature_24_hour_minimum": ("tmin", -273.15),
+        "solar_radiation_flux_daily": ("srad", 1e-6),  # J/m²→MJ/m²
+    }
+
+    # Find climate GeoTIFF directories: check cache paths relative to
+    # base_dir (the pipeline output root)
+    cache_base = base_dir.parent
+    tamsat_dir = None
+    agera5_dir = None
+
+    # Search for TAMSAT and AgERA5 cache dirs
+    for candidate in [
+        cache_base / "cache" / "tamsat",
+        cache_base / "cache",
+    ]:
+        if not candidate.exists():
+            continue
+        for sub in candidate.iterdir():
+            if sub.is_dir() and ("tamsat" in sub.name.lower() or "TAMSAT" in sub.name):
+                tifs = list(sub.glob("*.tif"))
+                if tifs:
+                    tamsat_dir = sub
+                    break
+
+    for candidate in [
+        cache_base / "cache" / "agera5",
+        cache_base / "cache",
+    ]:
+        if not candidate.exists():
+            continue
+        for sub in candidate.iterdir():
+            if sub.is_dir() and "AgERA5" in sub.name:
+                # Check it has variable subdirs
+                if any(d.is_dir() for d in sub.iterdir()):
+                    agera5_dir = sub
+                    break
+
+    sampled_vars = {}
+
+    # Sample TAMSAT rainfall
+    if tamsat_dir:
+        tifs = list(tamsat_dir.glob("*.tif"))
+        if tifs:
+            sample = random.sample(tifs, min(10, len(tifs)))
+            sampled_vars["rain"] = (sample, 1.0)
+
+    # Sample AgERA5 variables
+    if agera5_dir:
+        for var_dir_name, (internal_name, offset) in var_mapping.items():
+            var_dir = agera5_dir / var_dir_name
+            if not var_dir.is_dir():
+                continue
+            tifs = list(var_dir.glob("*.tif"))
+            if not tifs:
+                continue
+            sample = random.sample(tifs, min(10, len(tifs)))
+            sampled_vars[internal_name] = (sample, offset)
+
+    if not sampled_vars:
+        checks.append({
+            "check": "post_translate_climate_sarra_py",
+            "scope": "platform",
+            "result": "info",
+            "summary": "No SARRA-Py GeoTIFF climate files found for range check",
+            "manuscript_claim": "Section 2.5: value range verification",
+            "details": {"platform": "sarra_py"},
+        })
+        return checks
+
+    # Read pixel values and produce range checks
+    try:
+        import rasterio
+        import numpy as np
+    except ImportError:
+        checks.append({
+            "check": "post_translate_climate_sarra_py",
+            "scope": "platform",
+            "result": "info",
+            "summary": "rasterio not available for GeoTIFF range check",
+            "manuscript_claim": "Section 2.5: value range verification",
+            "details": {"platform": "sarra_py"},
+        })
+        return checks
+
+    for var, (sample_files, offset) in sampled_vars.items():
+        all_vals = []
+        for tif_path in sample_files:
+            try:
+                with rasterio.open(tif_path) as src:
+                    data = src.read(1).astype(float)
+                    nodata = src.nodata
+                    if nodata is not None:
+                        data = data[data != nodata]
+                    valid = data[np.isfinite(data)]
+                    if valid.size > 0:
+                        if offset != 1.0:
+                            valid = valid + offset if abs(offset) > 1 else valid * offset
+                        all_vals.extend([float(valid.min()), float(valid.max())])
+            except Exception as e:
+                logger.debug(f"Skipping {tif_path.name}: {e}")
+                continue
+
+        if not all_vals:
+            continue
+
+        obs_min = min(all_vals)
+        obs_max = max(all_vals)
+
+        vmin, vmax, unit = CLIMATE_RANGES.get(var, (None, None, ""))
+        if vmin is None:
+            continue
+
+        n_oor = sum(1 for v in all_vals if v < vmin or v > vmax)
+        result = "warning" if n_oor > 0 else "pass"
+
+        checks.append({
+            "check": f"post_translate_range_sarra_py_{var}",
+            "scope": "per_record",
+            "result": result,
+            "summary": (
+                f"SARRA-Py {var}: [{obs_min:.1f}, {obs_max:.1f}] "
+                f"{unit} (sampled from GeoTIFFs)"
+            ),
+            "manuscript_claim": "Section 2.5: value range verification (real data)",
+            "details": {
+                "platform": "sarra_py",
+                "variable": var,
+                "unit": unit,
+                "expected_min": vmin,
+                "expected_max": vmax,
+                "observed_min": round(obs_min, 2),
+                "observed_max": round(obs_max, 2),
+                "out_of_range_count": n_oor,
+                "total_values": len(all_vals),
+                "data_source": "GeoTIFF pixel values (10-file sample)",
             },
         })
 

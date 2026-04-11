@@ -364,11 +364,17 @@ def _check_temporal_completeness(unified_data, config) -> Dict[str, Any]:
     start_year = config.temporal.start_year
     end_year = config.temporal.end_year
     spinup = config.temporal.spinup_years
-    effective_start = start_year - spinup
 
-    expected_start = date(effective_start, 1, 1)
+    # For per-cell time series (CRAFT/PYTHIA/ACEA), expected range
+    # includes spinup. For file-based data (SARRA-Py), the actual
+    # download covers start_year to end_year WITHOUT spinup — the
+    # spinup period is handled by the model internally. We compute
+    # both ranges and use the appropriate one per data path.
+    expected_start_with_spinup = date(start_year - spinup, 1, 1)
+    expected_start_no_spinup = date(start_year, 1, 1)
     expected_end = date(end_year, 12, 31)
-    expected_days = (expected_end - expected_start).days + 1
+    expected_days_with_spinup = (expected_end - expected_start_with_spinup).days + 1
+    expected_days_no_spinup = (expected_end - expected_start_no_spinup).days + 1
 
     # Count actual days per cell
     climate = unified_data.climate if unified_data and hasattr(unified_data, 'climate') else {}
@@ -379,7 +385,7 @@ def _check_temporal_completeness(unified_data, config) -> Dict[str, Any]:
             "result": "warning",
             "summary": "No climate data available for completeness check",
             "manuscript_claim": "Section 2.5: completeness check",
-            "details": {"expected_days": expected_days, "actual_cells": 0},
+            "details": {"expected_days": expected_days_with_spinup, "actual_cells": 0},
         }
 
     cell_gaps = {}
@@ -393,18 +399,21 @@ def _check_temporal_completeness(unified_data, config) -> Dict[str, Any]:
         cells_with_records += 1
         actual_dates = {r.date for r in ts.records if hasattr(r, 'date')}
         n_actual = len(actual_dates)
-        n_missing = expected_days - n_actual
+        n_missing = expected_days_with_spinup - n_actual
         total_present += n_actual
-        total_expected += expected_days
+        total_expected += expected_days_with_spinup
         if n_missing > 0:
             cell_gaps[cell_id] = n_missing
 
     # If no cells have per-day records but climate dict has file-based
     # data (SARRA-Py: rainfall_file_count, agera5_variables), count
     # GeoTIFF files per variable as the completeness metric.
+    # D3 FIX: file-based check uses NON-SPINUP expected days.
+    # SARRA-Py downloads data for the actual period only; spinup
+    # is handled by the model internally.
     if cells_with_records == 0 and climate:
         return _check_temporal_completeness_file_based(
-            climate, expected_days
+            climate, expected_days_no_spinup
         )
 
     if total_expected == 0:
@@ -429,7 +438,7 @@ def _check_temporal_completeness(unified_data, config) -> Dict[str, Any]:
         ),
         "manuscript_claim": "Section 2.5: completeness check",
         "details": {
-            "expected_days_per_cell": expected_days,
+            "expected_days_per_cell": expected_days_with_spinup,
             "n_cells": len(climate),
             "completeness_pct": round(completeness * 100, 2),
             "cells_with_gaps": len(cell_gaps),
@@ -458,6 +467,19 @@ def _check_temporal_completeness_file_based(
     agera5_vars = climate.get("agera5_variables", {})
     for var_name, count in agera5_vars.items():
         var_counts[var_name] = count
+
+    # If AgERA5 was expected (SARRA-Py pipeline) but has no files,
+    # report it as zero-count entries so completeness check fails
+    # instead of silently passing on rainfall alone.
+    agera5_expected = climate.get("agera5_expected", False)
+    if agera5_expected and not agera5_vars:
+        for missing_var in [
+            "2m_temperature_24_hour_maximum",
+            "2m_temperature_24_hour_minimum",
+            "solar_radiation_flux_daily",
+            "2m_temperature_24_hour_mean",
+        ]:
+            var_counts[missing_var] = 0
 
     if not var_counts:
         return {
@@ -625,8 +647,10 @@ def _check_cross_variable_consistency(unified_data) -> Dict[str, Any]:
         "scope": "per_record",
         "result": result,
         "summary": (
-            f"{total_records} records checked, "
-            f"{fail_count} fail-level + {warn_count} warn-level violations"
+            f"Physical consistency checked across {total_records} daily records"
+            + (f" — {fail_count} critical + {warn_count} advisory issues found"
+               if (fail_count + warn_count) > 0
+               else " — all consistent")
         ),
         "manuscript_claim": "Section 2.5: cross-variable consistency",
         "details": {
@@ -705,8 +729,9 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
             "scope": "per_record",
             "result": result,
             "summary": (
-                f"{var}: observed [{stats['min']:.1f}, {stats['max']:.1f}] {unit}, "
-                f"expected [{vmin}, {vmax}], {n_oor}/{stats['total']} out of range"
+                f"{var}: {stats['min']:.1f} to {stats['max']:.1f} {unit} "
+                f"(expected {vmin} to {vmax})"
+                + (f" — {n_oor} of {stats['total']} values outside range" if n_oor > 0 else "")
             ),
             "manuscript_claim": "Section 2.5: value range verification",
             "details": {
@@ -769,8 +794,9 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
             "scope": "per_layer",
             "result": result,
             "summary": (
-                f"soil {var}: observed [{stats['min']:.2f}, {stats['max']:.2f}] {unit}, "
-                f"{n_oor}/{stats['total']} out of range"
+                f"Soil {var.replace('_', ' ')}: {stats['min']:.2f} to {stats['max']:.2f} {unit} "
+                f"(expected {vmin} to {vmax})"
+                + (f" — {n_oor} of {stats['total']} soil layers outside range" if n_oor > 0 else "")
             ),
             "manuscript_claim": "Section 2.5: value range verification",
             "details": {
@@ -793,8 +819,10 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
             "scope": "per_layer",
             "result": result,
             "summary": (
-                f"sand+clay+silt sum: {texture_violations}/{texture_total} "
-                f"layers outside [95, 105]%"
+                f"Soil texture fractions (sand + clay + silt) sum to ~100%"
+                + (f" — {texture_violations} of {texture_total} soil layers "
+                   f"have abnormal totals" if texture_violations > 0
+                   else f" for all {texture_total} soil layers")
             ),
             "manuscript_claim": "Section 2.5: value range verification",
             "details": {

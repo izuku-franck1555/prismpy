@@ -603,3 +603,81 @@ class TestAceaValidator:
         # Should have range error for cell ID (300000 > MAX_30ARCMIN_ID = 259199)
         range_errors = [i for i in result.issues if i.category == 'range']
         assert len(range_errors) > 0
+
+
+# =============================================================================
+# AgERA5 Partial Completeness Tests
+# =============================================================================
+
+class TestAgERA5CompletenessCheck:
+    """Tests proving that partial/missing AgERA5 data is flagged correctly.
+
+    Scientific integrity: a SARRA-Py package with incomplete temperature
+    data must never show 'Completeness: passed'. These tests verify the
+    fix for the silent-pass bug where AgERA5 gaps were invisible.
+    """
+
+    def _run_file_based_check(self, climate_data, expected_days):
+        from prismpy.validators.scientific import (
+            _check_temporal_completeness_file_based,
+        )
+        return _check_temporal_completeness_file_based(
+            climate_data, expected_days
+        )
+
+    def test_partial_agera5_flags_fail(self):
+        """83% AgERA5 completeness → FAIL (not pass)."""
+        climate = {
+            "rainfall_file_count": 1096,  # TAMSAT complete (3 years)
+            "agera5_expected": True,
+            "agera5_variables": {
+                "2m_temperature_24_hour_minimum": 731,
+                "2m_temperature_24_hour_maximum": 731,
+                "2m_temperature_24_hour_mean": 731,
+                "solar_radiation_flux_daily": 731,
+            },
+        }
+        result = self._run_file_based_check(climate, expected_days=1096)
+
+        assert result["result"] == "fail"
+        assert result["details"]["min_completeness_pct"] < 99.0
+        # Per-variable detail shows the gap
+        per_var = result["details"]["per_variable"]
+        assert per_var["2m_temperature_24_hour_maximum"]["file_count"] == 731
+        assert per_var["2m_temperature_24_hour_maximum"]["completeness_pct"] < 70.0
+
+    def test_zero_agera5_files_flags_fail(self):
+        """AgERA5 expected but zero files on disk → FAIL."""
+        climate = {
+            "rainfall_file_count": 1096,
+            "agera5_expected": True,
+            "agera5_variables": {},  # No files at all
+        }
+        result = self._run_file_based_check(climate, expected_days=1096)
+
+        assert result["result"] == "fail"
+        # Should inject 4 zero-count variables
+        per_var = result["details"]["per_variable"]
+        assert len(per_var) >= 4
+        # Each AgERA5 variable has 0 files
+        for var_name, info in per_var.items():
+            if var_name != "rainfall":
+                assert info["file_count"] == 0
+                assert info["completeness_pct"] == 0.0
+
+    def test_complete_agera5_passes(self):
+        """Full AgERA5 data → PASS."""
+        climate = {
+            "rainfall_file_count": 1096,
+            "agera5_expected": True,
+            "agera5_variables": {
+                "2m_temperature_24_hour_minimum": 1096,
+                "2m_temperature_24_hour_maximum": 1096,
+                "2m_temperature_24_hour_mean": 1096,
+                "solar_radiation_flux_daily": 1096,
+            },
+        }
+        result = self._run_file_based_check(climate, expected_days=1096)
+
+        assert result["result"] == "pass"
+        assert result["details"]["min_completeness_pct"] == 100.0

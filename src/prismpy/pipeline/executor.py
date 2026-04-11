@@ -868,11 +868,17 @@ class TranslationPipeline:
                 tamsat = TAMSATSource(cache_dir=cache_dir, provenance=self.provenance)
                 if tamsat.sarra_download_available:
                     self.logger.info("Downloading TAMSAT rainfall data...")
-                    def _tamsat_progress(current, total):
-                        if self._progress_callback:
+                    import time as _time
+                    _tamsat_last_report = [0.0]
+                    def _tamsat_progress(current, total, detail=''):
+                        now = _time.monotonic()
+                        is_final = current >= total
+                        if self._progress_callback and (is_final or now - _tamsat_last_report[0] >= 10):
+                            _tamsat_last_report[0] = now
+                            label = detail or f'TAMSAT rainfall: file {current} of {total}'
                             self._progress_callback.on_substage_progress(
                                 'retrieve', 'Downloading TAMSAT rainfall',
-                                current, total, f'year {current} of {total}')
+                                current, total, label)
                     tamsat_result = tamsat.retrieve(
                         region=region, start_date=start_date,
                         end_date=end_date, download=True,
@@ -895,15 +901,27 @@ class TranslationPipeline:
                 agera5 = AgERA5Source(cache_dir=cache_dir, provenance=self.provenance)
                 if agera5.sarra_download_available:
                     self.logger.info("Downloading AgERA5 temperature data...")
-                    def _agera5_progress(current, total):
-                        if self._progress_callback:
+                    # Force immediate substage update so the label
+                    # transitions from "TAMSAT: 1096/1096" to AgERA5
+                    if self._progress_callback:
+                        self._progress_callback.on_substage_progress(
+                            'retrieve', 'Downloading AgERA5 temperature',
+                            0, 1, 'AgERA5 temperature: starting CDS download...')
+                    _agera5_last_report = [0.0]
+                    def _agera5_progress(current, total, detail=''):
+                        now = _time.monotonic()
+                        is_final = current >= total
+                        if self._progress_callback and (is_final or now - _agera5_last_report[0] >= 10):
+                            _agera5_last_report[0] = now
+                            label = detail or f'AgERA5 temperature: file {current} of ~{total}'
                             self._progress_callback.on_substage_progress(
                                 'retrieve', 'Downloading AgERA5 temperature',
-                                current, total, f'year {current} of {total}')
+                                current, total, label)
                     agera5_result = agera5.retrieve(
                         region=region, start_date=start_date,
                         end_date=end_date, download=True,
                         progress_callback=_agera5_progress,
+                        cancel_check=self._progress_callback._is_cancelled if self._progress_callback else None,
                     )
                     if agera5_result.success and agera5_result.data:
                         climate_data["agera5_dir"] = agera5_result.data.data_dir
@@ -912,14 +930,52 @@ class TranslationPipeline:
                         got_data = True
                     else:
                         self.logger.warning(f"AgERA5 download failed: {agera5_result.errors}")
+                        # Scan cache for partial files — report what IS on disk
+                        # so validation can flag incomplete data honestly.
+                        self._report_partial_agera5(cache_dir, region.name, climate_data)
             except Exception as e:
                 self.logger.warning(f"AgERA5 download error: {e}")
+                self._report_partial_agera5(cache_dir, region.name, climate_data)
 
             if got_data:
                 return climate_data
 
         self.logger.warning("No pre-configured climate data paths found.")
         return None
+
+    def _report_partial_agera5(
+        self, cache_dir: Path, region_name: str, climate_data: Dict,
+    ) -> None:
+        """Scan AgERA5 cache for partial files after a failed download.
+
+        Even when download fails (timeout, network error), some files
+        may already exist from partial downloads or previous runs.
+        Report them so validation can flag incomplete data honestly
+        instead of silently ignoring the gap.
+        """
+        from prismpy.utils.sanitization import normalize_region_name
+        safe_name = normalize_region_name(region_name)
+        agera5_cache = cache_dir / "agera5" / f"AgERA5_{safe_name}"
+        if not agera5_cache.exists():
+            # Mark that AgERA5 was expected but has zero files
+            climate_data["agera5_variables"] = {}
+            climate_data["agera5_expected"] = True
+            return
+        var_counts = {}
+        for var_dir in agera5_cache.iterdir():
+            if var_dir.is_dir():
+                count = len(list(var_dir.glob("*.tif")))
+                if count:
+                    var_counts[var_dir.name] = count
+        if var_counts:
+            climate_data["agera5_dir"] = agera5_cache
+            climate_data["agera5_variables"] = var_counts
+            self.logger.warning(
+                f"Using partial AgERA5 cache: {var_counts}"
+            )
+        else:
+            climate_data["agera5_variables"] = {}
+        climate_data["agera5_expected"] = True
 
     def _create_placeholder_climate(
         self, region: Region
@@ -1167,6 +1223,13 @@ class TranslationPipeline:
             self.logger.info(
                 f"Downloading iSDA {prop_name} at ~1km via COG overview from S3..."
             )
+            # Set GDAL HTTP timeout for rasterio's network calls.
+            # Without this, rasterio.open on an S3 URL can block
+            # indefinitely if the server is unresponsive.
+            import os as _os2
+            _os2.environ.setdefault('GDAL_HTTP_TIMEOUT', '120')
+            _os2.environ.setdefault('GDAL_HTTP_CONNECTTIMEOUT', '30')
+
             with rasterio.open(s3_url) as src:
                 # CRS-aware target resolution selection.
                 # Geographic (degrees): 1/111 ≈ 0.00903° (~1km at equator;
@@ -2259,17 +2322,17 @@ class TranslationPipeline:
                             f"({scientific_report['n_checks']} checks)"
                         ),
                         rationale=(
-                            f"6 Tier 1 scientific quality checks per manuscript "
-                            f"Section 2.5: temporal completeness, cross-variable "
-                            f"consistency, value range, soil completeness, format "
-                            f"compliance, spatial/temporal coverage. "
+                            f"6 automated quality checks covering temporal "
+                            f"completeness, cross-variable consistency, value "
+                            f"ranges, soil completeness, format compliance, "
+                            f"and spatial/temporal coverage. "
                             f"Result: {scientific_report['n_pass']} pass, "
                             f"{scientific_report['n_warning']} warning, "
                             f"{scientific_report['n_fail']} fail."
                         ),
                         alternatives=[
                             "Skip validation (not recommended for research use)",
-                            "Tier 2 checks: region-specific thresholds (V2-20)",
+                            "Region-specific thresholds (planned enhancement)",
                         ],
                         reference="prismpy.validators.scientific.run_scientific_validation",
                         artifact_id="validation",
@@ -2476,6 +2539,26 @@ class TranslationPipeline:
                                 f"save failed: {ve}"
                             )
 
+                    # V2-21 C-group: generate cell_summary.json for the
+                    # interactive map. Per-cell metadata enables Leaflet
+                    # to color cells by validation status + show tooltips.
+                    if unified_data and hasattr(unified_data, 'grid') and unified_data.grid:
+                        try:
+                            cell_summary = self._build_cell_summary(unified_data)
+                            cs_path = platform_dir / "cell_summary.json"
+                            with open(cs_path, "w", encoding="utf-8") as csf:
+                                _json.dump(cell_summary, csf, indent=2,
+                                           default=str, ensure_ascii=False)
+                            self.logger.info(
+                                f"  {platform_name}: cell_summary.json saved "
+                                f"({len(cell_summary.get('cells', []))} cells)"
+                            )
+                        except Exception as cse:
+                            self.logger.warning(
+                                f"  {platform_name}: cell_summary.json "
+                                f"save failed: {cse}"
+                            )
+
                     self.logger.info(
                         f"  {platform_name}: package files distributed"
                     )
@@ -2500,6 +2583,90 @@ class TranslationPipeline:
             warnings=warnings,
             duration_seconds=duration,
         )
+
+    def _build_cell_summary(self, unified_data) -> Dict[str, Any]:
+        """Build per-cell summary for the interactive map.
+
+        Gathers validation-relevant metadata per grid cell:
+        - Coordinates from the spatial grid
+        - Soil source from SoilProfile.source
+        - Climate ranges from per-cell time series (if available)
+        - Validation status derived from soil source + data availability
+
+        Returns:
+            Dict with 'cells' list + 'resolution' + 'n_cells'
+        """
+        grid = unified_data.grid
+        soil = unified_data.soil or {}
+        climate = unified_data.climate or {}
+
+        cells = []
+        for cell in grid.cells:
+            cid = cell.cell_id
+            cell_data = {
+                "id": cid,
+                "lat": round(cell.lat, 6),
+                "lon": round(cell.lon, 6),
+            }
+
+            # Soil source
+            profile = soil.get(cid)
+            if profile and hasattr(profile, 'source'):
+                cell_data["soil_source"] = profile.source
+                # Flag DEFAULT_SOIL as warning
+                is_default = (
+                    profile.metadata.get('is_default', False)
+                    if hasattr(profile, 'metadata') and profile.metadata
+                    else False
+                )
+                cell_data["soil_default"] = is_default
+            else:
+                cell_data["soil_source"] = "none"
+                cell_data["soil_default"] = False
+
+            # Climate data (per-cell time series if available)
+            ts = climate.get(cid)
+            if ts and hasattr(ts, 'records') and ts.records:
+                tmax_vals = [r.tmax for r in ts.records if r.tmax is not None]
+                tmin_vals = [r.tmin for r in ts.records if r.tmin is not None]
+                if tmax_vals:
+                    cell_data["tmax_range"] = [
+                        round(min(tmax_vals), 1),
+                        round(max(tmax_vals), 1),
+                    ]
+                if tmin_vals:
+                    cell_data["tmin_range"] = [
+                        round(min(tmin_vals), 1),
+                        round(max(tmin_vals), 1),
+                    ]
+                cell_data["n_days"] = len(ts.records)
+                cell_data["has_climate"] = True
+            else:
+                cell_data["has_climate"] = False
+
+            # Validation status: pass / warning / fail
+            warnings = []
+            if cell_data.get("soil_default"):
+                warnings.append("default_soil")
+            if cell_data.get("soil_source") == "none":
+                warnings.append("no_soil")
+            if not cell_data.get("has_climate"):
+                warnings.append("no_climate")
+
+            if "no_soil" in warnings or "no_climate" in warnings:
+                cell_data["validation_status"] = "fail"
+            elif warnings:
+                cell_data["validation_status"] = "warning"
+            else:
+                cell_data["validation_status"] = "pass"
+
+            cells.append(cell_data)
+
+        return {
+            "n_cells": len(cells),
+            "resolution": getattr(grid, 'resolution', '5arcmin'),
+            "cells": cells,
+        }
 
     def execute(
         self,

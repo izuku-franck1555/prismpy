@@ -66,7 +66,7 @@ class AgERA5Config:
     resolution: float = 0.1  # ~10km
     data_dir: Optional[Path] = None
     use_sarra_download: bool = True
-    timeout: int = 300
+    timeout: int = 600
 
 
 @dataclass
@@ -282,6 +282,7 @@ class AgERA5Source(DataSource):
                     output_dir=data_dir.parent,  # Library creates subdir
                     region_name=region.name,
                     progress_callback=kwargs.get('progress_callback'),
+                    cancel_check=kwargs.get('cancel_check'),
                 )
 
                 # Re-validate
@@ -464,6 +465,7 @@ class AgERA5Source(DataSource):
         output_dir: Path,
         region_name: str,
         progress_callback=None,
+        cancel_check=None,
     ) -> None:
         """Download AgERA5 data using SARRA_data_download library.
 
@@ -482,18 +484,173 @@ class AgERA5Source(DataSource):
 
         area = {region_name: bounds}
 
+        import threading as _threading
+        import logging as _logging
+        from pathlib import Path as _P
+
+        total_days = (end_date - start_date).days + 1
+        estimated_total = total_days * len(AGERA5_VARIABLES)
+        agera5_out = _P("../data/3_output") / f"AgERA5_{region_name}"
+
+        # Variable names the library downloads (6 total)
+        var_labels = {
+            '2m_temperature_24_hour_minimum': 'tmin',
+            '2m_temperature_24_hour_maximum': 'tmax',
+            'solar_radiation_flux_daily': 'srad',
+            'vapour_pressure_24_hour_mean': 'humidity',
+            '10m_wind_speed_24_hour_mean': 'wind',
+            '2m_temperature_24_hour_mean': 'tmean',
+        }
+
         years = list(range(start_date.year, end_date.year + 1))
         for i, year in enumerate(years):
+            # Zombie guard: abort if pipeline was cancelled between years
+            if cancel_check and cancel_check():
+                self.logger.info("AgERA5 download aborted — pipeline cancelled")
+                return
+
+            # Report current file count at year start
             if progress_callback:
-                progress_callback(i + 1, len(years))
-            self.logger.info(f"Downloading AgERA5 data for {year}...")
-            download_AgERA5_year(
-                query_year=year,
-                area=area,
-                selected_area=region_name,
-                save_path=str(output_dir),
-                version="SARRA-Py",
+                count = sum(1 for _ in agera5_out.rglob("*.tif")) if agera5_out.exists() else 0
+                progress_callback(count, estimated_total, '')
+            self.logger.info(
+                f"Downloading AgERA5 data for {year} "
+                f"(year {i + 1}/{len(years)})..."
             )
+
+            # ── Sophisticated progress: CDS log interceptor + multi-stage scanner ──
+            # Captures CDS request lifecycle (queued → running → successful) and
+            # scans all 4 library stages to determine current phase.
+            stop_monitor = _threading.Event()
+            _cds_state = {'status': 'initializing', 'var_index': 0}
+
+            # CDS log interceptor: captures per-request status transitions
+            class _CDSHandler(_logging.Handler):
+                def emit(self, record):
+                    msg = record.getMessage()
+                    if 'status has been updated to' in msg:
+                        for token in ['accepted', 'running', 'successful', 'failed']:
+                            if token in msg:
+                                _cds_state['status'] = token
+                                break
+
+            cds_handler = _CDSHandler()
+            cds_handler.setLevel(_logging.INFO)
+            for logger_name in ['ecmwf.datastores.legacy_client', 'cdsapi']:
+                _logging.getLogger(logger_name).addHandler(cds_handler)
+
+            def _phase_monitor():
+                """Scan all 4 library stages + CDS state every 8s."""
+                prev_zips = 0
+                while not stop_monitor.wait(8):
+                    try:
+                        # Count files across all library stages
+                        dl_dir = output_dir / '0_downloads'
+                        n_zips = len(list(dl_dir.glob(
+                            f'AgERA5_{region_name}*_{year}.zip'
+                        ))) if dl_dir.exists() else 0
+
+                        ext_dir = output_dir / '1_extraction' / f'AgERA5_{region_name}' / str(year)
+                        n_extracted = sum(
+                            len(list(vd.glob('*.nc')))
+                            for vd in ext_dir.iterdir() if vd.is_dir()
+                        ) if ext_dir.exists() else 0
+
+                        conv_dir = output_dir / '2_conversion' / f'AgERA5_{region_name}'
+                        n_converted = sum(
+                            len(list(vd.glob('*.tif')))
+                            for vd in conv_dir.iterdir() if vd.is_dir()
+                        ) if conv_dir.exists() else 0
+
+                        n_output = sum(
+                            1 for _ in agera5_out.rglob('*.tif')
+                        ) if agera5_out.exists() else 0
+
+                        # Track variable progression
+                        if n_zips > prev_zips:
+                            _cds_state['var_index'] = n_zips
+                            _cds_state['status'] = 'initializing'
+                            prev_zips = n_zips
+
+                        # Build rich detail string
+                        yr_label = f'year {i + 1}/{len(years)}'
+                        cds_status = _cds_state['status']
+                        var_idx = _cds_state.get('var_index', 0)
+
+                        if n_converted > 0 or n_extracted > 0:
+                            # Post-download phase
+                            if n_converted > n_extracted:
+                                detail = (
+                                    f'{yr_label} — converting to GeoTIFF '
+                                    f'({n_converted} files)'
+                                )
+                            else:
+                                detail = (
+                                    f'{yr_label} — extracting NetCDF '
+                                    f'({n_extracted} files)'
+                                )
+                        elif n_zips > 0 and cds_status in ('initializing', 'accepted', 'running'):
+                            # Downloading next variable from CDS
+                            cds_label = {
+                                'initializing': 'preparing request',
+                                'accepted': 'queued on CDS',
+                                'running': 'downloading',
+                            }.get(cds_status, cds_status)
+                            detail = (
+                                f'{yr_label} — var {n_zips + 1}/6 '
+                                f'— {cds_label}'
+                            )
+                        elif n_zips > 0 and cds_status == 'successful':
+                            detail = (
+                                f'{yr_label} — {n_zips}/6 vars '
+                                f'downloaded'
+                            )
+                        else:
+                            # First variable, waiting for CDS
+                            cds_label = {
+                                'initializing': 'preparing request',
+                                'accepted': 'queued on CDS',
+                                'running': 'downloading',
+                                'successful': 'downloaded',
+                            }.get(cds_status, 'connecting...')
+                            detail = (
+                                f'{yr_label} — var 1/6 '
+                                f'— {cds_label}'
+                            )
+
+                        if progress_callback:
+                            progress_callback(
+                                n_output, estimated_total,
+                                f'AgERA5: {detail}',
+                            )
+                        self.logger.info(
+                            f'  AgERA5 {year}: {detail} '
+                            f'({n_output}/{estimated_total} output)'
+                        )
+                    except OSError:
+                        pass
+
+            monitor = _threading.Thread(target=_phase_monitor, daemon=True)
+            monitor.start()
+
+            # Call library directly — no timeout. CDS requests take
+            # 2-5 min each × 6 variables = 12-30 min per year.
+            # Heartbeat + watchdog provide the safety net.
+            try:
+                download_AgERA5_year(
+                    query_year=year,
+                    area=area,
+                    selected_area=region_name,
+                    save_path=str(output_dir),
+                    version="SARRA-Py",
+                )
+            finally:
+                stop_monitor.set()
+                monitor.join(timeout=2)
+                for logger_name in ['ecmwf.datastores.legacy_client', 'cdsapi']:
+                    _logging.getLogger(logger_name).removeHandler(cds_handler)
+
+            self.logger.info(f"AgERA5 {year} download complete.")
 
         # SARRA_data_download writes final GeoTIFFs to a hardcoded path
         # (../data/3_output/AgERA5_{region}/ relative to CWD, or under save_path).

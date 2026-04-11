@@ -74,7 +74,7 @@ class TAMSATSource(DataSource):
     provides daily rainfall estimates for Africa at ~4km resolution.
 
     The data can be accessed in two ways:
-    1. Using the SARRA_data_download library (if available)
+    1. Direct download from the JASMIN TAMSAT server (crop + GeoTIFF)
     2. Loading from pre-downloaded GeoTIFF files
 
     Attributes:
@@ -107,20 +107,15 @@ class TAMSATSource(DataSource):
         """
         super().__init__(cache_dir=cache_dir, provenance=provenance)
         self.config = config or TAMSATConfig()
-        self._sarra_download_available = None
 
     @property
     def sarra_download_available(self) -> bool:
-        """Check if SARRA_data_download library is available."""
-        if self._sarra_download_available is None:
-            try:
-                from SARRA_data_download.get_satellite_rainfall_estimates import (
-                    download_TAMSAT_year_parallel,
-                )
-                self._sarra_download_available = True
-            except ImportError:
-                self._sarra_download_available = False
-        return self._sarra_download_available
+        """Check if TAMSAT download capability is available.
+
+        Always True — uses direct HTTP download to JASMIN server,
+        no external library dependency.
+        """
+        return True
 
     def retrieve(
         self,
@@ -464,50 +459,264 @@ class TAMSATSource(DataSource):
         output_dir: Path,
         region_name: str,
         progress_callback=None,
+        max_workers: int = 4,
     ) -> None:
-        """Download TAMSAT data using SARRA_data_download library.
+        """Download TAMSAT daily rainfall and crop to region bounds.
+
+        Two-phase architecture to avoid SIGSEGV from concurrent
+        rasterio/PROJ writes:
+
+        Phase 1 — Parallel HTTP download (thread-safe):
+            4 threads fetch raw .nc files from JASMIN. Pure HTTP,
+            no GDAL/PROJ loaded. 4x network speedup.
+
+        Phase 2 — Sequential crop + convert (rasterio-safe):
+            Single-threaded xarray crop + rioxarray GeoTIFF write.
+            No concurrency on PROJ/GDAL, no SIGSEGV.
 
         Args:
             bounds: Bounding box in SARRA-Py format [lat_NW, lon_NW, lat_SE, lon_SE]
             start_date: Start date
             end_date: End date
-            output_dir: Output directory
+            output_dir: Output directory for cropped GeoTIFFs
             region_name: Region name for file naming
-            progress_callback: Optional callback(current, total) for progress
+            progress_callback: Optional callback(current, total, detail)
+            max_workers: Number of parallel download threads (default 4)
         """
-        import shutil
-        from SARRA_data_download.get_satellite_rainfall_estimates import (
-            download_TAMSAT_year_parallel,
+        import requests
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        TAMSAT_URL = (
+            "https://gws-access.jasmin.ac.uk/public/tamsat/rfe/data/"
+            "v3.1/daily/{year}/{month:02d}/"
+            "rfe{year}_{month:02d}_{day:02d}.v3.1.nc"
         )
 
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # SARRA_data_download expects area dict
-        area = {region_name: bounds}
+        # Parse SARRA-Py bounds: [lat_NW, lon_NW, lat_SE, lon_SE]
+        lat_nw, lon_nw, lat_se, lon_se = bounds
+        lat_min = min(lat_nw, lat_se)
+        lat_max = max(lat_nw, lat_se)
+        lon_min = min(lon_nw, lon_se)
+        lon_max = max(lon_nw, lon_se)
 
-        years = list(range(start_date.year, end_date.year + 1))
-        for i, year in enumerate(years):
+        # Partition dates into cached vs. to-download
+        dates_to_download = []
+        already_have = 0
+        current_date = start_date
+        while current_date <= end_date:
+            tif_name = self.FILE_PATTERN.format(
+                version=self.config.version, region=region_name,
+                year=current_date.year, month=current_date.month,
+                day=current_date.day,
+            )
+            if (output_dir / tif_name).exists():
+                already_have += 1
+            else:
+                dates_to_download.append(current_date)
+            current_date += timedelta(days=1)
+
+        total_days = (end_date - start_date).days + 1
+
+        self.logger.info(
+            f"TAMSAT download: {len(dates_to_download)} to fetch, "
+            f"{already_have} cached, total={total_days}, "
+            f"workers={max_workers}, region={region_name}"
+        )
+
+        if not dates_to_download:
             if progress_callback:
-                progress_callback(i + 1, len(years))
-            self.logger.info(f"Downloading TAMSAT data for {year}...")
-            download_TAMSAT_year_parallel(year, area, region_name, str(output_dir))
+                progress_callback(total_days, total_days, '')
+            return
 
-        # SARRA_data_download writes cropped .tif files to a hardcoded relative
-        # path (../data/3_output/TAMSAT_v3.1_{region}_rfe_filled/) instead of
-        # output_dir. Relocate them to our cache directory.
-        hardcoded_dir = Path("../data/3_output") / f"TAMSAT_v3.1_{region_name}_rfe_filled"
-        if hardcoded_dir.exists():
-            relocated = 0
-            for tif in hardcoded_dir.glob("*.tif"):
-                shutil.move(str(tif), str(output_dir / tif.name))
-                relocated += 1
-            if relocated:
-                self.logger.info(f"Relocated {relocated} TAMSAT .tif files to {output_dir}")
-            # Clean up empty hardcoded directory
+        # Temp dir for raw .nc files (Phase 1 output → Phase 2 input)
+        nc_dir = output_dir / "_raw_nc"
+        nc_dir.mkdir(exist_ok=True)
+
+        # ── Phase 1: Parallel HTTP download (thread-safe, no GDAL) ──
+
+        def _download_nc(target_date):
+            """Download a single raw .nc file. Pure HTTP, no rasterio."""
+            nc_name = f"rfe{target_date.year}_{target_date.month:02d}_{target_date.day:02d}.nc"
+            nc_path = nc_dir / nc_name
+
+            if nc_path.exists():
+                return "cached"
+
+            url = TAMSAT_URL.format(
+                year=target_date.year,
+                month=target_date.month,
+                day=target_date.day,
+            )
+
             try:
-                hardcoded_dir.rmdir()
+                resp = requests.get(url, timeout=(30, 60))
+
+                if resp.status_code == 404:
+                    return "skipped"
+
+                if resp.status_code >= 500:
+                    self.logger.warning(
+                        f"TAMSAT server {resp.status_code} for "
+                        f"{target_date}, retrying..."
+                    )
+                    resp = requests.get(url, timeout=(30, 60))
+                    if resp.status_code != 200:
+                        return f"HTTP {resp.status_code}"
+
+                resp.raise_for_status()
+                nc_path.write_bytes(resp.content)
+                return "ok"
+
+            except requests.exceptions.Timeout:
+                return "timeout"
+            except requests.exceptions.RequestException as e:
+                return f"download error: {e}"
+
+        dl_ok = 0
+        dl_skipped = 0
+        errors = []
+
+        self.logger.info(
+            f"TAMSAT Phase 1: downloading {len(dates_to_download)} "
+            f".nc files ({max_workers} threads)..."
+        )
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(_download_nc, d): d
+                for d in dates_to_download
+            }
+            for future in as_completed(futures):
+                target_date = futures[future]
+                try:
+                    result = future.result(timeout=90)
+                    if result in ("ok", "cached"):
+                        dl_ok += 1
+                    elif result == "skipped":
+                        dl_skipped += 1
+                    else:
+                        self.logger.warning(
+                            f"TAMSAT {target_date}: {result}"
+                        )
+                        errors.append(f"{target_date}: {result}")
+                        dl_skipped += 1
+                except Exception as e:
+                    self.logger.warning(
+                        f"TAMSAT {target_date}: {e}"
+                    )
+                    errors.append(f"{target_date}: {e}")
+                    dl_skipped += 1
+
+                processed = dl_ok + dl_skipped
+                if progress_callback and processed % 10 == 0:
+                    progress_callback(
+                        already_have + processed // 2,
+                        total_days,
+                        f'TAMSAT rainfall: downloading {processed}/'
+                        f'{len(dates_to_download)} files',
+                    )
+
+        self.logger.info(
+            f"TAMSAT Phase 1 complete: {dl_ok} downloaded, "
+            f"{dl_skipped} skipped"
+        )
+
+        # ── Phase 2: Sequential crop + GeoTIFF (single-threaded, rasterio-safe) ──
+
+        import xarray as xr
+        import rioxarray  # noqa: F401
+
+        converted = 0
+        nc_files = sorted(nc_dir.glob("*.nc"))
+
+        self.logger.info(
+            f"TAMSAT Phase 2: converting {len(nc_files)} "
+            f".nc → .tif (sequential)..."
+        )
+
+        for nc_path in nc_files:
+            # Parse date from filename: rfe{Y}_{M}_{D}.nc
+            stem = nc_path.stem  # rfe2020_01_15
+            parts = stem.replace("rfe", "").split("_")
+            try:
+                y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
+            except (ValueError, IndexError):
+                continue
+
+            tif_name = self.FILE_PATTERN.format(
+                version=self.config.version, region=region_name,
+                year=y, month=m, day=d,
+            )
+            tif_path = output_dir / tif_name
+
+            if tif_path.exists():
+                converted += 1
+                nc_path.unlink()
+                continue
+
+            try:
+                ds = xr.open_dataset(str(nc_path))
+                try:
+                    ds_cropped = ds.where(
+                        (ds.lat >= lat_min) & (ds.lat <= lat_max)
+                        & (ds.lon >= lon_min) & (ds.lon <= lon_max),
+                        drop=True,
+                    )
+                    rfe = ds_cropped["rfe"]
+                    rfe = rfe.rio.set_spatial_dims(
+                        x_dim="lon", y_dim="lat"
+                    )
+                    rfe = rfe.rio.write_crs("EPSG:4326")
+                    rfe.rio.to_raster(str(tif_path))
+                    converted += 1
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to convert {nc_path.name}: {e}"
+                    )
+                    if tif_path.exists():
+                        tif_path.unlink()
+                finally:
+                    ds.close()
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to open {nc_path.name}: {e}"
+                )
+
+            # Clean up raw .nc after conversion
+            try:
+                nc_path.unlink()
             except OSError:
                 pass
+
+            if progress_callback and converted % 10 == 0:
+                progress_callback(
+                    already_have + converted,
+                    total_days,
+                    f'TAMSAT rainfall: converting {converted}/'
+                    f'{len(nc_files)} files',
+                )
+
+        # Clean up temp dir
+        try:
+            nc_dir.rmdir()
+        except OSError:
+            pass
+
+        # Final progress
+        if progress_callback:
+            progress_callback(total_days, total_days, '')
+
+        total_done = already_have + converted
+        self.logger.info(
+            f"TAMSAT download complete: {total_done}/{total_days} files, "
+            f"{dl_skipped} skipped, {len(errors)} errors"
+        )
+        if errors:
+            self.logger.warning(
+                f"TAMSAT download errors (first 10): {errors[:10]}"
+            )
 
     def _validate_local_files(
         self,
