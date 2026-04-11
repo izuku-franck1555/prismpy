@@ -1,0 +1,81 @@
+{
+  "_comment": "Region-specific climate validation bounds. Auto-detected from study area centroid. Fall back to 'universal' if no region matches.",
+  "regions": [
+    {
+      "id": "sahel",
+      "name": "Sahel",
+      "description": "Semi-arid belt south of the Sahara (200-600 mm/yr rainfall)",
+      "bbox": [-20.0, 10.0, 25.0, 20.0],
+      "thresholds": {
+        "tmax": [5.0, 50.0],
+        "tmin": [0.0, 40.0],
+        "precip_daily_max": 200.0,
+        "precip_annual_mm": [200, 800],
+        "srad": [5.0, 35.0]
+      }
+    },
+    {
+      "id": "sudan_savanna",
+      "name": "Sudan Savanna",
+      "description": "Sub-humid zone between Sahel and Guinea (600-1200 mm/yr)",
+      "bbox": [-15.0, 6.0, 20.0, 12.0],
+      "thresholds": {
+        "tmax": [0.0, 48.0],
+        "tmin": [5.0, 35.0],
+        "precip_daily_max": 250.0,
+        "precip_annual_mm": [600, 1500],
+        "srad": [5.0, 32.0]
+      }
+    },
+    {
+      "id": "guinea_savanna",
+      "name": "Guinea Savanna",
+      "description": "Humid zone of West Africa (1200-2000 mm/yr)",
+      "bbox": [-15.0, 4.0, 15.0, 10.0],
+      "thresholds": {
+        "tmax": [5.0, 42.0],
+        "tmin": [10.0, 30.0],
+        "precip_daily_max": 300.0,
+        "precip_annual_mm": [1000, 2500],
+        "srad": [4.0, 30.0]
+      }
+    },
+    {
+      "id": "east_african_highlands",
+      "name": "East African Highlands",
+      "description": "Highland regions of Kenya, Ethiopia, Tanzania (>1500m elevation)",
+      "bbox": [28.0, -5.0, 42.0, 12.0],
+      "thresholds": {
+        "tmax": [5.0, 35.0],
+        "tmin": [-10.0, 25.0],
+        "precip_daily_max": 150.0,
+        "precip_annual_mm": [400, 2000],
+        "srad": [5.0, 30.0]
+      }
+    },
+    {
+      "id": "southern_africa",
+      "name": "Southern Africa",
+      "description": "Subtropical southern Africa including Zambia, Zimbabwe, Mozambique",
+      "bbox": [20.0, -35.0, 45.0, -10.0],
+      "thresholds": {
+        "tmax": [-5.0, 45.0],
+        "tmin": [-10.0, 30.0],
+        "precip_daily_max": 200.0,
+        "precip_annual_mm": [300, 1500],
+        "srad": [5.0, 35.0]
+      }
+    }
+  ],
+  "universal": {
+    "id": "universal",
+    "name": "Universal (no region detected)",
+    "thresholds": {
+      "tmax": [-50.0, 60.0],
+      "tmin": [-60.0, 50.0],
+      "precip_daily_max": 600.0,
+      "precip_annual_mm": [0, 5000],
+      "srad": [0.0, 40.0]
+    }
+  }
+}

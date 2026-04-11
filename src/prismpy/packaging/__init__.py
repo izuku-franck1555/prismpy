@@ -14,18 +14,16 @@ from .manifest import (
     validate_manifest
 )
 
-from .provenance import (
-    ProvenanceTracker,
-    create_stage_record,
-    create_decision,
-    load_provenance,
-    DEFAULT_DECISIONS
-)
-
 from .readme_generator import (
     generate_readme,
     get_readme_template
 )
+
+# V2-20: packaging/provenance.py (System B) deleted. All provenance
+# is now handled by prismpy.provenance.tracker (System A) with
+# dual-output (rich + stages-compat). The hybrid save in
+# executor._execute_package distributes provenance files to each
+# platform's output directory.
 
 __all__ = [
     # Manifest
@@ -35,12 +33,6 @@ __all__ = [
     'create_manifest',
     'save_manifest',
     'validate_manifest',
-    # Provenance
-    'ProvenanceTracker',
-    'create_stage_record',
-    'create_decision',
-    'load_provenance',
-    'DEFAULT_DECISIONS',
     # README
     'generate_readme',
     'get_readme_template',

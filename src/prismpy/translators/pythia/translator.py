@@ -2224,14 +2224,12 @@ class PythiaTranslator(PythiaTranslatorBase):
             List of generated file paths
         """
         from prismpy.packaging.manifest import create_manifest, save_manifest
-        from prismpy.packaging.provenance import ProvenanceTracker, create_decision
 
         output_files = []
 
-        # 1. Generate provenance.json
-        provenance_path = self._generate_provenance(data)
-        if provenance_path:
-            output_files.append(provenance_path)
+        # V2-20: Legacy System B provenance.json generation deleted.
+        # Provenance is now handled by System A and distributed via
+        # executor._execute_package.
 
         # 2. Generate manifest.json
         manifest_path = self._generate_manifest(data)
@@ -2245,124 +2243,9 @@ class PythiaTranslator(PythiaTranslatorBase):
 
         return output_files
 
-    def _generate_provenance(self, data: UnifiedData) -> Path:
-        """Generate provenance.json tracking data sources and decisions.
-
-        Uses stage-based format matching SARRA-Py pattern:
-        - RETRIEVE: Site coordinates, boundary source
-        - HARMONIZE: Climate (NASA POWER), Soil (eGHR)
-        - TRANSLATE: SNX templates, experiment config
-
-        Args:
-            data: UnifiedData with region info
-
-        Returns:
-            Path to provenance.json
-        """
-        from prismpy.packaging.provenance import ProvenanceTracker, create_decision
-
-        # Create tracker
-        session_id = f"pythia_{data.region.name.lower()}_{datetime.now():%Y%m%d_%H%M%S}"
-        tracker = ProvenanceTracker(session_id=session_id, workflow="prismpy_pythia")
-
-        # Get bounds info
-        if hasattr(data.region.bounds, 'to_gis_format'):
-            bounds = data.region.bounds.to_gis_format()
-        else:
-            bounds = [data.region.bounds.minx, data.region.bounds.miny,
-                     data.region.bounds.maxx, data.region.bounds.maxy]
-
-        # Stage 1: RETRIEVE - Site coordinates and boundary source
-        tracker.add_stage(
-            stage_name="RETRIEVE",
-            inputs={
-                "region": data.region.name,
-                "country": data.region.country,
-                "bounds": bounds,
-                "boundary_source": "GADM v4.1",
-            },
-            outputs=[
-                "shapes/sites.shp",
-                "shapes/sites.shx",
-                "shapes/sites.dbf",
-                "shapes/sites.prj",
-            ],
-            decisions=[
-                create_decision("BOUNDARY_SOURCE", "GADM v4.1",
-                               "Administrative boundaries with polygon geometry",
-                               alternatives=["Manual bounds", "Shapefile"]),
-                create_decision("GRID_RESOLUTION", f"{self.config.platform_config.pythia.grid_resolution if self.config.platform_config and self.config.platform_config.pythia else 0.0833}°",
-                               "~10km resolution matching legacy PYTHIA"),
-            ],
-            notes=f"Retrieved {len(data.grid.cells) if data.grid else 0} site locations for {data.region.name}"
-        )
-
-        # Stage 2: HARMONIZE - Climate and soil data processing
-        n_weather = len(list((self.output_dir / "weather").glob("*.WTH"))) if (self.output_dir / "weather").exists() else 0
-        n_sol = len(list((self.output_dir / "eGHR").glob("*.SOL"))) if (self.output_dir / "eGHR").exists() else 0
-
-        tracker.add_stage(
-            stage_name="HARMONIZE",
-            inputs={
-                "climate_source": "NASA POWER API",
-                "soil_source": "eGHR (GGCMI Soils v2)",
-                "crop_mask_source": "SPAM 2020 v2.0",
-            },
-            outputs=[
-                "weather/*.WTH",
-                "raster/soil.tif",
-                "raster/harvest_area.tif",
-                "eGHR/GHR.db",
-                "eGHR/*.SOL",
-            ],
-            decisions=[
-                create_decision("WEATHER_SOURCE", "NASA POWER",
-                               f"Downloaded {n_weather} .WTH files with daily SRAD, TMAX, TMIN, RAIN, TDEW, RHUM, WIND",
-                               alternatives=["AgERA5", "CHIRPS+ERA5"]),
-                create_decision("SOIL_SOURCE", "eGHR",
-                               f"Clipped soil raster + {n_sol} country-specific .SOL profiles",
-                               alternatives=["HWSD", "SoilGrids", "iSDA"]),
-                create_decision("CROP_MASK", "SPAM 2020 v2.0",
-                               "Harvested area raster for yield weighting",
-                               alternatives=["SPAM 2010"]),
-            ],
-            notes=f"Harmonized data for {data.region.name}: {n_weather} weather files, {n_sol} soil profiles"
-        )
-
-        # Stage 3: TRANSLATE - SNX templates and experiment config
-        cultivar = self._map_generic_to_cultivar()
-        fertilizer = self._map_generic_to_fertilizer()
-
-        tracker.add_stage(
-            stage_name="TRANSLATE",
-            inputs={
-                "unified_data": "internal",
-                "platform": "pythia",
-            },
-            outputs=[
-                f"templates/{self._get_template_filename()}",
-                "config/pythia_config.json",
-                "raster/fertilizer.tif",
-                "raster/planting_doy.tif",
-                "raster/cultivar.tif",
-            ],
-            decisions=[
-                create_decision("OUTPUT_FORMAT", "PYTHIA/DSSAT",
-                               "Spatial DSSAT simulation package with JSON config and SNX template"),
-                create_decision("CULTIVAR_MAPPING", cultivar.get("ingeno", "990002"),
-                               f"Mapped from phenology: {cultivar.get('total_gdd', 'N/A')} GDD → {cultivar.get('cname', 'MEDIUM_SEASON')}"),
-                create_decision("FERTILIZER_REGIME", f"{fertilizer.get('fen_tot', 60)} kg N/ha",
-                               f"Split application: {fertilizer.get('fer_pct', [50, 50])}"),
-            ],
-            notes=f"Generated PYTHIA package with template {self._get_template_filename()}"
-        )
-
-        # Save
-        provenance_path = self.output_dir / "provenance.json"
-        tracker.save(provenance_path)
-
-        logger.info(f"Generated provenance: {provenance_path}")
-        return provenance_path
+    # V2-20: _generate_provenance deleted (was System B legacy).
+    # Provenance is now handled by System A (prismpy.provenance.tracker)
+    # and distributed via executor._execute_package.
 
     def _generate_manifest(self, data: UnifiedData) -> Path:
         """Generate manifest.json with file inventory and checksums.

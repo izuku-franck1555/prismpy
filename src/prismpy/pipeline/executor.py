@@ -2279,6 +2279,82 @@ class TranslationPipeline:
                 self.logger.warning(f"Scientific validation failed: {e}")
                 warnings.append(f"Scientific validation skipped: {e}")
 
+        # Layer 3: Post-translate climate validation (V2-20)
+        # Validates ACTUAL per-cell weather data from translator output
+        # files (.WTH for PYTHIA, .pckl for ACEA). Replaces the V2-19
+        # placeholder-based checks with real-data validation.
+        try:
+            from prismpy.validators.post_translate import (
+                run_post_translate_validation,
+            )
+
+            base_dir = Path(self.config.output.base_dir)
+            post_translate_report = run_post_translate_validation(
+                translation_results, base_dir
+            )
+
+            # Merge post-translate checks into the scientific report's
+            # 5-category structure (UX-expert item 5). The scientific
+            # vs post-translate split is an implementation concern;
+            # the user sees one unified validation report.
+            if "scientific" in validation_summary:
+                sci = validation_summary["scientific"]
+                from prismpy.validators.scientific import _get_check_category
+                for check in post_translate_report.get("checks", []):
+                    # Apply items 6-8 to post-translate checks
+                    result = check.get("result", "pass")
+                    check["passed"] = result in ("pass", "info")
+                    cat = _get_check_category(check.get("check", ""))
+                    check["category"] = cat
+                    details = check.get("details", {})
+                    if "unit" in details:
+                        check["unit"] = details["unit"]
+                    # Merge into category
+                    if "categories" in sci and cat in sci["categories"]:
+                        sci["categories"][cat]["checks"].append(check)
+                        if result == "fail":
+                            sci["categories"][cat]["passed"] = False
+                    # Also add to flat checks list
+                    sci.setdefault("checks", []).append(check)
+                # Update counts
+                all_checks = sci.get("checks", [])
+                sci["n_checks"] = len(all_checks)
+                results_all = [c.get("result", "pass") for c in all_checks]
+                sci["n_pass"] = sum(1 for r in results_all if r == "pass")
+                sci["n_warning"] = sum(1 for r in results_all if r == "warning")
+                sci["n_fail"] = sum(1 for r in results_all if r == "fail")
+                if "fail" in results_all:
+                    sci["overall_result"] = "fail"
+                    sci["passed"] = False
+                elif "warning" in results_all:
+                    sci["overall_result"] = "warning"
+                cats = sci.get("categories", {})
+                sci["categories_passed"] = sum(
+                    1 for c in cats.values() if c.get("passed", True)
+                )
+            else:
+                validation_summary["post_translate"] = post_translate_report
+
+            for check in post_translate_report.get("checks", []):
+                if check["result"] == "fail":
+                    warnings.append(
+                        f"Post-translate validation FAIL: {check['summary']}"
+                    )
+                elif check["result"] == "warning":
+                    warnings.append(
+                        f"Post-translate validation: {check['summary']}"
+                    )
+
+            self.logger.info(
+                f"  Post-translate validation: "
+                f"{post_translate_report['overall_result']} "
+                f"({post_translate_report['n_checks']} checks)"
+            )
+
+        except Exception as e:
+            self.logger.warning(f"Post-translate validation failed: {e}")
+            warnings.append(f"Post-translate validation skipped: {e}")
+
         duration = (datetime.now() - start_time).total_seconds()
         return StageResult(
             stage=PipelineStage.VALIDATE,

@@ -2013,7 +2013,6 @@ if __name__ == "__main__":
         """
         from prismpy.packaging.manifest import create_manifest, save_manifest
         from prismpy.packaging.readme_generator import generate_readme
-        from prismpy.packaging.provenance import ProvenanceTracker, create_decision
         from datetime import datetime
 
         logger.info("Generating ACEA package metadata...")
@@ -2129,128 +2128,9 @@ if __name__ == "__main__":
         except Exception as e:
             logger.warning(f"Failed to generate README: {e}")
 
-        # 3. Generate provenance.json using stage-based format
-        try:
-            # Create stage-based provenance tracker
-            tracker = ProvenanceTracker(
-                session_id=f"ct_{data.region.name.lower()}_{datetime.now().strftime('%Y%m%d')}",
-                workflow="prismpy"
-            )
-
-            # Get bounds
-            bounds = None
-            if data.region and data.region.bounds:
-                bounds = [
-                    data.region.bounds.minx,
-                    data.region.bounds.miny,
-                    data.region.bounds.maxx,
-                    data.region.bounds.maxy,
-                ]
-
-            # RETRIEVE stage: Climate and region data
-            tracker.add_stage(
-                "RETRIEVE",
-                inputs={
-                    "region": data.region.name,
-                    "country": data.region.country,
-                    "bounds": bounds,
-                    "n_cells": len(cell_ids_30arcmin),
-                    "start_year": start_year,
-                    "end_year": end_year,
-                },
-                outputs=[
-                    f"climate/{climate_name}_*.pckl ({n_climate_files} files)",
-                ],
-                decisions=[
-                    create_decision(
-                        "CLIMATE_SOURCE",
-                        climate_source,
-                        "Daily gridded climate data (Tmax, Tmin, Precip, ET0)",
-                        alternatives=["AgERA5", "CHIRPS+CRU"]
-                    ),
-                    create_decision(
-                        "GRID_RESOLUTION",
-                        "30-arcmin (~55km)",
-                        "ACEA standard grid resolution for continental simulations"
-                    )
-                ]
-            )
-
-            # HARMONIZE stage: Soil and crop data
-            tracker.add_stage(
-                "HARMONIZE",
-                inputs={
-                    "soil_source": soil_source,
-                    "spam_source": spam_source,
-                    "gaez_source": gaez_source,
-                },
-                outputs=[
-                    "soil/soil_data.csv",
-                    "soil/HWSD_soil_data_on_cropland_v2.3.nc",
-                    f"harvested_areas/{fao_code}/spam_*.tif",
-                    "gaez/LUT/*.tif",
-                    "gaez/PotentialYield/*.tif",
-                ],
-                decisions=[
-                    create_decision(
-                        "SOIL_SOURCE",
-                        soil_source,
-                        "Per-cell soil texture (sand, clay, organic carbon)"
-                    ),
-                    create_decision(
-                        "HARVESTED_AREA_SOURCE",
-                        spam_source,
-                        "Crop harvested area fractions for spatial weighting"
-                    ),
-                    create_decision(
-                        "CROP_SUITABILITY_SOURCE",
-                        gaez_source,
-                        "Crop suitability indices and potential yields"
-                    ),
-                ]
-            )
-
-            # TRANSLATE stage: ACEA-specific formatting
-            tracker.add_stage(
-                "TRANSLATE",
-                inputs={
-                    "platform": "acea",
-                    "crop": crop_name,
-                    "fao_code": fao_code,
-                },
-                outputs=[
-                    f"config/{self.config.project.name}_config.py",
-                    "crop_calendar/calendar.csv",
-                    "crop_params/params.yaml",
-                    "co2/GlobalHistoricalCO2_NOAA_1980_2020.txt",
-                    "install.py",
-                ],
-                decisions=[
-                    create_decision(
-                        "ACEA_FAO_CODE",
-                        f"{fao_code} ({crop_name})",
-                        "ACEA internal crop code (differs from standard FAO codes)"
-                    ),
-                    create_decision(
-                        "CLIMATE_FORMAT",
-                        "Pickle (numpy arrays)",
-                        "ACEA expects (tmax, tmin, prec, et0) as float32 arrays"
-                    ),
-                    create_decision(
-                        "SOIL_FORMAT",
-                        "NetCDF (merged with existing)",
-                        "ACEA reads from HWSD_soil_data_on_cropland_v2.3.nc"
-                    ),
-                ]
-            )
-
-            # Save provenance
-            provenance_path = tracker.save(self.output_dir / 'provenance.json')
-            metadata_files.append(provenance_path)
-            logger.info(f"Generated provenance: {provenance_path}")
-
-        except Exception as e:
-            logger.warning(f"Failed to generate provenance: {e}")
+        # V2-20: Legacy System B provenance.json generation deleted.
+        # Provenance is now handled by System A (prismpy.provenance.tracker)
+        # and distributed via executor._execute_package.
 
         return metadata_files
 

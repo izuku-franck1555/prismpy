@@ -20,11 +20,38 @@ Each check returns a structured dict per UX-expert spec:
 }
 """
 
+import json
 import logging
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+def _load_region_bounds() -> Dict[str, Any]:
+    """Load region-specific validation bounds from JSON config."""
+    bounds_path = Path(__file__).parent / "region_bounds.json"
+    if not bounds_path.exists():
+        return {"regions": [], "universal": {"thresholds": {}}}
+    with open(bounds_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _detect_region(lat: float, lon: float) -> Dict[str, Any]:
+    """Auto-detect agro-ecological region from coordinates.
+
+    Checks the study area centroid against each region's bounding box.
+    Returns the first matching region, or the universal fallback.
+    """
+    config = _load_region_bounds()
+    for region in config.get("regions", []):
+        bbox = region.get("bbox", [])
+        if len(bbox) == 4:
+            minx, miny, maxx, maxy = bbox
+            if minx <= lon <= maxx and miny <= lat <= maxy:
+                return region
+    return config.get("universal", {"id": "universal", "thresholds": {}})
 
 
 # =============================================================================
@@ -46,7 +73,7 @@ SOIL_RANGES = {
     "silt": (0.0, 100.0, "%"),
     "organic_carbon": (0.0, 30.0, "%"),
     "ph": (2.5, 10.5, ""),
-    "bulk_density": (0.3, 2.0, "g/cm³"),
+    "bulk_density": (0.5, 1.9, "g/cm³"),  # Tightened per specialist — catches unit errors
 }
 
 # Platform-specific required soil properties
@@ -102,6 +129,9 @@ def run_scientific_validation(
     # Check 6: Spatial/temporal coverage
     checks.append(_check_coverage(unified_data, config))
 
+    # Check 7: Region-specific bounds (V2-20)
+    checks.append(_check_region_bounds(unified_data, config))
+
     # Overall rollup
     results = [c["result"] for c in checks]
     if "fail" in results:
@@ -111,15 +141,218 @@ def run_scientific_validation(
     else:
         overall = "pass"
 
+    # Summary statistics block (V2-20 specialist request #6)
+    summary_stats = _compute_summary_stats(unified_data, config)
+
+    # V2-20 UX-expert item 5: restructure into 5 manuscript-aligned
+    # categories + items 6-8 (passed boolean, unit field, category field)
+    categories = _restructure_to_categories(checks)
+
+    # Overall rollup at category level
+    categories_passed = sum(1 for c in categories.values() if c["passed"])
+
     return {
-        "validation_version": "1.0",
-        "checks": checks,
+        "validation_version": "2.0",
+        "passed": overall != "fail",
         "overall_result": overall,
+        "categories_passed": categories_passed,
+        "categories_total": len(categories),
+        "categories": categories,
+        "summary_statistics": summary_stats,
+        # Flat list preserved for backward compat + flat-list operations
+        "checks": checks,
         "n_checks": len(checks),
         "n_pass": results.count("pass"),
         "n_warning": results.count("warning"),
         "n_fail": results.count("fail"),
     }
+
+
+# Category mapping: check name prefix → manuscript category
+_CATEGORY_MAP = {
+    "temporal_completeness": "completeness",
+    "cross_variable_consistency": "ranges",
+    "value_range_": "ranges",
+    "soil_completeness_": "completeness",
+    "format_compliance": "schema",
+    "spatial_temporal_coverage": "coverage",
+    "region_specific_bounds": "ranges",
+    "post_translate_consistency_": "ranges",
+    "post_translate_range_": "ranges",
+    "post_translate_date_continuity_": "completeness",
+    "post_translate_climate_": "ranges",
+}
+
+_CATEGORY_META = {
+    "schema": {
+        "label": "Schema Conformance",
+        "subtitle": "File structure, headers, and format compliance",
+    },
+    "ranges": {
+        "label": "Value Ranges",
+        "subtitle": "Climate and soil values within physical and regional bounds",
+    },
+    "completeness": {
+        "label": "Completeness",
+        "subtitle": "Temporal coverage and soil profile availability",
+    },
+    "spatial": {
+        "label": "Spatial Consistency",
+        "subtitle": "CRS consistency and grid alignment",
+    },
+    "coverage": {
+        "label": "Coverage",
+        "subtitle": "Temporal and spatial extent match configuration",
+    },
+}
+
+
+def _get_check_category(check_name: str) -> str:
+    """Map a check name to its manuscript category."""
+    for prefix, category in _CATEGORY_MAP.items():
+        if check_name.startswith(prefix):
+            return category
+    return "schema"  # default for unknown checks
+
+
+def _restructure_to_categories(
+    checks: List[Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Restructure flat check list into 5 manuscript-aligned categories.
+
+    UX-expert item 5: groups checks under schema/ranges/completeness/
+    spatial/coverage. Also applies items 6-8:
+    - Item 6: `passed: bool` on each check
+    - Item 7: `unit` field on range checks (from details)
+    - Item 8: `category` field on each check
+    """
+    categories: Dict[str, Dict[str, Any]] = {}
+
+    # Initialize all 5 categories
+    for cat_id, meta in _CATEGORY_META.items():
+        categories[cat_id] = {
+            "passed": True,
+            "label": meta["label"],
+            "subtitle": meta["subtitle"],
+            "checks": [],
+        }
+
+    for check in checks:
+        check_name = check.get("check", "")
+        cat = _get_check_category(check_name)
+
+        # Item 6: add passed boolean
+        result = check.get("result", "pass")
+        check["passed"] = result in ("pass", "info")
+
+        # Item 7: add unit field for range checks (extract from details)
+        details = check.get("details", {})
+        if "unit" in details and "unit" not in check:
+            check["unit"] = details["unit"]
+
+        # Item 8: add category field
+        check["category"] = cat
+
+        # Add to category
+        if cat in categories:
+            categories[cat]["checks"].append(check)
+            if result == "fail":
+                categories[cat]["passed"] = False
+
+    return categories
+
+
+def _compute_summary_stats(unified_data, config) -> Dict[str, Any]:
+    """Compute descriptive summary statistics for the validation report.
+
+    Saves researchers from computing basic stats themselves.
+    """
+    stats: Dict[str, Any] = {
+        "temporal": {
+            "start_year": config.temporal.start_year,
+            "end_year": config.temporal.end_year,
+            "spinup_years": config.temporal.spinup_years,
+        },
+    }
+
+    # Grid stats
+    grid = unified_data.grid if unified_data and hasattr(unified_data, 'grid') else None
+    if grid:
+        stats["grid"] = {
+            "n_cells": grid.n_cells,
+            "resolution": getattr(grid, 'resolution', 'unknown'),
+        }
+
+    # Soil source breakdown
+    soil = unified_data.soil if unified_data and hasattr(unified_data, 'soil') else {}
+    if soil:
+        sources = {}
+        for profile in soil.values():
+            src = getattr(profile, 'source', 'unknown')
+            sources[src] = sources.get(src, 0) + 1
+        stats["soil"] = {
+            "n_profiles": len(soil),
+            "source_breakdown": sources,
+        }
+
+    # Climate stats (per-cell format only)
+    climate = unified_data.climate if unified_data and hasattr(unified_data, 'climate') else {}
+    if climate and not _is_file_based_climate(climate):
+        tmax_vals, tmin_vals, precip_vals, srad_vals = [], [], [], []
+        n_days = 0
+        for ts in climate.values():
+            if not hasattr(ts, 'records'):
+                continue
+            for r in ts.records:
+                n_days += 1
+                if r.tmax is not None:
+                    tmax_vals.append(r.tmax)
+                if r.tmin is not None:
+                    tmin_vals.append(r.tmin)
+                if r.precip is not None:
+                    precip_vals.append(r.precip)
+                if r.srad is not None:
+                    srad_vals.append(r.srad)
+
+        stats["climate"] = {
+            "n_cells": len(climate),
+            "n_days_total": n_days,
+        }
+        if tmax_vals:
+            stats["climate"]["tmax_range"] = [
+                round(min(tmax_vals), 1), round(max(tmax_vals), 1)
+            ]
+        if tmin_vals:
+            stats["climate"]["tmin_range"] = [
+                round(min(tmin_vals), 1), round(max(tmin_vals), 1)
+            ]
+        if precip_vals:
+            annual_total = sum(precip_vals)
+            n_years = max(1, config.temporal.end_year - config.temporal.start_year + 1)
+            stats["climate"]["precip_annual_mean_mm"] = round(
+                annual_total / max(1, len(climate)) / n_years, 0
+            )
+        if srad_vals:
+            stats["climate"]["srad_mean"] = round(
+                sum(srad_vals) / len(srad_vals), 1
+            )
+    elif climate and _is_file_based_climate(climate):
+        stats["climate"] = {
+            "data_format": "geotiff_per_day",
+            "rainfall_files": climate.get("rainfall_file_count", 0),
+            "agera5_variables": climate.get("agera5_variables", {}),
+        }
+
+    # Region detection
+    region = unified_data.region if unified_data and hasattr(unified_data, 'region') else None
+    if region and hasattr(region, 'bounds'):
+        center_lat = (region.bounds.miny + region.bounds.maxy) / 2
+        center_lon = (region.bounds.minx + region.bounds.maxx) / 2
+        detected = _detect_region(center_lat, center_lon)
+        stats["region_detected"] = detected.get("id", "universal")
+        stats["region_name"] = detected.get("name", "Universal")
+
+    return stats
 
 
 # =============================================================================
@@ -710,5 +943,123 @@ def _check_coverage(unified_data, config) -> Dict[str, Any]:
             "temporal_start": start_year,
             "temporal_end": end_year,
             "issues": issues,
+        },
+    }
+
+
+# =============================================================================
+# Check 7: Region-specific bounds (V2-20)
+# =============================================================================
+
+def _check_region_bounds(unified_data, config) -> Dict[str, Any]:
+    """Check climate values against region-specific thresholds.
+
+    Auto-detects the agro-ecological region from the study area's
+    centroid coordinates, then applies tighter bounds than the
+    universal physical limits in Check 3.
+    """
+    # Determine centroid from region bounds
+    region = unified_data.region if unified_data and hasattr(unified_data, 'region') else None
+    if not region or not hasattr(region, 'bounds'):
+        return {
+            "check": "region_specific_bounds",
+            "scope": "global",
+            "result": "info",
+            "summary": "Region bounds check skipped: no region available",
+            "manuscript_claim": "Section 2.5: region-appropriate thresholds",
+            "details": {},
+        }
+
+    bounds = region.bounds
+    center_lat = (bounds.miny + bounds.maxy) / 2
+    center_lon = (bounds.minx + bounds.maxx) / 2
+
+    detected = _detect_region(center_lat, center_lon)
+    region_id = detected.get("id", "universal")
+    region_name = detected.get("name", "Universal")
+    thresholds = detected.get("thresholds", {})
+
+    if not thresholds or region_id == "universal":
+        return {
+            "check": "region_specific_bounds",
+            "scope": "global",
+            "result": "info",
+            "summary": (
+                f"No region-specific bounds for centroid "
+                f"({center_lat:.2f}, {center_lon:.2f}) — using universal"
+            ),
+            "manuscript_claim": "Section 2.5: region-appropriate thresholds",
+            "details": {
+                "centroid_lat": round(center_lat, 4),
+                "centroid_lon": round(center_lon, 4),
+                "region_detected": "universal",
+            },
+        }
+
+    # Check climate values against region-specific thresholds
+    climate = unified_data.climate if unified_data and hasattr(unified_data, 'climate') else {}
+    violations = []
+
+    if not _is_file_based_climate(climate):
+        tmax_range = thresholds.get("tmax")
+        tmin_range = thresholds.get("tmin")
+        srad_range = thresholds.get("srad")
+        precip_daily_max = thresholds.get("precip_daily_max")
+
+        for cell_id, ts in climate.items():
+            if not hasattr(ts, 'records'):
+                continue
+            for record in ts.records:
+                if tmax_range and hasattr(record, 'tmax') and record.tmax is not None:
+                    if record.tmax < tmax_range[0] or record.tmax > tmax_range[1]:
+                        violations.append(
+                            f"tmax={record.tmax:.1f} outside {region_name} "
+                            f"range {tmax_range}"
+                        )
+                if tmin_range and hasattr(record, 'tmin') and record.tmin is not None:
+                    if record.tmin < tmin_range[0] or record.tmin > tmin_range[1]:
+                        violations.append(
+                            f"tmin={record.tmin:.1f} outside {region_name} "
+                            f"range {tmin_range}"
+                        )
+                # Daily precipitation uses precip_daily_max (NOT
+                # precip_annual_mm which is an annual total)
+                if precip_daily_max and hasattr(record, 'precip') and record.precip is not None:
+                    if record.precip > precip_daily_max:
+                        violations.append(
+                            f"precip={record.precip:.1f} mm/day exceeds "
+                            f"{region_name} daily max {precip_daily_max}"
+                        )
+                if srad_range and hasattr(record, 'srad') and record.srad is not None:
+                    if record.srad < srad_range[0] or record.srad > srad_range[1]:
+                        violations.append(
+                            f"srad={record.srad:.1f} outside {region_name} "
+                            f"range {srad_range}"
+                        )
+
+    n_violations = len(violations)
+    if n_violations > 0:
+        result = "warning"
+    else:
+        result = "pass"
+
+    return {
+        "check": "region_specific_bounds",
+        "scope": "per_record",
+        "result": result,
+        "summary": (
+            f"Region: {region_name} (centroid {center_lat:.2f}°N, "
+            f"{center_lon:.2f}°E) — {n_violations} values outside "
+            f"region-specific bounds"
+        ),
+        "manuscript_claim": "Section 2.5: region-appropriate thresholds",
+        "details": {
+            "region_detected": region_id,
+            "region_name": region_name,
+            "centroid_lat": round(center_lat, 4),
+            "centroid_lon": round(center_lon, 4),
+            "thresholds": thresholds,
+            "n_violations": n_violations,
+            "sample_violations": violations[:10],
         },
     }

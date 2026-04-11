@@ -1421,9 +1421,7 @@ class SarraPyTranslator(SarraPyTranslatorBase):
         from prismpy.packaging import (
             create_manifest,
             save_manifest,
-            ProvenanceTracker as PackageProvenance,
             generate_readme,
-            DEFAULT_DECISIONS,
         )
 
         package_files = []
@@ -1460,54 +1458,9 @@ class SarraPyTranslator(SarraPyTranslatorBase):
             "package_name": f"{data.region.name.lower()}_{self.config.crop.name.lower()}_sarra_py_package",
         }
 
-        # 1. Generate provenance.json
-        tracker = PackageProvenance(
-            session_id=f"ct_{data.region.name.lower()}_{datetime.now().strftime('%Y%m%d')}",
-            workflow="prismpy"
-        )
-
-        tracker.add_stage(
-            "RETRIEVE",
-            inputs={
-                "region": data.region.name,
-                "bounds": sarra_bounds,
-            },
-            outputs=["data/boundaries/bounds.json"],
-            decisions=[DEFAULT_DECISIONS["BOUNDARY_SOURCE"]]
-        )
-
-        tracker.add_stage(
-            "HARMONIZE",
-            inputs={
-                "climate_source": "TAMSAT + AgERA5",
-                "soil_source": "iSDA",
-            },
-            outputs=[
-                "data/climate/rainfall/*.tif",
-                "data/climate/*/*.tif",
-            ],
-            decisions=[
-                DEFAULT_DECISIONS["RAINFALL_SOURCE"],
-                DEFAULT_DECISIONS["TEMPERATURE_SOURCE"],
-                DEFAULT_DECISIONS["SOIL_SOURCE"],
-            ]
-        )
-
-        tracker.add_stage(
-            "TRANSLATE",
-            inputs={"platform": "sarra_py"},
-            outputs=[
-                "parameters/variety.yaml",
-                "parameters/itk.yaml",
-                "parameters/soil.yaml",
-            ],
-            decisions=[DEFAULT_DECISIONS["CROP_PARAMETERS"]]
-        )
-
-        provenance_path = self.output_dir / "provenance.json"
-        tracker.save(provenance_path)
-        package_files.append(provenance_path)
-        logger.info(f"Generated provenance.json: {provenance_path}")
+        # V2-20: Legacy System B provenance.json generation deleted.
+        # Provenance is now handled by System A (prismpy.provenance.tracker)
+        # and distributed via executor._execute_package.
 
         # 2. Generate README.md
         readme_path = self.output_dir / "README.md"

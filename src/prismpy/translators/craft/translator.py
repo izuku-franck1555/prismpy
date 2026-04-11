@@ -168,22 +168,48 @@ class CraftTranslator(CraftTranslatorBase):
                 weather_input_csv = self._generate_weather_input_csv(data.grid)
                 output_files.append(weather_input_csv)
 
-            # 2b. If actual climate data is provided, also generate WTH files
-            if data.climate and len(data.climate) > 0:
-                # Check if we have real data (not just placeholder with cell_id=-1)
-                has_real_data = any(
-                    cell_id >= 0 and ts.records and len(ts.records) > 1
-                    for cell_id, ts in data.climate.items()
+            # 2b. Download real NASA POWER weather for all cells and
+            # generate per-cell weather files (V2-20: self-contained
+            # packages — no external CRAFT GUI download needed).
+            if data.grid:
+                climate_data = data.climate
+                n_cells = len(data.grid.cells)
+                n_climate = sum(
+                    1 for cid, ts in (climate_data or {}).items()
+                    if cid >= 0 and hasattr(ts, 'records') and len(ts.records) > 1
                 )
-                if has_real_data:
-                    # Filter out placeholder data
+
+                if n_climate < n_cells:
+                    logger.info(
+                        f"Downloading NASA POWER weather for {n_cells} cells "
+                        f"({n_climate} already available)..."
+                    )
+                    def _craft_progress(current, total):
+                        cb = getattr(self, 'progress_callback', None)
+                        if cb and hasattr(cb, 'on_substage_progress'):
+                            cb.on_substage_progress(
+                                'translate',
+                                'Downloading weather from NASA POWER',
+                                current, total,
+                                f'cell {current} of {total}',
+                            )
+                    climate_data = self._download_cell_weather(
+                        data, progress_callback=_craft_progress
+                    )
+
+                if climate_data:
                     real_climate = {
-                        cell_id: ts for cell_id, ts in data.climate.items()
-                        if cell_id >= 0 and ts.records and len(ts.records) > 1
+                        cid: ts for cid, ts in climate_data.items()
+                        if cid >= 0 and hasattr(ts, 'records') and len(ts.records) > 1
                     }
                     if real_climate:
                         weather_files = self._generate_weather_files(real_climate)
                         output_files.extend(weather_files)
+                    else:
+                        warnings.append(
+                            "NASA POWER download returned no valid data — "
+                            "weather files not generated"
+                        )
 
             # 3. Generate soil package (.SOL file + soil_mask.txt)
             # Uses HWSD data if configured, otherwise creates default profile
@@ -1325,6 +1351,117 @@ class CraftTranslator(CraftTranslatorBase):
 
         return input_csv_path
 
+    def _download_cell_weather(
+        self,
+        data,
+        progress_callback=None,
+    ) -> Dict[int, "ClimateTimeSeries"]:
+        """Download NASA POWER weather data for all grid cells.
+
+        V2-20: makes CRAFT packages self-contained by downloading real
+        per-cell weather during translate, same pattern as PYTHIA.
+        Leverages NASA POWER caching so repeated runs (or runs after
+        a PYTHIA run on the same region) don't re-download.
+
+        Args:
+            data: UnifiedData with grid info
+            progress_callback: Optional callback(current, total)
+
+        Returns:
+            Dictionary mapping cell_id to ClimateTimeSeries
+        """
+        import time
+        from prismpy.sources.climate.nasa_power import (
+            NASAPowerSource, NASAPowerConfig,
+        )
+
+        # Determine date range from config
+        if self.config.temporal:
+            start_date = f"{self.config.temporal.start_year}-01-01"
+            end_date = f"{self.config.temporal.end_year}-12-31"
+        else:
+            raise ValueError(
+                "temporal.start_year and end_year are required for "
+                "CRAFT weather download"
+            )
+
+        # Initialize NASA POWER source with rate limiting + caching
+        nasa_config = NASAPowerConfig(
+            request_delay=2.0,
+            retry_count=3,
+            timeout=120,
+        )
+        # Use cache dir from data_sources config if available
+        cache_dir = None
+        if (hasattr(self.config, 'data_sources')
+                and hasattr(self.config.data_sources, 'cache_dir')
+                and self.config.data_sources.cache_dir):
+            cache_dir = Path(self.config.data_sources.cache_dir)
+
+        source = NASAPowerSource(
+            config=nasa_config,
+            cache_dir=cache_dir,
+        )
+
+        climate_data = {}
+        cells = data.grid.cells if data.grid else []
+        total = len(cells)
+        failed = []
+
+        logger.info(
+            f"Downloading NASA POWER weather for {total} CRAFT cells "
+            f"({start_date} to {end_date})"
+        )
+
+        for i, cell in enumerate(cells):
+            cell_id = cell.cell_id
+
+            if progress_callback:
+                progress_callback(i + 1, total)
+
+            try:
+                result = source.retrieve(
+                    lat=cell.lat,
+                    lon=cell.lon,
+                    start_date=start_date,
+                    end_date=end_date,
+                    location_id=cell_id,
+                    use_cache=True,
+                )
+
+                if result.success and result.data:
+                    result.data.location_id = cell_id
+                    climate_data[cell_id] = result.data
+                else:
+                    failed.append(cell_id)
+                    logger.warning(
+                        f"NASA POWER failed for cell {cell_id}: "
+                        f"{result.errors}"
+                    )
+
+            except Exception as e:
+                failed.append(cell_id)
+                logger.error(
+                    f"Exception downloading weather for cell {cell_id}: {e}"
+                )
+
+            # Rate limiting between requests
+            if i < total - 1:
+                time.sleep(2.0)
+
+        logger.info(
+            f"Downloaded weather for {len(climate_data)}/{total} cells"
+            + (f" ({len(failed)} failed)" if failed else "")
+        )
+
+        if failed:
+            logger.warning(
+                f"Failed cells: {failed[:10]}"
+                + (f"... and {len(failed) - 10} more" if len(failed) > 10 else "")
+            )
+
+        return climate_data
+
     def _generate_weather_files(
         self,
         climate_data: Dict[int, ClimateTimeSeries],
@@ -1348,7 +1485,10 @@ class CraftTranslator(CraftTranslatorBase):
         weather_dir = self.output_dir / "weather"
 
         for cell_id, ts in climate_data.items():
-            weather_file = weather_dir / f"cell_{cell_id}.txt"
+            # Use CRAFT 1-indexed CellID for self-documenting filenames
+            # that match schema/soil file naming (e.g., 4054256.txt)
+            craft_cellid = self._to_craft_cellid(cell_id)
+            weather_file = weather_dir / f"{craft_cellid}.txt"
 
             with open(weather_file, 'w', newline='\r\n') as f:
                 # Header
@@ -2841,131 +2981,10 @@ class CraftTranslator(CraftTranslatorBase):
         except Exception as e:
             logger.warning(f"Failed to generate README: {e}")
 
-        # 3. Generate provenance.json using stage-based format (like SARRA-Py)
-        try:
-            from prismpy.packaging.provenance import (
-                ProvenanceTracker as PackageProvenance,
-                create_decision,
-            )
-            from datetime import datetime
-
-            # Create stage-based provenance tracker
-            tracker = PackageProvenance(
-                session_id=f"ct_{data.region.name.lower()}_{datetime.now().strftime('%Y%m%d')}",
-                workflow="prismpy"
-            )
-
-            # Get bounds for RETRIEVE stage
-            bounds = None
-            if data.region and data.region.bounds:
-                bounds = [
-                    data.region.bounds.minx,
-                    data.region.bounds.miny,
-                    data.region.bounds.maxx,
-                    data.region.bounds.maxy,
-                ]
-
-            # RETRIEVE stage: Boundary/schema source
-            tracker.add_stage(
-                "RETRIEVE",
-                inputs={
-                    "region": data.region.name,
-                    "country": data.region.country,
-                    "bounds": bounds,
-                    "n_cells": n_cells,
-                },
-                outputs=[
-                    f"schema/CRAFT_Schema/Level{package_config['craft_level']}/Schema/5m_{admin_names}.txt",
-                    f"schema/Python_Schemas/Level{package_config['craft_level']}/Schema_{admin_names}.txt",
-                ],
-                decisions=[
-                    create_decision(
-                        "BOUNDARY_SOURCE",
-                        boundary_source,
-                        boundary_description,
-                        alternatives=["Bounding box", "GADM v4.1"] if boundary_source != "Bounding box" else None
-                    )
-                ]
-            )
-
-            # HARMONIZE stage: Soil and crop mask sources
-            tracker.add_stage(
-                "HARMONIZE",
-                inputs={
-                    "soil_source": soil_source,
-                    "crop_mask_source": crop_mask_source,
-                    "climate_source": "NASA POWER",
-                },
-                outputs=[
-                    f"soil/{country_code}.SOL",
-                    "soil/soil_mask.txt",
-                    "crop_mask/mask.txt",
-                    "weather/input.csv",
-                ],
-                decisions=[
-                    create_decision(
-                        "SOIL_SOURCE",
-                        soil_source,
-                        soil_description,
-                        alternatives=["Default profile", "HWSD v2.0"] if soil_source != "Default profile" else None
-                    ),
-                    create_decision(
-                        "CROP_MASK_SOURCE",
-                        crop_mask_source,
-                        crop_mask_description,
-                        alternatives=["Uniform (100%)", "SPAM 2020"] if crop_mask_source != "Uniform (100%)" else None
-                    ),
-                    create_decision(
-                        "CLIMATE_SOURCE",
-                        "NASA POWER",
-                        "Daily gridded climate data (SRAD, TMAX, TMIN, RAIN) to be downloaded",
-                        alternatives=["AgERA5", "CHIRPS"]
-                    ),
-                ]
-            )
-
-            # TRANSLATE stage: Management configuration
-            tracker.add_stage(
-                "TRANSLATE",
-                inputs={
-                    "platform": "craft",
-                    "cultivar": cultivar,
-                    "plant_population": plant_pop,
-                    "row_spacing_cm": row_spacing,
-                    "total_n_kg_ha": total_n,
-                    "planting_date_mmdd": planting_date,
-                },
-                outputs=[
-                    "management/cultivar_data.txt",
-                    "management/planting_data.txt",
-                    "management/fertilizer_data.txt",
-                    "management/organic_fertilizer_data.txt",
-                ],
-                decisions=[
-                    create_decision(
-                        "CULTIVAR",
-                        cultivar,
-                        f"DSSAT cultivar code for {package_config.get('crop_name', 'crop')}"
-                    ),
-                    create_decision(
-                        "FERTILIZER_STRATEGY",
-                        f"{total_n} kg N/ha split {n_split_ratio}",
-                        "Total nitrogen applied in two applications based on regional practice"
-                    ),
-                    create_decision(
-                        "PLANTING_DATE",
-                        planting_date,
-                        "Planting date in MMDD format based on regional onset"
-                    ),
-                ]
-            )
-
-            provenance_path = self.output_dir / "provenance.json"
-            tracker.save(provenance_path)
-            metadata_files.append(provenance_path)
-            logger.info(f"Generated provenance: {provenance_path}")
-        except Exception as e:
-            logger.warning(f"Failed to generate provenance: {e}")
+        # V2-20: Legacy System B provenance.json generation deleted.
+        # Provenance is now handled by prismpy.provenance.tracker (System A)
+        # and distributed to platform dirs via the hybrid save in
+        # executor._execute_package.
 
         logger.info(f"Generated {len(metadata_files)} package metadata files")
         return metadata_files
