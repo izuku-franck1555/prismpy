@@ -913,10 +913,14 @@ class TranslationPipeline:
                         is_final = current >= total
                         if self._progress_callback and (is_final or now - _agera5_last_report[0] >= 10):
                             _agera5_last_report[0] = now
-                            label = detail or f'AgERA5 temperature: file {current} of ~{total}'
+                            # V2-22a 1.5 — W3 fallback deleted. After W4
+                            # removal in agera5.py, _phase_monitor is the
+                            # sole caller and always passes a non-empty
+                            # detail. An empty detail here would indicate
+                            # a regression worth surfacing, not masking.
                             self._progress_callback.on_substage_progress(
                                 'retrieve', 'Downloading AgERA5 temperature',
-                                current, total, label)
+                                current, total, detail)
                     agera5_result = agera5.retrieve(
                         region=region, start_date=start_date,
                         end_date=end_date, download=True,
