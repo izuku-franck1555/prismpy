@@ -700,6 +700,8 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
         for cell_id, ts in climate.items():
             if not hasattr(ts, 'records'):
                 continue
+            if getattr(ts, 'source', '') == 'placeholder':
+                continue
             for record in ts.records:
                 for var, (vmin, vmax, unit) in CLIMATE_RANGES.items():
                     val = getattr(record, var, None)
