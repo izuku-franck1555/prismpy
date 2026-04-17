@@ -1375,10 +1375,11 @@ class CraftTranslator(CraftTranslatorBase):
             NASAPowerSource, NASAPowerConfig,
         )
 
-        # Determine date range from config
+        # Determine date range from config (cross-year-aware)
         if self.config.temporal:
             start_date = f"{self.config.temporal.start_year}-01-01"
-            end_date = f"{self.config.temporal.end_year}-12-31"
+            crop_cal = self.config.crop.calendar if self.config.crop else None
+            end_date = self.config.temporal.get_climate_end_date(crop_cal).isoformat()
         else:
             raise ValueError(
                 "temporal.start_year and end_year are required for "

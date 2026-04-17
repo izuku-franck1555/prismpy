@@ -359,9 +359,10 @@ class SarraPyTranslator(SarraPyTranslatorBase):
         # Build SARRA-Py bounding box format [lat_NW, lon_NW, lat_SE, lon_SE]
         sarra_bounds = data.region.bounds.to_sarra_py_format()
 
-        # Get date range from config or climate data
+        # Get date range from config or climate data (cross-year-aware)
         start_date = date(self.config.temporal.start_year, 1, 1)
-        end_date = date(self.config.temporal.end_year, 12, 31)
+        crop_cal = self.config.crop.calendar if self.config.crop else None
+        end_date = self.config.temporal.get_climate_end_date(crop_cal)
 
         if data.climate:
             # Check if it's path-based format or in-memory format

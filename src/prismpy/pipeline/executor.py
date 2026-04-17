@@ -801,9 +801,10 @@ class TranslationPipeline:
         """
         from datetime import date
 
-        # Get temporal range from config
+        # Get temporal range from config (cross-year-aware)
         start_date = date(self.config.temporal.start_year, 1, 1)
-        end_date = date(self.config.temporal.end_year, 12, 31)
+        crop_cal = self.config.crop.calendar if self.config.crop else None
+        end_date = self.config.temporal.get_climate_end_date(crop_cal)
 
         climate_data = {
             "rainfall_dir": None,
@@ -1002,7 +1003,8 @@ class TranslationPipeline:
         # Create records for each day, including spinup period
         records = []
         current_date = date(start_year - spinup_years, 1, 1)
-        end_date = date(end_year, 12, 31)
+        crop_cal = self.config.crop.calendar if self.config.crop else None
+        end_date = self.config.temporal.get_climate_end_date(crop_cal)
 
         while current_date <= end_date:
             # Create record with generic placeholder values (not region-specific)
