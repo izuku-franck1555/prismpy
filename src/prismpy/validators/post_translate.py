@@ -58,7 +58,7 @@ def run_post_translate_validation(
         elif platform_name == "craft":
             checks.extend(_validate_craft_weather(platform_dir))
         elif platform_name == "sarra_py":
-            checks.extend(_validate_sarra_py_geotiffs(platform_dir, base_dir))
+            checks.extend(_validate_sarra_py_geotiffs(platform_dir))
 
     results = [c["result"] for c in checks]
     if "fail" in results:
@@ -319,7 +319,7 @@ def _validate_acea_pickles(platform_dir: Path) -> List[Dict[str, Any]]:
         }]
 
     all_values: Dict[str, List[float]] = {
-        "tmax": [], "tmin": [], "rain": [],
+        "tmax": [], "tmin": [], "rain": [], "srad": [],
     }
     consistency_violations = {
         "tmax_le_tmin": 0,
@@ -334,9 +334,10 @@ def _validate_acea_pickles(platform_dir: Path) -> List[Dict[str, Any]]:
             with open(pkl_file, "rb") as f:
                 data = pickle.load(f)
 
-            # ACEA pickle format: tuple of (tmax, tmin, prec, et0) arrays
+            # ACEA pickle format: tuple of (tmax, tmin, prec, et0[, srad])
             if isinstance(data, tuple) and len(data) >= 3:
                 tmax_arr, tmin_arr, prec_arr = data[0], data[1], data[2]
+                srad_arr = data[4] if len(data) >= 5 else None
                 n = min(len(tmax_arr), len(tmin_arr), len(prec_arr))
                 total_records += n
                 for i in range(n):
@@ -346,6 +347,11 @@ def _validate_acea_pickles(platform_dir: Path) -> List[Dict[str, Any]]:
                     all_values["tmax"].append(tmax_val)
                     all_values["tmin"].append(tmin_val)
                     all_values["rain"].append(rain_val)
+                    if srad_arr is not None and i < len(srad_arr):
+                        srad_val = float(srad_arr[i])
+                        all_values["srad"].append(srad_val)
+                        if srad_val < 0:
+                            consistency_violations["negative_srad"] += 1
                     if tmax_val < tmin_val:
                         consistency_violations["tmax_le_tmin"] += 1
                     if rain_val < 0:
@@ -506,94 +512,84 @@ def _build_climate_checks(
     return checks
 
 
-def _validate_sarra_py_geotiffs(
-    platform_dir: Path, base_dir: Path,
-) -> List[Dict[str, Any]]:
-    """Validate SARRA-Py climate by sampling GeoTIFF pixel values.
+# Explicit variable mapping for SARRA-Py GeoTIFF subdirectories.
+# Each entry: subdir_name → (internal_var, operation, operand)
+# Operations: "noop" = no conversion, "add" = additive, "mul" = multiplicative.
+SARRA_PY_VAR_MAPPING = {
+    "rainfall": ("rain", "noop", 0.0),
+    "2m_temperature_24_hour_maximum": ("tmax", "add", -273.15),  # K→°C
+    "2m_temperature_24_hour_minimum": ("tmin", "add", -273.15),
+    "solar_radiation_flux_daily": ("srad", "mul", 1e-6),  # J/m²→MJ/m²
+}
 
-    Samples up to 10 random files per variable directory, reads pixel
-    values with rasterio, and produces range checks identical in structure
-    to other platforms (post_translate_range_{platform}_{var}).
+
+def _validate_sarra_py_geotiffs(
+    platform_dir: Path,
+) -> List[Dict[str, Any]]:
+    """Validate SARRA-Py climate by sampling GeoTIFF pixel values from
+    the per-run output tree at platform_dir/data/climate/<var_subdir>/.
+
+    Reads from the translator's authoritative output location (matching
+    the pattern of _validate_pythia_wth and _validate_acea_pickles),
+    not from the shared download cache.
     """
     import random
-    import logging
 
-    logger = logging.getLogger(__name__)
     checks = []
+    climate_base = platform_dir / "data" / "climate"
 
-    # Map variable dirs to our internal variable names + unit conversion
-    var_mapping = {
-        "2m_temperature_24_hour_maximum": ("tmax", -273.15),  # K→°C
-        "2m_temperature_24_hour_minimum": ("tmin", -273.15),
-        "solar_radiation_flux_daily": ("srad", 1e-6),  # J/m²→MJ/m²
-    }
-
-    # Find climate GeoTIFF directories: check cache paths relative to
-    # base_dir (the pipeline output root)
-    cache_base = base_dir.parent
-    tamsat_dir = None
-    agera5_dir = None
-
-    # Search for TAMSAT and AgERA5 cache dirs
-    for candidate in [
-        cache_base / "cache" / "tamsat",
-        cache_base / "cache",
-    ]:
-        if not candidate.exists():
-            continue
-        for sub in candidate.iterdir():
-            if sub.is_dir() and ("tamsat" in sub.name.lower() or "TAMSAT" in sub.name):
-                tifs = list(sub.glob("*.tif"))
-                if tifs:
-                    tamsat_dir = sub
-                    break
-
-    for candidate in [
-        cache_base / "cache" / "agera5",
-        cache_base / "cache",
-    ]:
-        if not candidate.exists():
-            continue
-        for sub in candidate.iterdir():
-            if sub.is_dir() and "AgERA5" in sub.name:
-                # Check it has variable subdirs
-                if any(d.is_dir() for d in sub.iterdir()):
-                    agera5_dir = sub
-                    break
-
+    searched_paths = []
     sampled_vars = {}
+    total_files = 0
 
-    # Sample TAMSAT rainfall
-    if tamsat_dir:
-        tifs = list(tamsat_dir.glob("*.tif"))
-        if tifs:
-            sample = random.sample(tifs, min(10, len(tifs)))
-            sampled_vars["rain"] = (sample, 1.0)
-
-    # Sample AgERA5 variables
-    if agera5_dir:
-        for var_dir_name, (internal_name, offset) in var_mapping.items():
-            var_dir = agera5_dir / var_dir_name
-            if not var_dir.is_dir():
-                continue
-            tifs = list(var_dir.glob("*.tif"))
-            if not tifs:
-                continue
-            sample = random.sample(tifs, min(10, len(tifs)))
-            sampled_vars[internal_name] = (sample, offset)
+    for subdir_name, (var, op, operand) in SARRA_PY_VAR_MAPPING.items():
+        var_dir = climate_base / subdir_name
+        searched_paths.append(str(var_dir))
+        if not var_dir.is_dir():
+            continue
+        tifs = list(var_dir.glob("*.tif"))
+        total_files += len(tifs)
+        if not tifs:
+            continue
+        sample = random.sample(tifs, min(10, len(tifs)))
+        sampled_vars[var] = (sample, op, operand)
 
     if not sampled_vars:
         checks.append({
             "check": "post_translate_climate_sarra_py",
             "scope": "platform",
-            "result": "info",
-            "summary": "No SARRA-Py GeoTIFF climate files found for range check",
-            "manuscript_claim": "Section 2.5: value range verification",
-            "details": {"platform": "sarra_py"},
+            "result": "warning",
+            "summary": "No climate files found in SARRA-Py output",
+            "details": {
+                "platform": "sarra_py",
+                "searched_paths": searched_paths,
+            },
         })
         return checks
 
-    # Read pixel values and produce range checks
+    # Partial-data detection (AC 1.4.10)
+    expected_vars = len(SARRA_PY_VAR_MAPPING)
+    found_vars = len(sampled_vars)
+    if found_vars < expected_vars:
+        missing = [v for _, (v, _, _) in SARRA_PY_VAR_MAPPING.items()
+                   if v not in sampled_vars]
+        checks.append({
+            "check": "post_translate_completeness_sarra_py",
+            "scope": "platform",
+            "result": "warning",
+            "summary": (
+                f"Partial climate data: {found_vars}/{expected_vars} "
+                f"variables present ({total_files} files)"
+            ),
+            "details": {
+                "platform": "sarra_py",
+                "expected_variables": expected_vars,
+                "found_variables": found_vars,
+                "missing_variables": missing,
+                "total_files": total_files,
+            },
+        })
+
     try:
         import rasterio
         import numpy as np
@@ -602,13 +598,12 @@ def _validate_sarra_py_geotiffs(
             "check": "post_translate_climate_sarra_py",
             "scope": "platform",
             "result": "info",
-            "summary": "rasterio not available for GeoTIFF range check",
-            "manuscript_claim": "Section 2.5: value range verification",
+            "summary": "rasterio not available for climate range check",
             "details": {"platform": "sarra_py"},
         })
         return checks
 
-    for var, (sample_files, offset) in sampled_vars.items():
+    for var, (sample_files, op, operand) in sampled_vars.items():
         all_vals = []
         for tif_path in sample_files:
             try:
@@ -619,8 +614,10 @@ def _validate_sarra_py_geotiffs(
                         data = data[data != nodata]
                     valid = data[np.isfinite(data)]
                     if valid.size > 0:
-                        if offset != 1.0:
-                            valid = valid + offset if abs(offset) > 1 else valid * offset
+                        if op == "add":
+                            valid = valid + operand
+                        elif op == "mul":
+                            valid = valid * operand
                         all_vals.extend([float(valid.min()), float(valid.max())])
             except Exception as e:
                 logger.debug(f"Skipping {tif_path.name}: {e}")
@@ -645,9 +642,8 @@ def _validate_sarra_py_geotiffs(
             "result": result,
             "summary": (
                 f"SARRA-Py {var}: [{obs_min:.1f}, {obs_max:.1f}] "
-                f"{unit} (sampled from GeoTIFFs)"
+                f"{unit} (from output files)"
             ),
-            "manuscript_claim": "Section 2.5: value range verification (real data)",
             "details": {
                 "platform": "sarra_py",
                 "variable": var,
