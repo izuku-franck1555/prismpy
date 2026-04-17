@@ -405,12 +405,13 @@ class AceaTranslator(AceaTranslatorBase):
                 logger.info(f"Insufficient climate data ({n_climate}/{n_cells} cells), "
                            f"downloading from NASA POWER...")
 
-                # Get date range from config
+                # Get date range from config (cross-year-aware)
                 start_year = self.config.temporal.start_year
                 end_year = self.config.temporal.end_year
                 spinup = self.config.temporal.spinup_years
                 start_date = date(start_year - spinup, 1, 1)
-                end_date = date(end_year, 12, 31)
+                crop_cal = self.config.crop.calendar if self.config.crop else None
+                end_date = self.config.temporal.get_climate_end_date(crop_cal)
 
                 # Download climate for unique 30-arcmin cells only (not all 5-arcmin).
                 # NASA POWER's native resolution is ~0.5° (30-arcmin), so multiple
@@ -2089,7 +2090,9 @@ if __name__ == "__main__":
 
             # Config parameters
             'clock_start': f"{climate_start}/01/01",
-            'clock_end': f"{end_year}/12/31",
+            'clock_end': self.config.temporal.get_climate_end_date(
+                self.config.crop.calendar if self.config.crop else None
+            ).strftime('%Y/%m/%d'),
             'resolution': 1,  # 5arcmin
             'scenarios': [1],  # rainfed
 
@@ -2613,7 +2616,8 @@ if __name__ == "__main__":
         climate_end = end_year
 
         clock_start = f"{climate_start}/01/01"
-        clock_end = f"{climate_end}/12/31"
+        crop_cal = self.config.crop.calendar if self.config.crop else None
+        clock_end = self.config.temporal.get_climate_end_date(crop_cal).strftime('%Y/%m/%d')
 
         # Format grid cells list
         gridcells_str = self._format_gridcells(cell_ids_30arcmin)

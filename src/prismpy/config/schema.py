@@ -6,7 +6,7 @@ data-to-model translation framework, including region, crop, temporal,
 and platform-specific settings.
 """
 
-from datetime import date
+from datetime import date, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Union
@@ -528,6 +528,21 @@ class TemporalConfig(BaseModel):
     def simulation_years(self) -> int:
         """Number of simulation years."""
         return self.end_year - self.start_year + 1
+
+    def get_climate_end_date(self, crop_calendar: Optional["CropCalendarConfig"] = None) -> date:
+        """Climate end date, extended to cover cross-year growing seasons.
+
+        For same-year seasons (maturity_doy >= planting_doy), returns Dec 31
+        of end_year. For cross-year seasons (maturity_doy < planting_doy,
+        e.g., Nov planting → Mar harvest), returns the maturity date in
+        end_year + 1 so climate data covers the final harvest.
+        """
+        if (
+            crop_calendar is not None
+            and crop_calendar.maturity_doy < crop_calendar.planting_doy
+        ):
+            return date(self.end_year + 1, 1, 1) + timedelta(days=crop_calendar.maturity_doy - 1)
+        return date(self.end_year, 12, 31)
 
 
 # =============================================================================

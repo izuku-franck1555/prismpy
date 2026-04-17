@@ -1959,7 +1959,8 @@ class PythiaTranslator(PythiaTranslatorBase):
         if pythia_config and pythia_config.climate_end_date:
             end_date = pythia_config.climate_end_date
         elif self.config.temporal:
-            end_date = f"{self.config.temporal.end_year}-12-31"
+            crop_cal = self.config.crop.calendar if self.config.crop else None
+            end_date = self.config.temporal.get_climate_end_date(crop_cal).isoformat()
         else:
             raise ValueError(
                 "temporal.end_year or platform_config.pythia.climate_end_date is required. "

@@ -372,7 +372,8 @@ def _check_temporal_completeness(unified_data, config) -> Dict[str, Any]:
     # both ranges and use the appropriate one per data path.
     expected_start_with_spinup = date(start_year - spinup, 1, 1)
     expected_start_no_spinup = date(start_year, 1, 1)
-    expected_end = date(end_year, 12, 31)
+    crop_cal = config.crop.calendar if config.crop else None
+    expected_end = config.temporal.get_climate_end_date(crop_cal)
     expected_days_with_spinup = (expected_end - expected_start_with_spinup).days + 1
     expected_days_no_spinup = (expected_end - expected_start_no_spinup).days + 1
 

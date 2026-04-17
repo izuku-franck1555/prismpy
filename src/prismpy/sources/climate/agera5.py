@@ -57,6 +57,77 @@ AGERA5_TO_INTERNAL = {
 }
 
 
+def _count_agera5_stage_files(
+    stages_base: Path,
+    region_name: str,
+    year: int,
+) -> Dict[str, int]:
+    """Return per-year file counts across the 4 SARRA_data_download stages.
+
+    V2-22a 1.5 route-back fix — the SARRA_data_download library writes to
+    a CWD-relative path (``../data/``) regardless of the ``save_path``
+    argument forwarded through ``download_AgERA5_year``. The relocation
+    logic in ``AgERA5Source.retrieve`` explicitly handles both candidate
+    paths after the fact, which confirms the quirk empirically. Callers
+    must pass the SAME base the library actually uses (``Path("../data")``
+    in production) so these counts reflect ground truth. Reading from the
+    per-run ``output_dir`` returns zeros and pins the var counter at 1/6
+    for the entire download phase.
+
+    The zip glob matches the flat layout ``0_downloads/AgERA5_{region}*_{year}.zip``.
+    The conversion and output globs are year-scoped via ``f'*_{year}_*.tif'`` so
+    year 1's accumulated TIFFs do not leak into year 2's counts (the
+    ``2_conversion`` dir is only wiped at the end of the full year loop).
+
+    Returns a dict with keys ``n_zips``, ``n_extracted``, ``n_converted``,
+    ``n_output``.
+    """
+    year_glob = f"*_{year}_*.tif"
+
+    dl_dir = stages_base / "0_downloads"
+    n_zips = (
+        len(list(dl_dir.glob(f"AgERA5_{region_name}*_{year}.zip")))
+        if dl_dir.exists()
+        else 0
+    )
+
+    ext_dir = stages_base / "1_extraction" / f"AgERA5_{region_name}" / str(year)
+    n_extracted = (
+        sum(
+            len(list(vd.glob("*.nc")))
+            for vd in ext_dir.iterdir()
+            if vd.is_dir()
+        )
+        if ext_dir.exists()
+        else 0
+    )
+
+    conv_dir = stages_base / "2_conversion" / f"AgERA5_{region_name}"
+    n_converted = (
+        sum(
+            len(list(vd.glob(year_glob)))
+            for vd in conv_dir.iterdir()
+            if vd.is_dir()
+        )
+        if conv_dir.exists()
+        else 0
+    )
+
+    out_dir = stages_base / "3_output" / f"AgERA5_{region_name}"
+    n_output = (
+        sum(1 for _ in out_dir.rglob(year_glob))
+        if out_dir.exists()
+        else 0
+    )
+
+    return {
+        "n_zips": n_zips,
+        "n_extracted": n_extracted,
+        "n_converted": n_converted,
+        "n_output": n_output,
+    }
+
+
 @dataclass
 class AgERA5Config:
     """Configuration for AgERA5 data access."""
@@ -490,7 +561,6 @@ class AgERA5Source(DataSource):
 
         total_days = (end_date - start_date).days + 1
         estimated_total = total_days * len(AGERA5_VARIABLES)
-        agera5_out = _P("../data/3_output") / f"AgERA5_{region_name}"
 
         # Variable names the library downloads (6 total)
         var_labels = {
@@ -509,10 +579,10 @@ class AgERA5Source(DataSource):
                 self.logger.info("AgERA5 download aborted — pipeline cancelled")
                 return
 
-            # Report current file count at year start
-            if progress_callback:
-                count = sum(1 for _ in agera5_out.rglob("*.tif")) if agera5_out.exists() else 0
-                progress_callback(count, estimated_total, '')
+            # V2-22a 1.5 — W4 (main-thread year-header callback) deleted.
+            # _phase_monitor is now the sole writer of substage.detail for
+            # AgERA5 (see ownership comment below). The ≤8s reporting lag
+            # at year boundaries is acceptable.
             self.logger.info(
                 f"Downloading AgERA5 data for {year} "
                 f"(year {i + 1}/{len(years)})..."
@@ -522,7 +592,10 @@ class AgERA5Source(DataSource):
             # Captures CDS request lifecycle (queued → running → successful) and
             # scans all 4 library stages to determine current phase.
             stop_monitor = _threading.Event()
-            _cds_state = {'status': 'initializing', 'var_index': 0}
+            # V2-22a 1.5 — year-tagged state: 'year' key added so
+            # _phase_monitor reads are explicit about per-year scoping,
+            # and reset at year-loop entry prevents cross-year carry-over.
+            _cds_state = {'year': year, 'status': 'initializing', 'var_index': 0}
 
             # CDS log interceptor: captures per-request status transitions
             class _CDSHandler(_logging.Handler):
@@ -539,32 +612,39 @@ class AgERA5Source(DataSource):
             for logger_name in ['ecmwf.datastores.legacy_client', 'cdsapi']:
                 _logging.getLogger(logger_name).addHandler(cds_handler)
 
+            # V2-22a 1.5 — SINGLE WRITER OWNERSHIP
+            # _phase_monitor is the sole writer of progress_callback (and
+            # therefore substage.detail) during AgERA5 downloads. The
+            # main-thread year-header callback (W4) was deleted above so
+            # labels no longer alternate between this monitor's rich CDS
+            # state and a main-thread file-count fallback. This single
+            # writer is what lets item 1.1's detail-diff guard correctly
+            # preserve updated_at during CDS queue waits — without the
+            # consolidation, labels from two sources are never byte-
+            # identical and the guard never fires. AC 1.5.6 grep test
+            # locks this invariant structurally (asserts zero
+            # progress_callback() call sites outside _phase_monitor).
             def _phase_monitor():
                 """Scan all 4 library stages + CDS state every 8s."""
                 prev_zips = 0
+                # V2-22a 1.5 route-back — the SARRA_data_download library
+                # writes stage files to a CWD-relative path regardless of
+                # the save_path argument, so file counts must read from
+                # Path("../data/"), not from the pipeline's per-run
+                # output_dir (which receives files only after the explicit
+                # relocation at retrieve_sarra_py's tail). Reading from
+                # output_dir returned zeros and pinned the var counter at
+                # 1/6 for the entire download phase in V2-22a/A verification.
+                stages_base = _P("../data")
                 while not stop_monitor.wait(8):
                     try:
-                        # Count files across all library stages
-                        dl_dir = output_dir / '0_downloads'
-                        n_zips = len(list(dl_dir.glob(
-                            f'AgERA5_{region_name}*_{year}.zip'
-                        ))) if dl_dir.exists() else 0
-
-                        ext_dir = output_dir / '1_extraction' / f'AgERA5_{region_name}' / str(year)
-                        n_extracted = sum(
-                            len(list(vd.glob('*.nc')))
-                            for vd in ext_dir.iterdir() if vd.is_dir()
-                        ) if ext_dir.exists() else 0
-
-                        conv_dir = output_dir / '2_conversion' / f'AgERA5_{region_name}'
-                        n_converted = sum(
-                            len(list(vd.glob('*.tif')))
-                            for vd in conv_dir.iterdir() if vd.is_dir()
-                        ) if conv_dir.exists() else 0
-
-                        n_output = sum(
-                            1 for _ in agera5_out.rglob('*.tif')
-                        ) if agera5_out.exists() else 0
+                        counts = _count_agera5_stage_files(
+                            stages_base, region_name, year,
+                        )
+                        n_zips = counts['n_zips']
+                        n_extracted = counts['n_extracted']
+                        n_converted = counts['n_converted']
+                        n_output = counts['n_output']
 
                         # Track variable progression
                         if n_zips > prev_zips:

@@ -801,9 +801,10 @@ class TranslationPipeline:
         """
         from datetime import date
 
-        # Get temporal range from config
+        # Get temporal range from config (cross-year-aware)
         start_date = date(self.config.temporal.start_year, 1, 1)
-        end_date = date(self.config.temporal.end_year, 12, 31)
+        crop_cal = self.config.crop.calendar if self.config.crop else None
+        end_date = self.config.temporal.get_climate_end_date(crop_cal)
 
         climate_data = {
             "rainfall_dir": None,
@@ -913,10 +914,14 @@ class TranslationPipeline:
                         is_final = current >= total
                         if self._progress_callback and (is_final or now - _agera5_last_report[0] >= 10):
                             _agera5_last_report[0] = now
-                            label = detail or f'AgERA5 temperature: file {current} of ~{total}'
+                            # V2-22a 1.5 — W3 fallback deleted. After W4
+                            # removal in agera5.py, _phase_monitor is the
+                            # sole caller and always passes a non-empty
+                            # detail. An empty detail here would indicate
+                            # a regression worth surfacing, not masking.
                             self._progress_callback.on_substage_progress(
                                 'retrieve', 'Downloading AgERA5 temperature',
-                                current, total, label)
+                                current, total, detail)
                     agera5_result = agera5.retrieve(
                         region=region, start_date=start_date,
                         end_date=end_date, download=True,
@@ -998,7 +1003,8 @@ class TranslationPipeline:
         # Create records for each day, including spinup period
         records = []
         current_date = date(start_year - spinup_years, 1, 1)
-        end_date = date(end_year, 12, 31)
+        crop_cal = self.config.crop.calendar if self.config.crop else None
+        end_date = self.config.temporal.get_climate_end_date(crop_cal)
 
         while current_date <= end_date:
             # Create record with generic placeholder values (not region-specific)
