@@ -42,6 +42,34 @@ class PipelineStage(str, Enum):
     PACKAGE = "package"
 
 
+def _extract_run_id(callback) -> Optional[str]:
+    """Best-effort run-identifier extraction for cache-manifest provenance.
+
+    V2-22a B2 stage 9 — climate sources accept an optional `run_id`
+    kwarg that is recorded in the cache manifest's provenance field. The
+    executor reads it from the progress callback in two defensive ways:
+
+      1. `callback.run_id` if exposed directly (preferred shape — clean
+         protocol, decouples the source from any specific callback class).
+      2. `callback.run.id` for the current prismweb shape, where the
+         WebProgressCallback exposes a Django PipelineRun model on `.run`.
+
+    Returns None when no identifier is discoverable; manifest writers
+    record None as an empty string with no semantic loss — the manifest's
+    correctness checks (bbox, file_count, marker) do not depend on run_id.
+    """
+    if callback is None:
+        return None
+    explicit = getattr(callback, 'run_id', None)
+    if explicit is not None:
+        return str(explicit)
+    run_obj = getattr(callback, 'run', None)
+    if run_obj is None:
+        return None
+    inner_id = getattr(run_obj, 'id', None)
+    return str(inner_id) if inner_id is not None else None
+
+
 @dataclass
 class StageResult:
     """Result of a pipeline stage execution.
@@ -884,6 +912,7 @@ class TranslationPipeline:
                         region=region, start_date=start_date,
                         end_date=end_date, download=True,
                         progress_callback=_tamsat_progress,
+                        run_id=_extract_run_id(self._progress_callback),
                     )
                     if tamsat_result.success and tamsat_result.data:
                         climate_data["rainfall_dir"] = tamsat_result.data.data_dir
@@ -927,6 +956,7 @@ class TranslationPipeline:
                         end_date=end_date, download=True,
                         progress_callback=_agera5_progress,
                         cancel_check=self._progress_callback._is_cancelled if self._progress_callback else None,
+                        run_id=_extract_run_id(self._progress_callback),
                     )
                     if agera5_result.success and agera5_result.data:
                         climate_data["agera5_dir"] = agera5_result.data.data_dir

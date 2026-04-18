@@ -13,19 +13,373 @@ Reference: SARRA-Py/02-WEATHER-PREPARATION/ implementation patterns.
 import glob
 import json
 import logging
+import os
+import tempfile
+import threading
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
+from filelock import FileLock, Timeout
 
 from prismpy.models.region import BoundingBox, Region
 from prismpy.provenance.tracker import DecisionType, ProvenanceTracker
 from prismpy.sources.base import DataSource, RetrievalResult
+from prismpy.utils.sanitization import normalize_region_name
 
 
 logger = logging.getLogger(__name__)
+
+
+# ── V2-22a B2: cache-manifest + filelock helpers ─────────────────────
+# Shared by tamsat.py and agera5.py for cache-isolation correctness.
+# Closes C1 (bbox-blind cache contamination) and C2 (concurrent download
+# race) per V2-22a-B2-CONTRACT. agera5.py imports the public names below.
+
+MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_FILENAME = "_manifest.json"
+MARKER_FILENAME = "_manifest.writing"
+TMPFILE_PREFIX = ".writing-"
+# 0.01° per edge ≈ 1 km — well above sub-pixel noise on TAMSAT (0.0375°)
+# and AgERA5 (0.1°) grids, matches wizard map-click precision.
+BBOX_TOLERANCE_DEG = 0.01
+# 7200 s (2 h) — covers worst-case 3-year SARRA-Py runs under CDS contention.
+DOWNLOAD_LOCK_TIMEOUT_SECONDS = 7200
+
+# One WARNING per cache path per process lifetime for legacy (no-manifest)
+# caches — keeps server logs from drowning when many requests hit a region
+# whose cache predates B2.
+_legacy_warned_cache_paths: set = set()
+_legacy_warned_lock = threading.Lock()
+
+
+class CacheManifestState(NamedTuple):
+    """Outcome of inspecting a cache directory for a valid manifest.
+
+    Attributes:
+        cache_hit: True if the caller may use the cached data as-is (still
+            subject to the caller's own completeness/date-coverage check).
+        force_redownload: True if the caller MUST wipe stale data files
+            and re-download. Set whenever the manifest check detected a
+            cold signal: bbox_mismatch, manifest_corrupt, marker_present,
+            or file_count_drift.
+        reason: Short tag for logs.
+        prior_bbox: Prior manifest's bbox when reason='bbox_mismatch'.
+        marker_started_at: Marker's started_at ISO when reason='marker_present'.
+        expected_file_count: Manifest's recorded file_count when
+            reason='file_count_drift' (the "expected" side of the drift).
+    """
+    cache_hit: bool
+    force_redownload: bool
+    reason: str
+    prior_bbox: Optional[Dict[str, float]] = None
+    marker_started_at: Optional[str] = None
+    expected_file_count: Optional[int] = None
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def bbox_to_dict(bounds: BoundingBox) -> Dict[str, float]:
+    """Extract bbox in canonical {north,south,east,west} keys.
+
+    Avoids the GIS-vs-SARRA-Py tuple-order drift risk (Rev 10 correction
+    #3) by always using explicit edge names.
+    """
+    return {
+        "north": float(bounds.maxy),
+        "south": float(bounds.miny),
+        "east": float(bounds.maxx),
+        "west": float(bounds.minx),
+    }
+
+
+def _bbox_matches(
+    a: Dict[str, float],
+    b: Dict[str, float],
+    tolerance_deg: float = BBOX_TOLERANCE_DEG,
+) -> bool:
+    for edge in ("north", "south", "east", "west"):
+        if abs(float(a.get(edge, 0.0)) - float(b.get(edge, 0.0))) > tolerance_deg:
+            return False
+    return True
+
+
+def count_tif_files(data_dir: Path) -> int:
+    """Recursive .tif count under data_dir (0 if absent).
+
+    Works for TAMSAT (flat) and AgERA5 (per-variable subdirs). Excludes
+    .nc fragments in TAMSAT's _raw_nc/ staging area.
+    """
+    if not data_dir.exists():
+        return 0
+    return sum(1 for _ in data_dir.rglob("*.tif"))
+
+
+def _cleanup_orphan_tmpfiles(target_dir: Path) -> None:
+    """Best-effort removal of leftover atomic-write tempfiles.
+
+    A SIGKILL between os.fsync and os.replace can leave a .writing-XXXX.tmp
+    fragment in the target dir. Cleanup is opportunistic — failures are
+    swallowed because the next manifest write will overwrite the target
+    regardless.
+    """
+    if not target_dir.exists():
+        return
+    for stale in target_dir.glob(f"{TMPFILE_PREFIX}*.tmp"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+
+def write_marker(
+    marker_path: Path,
+    *,
+    source: str,
+    region_name: str,
+    run_id: Optional[str],
+) -> None:
+    """Create _manifest.writing — the in-progress signal that survives SIGKILL.
+
+    Persists if the writer process is killed mid-download. The next reader
+    sees the marker and treats the cache as cold even when data files
+    look complete (AC 1.7.3c). Deleted by delete_marker after a successful
+    manifest replace.
+    """
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "started_at": _utcnow_iso(),
+        "run_id": run_id or "",
+        "pid": os.getpid(),
+        "source": source,
+        "region_name": region_name,
+    }
+    marker_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def delete_marker(marker_path: Path) -> None:
+    try:
+        marker_path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def write_cache_manifest(
+    manifest_path: Path,
+    *,
+    source: str,
+    region_name: str,
+    bbox: Dict[str, float],
+    start_date: date,
+    end_date: date,
+    run_id: Optional[str],
+    file_count: int,
+) -> None:
+    """Write _manifest.json atomically; called inside the per-source lock.
+
+    Uses tempfile in the SAME directory as the target so os.replace stays
+    atomic on the same filesystem (cross-fs rename degrades to copy+unlink
+    and loses atomicity). fsync on the file ensures the bytes hit disk;
+    fsync on the directory ensures the rename itself is durable across a
+    crash.
+
+    Crash semantics (AC 1.7.1):
+      * SIGKILL between tempfile creation and os.replace → orphan
+        .writing-XXXX.tmp may persist (best-effort cleanup on writer
+        re-entry). Target manifest is either absent or contains a prior
+        successful manifest — never partial/corrupt.
+      * SIGKILL between os.replace and dir-fsync → target is written but
+        the rename may not be durable. Acceptable: next reader either sees
+        the new manifest or its absence (which the marker still flags as
+        cold).
+    """
+    target_dir = manifest_path.parent
+    target_dir.mkdir(parents=True, exist_ok=True)
+    _cleanup_orphan_tmpfiles(target_dir)
+
+    payload = {
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "source": source,
+        "region_name": region_name,
+        "bbox": bbox,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "created_at": _utcnow_iso(),
+        "run_id": run_id or "",
+        "file_count": file_count,
+    }
+    body = json.dumps(payload, indent=2).encode("utf-8")
+
+    tf = tempfile.NamedTemporaryFile(
+        mode="wb",
+        prefix=TMPFILE_PREFIX,
+        suffix=".tmp",
+        dir=str(target_dir),
+        delete=False,
+    )
+    tmp_path = Path(tf.name)
+    try:
+        tf.write(body)
+        tf.flush()
+        os.fsync(tf.fileno())
+        tf.close()
+        os.replace(str(tmp_path), str(manifest_path))
+    except Exception:
+        try:
+            tf.close()
+        except Exception:
+            pass
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        raise
+
+    # Crash-durable directory rename — fsync the dir entry itself.
+    try:
+        dir_fd = os.open(str(target_dir), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        pass
+
+
+def check_cache_manifest(
+    manifest_path: Path,
+    marker_path: Path,
+    *,
+    expected_bbox: Dict[str, float],
+    actual_file_count: int,
+    data_files_present: bool,
+) -> CacheManifestState:
+    """Inspect a cache dir and return the action the caller should take.
+
+    Evaluation order is significant: marker presence overrides everything
+    because a prior writer may have crashed AFTER replacing the manifest
+    but BEFORE deleting the marker (or partway through producing data).
+
+    States:
+      * marker_present       → cold, force re-download
+      * no_data              → cold, no force needed
+      * legacy_assume_valid  → cache hit (warn once per cache path)
+      * manifest_corrupt     → cold, force re-download
+      * bbox_mismatch        → cold, force re-download (prior bbox in log)
+      * file_count_drift     → cold, force re-download
+      * valid                → cache hit
+    """
+    if marker_path.exists():
+        try:
+            marker_data = json.loads(marker_path.read_text(encoding="utf-8"))
+            started_at = marker_data.get("started_at") if isinstance(marker_data, dict) else None
+        except (OSError, json.JSONDecodeError):
+            started_at = None
+        return CacheManifestState(
+            cache_hit=False,
+            force_redownload=True,
+            reason="marker_present",
+            marker_started_at=started_at,
+        )
+
+    if not manifest_path.exists():
+        if not data_files_present:
+            return CacheManifestState(
+                cache_hit=False,
+                force_redownload=False,
+                reason="no_data",
+            )
+        return CacheManifestState(
+            cache_hit=True,
+            force_redownload=False,
+            reason="legacy_assume_valid",
+        )
+
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return CacheManifestState(
+            cache_hit=False,
+            force_redownload=True,
+            reason="manifest_corrupt",
+        )
+
+    if (not isinstance(manifest, dict)
+            or manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION):
+        return CacheManifestState(
+            cache_hit=False,
+            force_redownload=True,
+            reason="manifest_corrupt",
+        )
+
+    prior_bbox = manifest.get("bbox") if isinstance(manifest.get("bbox"), dict) else None
+    if not prior_bbox or not _bbox_matches(prior_bbox, expected_bbox):
+        return CacheManifestState(
+            cache_hit=False,
+            force_redownload=True,
+            reason="bbox_mismatch",
+            prior_bbox=prior_bbox,
+        )
+
+    manifest_file_count = manifest.get("file_count")
+    if isinstance(manifest_file_count, int) and manifest_file_count != actual_file_count:
+        return CacheManifestState(
+            cache_hit=False,
+            force_redownload=True,
+            reason="file_count_drift",
+            expected_file_count=manifest_file_count,
+        )
+
+    return CacheManifestState(
+        cache_hit=True,
+        force_redownload=False,
+        reason="valid",
+    )
+
+
+def warn_legacy_cache_once(cache_path: Path, source_logger: logging.Logger) -> None:
+    """One WARNING per cache path per process lifetime."""
+    try:
+        key = str(cache_path.resolve())
+    except OSError:
+        key = str(cache_path)
+    with _legacy_warned_lock:
+        if key in _legacy_warned_cache_paths:
+            return
+        _legacy_warned_cache_paths.add(key)
+    source_logger.warning(
+        "Legacy cache (no manifest) at %s — assuming valid for backward "
+        "compatibility. Will be replaced with a manifest after the next "
+        "successful download of this region.",
+        key,
+    )
+
+
+def bbox_field_for_log(bbox: Optional[Dict[str, float]]) -> str:
+    if not bbox:
+        return "<none>"
+    return (
+        f"N={bbox.get('north')} S={bbox.get('south')} "
+        f"E={bbox.get('east')} W={bbox.get('west')}"
+    )
+
+
+def cache_lock_path(cache_dir: Path, source: str, region_name: str) -> Path:
+    """Per-source, per-region lock path: .{source}-{normalized_region}.lock.
+
+    Different sources on the same region use different lock files so a
+    single SARRA-Py run can progress through TAMSAT then AgERA5 without
+    self-blocking and so two users hitting the same region overlap on
+    different sources but serialize on the same source.
+    """
+    safe = normalize_region_name(region_name)
+    return cache_dir / f".{source}-{safe}.lock"
 
 
 @dataclass
@@ -141,6 +495,7 @@ class TAMSATSource(DataSource):
         """
         errors = []
         warnings = []
+        run_id = kwargs.get('run_id')
         metadata = {
             "source": self.NAME,
             "version": self.config.version,
@@ -161,19 +516,37 @@ class TAMSATSource(DataSource):
             data_dir = self.config.data_dir
         else:
             # Default: cache_dir/tamsat/{region_name}/
-            from prismpy.utils.sanitization import normalize_region_name
             safe_name = normalize_region_name(region.name)
             data_dir = self.cache_dir / "tamsat" / safe_name
 
         # Get bounds in both formats
         bounds_gis = region.bounds.to_gis_format()
         bounds_sarra_py = region.bounds.to_sarra_py_format()
+        bbox_dict = bbox_to_dict(region.bounds)
 
         metadata["bounds_gis"] = bounds_gis
         metadata["bounds_sarra_py"] = bounds_sarra_py
         metadata["data_dir"] = str(data_dir)
 
-        # Check if data exists locally
+        # Cache-isolation paths (V2-22a B2)
+        manifest_path = data_dir / MANIFEST_FILENAME
+        marker_path = data_dir / MARKER_FILENAME
+        force_redownload = False
+
+        # V2-22a B2 + Gate B BLOCKER fix: the manifest check must fire
+        # INDEPENDENT of file_info.complete. Otherwise a partial cache
+        # from a crashed writer (e.g., 200 out of 1000 .tif files) whose
+        # manifest carries the stale-bbox would fall through the "else"
+        # branch of the old code with force_redownload=False, and the
+        # downloader's per-date .exists() short-circuit at tamsat.py
+        # ':514' would preserve the stale .tif files while a fresh
+        # manifest got written over them. Silent contamination.
+        #
+        # New flow: always consult the manifest first. Any cold signal
+        # (bbox_mismatch / manifest_corrupt / marker_present /
+        # file_count_drift) sets force_redownload=True regardless of
+        # completeness; the "cache hit" short-circuit only applies when
+        # BOTH the manifest says valid/legacy AND file_info says complete.
         if data_dir.exists():
             file_info = self._validate_local_files(
                 data_dir=data_dir,
@@ -181,8 +554,58 @@ class TAMSATSource(DataSource):
                 start_date=start_date,
                 end_date=end_date,
             )
+            actual_count = count_tif_files(data_dir)
+            state = check_cache_manifest(
+                manifest_path,
+                marker_path,
+                expected_bbox=bbox_dict,
+                actual_file_count=actual_count,
+                data_files_present=actual_count > 0,
+            )
 
-            if file_info["complete"]:
+            # Invalidation signals fire independent of completeness —
+            # this is the BLOCKER fix.
+            force_redownload = state.force_redownload
+            metadata["cache_state"] = state.reason
+
+            if state.reason == "bbox_mismatch":
+                self.logger.info(
+                    "TAMSAT cache bbox mismatch for %s — prior=%s "
+                    "requested=%s — re-downloading",
+                    region.name,
+                    bbox_field_for_log(state.prior_bbox),
+                    bbox_field_for_log(bbox_dict),
+                )
+            elif state.reason == "manifest_corrupt":
+                self.logger.warning(
+                    "TAMSAT manifest at %s is corrupt/unreadable — "
+                    "treating as cold",
+                    manifest_path,
+                )
+            elif state.reason == "marker_present":
+                self.logger.warning(
+                    "TAMSAT marker present at %s (started_at=%s) — "
+                    "prior download interrupted; re-downloading",
+                    marker_path,
+                    state.marker_started_at,
+                )
+            elif state.reason == "file_count_drift":
+                # Gate B LOW 1: include expected + actual in the log
+                self.logger.warning(
+                    "TAMSAT manifest file_count drift at %s — expected=%s "
+                    "(from manifest) actual=%d (disk count) — treating as "
+                    "cold",
+                    manifest_path,
+                    state.expected_file_count,
+                    actual_count,
+                )
+
+            # Cache hit only when BOTH the manifest says OK AND the
+            # completeness check says we have every date we need.
+            if state.cache_hit and file_info["complete"]:
+                if state.reason == "legacy_assume_valid":
+                    warn_legacy_cache_once(data_dir, self.logger)
+
                 self.logger.info(
                     f"Found {file_info['file_count']} TAMSAT files for {region.name}"
                 )
@@ -215,7 +638,8 @@ class TAMSATSource(DataSource):
                     warnings=warnings,
                     metadata=metadata,
                 )
-            else:
+
+            if not file_info["complete"]:
                 warnings.append(
                     f"Local data incomplete: {file_info['file_count']} files found, "
                     f"{len(file_info['missing_dates'])} dates missing"
@@ -234,61 +658,121 @@ class TAMSATSource(DataSource):
                     metadata=metadata,
                 )
 
+            # V2-22a B2: serialize concurrent downloads on the same
+            # (source, region) via a per-source-per-region filelock.
+            # Different sources on the same region run concurrently
+            # (separate lock files); same source same region serializes.
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = cache_lock_path(self.cache_dir, source=self.NAME, region_name=region.name)
+            lock = FileLock(str(lock_path))
+
             try:
-                self._download_tamsat(
-                    bounds=bounds_sarra_py,
-                    start_date=start_date,
-                    end_date=end_date,
-                    output_dir=data_dir,
-                    region_name=region.name,
-                    progress_callback=kwargs.get('progress_callback'),
-                )
-
-                # Re-validate after download
-                file_info = self._validate_local_files(
-                    data_dir=data_dir,
-                    region_name=region.name,
-                    start_date=start_date,
-                    end_date=end_date,
-                )
-
-                tamsat_data = TAMSATData(
-                    region_name=region.name,
-                    bounds=bounds_gis,
-                    bounds_sarra_py=bounds_sarra_py,
-                    start_date=start_date,
-                    end_date=end_date,
-                    resolution=self.config.resolution,
-                    data_dir=data_dir,
-                    file_count=file_info["file_count"],
-                    variables=["rain"],
-                )
-
-                metadata["downloaded"] = True
-                metadata["file_count"] = file_info["file_count"]
-
-                # Record provenance
-                if self.provenance:
-                    self.provenance.record_retrieval(
+                with lock.acquire(timeout=DOWNLOAD_LOCK_TIMEOUT_SECONDS):
+                    # Marker BEFORE any data write so a SIGKILL during the
+                    # download leaves a "this cache may be partial" signal
+                    # the next reader will respect (AC 1.7.3c).
+                    write_marker(
+                        marker_path,
                         source=self.NAME,
-                        parameters={
-                            "region": region.name,
-                            "bounds": bounds_sarra_py,
-                            "start_date": start_date.isoformat(),
-                            "end_date": end_date.isoformat(),
-                        },
-                        output_path=data_dir,
-                        decisions=[],
+                        region_name=region.name,
+                        run_id=run_id,
                     )
 
+                    # AC 1.7.3e: force_redownload bypasses TAMSAT's per-file
+                    # short-circuits at :514 (.tif partition skip) and :654
+                    # (.tif conversion skip) by removing the stale .tif files
+                    # outright. _raw_nc/*.nc is bbox-INDEPENDENT (full TAMSAT
+                    # grid for that date; cropping happens at conversion) and
+                    # is preserved so a bbox change doesn't trigger a multi-MB
+                    # JASMIN refetch with no correctness benefit.
+                    if force_redownload:
+                        for tif in data_dir.glob("*.tif"):
+                            try:
+                                tif.unlink()
+                            except OSError:
+                                pass
+
+                    self._download_tamsat(
+                        bounds=bounds_sarra_py,
+                        start_date=start_date,
+                        end_date=end_date,
+                        output_dir=data_dir,
+                        region_name=region.name,
+                        progress_callback=kwargs.get('progress_callback'),
+                    )
+
+                    # Re-validate after download
+                    file_info = self._validate_local_files(
+                        data_dir=data_dir,
+                        region_name=region.name,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+
+                    tamsat_data = TAMSATData(
+                        region_name=region.name,
+                        bounds=bounds_gis,
+                        bounds_sarra_py=bounds_sarra_py,
+                        start_date=start_date,
+                        end_date=end_date,
+                        resolution=self.config.resolution,
+                        data_dir=data_dir,
+                        file_count=file_info["file_count"],
+                        variables=["rain"],
+                    )
+
+                    metadata["downloaded"] = True
+                    metadata["file_count"] = file_info["file_count"]
+                    if force_redownload:
+                        metadata["force_redownload"] = True
+
+                    # Record provenance
+                    if self.provenance:
+                        self.provenance.record_retrieval(
+                            source=self.NAME,
+                            parameters={
+                                "region": region.name,
+                                "bounds": bounds_sarra_py,
+                                "start_date": start_date.isoformat(),
+                                "end_date": end_date.isoformat(),
+                            },
+                            output_path=data_dir,
+                            decisions=[],
+                        )
+
+                    # AC 1.7.3d: manifest replace BEFORE marker delete.
+                    # Marker stays on disk if any of these fail so the next
+                    # reader sees the cache as cold.
+                    write_cache_manifest(
+                        manifest_path,
+                        source=self.NAME,
+                        region_name=region.name,
+                        bbox=bbox_dict,
+                        start_date=start_date,
+                        end_date=end_date,
+                        run_id=run_id,
+                        file_count=count_tif_files(data_dir),
+                    )
+                    delete_marker(marker_path)
+
+                    return self.create_result(
+                        success=True,
+                        data=tamsat_data,
+                        output_path=data_dir,
+                        warnings=warnings,
+                        metadata=metadata,
+                    )
+
+            except Timeout:
                 return self.create_result(
-                    success=True,
-                    data=tamsat_data,
-                    output_path=data_dir,
+                    success=False,
+                    errors=[
+                        "Another run on this region is downloading data "
+                        "(~90 min max). Please wait and retry."
+                    ],
                     warnings=warnings,
                     metadata=metadata,
                 )
-
             except Exception as e:
                 return self.create_result(
                     success=False,

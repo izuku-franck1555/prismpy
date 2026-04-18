@@ -30,10 +30,29 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
+from filelock import FileLock, Timeout
 
 from prismpy.models.region import Region
 from prismpy.provenance.tracker import ProvenanceTracker
 from prismpy.sources.base import DataSource, RetrievalResult
+# V2-22a B2: cache-isolation helpers (canonical home is tamsat.py;
+# imported here to keep the manifest + filelock contract identical
+# across both climate sources).
+from prismpy.sources.climate.tamsat import (
+    DOWNLOAD_LOCK_TIMEOUT_SECONDS,
+    MANIFEST_FILENAME,
+    MARKER_FILENAME,
+    bbox_field_for_log,
+    bbox_to_dict,
+    cache_lock_path,
+    check_cache_manifest,
+    count_tif_files,
+    delete_marker,
+    warn_legacy_cache_once,
+    write_cache_manifest,
+    write_marker,
+)
+from prismpy.utils.sanitization import normalize_region_name
 
 
 logger = logging.getLogger(__name__)
@@ -254,6 +273,7 @@ class AgERA5Source(DataSource):
         """
         errors = []
         warnings = []
+        run_id = kwargs.get('run_id')
         metadata = {
             "source": self.NAME,
             "resolution": self.config.resolution,
@@ -275,19 +295,30 @@ class AgERA5Source(DataSource):
         elif self.config.data_dir:
             data_dir = self.config.data_dir
         else:
-            from prismpy.utils.sanitization import normalize_region_name
             safe_name = normalize_region_name(region.name)
             data_dir = self.cache_dir / "agera5" / f"AgERA5_{safe_name}"
 
         # Get bounds
         bounds_gis = region.bounds.to_gis_format()
         bounds_sarra_py = region.bounds.to_sarra_py_format()
+        bbox_dict = bbox_to_dict(region.bounds)
 
         metadata["bounds_gis"] = bounds_gis
         metadata["bounds_sarra_py"] = bounds_sarra_py
         metadata["data_dir"] = str(data_dir)
 
-        # Check if data exists locally
+        # Cache-isolation paths (V2-22a B2)
+        manifest_path = data_dir / MANIFEST_FILENAME
+        marker_path = data_dir / MARKER_FILENAME
+        force_redownload = False
+
+        # V2-22a B2 + Gate B BLOCKER fix: consult the manifest BEFORE the
+        # file_info.complete branch. A partial AgERA5 cache (some var
+        # subdirs populated, others empty) whose manifest carries a
+        # stale bbox must still trigger the wipe + re-download — the
+        # old ordering gated the whole manifest check behind completeness
+        # and let the SARRA_data_download library's internal caching
+        # preserve stale-bbox .tif files in the partial subdirs.
         if data_dir.exists():
             file_info = self._validate_local_files(
                 data_dir=data_dir,
@@ -295,8 +326,57 @@ class AgERA5Source(DataSource):
                 end_date=end_date,
                 variables=variables,
             )
+            actual_count = count_tif_files(data_dir)
+            state = check_cache_manifest(
+                manifest_path,
+                marker_path,
+                expected_bbox=bbox_dict,
+                actual_file_count=actual_count,
+                data_files_present=actual_count > 0,
+            )
 
-            if file_info["complete"]:
+            # Invalidation signals fire independent of completeness.
+            force_redownload = state.force_redownload
+            metadata["cache_state"] = state.reason
+
+            if state.reason == "bbox_mismatch":
+                self.logger.info(
+                    "AgERA5 cache bbox mismatch for %s — prior=%s "
+                    "requested=%s — re-downloading",
+                    region.name,
+                    bbox_field_for_log(state.prior_bbox),
+                    bbox_field_for_log(bbox_dict),
+                )
+            elif state.reason == "manifest_corrupt":
+                self.logger.warning(
+                    "AgERA5 manifest at %s is corrupt/unreadable — "
+                    "treating as cold",
+                    manifest_path,
+                )
+            elif state.reason == "marker_present":
+                self.logger.warning(
+                    "AgERA5 marker present at %s (started_at=%s) — "
+                    "prior download interrupted; re-downloading",
+                    marker_path,
+                    state.marker_started_at,
+                )
+            elif state.reason == "file_count_drift":
+                # Gate B LOW 1: include expected + actual in the log
+                self.logger.warning(
+                    "AgERA5 manifest file_count drift at %s — expected=%s "
+                    "(from manifest) actual=%d (disk count) — treating as "
+                    "cold",
+                    manifest_path,
+                    state.expected_file_count,
+                    actual_count,
+                )
+
+            # Cache hit only when BOTH the manifest says OK AND the
+            # completeness check says we have every date we need.
+            if state.cache_hit and file_info["complete"]:
+                if state.reason == "legacy_assume_valid":
+                    warn_legacy_cache_once(data_dir, self.logger)
+
                 self.logger.info(
                     f"Found AgERA5 data for {region.name}: {file_info['total_files']} files"
                 )
@@ -327,7 +407,8 @@ class AgERA5Source(DataSource):
                     warnings=warnings,
                     metadata=metadata,
                 )
-            else:
+
+            if not file_info["complete"]:
                 warnings.append(
                     f"Local data incomplete. Found: {file_info['total_files']} files"
                 )
@@ -345,47 +426,109 @@ class AgERA5Source(DataSource):
                     metadata=metadata,
                 )
 
+            # V2-22a B2: per-source-per-region filelock. Different sources
+            # (TAMSAT vs. AgERA5) on the same region run concurrently —
+            # separate lock files (.tamsat-<region>.lock vs.
+            # .agera5-<region>.lock) keep a single SARRA-Py run from
+            # self-blocking when it sequences TAMSAT then AgERA5.
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = cache_lock_path(self.cache_dir, source=self.NAME, region_name=region.name)
+            lock = FileLock(str(lock_path))
+
             try:
-                self._download_agera5(
-                    bounds=bounds_sarra_py,
-                    start_date=start_date,
-                    end_date=end_date,
-                    output_dir=data_dir.parent,  # Library creates subdir
-                    region_name=region.name,
-                    progress_callback=kwargs.get('progress_callback'),
-                    cancel_check=kwargs.get('cancel_check'),
-                )
+                with lock.acquire(timeout=DOWNLOAD_LOCK_TIMEOUT_SECONDS):
+                    # Marker BEFORE any data write so a SIGKILL during the
+                    # download leaves a "this cache may be partial" signal
+                    # the next reader will respect (AC 1.7.3c).
+                    write_marker(
+                        marker_path,
+                        source=self.NAME,
+                        region_name=region.name,
+                        run_id=run_id,
+                    )
 
-                # Re-validate
-                file_info = self._validate_local_files(
-                    data_dir=data_dir,
-                    start_date=start_date,
-                    end_date=end_date,
-                    variables=variables,
-                )
+                    # AC 1.7.3e (AgERA5 flavor): force_redownload wipes the
+                    # per-region .tif files only — staging dirs at
+                    # Path("../data") are CWD-relative and may be shared
+                    # with concurrently-running AgERA5 calls on a different
+                    # region; touching them is out of B2 scope (Drift 4
+                    # backlog). The opaque SARRA_data_download library may
+                    # have its own skip-if-exists shortcuts — wiping the
+                    # per-region cache contents is the safe path.
+                    if force_redownload and data_dir.exists():
+                        for tif in data_dir.rglob("*.tif"):
+                            try:
+                                tif.unlink()
+                            except OSError:
+                                pass
 
-                agera5_data = AgERA5Data(
-                    region_name=region.name,
-                    bounds=bounds_gis,
-                    bounds_sarra_py=bounds_sarra_py,
-                    start_date=start_date,
-                    end_date=end_date,
-                    resolution=self.config.resolution,
-                    data_dir=data_dir,
-                    variables=file_info["variable_counts"],
-                )
+                    self._download_agera5(
+                        bounds=bounds_sarra_py,
+                        start_date=start_date,
+                        end_date=end_date,
+                        output_dir=data_dir.parent,  # Library creates subdir
+                        region_name=region.name,
+                        progress_callback=kwargs.get('progress_callback'),
+                        cancel_check=kwargs.get('cancel_check'),
+                    )
 
-                metadata["downloaded"] = True
-                metadata["variable_counts"] = file_info["variable_counts"]
+                    # Re-validate
+                    file_info = self._validate_local_files(
+                        data_dir=data_dir,
+                        start_date=start_date,
+                        end_date=end_date,
+                        variables=variables,
+                    )
 
+                    agera5_data = AgERA5Data(
+                        region_name=region.name,
+                        bounds=bounds_gis,
+                        bounds_sarra_py=bounds_sarra_py,
+                        start_date=start_date,
+                        end_date=end_date,
+                        resolution=self.config.resolution,
+                        data_dir=data_dir,
+                        variables=file_info["variable_counts"],
+                    )
+
+                    metadata["downloaded"] = True
+                    metadata["variable_counts"] = file_info["variable_counts"]
+                    if force_redownload:
+                        metadata["force_redownload"] = True
+
+                    # AC 1.7.3d: manifest replace BEFORE marker delete.
+                    # Marker stays on disk if any of these fail so the next
+                    # reader sees the cache as cold.
+                    write_cache_manifest(
+                        manifest_path,
+                        source=self.NAME,
+                        region_name=region.name,
+                        bbox=bbox_dict,
+                        start_date=start_date,
+                        end_date=end_date,
+                        run_id=run_id,
+                        file_count=count_tif_files(data_dir),
+                    )
+                    delete_marker(marker_path)
+
+                    return self.create_result(
+                        success=True,
+                        data=agera5_data,
+                        output_path=data_dir,
+                        warnings=warnings,
+                        metadata=metadata,
+                    )
+
+            except Timeout:
                 return self.create_result(
-                    success=True,
-                    data=agera5_data,
-                    output_path=data_dir,
+                    success=False,
+                    errors=[
+                        "Another run on this region is downloading data "
+                        "(~90 min max). Please wait and retry."
+                    ],
                     warnings=warnings,
                     metadata=metadata,
                 )
-
             except Exception as e:
                 return self.create_result(
                     success=False,
