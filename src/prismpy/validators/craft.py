@@ -139,7 +139,7 @@ class CraftValidator(BaseValidator):
 
         # Validate file types in key directories
         issues.extend(self.validate_file_types(
-            self.output_dir / "weather", ['.csv'], dir_label="weather"
+            self.output_dir / "weather", ['.csv', '.txt'], dir_label="weather"
         ))
         issues.extend(self.validate_file_types(
             self.output_dir / "soil", ['.SOL', '.sol', '.txt'], dir_label="soil"
