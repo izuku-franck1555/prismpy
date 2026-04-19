@@ -42,6 +42,9 @@ class PipelineStage(str, Enum):
     PACKAGE = "package"
 
 
+from prismpy.sources.climate._cancel import PipelineCancelled, raise_if_cancelled
+
+
 def _extract_run_id(callback) -> Optional[str]:
     """Best-effort run-identifier extraction for cache-manifest provenance.
 
@@ -635,6 +638,15 @@ class TranslationPipeline:
                     )
                 }
 
+        except PipelineCancelled:
+            # V2-22b L Gate B round 3 (F-9): whole-stage wrapper was
+            # catching PipelineCancelled and rewriting as
+            # StageResult(success=False). The new `except PipelineCancelled`
+            # handler at tasks.py:646 was dead code on real pipelines.
+            # Re-raise so the boundary catcher at pipeline.execute()
+            # + the prismweb cleanup helper run correctly. Preserves
+            # original ``exc.where`` for operator diagnostics.
+            raise
         except Exception as e:
             errors.append(f"Retrieval failed: {str(e)}")
             self.logger.error(f"Retrieval error: {e}")
@@ -912,6 +924,9 @@ class TranslationPipeline:
                         region=region, start_date=start_date,
                         end_date=end_date, download=True,
                         progress_callback=_tamsat_progress,
+                        # V2-22b L: thread cancel_check so Phase 1 +
+                        # Phase 2 observe user cancel.
+                        cancel_check=getattr(self, '_cancel_check', None),
                         run_id=_extract_run_id(self._progress_callback),
                     )
                     if tamsat_result.success and tamsat_result.data:
@@ -921,6 +936,10 @@ class TranslationPipeline:
                         got_data = True
                     else:
                         self.logger.warning(f"TAMSAT download failed: {tamsat_result.errors}")
+            except PipelineCancelled:
+                # V2-22b L: cancel unwinds past the broad except so the
+                # pipeline.execute boundary can run handler-local cleanup.
+                raise
             except Exception as e:
                 self.logger.warning(f"TAMSAT download error: {e}")
 
@@ -955,7 +974,11 @@ class TranslationPipeline:
                         region=region, start_date=start_date,
                         end_date=end_date, download=True,
                         progress_callback=_agera5_progress,
-                        cancel_check=self._progress_callback._is_cancelled if self._progress_callback else None,
+                        # V2-22b L: use the explicit _cancel_check stored
+                        # on self by execute() — decouples prismpy from
+                        # prismweb's private `callback._is_cancelled`
+                        # method. V2-22c will formalize this.
+                        cancel_check=getattr(self, '_cancel_check', None),
                         run_id=_extract_run_id(self._progress_callback),
                     )
                     if agera5_result.success and agera5_result.data:
@@ -968,6 +991,13 @@ class TranslationPipeline:
                         # Scan cache for partial files — report what IS on disk
                         # so validation can flag incomplete data honestly.
                         self._report_partial_agera5(cache_dir, region.name, climate_data)
+            except PipelineCancelled:
+                # V2-22b L F-4: Gate A's HIGH 1 list cited :924 (TAMSAT
+                # branch) but missed this AgERA5-branch site. Without
+                # the carve-out, user cancel inside AgERA5 gets logged
+                # as a generic "download error" and the pipeline
+                # continues into translate. Propagate.
+                raise
             except Exception as e:
                 self.logger.warning(f"AgERA5 download error: {e}")
                 self._report_partial_agera5(cache_dir, region.name, climate_data)
@@ -2155,6 +2185,12 @@ class TranslationPipeline:
             if translator:
                 # Pass progress callback to translator for substage reporting
                 translator.progress_callback = getattr(self, '_progress_callback', None)
+                # V2-22b L: thread the pipeline-level cancel_check to
+                # the translator so its per-cell NASA POWER loops can
+                # cooperatively cancel. Attribute-assignment mirrors
+                # the progress_callback pattern above and avoids
+                # invalidating BaseTranslator.translate()'s signature.
+                translator.cancel_check = getattr(self, '_cancel_check', None)
 
                 # V2-19: start a dedicated artifact for this platform's translation
                 # output. This gives the FORMAT_CHOICE decision emitted by the
@@ -2187,6 +2223,11 @@ class TranslationPipeline:
                             },
                             artifact_id=output_artifact,
                         )
+                except PipelineCancelled:
+                    # V2-22b L: per-platform translate broad except must
+                    # not rewrite cancel as a translation error result;
+                    # let the pipeline.execute boundary handle it.
+                    raise
                 except Exception as e:
                     self.logger.error(f"Translation error for {platform.value}: {e}")
                     from prismpy.translators.base import TranslationResult
@@ -2708,6 +2749,7 @@ class TranslationPipeline:
         self,
         stages: Optional[List[PipelineStage]] = None,
         progress_callback=None,
+        cancel_check=None,
     ) -> PipelineResult:
         """Execute the translation pipeline.
 
@@ -2717,11 +2759,20 @@ class TranslationPipeline:
                 Must implement on_stage_start(stage, description),
                 on_stage_complete(stage, result), and optionally
                 on_substage_progress(stage, task, current, total, detail).
+            cancel_check: Optional callable returning True when the user
+                has requested cancellation. V2-22b/L: threaded through
+                to every climate download loop + translator per-cell
+                loop. None disables cancellation (CLI / unit-test usage).
+                Passing ``callback._is_cancelled`` keeps backward compat
+                with prismweb's old reach-into-private-method pattern;
+                V2-22c will formalize this as a public ``ProgressCallback``
+                protocol member.
 
         Returns:
             PipelineResult with all stage results and final status
         """
         self._progress_callback = progress_callback
+        self._cancel_check = cancel_check
         start_time = datetime.now()
         stages = stages or list(PipelineStage)
 
@@ -2748,8 +2799,22 @@ class TranslationPipeline:
                     pass
 
         try:
+            # V2-22b L F-6 (AC L.12 / CA-7): inter-stage cancel hook.
+            # Cancel observed between stages — e.g., during HARMONIZE
+            # post-retrieve but before TRANSLATE — must not wait for
+            # the next stage's natural cancel-observation point.
+            # Checked at the top of each stage iteration so cancel
+            # latency between stages is sub-second rather than whole-
+            # stage-duration.
+            def _check_cancel_before_stage(stage_name: str) -> None:
+                raise_if_cancelled(
+                    getattr(self, '_cancel_check', None),
+                    f"executor.stage.{stage_name}",
+                )
+
             # Stage 1: RETRIEVE
             if PipelineStage.RETRIEVE in stages:
+                _check_cancel_before_stage("retrieve")
                 _notify_start("retrieve", "Gathering your data")
                 result = self._execute_retrieve()
                 stage_results["retrieve"] = result
@@ -2761,6 +2826,7 @@ class TranslationPipeline:
 
             # Stage 2: HARMONIZE
             if PipelineStage.HARMONIZE in stages:
+                _check_cancel_before_stage("harmonize")
                 _notify_start("harmonize", "Aligning and checking")
                 retrieved_data = stage_results.get("retrieve", StageResult(
                     stage=PipelineStage.RETRIEVE, success=True, data={}
@@ -2775,6 +2841,7 @@ class TranslationPipeline:
 
             # Stage 3: TRANSLATE
             if PipelineStage.TRANSLATE in stages:
+                _check_cancel_before_stage("translate")
                 _notify_start("translate", "Building platform files")
                 unified_data = stage_results.get("harmonize", StageResult(
                     stage=PipelineStage.HARMONIZE, success=True, data=UnifiedData(region=None)
@@ -2800,6 +2867,7 @@ class TranslationPipeline:
 
             # Stage 4: VALIDATE
             if PipelineStage.VALIDATE in stages and translation_results:
+                _check_cancel_before_stage("validate")
                 _notify_start("validate", "Verifying outputs")
                 # Pass unified_data for scientific validation (Phase 2a)
                 harmonize_data = stage_results.get("harmonize", StageResult(
@@ -2813,6 +2881,7 @@ class TranslationPipeline:
 
             # Stage 5: PACKAGE
             if PipelineStage.PACKAGE in stages:
+                _check_cancel_before_stage("package")
                 _notify_start("package", "Preparing your package")
                 unified_data = stage_results.get("harmonize", StageResult(
                     stage=PipelineStage.HARMONIZE, success=True, data=None
@@ -2826,6 +2895,13 @@ class TranslationPipeline:
                 if result.data:
                     provenance_path = result.data.get("provenance_path")
 
+        except PipelineCancelled:
+            # V2-22b L: pipeline.execute boundary — propagate cancel so
+            # the prismweb caller's _execute_pipeline_cancelled_cleanup
+            # runs. Do NOT convert to an error-state PipelineResult; the
+            # run.status is already set to 'error' by the cancel writer
+            # and the handler-local cleanup coerces project.status.
+            raise
         except Exception as e:
             self.logger.error(f"Pipeline execution failed: {e}")
             return self._build_result(

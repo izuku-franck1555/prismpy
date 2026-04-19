@@ -22,11 +22,13 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
 import requests
+
+from prismpy.sources.climate._cancel import PipelineCancelled, raise_if_cancelled
 
 from prismpy.models.climate import ClimateRecord, ClimateTimeSeries
 from prismpy.models.region import Region
@@ -132,6 +134,7 @@ class NASAPowerSource(DataSource):
         parameters: Optional[List[str]] = None,
         location_id: Optional[int] = None,
         use_cache: bool = True,
+        cancel_check: Optional[Callable[[], bool]] = None,
         **kwargs,
     ) -> RetrievalResult:
         """Retrieve climate data from NASA POWER API.
@@ -156,6 +159,8 @@ class NASAPowerSource(DataSource):
         """
         errors = []
         warnings = []
+        # V2-22b L F-8: cancel_check now an explicit kwarg on the
+        # signature — typo safety.
         metadata = {"source": self.NAME}
 
         # Determine coordinates
@@ -281,6 +286,11 @@ class NASAPowerSource(DataSource):
 
         # Fetch missing years from API
         for year in years_to_fetch:
+            # V2-22b L: year-top cancel — AC L.2. Operator clicks cancel
+            # and the loop exits cleanly via PipelineCancelled rather
+            # than firing a third year's API call.
+            raise_if_cancelled(cancel_check, f"nasa_power.year={year}")
+
             year_start = date(year, 1, 1)
             year_end = date(year, 12, 31)
             # Clamp to actual request bounds for first/last year isn't needed —
@@ -292,6 +302,7 @@ class NASAPowerSource(DataSource):
                     start_date=year_start,
                     end_date=year_end,
                     parameters=params_to_fetch,
+                    cancel_check=cancel_check,
                 )
                 year_ts = self._convert_to_climate_timeseries(
                     nasa_data=nasa_data,
@@ -308,10 +319,21 @@ class NASAPowerSource(DataSource):
                 except Exception as e:
                     warnings.append(f"Failed to cache year {year}: {e}")
 
+                # V2-22b L: cancel check BEFORE the inter-year sleep so
+                # operator cancel is observed on the next iteration
+                # rather than after a full request_delay wait.
+                raise_if_cancelled(
+                    cancel_check, f"nasa_power.before_request_delay={year}",
+                )
                 # Rate limiting between year requests
                 if year != years_to_fetch[-1]:
                     time.sleep(self.config.request_delay)
 
+            except PipelineCancelled:
+                # V2-22b L F-1: carve-out so user cancel unwinds past
+                # this broad except instead of being rewritten as
+                # "API request failed for year {year}".
+                raise
             except Exception as e:
                 return self.create_result(
                     success=False,
@@ -462,6 +484,7 @@ class NASAPowerSource(DataSource):
         start_date: date,
         end_date: date,
         parameters: List[str],
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Dict[str, float]]:
         """Fetch data from NASA POWER API.
 
@@ -500,6 +523,11 @@ class NASAPowerSource(DataSource):
 
         last_error = None
         for attempt in range(self.config.retry_count):
+            # V2-22b L: retry-loop cancel check — AC L.2. Catches cancel
+            # fired during an earlier attempt's 120-s timeout wait.
+            raise_if_cancelled(
+                cancel_check, f"nasa_power.fetch.attempt={attempt}",
+            )
             try:
                 response = requests.get(
                     self.config.base_url,
@@ -526,6 +554,11 @@ class NASAPowerSource(DataSource):
                 self.logger.warning(f"Attempt {attempt + 1} invalid response: {e}")
 
             if attempt < self.config.retry_count - 1:
+                # V2-22b L: pre-retry-delay sleep check — cancel during
+                # the backoff wait is observed on the next iteration.
+                raise_if_cancelled(
+                    cancel_check, f"nasa_power.before_retry_delay={attempt}",
+                )
                 time.sleep(self.config.retry_delay)
 
         raise Exception(f"API request failed after {self.config.retry_count} attempts: {last_error}")

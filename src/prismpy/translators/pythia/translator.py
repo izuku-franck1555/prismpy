@@ -41,6 +41,7 @@ from prismpy.models.region import Region
 from prismpy.models.soil import SoilProfile
 from prismpy.models.spatial import SpatialGrid
 from prismpy.provenance.tracker import DecisionType, ProvenanceTracker
+from prismpy.sources.climate._cancel import PipelineCancelled, raise_if_cancelled
 from prismpy.translators.base import (
     BaseTranslator,
     PythiaTranslatorBase,
@@ -204,6 +205,9 @@ class PythiaTranslator(PythiaTranslatorBase):
             if validation_errors:
                 warnings.extend(validation_errors)
 
+        except PipelineCancelled:
+            # V2-22b L Gate B round 3: translate() outer-try carve-out.
+            raise
         except Exception as e:
             logger.error(f"PYTHIA translation failed: {e}")
             import traceback
@@ -1988,6 +1992,11 @@ class PythiaTranslator(PythiaTranslatorBase):
         logger.info(f"Downloading NASA POWER weather for {total} sites ({start_date} to {end_date})")
 
         for i, cell in enumerate(cells):
+            # V2-22b L (AC L.3): per-cell cancel.
+            raise_if_cancelled(
+                getattr(self, 'cancel_check', None),
+                f"pythia.cell={i + 1}/{total}",
+            )
             site_id = cell.cell_id
 
             if progress_callback:
@@ -2004,6 +2013,7 @@ class PythiaTranslator(PythiaTranslatorBase):
                     end_date=end_date,
                     location_id=site_id,
                     use_cache=True,  # Use caching to speed up repeat runs
+                    cancel_check=getattr(self, 'cancel_check', None),
                 )
 
                 if result.success and result.data:
@@ -2013,9 +2023,17 @@ class PythiaTranslator(PythiaTranslatorBase):
                 else:
                     logger.warning(f"Failed to download weather for site {site_id}: {result.errors}")
 
+            except PipelineCancelled:
+                # V2-22b L: per-cell broad except must not swallow cancel.
+                raise
             except Exception as e:
                 logger.error(f"Exception downloading weather for site {site_id}: {e}")
 
+            # V2-22b L: pre-sleep cancel check.
+            raise_if_cancelled(
+                getattr(self, 'cancel_check', None),
+                f"pythia.before_sleep={i + 1}/{total}",
+            )
             # Rate limiting (already built into NASAPowerSource, but add explicit delay)
             if i < total - 1:
                 time.sleep(delay)

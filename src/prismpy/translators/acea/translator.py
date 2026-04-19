@@ -37,6 +37,7 @@ from prismpy.models.region import Region
 from prismpy.models.soil import SoilProfile
 from prismpy.models.spatial import SpatialGrid, GridCell
 from prismpy.provenance.tracker import DecisionType, ProvenanceTracker
+from prismpy.sources.climate._cancel import PipelineCancelled, raise_if_cancelled
 from prismpy.translators.base import (
     BaseTranslator,
     AceaTranslatorBase,
@@ -592,6 +593,9 @@ class AceaTranslator(AceaTranslatorBase):
             if validation_errors:
                 warnings.extend(validation_errors)
 
+        except PipelineCancelled:
+            # V2-22b L Gate B round 3: translate() outer-try carve-out.
+            raise
         except Exception as e:
             logger.error(f"ACEA translation failed: {e}")
             errors.append(str(e))
@@ -958,6 +962,11 @@ class AceaTranslator(AceaTranslatorBase):
         total_cells = len(grid.cells)
 
         for i, cell in enumerate(grid.cells):
+            # V2-22b L (AC L.3): per-cell cancel for the 5-arcmin loop.
+            raise_if_cancelled(
+                getattr(self, 'cancel_check', None),
+                f"acea.5arcmin.cell={i + 1}/{total_cells}",
+            )
             cell_id = cell.cell_id
             logger.info(f"Downloading climate for cell {i+1}/{total_cells} "
                        f"(lat={cell.lat:.2f}, lon={cell.lon:.2f})")
@@ -968,7 +977,8 @@ class AceaTranslator(AceaTranslatorBase):
                     lat=cell.lat,
                     lon=cell.lon,
                     start_date=start_date,
-                    end_date=end_date
+                    end_date=end_date,
+                    cancel_check=getattr(self, 'cancel_check', None),
                 )
 
                 if result.success and result.data:
@@ -978,6 +988,9 @@ class AceaTranslator(AceaTranslatorBase):
                     logger.warning(f"Failed to download climate for cell {cell_id}: "
                                  f"{result.errors}")
 
+            except PipelineCancelled:
+                # V2-22b L: 5-arcmin per-cell broad except must not swallow cancel.
+                raise
             except Exception as e:
                 logger.error(f"Error downloading climate for cell {cell_id}: {e}")
 
@@ -1041,14 +1054,25 @@ class AceaTranslator(AceaTranslatorBase):
         # Download per unique 30-arcmin cell
         climate_30 = {}
         for i, (cell_id, (lat, lon)) in enumerate(centers_30.items()):
+            # V2-22b L (AC L.3): per-cell cancel for the 30-arcmin loop.
+            raise_if_cancelled(
+                getattr(self, 'cancel_check', None),
+                f"acea.30arcmin.cell={i + 1}/{len(centers_30)}",
+            )
             if progress_callback:
                 progress_callback(i + 1, len(centers_30))
             logger.info(f"Downloading climate for 30arcmin cell {i+1}/{len(centers_30)} "
                        f"(ID={cell_id}, lat={lat:.2f}, lon={lon:.2f})")
             try:
-                result = source.retrieve(lat=lat, lon=lon, start_date=start_date, end_date=end_date)
+                result = source.retrieve(
+                    lat=lat, lon=lon, start_date=start_date, end_date=end_date,
+                    cancel_check=getattr(self, 'cancel_check', None),
+                )
                 if result.success and result.data:
                     climate_30[cell_id] = result.data
+            except PipelineCancelled:
+                # V2-22b L: 30-arcmin per-cell broad except must not swallow cancel.
+                raise
             except Exception as e:
                 logger.error(f"Error downloading climate for 30arcmin cell {cell_id}: {e}")
 

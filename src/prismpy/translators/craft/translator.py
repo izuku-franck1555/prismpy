@@ -31,6 +31,7 @@ from prismpy.models.region import Region
 from prismpy.models.soil import SoilProfile, SoilLayer
 from prismpy.models.spatial import SpatialGrid
 from prismpy.provenance.tracker import DecisionType, ProvenanceTracker
+from prismpy.sources.climate._cancel import PipelineCancelled, raise_if_cancelled
 from prismpy.translators.base import (
     BaseTranslator,
     CraftTranslatorBase,
@@ -271,6 +272,11 @@ class CraftTranslator(CraftTranslatorBase):
             if validation_errors:
                 warnings.extend(validation_errors)
 
+        except PipelineCancelled:
+            # V2-22b L Gate B round 3: translate() outer-try carve-out
+            # — NASA POWER per-cell loop raises PipelineCancelled that
+            # would otherwise be rewritten as "CRAFT translation failed".
+            raise
         except Exception as e:
             logger.error(f"CRAFT translation failed: {e}")
             errors.append(str(e))
@@ -1415,6 +1421,14 @@ class CraftTranslator(CraftTranslatorBase):
         )
 
         for i, cell in enumerate(cells):
+            # V2-22b L (AC L.3): per-cell cancel — granularity is one
+            # NASA POWER call plus the rate-limiting sleep. Cancel
+            # observed here raises before the source.retrieve on the
+            # current iteration.
+            raise_if_cancelled(
+                getattr(self, 'cancel_check', None),
+                f"craft.cell={i + 1}/{total}",
+            )
             cell_id = cell.cell_id
 
             if progress_callback:
@@ -1428,6 +1442,7 @@ class CraftTranslator(CraftTranslatorBase):
                     end_date=end_date,
                     location_id=cell_id,
                     use_cache=True,
+                    cancel_check=getattr(self, 'cancel_check', None),
                 )
 
                 if result.success and result.data:
@@ -1440,12 +1455,23 @@ class CraftTranslator(CraftTranslatorBase):
                         f"{result.errors}"
                     )
 
+            except PipelineCancelled:
+                # V2-22b L: per-cell broad except must not swallow
+                # cancel; propagate so the translate() boundary can
+                # unwind through pipeline.execute.
+                raise
             except Exception as e:
                 failed.append(cell_id)
                 logger.error(
                     f"Exception downloading weather for cell {cell_id}: {e}"
                 )
 
+            # V2-22b L: pre-sleep cancel observed on the next
+            # iteration rather than after a full 2-s wait.
+            raise_if_cancelled(
+                getattr(self, 'cancel_check', None),
+                f"craft.before_sleep={i + 1}/{total}",
+            )
             # Rate limiting between requests
             if i < total - 1:
                 time.sleep(2.0)

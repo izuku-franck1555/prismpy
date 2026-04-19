@@ -19,7 +19,7 @@ import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
 from filelock import FileLock, Timeout
@@ -27,6 +27,7 @@ from filelock import FileLock, Timeout
 from prismpy.models.region import BoundingBox, Region
 from prismpy.provenance.tracker import DecisionType, ProvenanceTracker
 from prismpy.sources.base import DataSource, RetrievalResult
+from prismpy.sources.climate._cancel import PipelineCancelled, raise_if_cancelled
 from prismpy.utils.sanitization import normalize_region_name
 
 
@@ -478,6 +479,7 @@ class TAMSATSource(DataSource):
         end_date: Optional[Union[str, date]] = None,
         data_dir: Optional[Union[str, Path]] = None,
         download: bool = False,
+        cancel_check: Optional[Callable[[], bool]] = None,
         **kwargs,
     ) -> RetrievalResult:
         """Retrieve TAMSAT rainfall data for a region.
@@ -496,6 +498,10 @@ class TAMSATSource(DataSource):
         errors = []
         warnings = []
         run_id = kwargs.get('run_id')
+        # V2-22b L F-8: ``cancel_check`` is now an explicit kwarg (see
+        # method signature). Previously read from ``kwargs.get``; that
+        # meant a caller typo (e.g., ``cancel_chck``) silently disabled
+        # cancellation. Explicit signature makes typos a TypeError.
         metadata = {
             "source": self.NAME,
             "version": self.config.version,
@@ -532,6 +538,11 @@ class TAMSATSource(DataSource):
         manifest_path = data_dir / MANIFEST_FILENAME
         marker_path = data_dir / MARKER_FILENAME
         force_redownload = False
+        # V2-22b L F-5 (Gate A round 1 MEDIUM 1): `state` is only
+        # bound inside the `if data_dir.exists():` branch below, so
+        # the legacy-warning emission downstream must guard with
+        # `state is not None`. Initialize here to avoid NameError.
+        state = None
 
         # V2-22a B2 + Gate B BLOCKER fix: the manifest check must fire
         # INDEPENDENT of file_info.complete. Otherwise a partial cache
@@ -666,8 +677,16 @@ class TAMSATSource(DataSource):
             lock_path = cache_lock_path(self.cache_dir, source=self.NAME, region_name=region.name)
             lock = FileLock(str(lock_path))
 
+            # V2-22b L (AC L.5): pre-lock cancel observation. Lock-wait
+            # itself is not interruptible — if cancel fires DURING the
+            # 7200 s wait, observation is delayed up to that ceiling
+            # (documented operator-tier guidance; architectural fix is
+            # V2-22c work). Pre-lock + post-lock checks catch the most
+            # common cases.
+            raise_if_cancelled(cancel_check, "tamsat.before_lock")
             try:
                 with lock.acquire(timeout=DOWNLOAD_LOCK_TIMEOUT_SECONDS):
+                    raise_if_cancelled(cancel_check, "tamsat.after_lock")
                     # Marker BEFORE any data write so a SIGKILL during the
                     # download leaves a "this cache may be partial" signal
                     # the next reader will respect (AC 1.7.3c).
@@ -677,6 +696,17 @@ class TAMSATSource(DataSource):
                         region_name=region.name,
                         run_id=run_id,
                     )
+
+                    # V2-22b L F-5: emit legacy-cache warning when we
+                    # reach the download branch on a pre-B2 cache —
+                    # UNCONDITIONAL of `force_redownload`. The bug F-5
+                    # closes is the "legacy_assume_valid + incomplete
+                    # (force=False)" path silently re-downloading with
+                    # no operator-visible signal. Module-level dedup
+                    # in warn_legacy_cache_once ensures at-most-once
+                    # per cache path per process.
+                    if state is not None and state.reason == "legacy_assume_valid":
+                        warn_legacy_cache_once(data_dir, self.logger)
 
                     # AC 1.7.3e: force_redownload bypasses TAMSAT's per-file
                     # short-circuits at :514 (.tif partition skip) and :654
@@ -699,6 +729,7 @@ class TAMSATSource(DataSource):
                         output_dir=data_dir,
                         region_name=region.name,
                         progress_callback=kwargs.get('progress_callback'),
+                        cancel_check=cancel_check,
                     )
 
                     # Re-validate after download
@@ -773,6 +804,12 @@ class TAMSATSource(DataSource):
                     warnings=warnings,
                     metadata=metadata,
                 )
+            except PipelineCancelled:
+                # V2-22b L: cooperative cancellation must unwind past
+                # this broad except, not be rewritten as a download
+                # failure (AC L.9). pipeline.execute catches at the
+                # boundary and runs handler-local cleanup.
+                raise
             except Exception as e:
                 return self.create_result(
                     success=False,
@@ -944,6 +981,7 @@ class TAMSATSource(DataSource):
         region_name: str,
         progress_callback=None,
         max_workers: int = 4,
+        cancel_check=None,
     ) -> None:
         """Download TAMSAT daily rainfall and crop to region bounds.
 
@@ -957,6 +995,16 @@ class TAMSATSource(DataSource):
         Phase 2 — Sequential crop + convert (rasterio-safe):
             Single-threaded xarray crop + rioxarray GeoTIFF write.
             No concurrency on PROJ/GDAL, no SIGSEGV.
+
+        V2-22b L (cooperative cancellation, ≤180 s cancel-to-exit
+        worst case): ``cancel_check`` is checked before ``executor.submit``
+        (blocks queued dates from starting), after each ``future.result``
+        in the ``as_completed`` loop, and at the top of every Phase-2
+        iteration before ``rio.to_raster``. On cancel observation, the
+        Phase-1 executor is shut down with ``cancel_futures=True`` so
+        pending dates don't touch JASMIN at all; already-running
+        workers complete at their 90-s HTTP ceiling (2× for 5xx
+        retry → 180 s theoretical max per in-flight worker).
 
         Args:
             bounds: Bounding box in SARRA-Py format [lat_NW, lon_NW, lat_SE, lon_SE]
@@ -1022,6 +1070,12 @@ class TAMSATSource(DataSource):
 
         def _download_nc(target_date):
             """Download a single raw .nc file. Pure HTTP, no rasterio."""
+            # V2-22b L: per-worker cancel check — raises PipelineCancelled
+            # into the future, caught by the `except PipelineCancelled:
+            # raise` carve-out at the as_completed loop (tamsat.py:1106).
+            raise_if_cancelled(
+                cancel_check, f"tamsat._download_nc.{target_date}"
+            )
             nc_name = f"rfe{target_date.year}_{target_date.month:02d}_{target_date.day:02d}.nc"
             nc_path = nc_dir / nc_name
 
@@ -1067,6 +1121,11 @@ class TAMSATSource(DataSource):
             f".nc files ({max_workers} threads)..."
         )
 
+        # V2-22b L: pre-submit check — fires BEFORE any JASMIN call.
+        # Operator clicks cancel before the first future starts and
+        # cancel_to_exit is sub-second.
+        raise_if_cancelled(cancel_check, "tamsat.phase1.before_submit")
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(_download_nc, d): d
@@ -1086,12 +1145,41 @@ class TAMSATSource(DataSource):
                         )
                         errors.append(f"{target_date}: {result}")
                         dl_skipped += 1
+                except PipelineCancelled:
+                    # V2-22b L: a _download_nc worker observed cancel
+                    # and raised PipelineCancelled in its future.
+                    # future.result re-raised it here. Shut down the
+                    # executor with cancel_futures=True so queued-but-
+                    # not-started dates don't touch JASMIN, then
+                    # propagate past the as_completed loop and unwind
+                    # through _download_tamsat.
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise
                 except Exception as e:
                     self.logger.warning(
                         f"TAMSAT {target_date}: {e}"
                     )
                     errors.append(f"{target_date}: {e}")
                     dl_skipped += 1
+
+                # V2-22b L: top-of-iteration check — catches cancel
+                # observed between worker completions, NOT via future
+                # propagation. Finer-grained than waiting for every
+                # future to resolve.
+                #
+                # F-5 fix (Group L Gate B round 2): this poll path
+                # raises DIRECTLY via ``raise_if_cancelled`` without
+                # the worker-future wrapping of the inner try/except.
+                # Without a pre-raise shutdown, the ThreadPoolExecutor
+                # context-manager ``__exit__`` calls
+                # ``shutdown(wait=True)`` and the queued futures run
+                # to completion — AC L.1 / BLOCKER 3 reopens. Force
+                # shutdown with ``cancel_futures=True`` BEFORE raising
+                # so pending dates are cancelled; in-flight workers
+                # still drain at the 180 s HTTP ceiling (expected).
+                if cancel_check is not None and cancel_check():
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise PipelineCancelled("tamsat.phase1.as_completed")
 
                 processed = dl_ok + dl_skipped
                 if progress_callback and processed % 10 == 0:
@@ -1121,6 +1209,13 @@ class TAMSATSource(DataSource):
         )
 
         for nc_path in nc_files:
+            # V2-22b L: per-file cancel check — ~0.5-2 s granularity,
+            # matches AC L.1 target. The raise happens BEFORE both the
+            # xr.open_dataset call (slow on cold PROJ) and the
+            # rio.to_raster write, so cancel observed here means this
+            # file is neither started nor partially written.
+            raise_if_cancelled(cancel_check, "tamsat.phase2.convert")
+
             # Parse date from filename: rfe{Y}_{M}_{D}.nc
             stem = nc_path.stem  # rfe2020_01_15
             parts = stem.replace("rfe", "").split("_")
@@ -1153,8 +1248,22 @@ class TAMSATSource(DataSource):
                         x_dim="lon", y_dim="lat"
                     )
                     rfe = rfe.rio.write_crs("EPSG:4326")
+                    # V2-22b L F-7: second per-file check right before
+                    # the rio.to_raster disk write. Catches cancel fired
+                    # during the xr.open_dataset + crop operations
+                    # (which can take seconds on a cold PROJ cache).
+                    raise_if_cancelled(
+                        cancel_check, f"tamsat.phase2.to_raster={nc_path.name}",
+                    )
                     rfe.rio.to_raster(str(tif_path))
                     converted += 1
+                except PipelineCancelled:
+                    # V2-22b L Gate B round 2: inner-try carve-out so
+                    # the F-7 pre-to_raster cancel doesn't get rewritten
+                    # as "Failed to convert {name}" (which also tries
+                    # to unlink the tif_path — we want the cancel to
+                    # skip both, and the `ds.close()` finally to still run).
+                    raise
                 except Exception as e:
                     self.logger.warning(
                         f"Failed to convert {nc_path.name}: {e}"
@@ -1163,6 +1272,11 @@ class TAMSATSource(DataSource):
                         tif_path.unlink()
                 finally:
                     ds.close()
+            except PipelineCancelled:
+                # V2-22b L Gate B round 2: outer-try carve-out so the
+                # inner-try's re-raised cancel propagates past the outer
+                # except-Exception log line.
+                raise
             except Exception as e:
                 self.logger.warning(
                     f"Failed to open {nc_path.name}: {e}"
