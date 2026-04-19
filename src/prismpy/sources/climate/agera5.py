@@ -27,7 +27,7 @@ import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
 from filelock import FileLock, Timeout
@@ -35,6 +35,7 @@ from filelock import FileLock, Timeout
 from prismpy.models.region import Region
 from prismpy.provenance.tracker import ProvenanceTracker
 from prismpy.sources.base import DataSource, RetrievalResult
+from prismpy.sources.climate._cancel import PipelineCancelled, raise_if_cancelled
 # V2-22a B2: cache-isolation helpers (canonical home is tamsat.py;
 # imported here to keep the manifest + filelock contract identical
 # across both climate sources).
@@ -255,6 +256,7 @@ class AgERA5Source(DataSource):
         data_dir: Optional[Union[str, Path]] = None,
         variables: Optional[List[str]] = None,
         download: bool = False,
+        cancel_check: Optional[Callable[[], bool]] = None,
         **kwargs,
     ) -> RetrievalResult:
         """Retrieve AgERA5 climate data for a region.
@@ -311,6 +313,10 @@ class AgERA5Source(DataSource):
         manifest_path = data_dir / MANIFEST_FILENAME
         marker_path = data_dir / MARKER_FILENAME
         force_redownload = False
+        # V2-22b L F-5: initialize `state` so the download-branch
+        # legacy-warning guard doesn't NameError when data_dir does
+        # not exist (fresh cache).
+        state = None
 
         # V2-22a B2 + Gate B BLOCKER fix: consult the manifest BEFORE the
         # file_info.complete branch. A partial AgERA5 cache (some var
@@ -447,6 +453,13 @@ class AgERA5Source(DataSource):
                         run_id=run_id,
                     )
 
+                    # V2-22b L F-5: emit legacy-cache warning when we
+                    # reach the download branch on a pre-B2 cache —
+                    # unconditional of force_redownload. See tamsat.py
+                    # counterpart for full rationale.
+                    if state is not None and state.reason == "legacy_assume_valid":
+                        warn_legacy_cache_once(data_dir, self.logger)
+
                     # AC 1.7.3e (AgERA5 flavor): force_redownload wipes the
                     # per-region .tif files only — staging dirs at
                     # Path("../data") are CWD-relative and may be shared
@@ -469,7 +482,7 @@ class AgERA5Source(DataSource):
                         output_dir=data_dir.parent,  # Library creates subdir
                         region_name=region.name,
                         progress_callback=kwargs.get('progress_callback'),
-                        cancel_check=kwargs.get('cancel_check'),
+                        cancel_check=cancel_check,
                     )
 
                     # Re-validate
@@ -529,6 +542,11 @@ class AgERA5Source(DataSource):
                     warnings=warnings,
                     metadata=metadata,
                 )
+            except PipelineCancelled:
+                # V2-22b L F-2: carve-out so user cancel unwinds past
+                # this broad except instead of being rewritten as
+                # "Download failed: {e}".
+                raise
             except Exception as e:
                 return self.create_result(
                     success=False,
@@ -717,10 +735,14 @@ class AgERA5Source(DataSource):
 
         years = list(range(start_date.year, end_date.year + 1))
         for i, year in enumerate(years):
-            # Zombie guard: abort if pipeline was cancelled between years
-            if cancel_check and cancel_check():
-                self.logger.info("AgERA5 download aborted — pipeline cancelled")
-                return
+            # V2-22b L (AC L.4, BLOCKER 2): year-top cancel MUST raise,
+            # not return. A bare `return` drops back into retrieve()
+            # which then runs _validate_local_files + write_cache_manifest
+            # + delete_marker + success return — treating the cancelled
+            # download as successful (silent contamination). Raising
+            # unwinds past all of that; the B2 marker stays on disk so
+            # the next reader treats the cache as cold.
+            raise_if_cancelled(cancel_check, f"agera5.year={year}")
 
             # V2-22a 1.5 — W4 (main-thread year-header callback) deleted.
             # _phase_monitor is now the sole writer of substage.detail for
@@ -754,6 +776,22 @@ class AgERA5Source(DataSource):
             cds_handler.setLevel(_logging.INFO)
             for logger_name in ['ecmwf.datastores.legacy_client', 'cdsapi']:
                 _logging.getLogger(logger_name).addHandler(cds_handler)
+
+            # V2-22b L (Gate A round 1 MEDIUM 2): cancel observed after
+            # log-handler attachment but before the monitor thread
+            # starts must clean up the handler in its own hands — the
+            # `finally` block below only runs after download_AgERA5_year
+            # has been called. Without this cleanup, cancel leaks a
+            # handler registration on the CDS logger for the rest of
+            # the process.
+            try:
+                raise_if_cancelled(
+                    cancel_check, f"agera5.before_monitor.year={year}",
+                )
+            except PipelineCancelled:
+                for logger_name in ['ecmwf.datastores.legacy_client', 'cdsapi']:
+                    _logging.getLogger(logger_name).removeHandler(cds_handler)
+                raise
 
             # V2-22a 1.5 — SINGLE WRITER OWNERSHIP
             # _phase_monitor is the sole writer of progress_callback (and
@@ -856,9 +894,34 @@ class AgERA5Source(DataSource):
             monitor = _threading.Thread(target=_phase_monitor, daemon=True)
             monitor.start()
 
+            # V2-22b L (AC L.4): second year-level check — catches
+            # cancel fired between the pre-monitor check and the
+            # opaque `download_AgERA5_year` submit. Library opacity
+            # means 12-30 min per year is intrinsic; this check is
+            # the last observation point before that window opens.
+            # The monitor thread is already running, so a raise here
+            # must also stop it (the outer `finally` at the try below
+            # handles stop_monitor.set() + monitor.join; we need to
+            # fire it manually here before raising).
+            try:
+                raise_if_cancelled(
+                    cancel_check, f"agera5.before_cds.year={year}",
+                )
+            except PipelineCancelled:
+                stop_monitor.set()
+                monitor.join(timeout=2)
+                for logger_name in ['ecmwf.datastores.legacy_client', 'cdsapi']:
+                    _logging.getLogger(logger_name).removeHandler(cds_handler)
+                raise
+
             # Call library directly — no timeout. CDS requests take
             # 2-5 min each × 6 variables = 12-30 min per year.
-            # Heartbeat + watchdog provide the safety net.
+            # Heartbeat + watchdog provide the safety net. Cancel
+            # granularity here is year-boundary — the library call is
+            # opaque (cdsapi internals); 12-30 min per year is inherent
+            # to CDS queue + 6-variable sequential fetch. Do not try to
+            # interrupt — orphan threads consume CDS quota across
+            # cancellations. User-facing expectation documented in AC L.4.
             try:
                 download_AgERA5_year(
                     query_year=year,

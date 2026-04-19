@@ -877,6 +877,137 @@ class TestCountTifFiles:
         assert count_tif_files(tmp_path) == 1
 
 
+# ── AC L.8 F-5: legacy-cache warning on incomplete force-redownload ───
+
+
+class TestF5LegacyWarningOnDownloadBranch:
+    """V2-22b L F-5 (Gate A round 1 MEDIUM 1): the legacy-cache
+    warning must fire when we reach the download branch with a pre-B2
+    cache (no manifest, no marker, data present but incomplete). The
+    original Group-B2 emission in the cache-hit-complete branch missed
+    the `legacy_assume_valid + incomplete → force=False` path — this
+    AC closes that gap."""
+
+    def test_tamsat_legacy_incomplete_emits_warning_once(
+        self,
+        tmp_path: Path,
+        maradi_region: Region,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging as _logging
+
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        data_dir = cache_dir / "tamsat" / "maradi"
+        data_dir.mkdir(parents=True)
+        # Plant 1 legacy .tif for a 4-day request → file_info.complete=False
+        (data_dir / "TAMSAT_v3.1_Maradi_rfe_filled_2020_01_01.tif").write_bytes(b"LEGACY")
+
+        def fake_download_tamsat(
+            self, *, bounds, start_date, end_date,
+            output_dir: Path, region_name,
+            progress_callback=None, cancel_check=None,
+        ):
+            # Repopulate the cache so retrieve() succeeds
+            for d in range(1, 5):
+                (output_dir / f"TAMSAT_v3.1_Maradi_rfe_filled_2020_01_0{d}.tif").write_bytes(b"NEW")
+
+        monkeypatch.setattr(
+            "prismpy.sources.climate.tamsat.TAMSATSource._download_tamsat",
+            fake_download_tamsat,
+        )
+
+        source = TAMSATSource(cache_dir=cache_dir)
+        # Twin retrieve() calls — dedup set must emit the WARNING exactly once
+        with caplog.at_level(_logging.WARNING):
+            # Fresh cache for the second call since the first leaves a manifest
+            result1 = source.retrieve(
+                region=maradi_region,
+                start_date=date(2020, 1, 1),
+                end_date=date(2020, 1, 4),
+                download=True,
+            )
+            assert result1.success
+
+            # Second call: cache now has a manifest (no longer legacy); the
+            # dedup guard still would suppress repeats even if the state were
+            # legacy. This sister assertion documents the dedup is active.
+            result2 = source.retrieve(
+                region=maradi_region,
+                start_date=date(2020, 1, 1),
+                end_date=date(2020, 1, 4),
+                download=True,
+            )
+            assert result2.success
+
+        legacy_warnings = [
+            r for r in caplog.records
+            if "Legacy cache" in r.getMessage()
+        ]
+        assert len(legacy_warnings) == 1, (
+            f"AC L.8: expected exactly one legacy warning across calls; "
+            f"got {len(legacy_warnings)}: {[r.getMessage() for r in legacy_warnings]}"
+        )
+
+    def test_agera5_legacy_incomplete_emits_warning_once(
+        self,
+        tmp_path: Path,
+        maradi_region: Region,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging as _logging
+
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        data_dir = cache_dir / "agera5" / "AgERA5_maradi"
+        data_dir.mkdir(parents=True)
+        focus_var = "Temperature-Air-2m-Mean-24h"
+        # Plant 1 legacy .tif for a 4-day request → incomplete per-var
+        var_dir = data_dir / focus_var
+        var_dir.mkdir()
+        (var_dir / f"{focus_var}_2020_01_01.tif").write_bytes(b"LEGACY")
+
+        def fake_download_agera5(
+            self, *, bounds, start_date, end_date,
+            output_dir: Path, region_name,
+            progress_callback=None, cancel_check=None,
+        ):
+            target_root = output_dir / f"AgERA5_{region_name}"
+            focus_dir = target_root / focus_var
+            focus_dir.mkdir(parents=True, exist_ok=True)
+            for d in range(1, 5):
+                (focus_dir / f"{focus_var}_2020_01_0{d}.tif").write_bytes(b"NEW")
+
+        monkeypatch.setattr(
+            "prismpy.sources.climate.agera5.AgERA5Source._download_agera5",
+            fake_download_agera5,
+        )
+        monkeypatch.setattr(
+            AgERA5Source,
+            "sarra_download_available",
+            property(lambda self: True),
+        )
+
+        source = AgERA5Source(cache_dir=cache_dir)
+        with caplog.at_level(_logging.WARNING):
+            result = source.retrieve(
+                region=maradi_region,
+                start_date=date(2020, 1, 1),
+                end_date=date(2020, 1, 4),
+                variables=[focus_var],
+                download=True,
+            )
+            assert result.success
+
+        legacy_warnings = [
+            r for r in caplog.records
+            if "Legacy cache" in r.getMessage()
+        ]
+        assert len(legacy_warnings) == 1
+
+
 # ── AC 1.7.3e: TAMSAT bbox-mismatch wipes .tif but preserves raw .nc ──
 
 
@@ -949,6 +1080,7 @@ class TestTAMSATForceRedownloadWipe:
             output_dir: Path,
             region_name,
             progress_callback=None,
+            cancel_check=None,
         ):
             # Snapshot disk state at the moment _download_tamsat is called
             captured["called"] = True
@@ -1070,6 +1202,7 @@ class TestPartialCacheStaleManifestBlocker:
         def fake_download_tamsat(
             self, *, bounds, start_date, end_date,
             output_dir: Path, region_name, progress_callback=None,
+            cancel_check=None,
         ):
             # Snapshot the disk state AT the moment _download_tamsat runs.
             # If the BLOCKER fix is correct, the 2 stale .tif files have
@@ -1139,6 +1272,7 @@ class TestPartialCacheStaleManifestBlocker:
         def fake_download_tamsat(
             self, *, bounds, start_date, end_date,
             output_dir: Path, region_name, progress_callback=None,
+            cancel_check=None,
         ):
             captured["tif_present_at_call"] = list(output_dir.glob("*.tif"))
             (output_dir / "TAMSAT_v3.1_Maradi_rfe_filled_2020_01_01.tif").write_bytes(b"NEW")
@@ -1189,6 +1323,7 @@ class TestTAMSATWriterLifecycle:
         def fake_download_tamsat(
             self, *, bounds, start_date, end_date,
             output_dir: Path, region_name, progress_callback=None,
+            cancel_check=None,
         ):
             output_dir.mkdir(parents=True, exist_ok=True)
             # Snapshot disk state mid-download — marker should exist
@@ -1234,7 +1369,8 @@ class TestTAMSATWriterLifecycle:
         data_dir = cache_dir / "tamsat" / "maradi"
 
         def boom(self, *, bounds, start_date, end_date,
-                 output_dir: Path, region_name, progress_callback=None):
+                 output_dir: Path, region_name, progress_callback=None,
+                 cancel_check=None):
             output_dir.mkdir(parents=True, exist_ok=True)
             raise RuntimeError("simulated download crash")
 
@@ -1301,6 +1437,7 @@ class TestTAMSATWriterLifecycle:
         def fake_download_tamsat(
             self, *, bounds, start_date, end_date,
             output_dir: Path, region_name, progress_callback=None,
+            cancel_check=None,
         ):
             output_dir.mkdir(parents=True, exist_ok=True)
             (output_dir / "TAMSAT_v3.1_Maradi_rfe_filled_2020_01_01.tif").write_bytes(b"NEW")
@@ -1466,6 +1603,7 @@ class TestFileCountDriftLogIncludesCounts:
         def fake_download_tamsat(
             self, *, bounds, start_date, end_date,
             output_dir: Path, region_name, progress_callback=None,
+            cancel_check=None,
         ):
             (output_dir / "TAMSAT_v3.1_Maradi_rfe_filled_2020_01_01.tif").write_bytes(b"NEW")
 
