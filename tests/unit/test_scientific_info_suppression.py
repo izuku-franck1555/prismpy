@@ -11,13 +11,19 @@ The third fix introduced a "delegated to the per-platform
 post-translate validator" copy which was honest but read as
 technical to non-developer personas — user flagged it.
 
-The current contract (P.1 persona copy): file-based climate →
-one info record whose summary explains the sampling in plain
-language ("random sample of 10 output files per variable"),
-points the reader at the per-variable records that follow, and
-tells them where to look if those records are missing ("pipeline
-steps above" — unambiguously the Retrieve/Harmonize/Translate/
-Package cards, not some other part of the validation list).
+The current contract (P.1 persona copy, post codex round 2): file-
+based climate → one info record whose summary explains the
+sampling in plain language ("random sample of 10 output files per
+variable"), points the reader at the per-variable records that
+follow, and tells them where to look if those records are missing
+("pipeline steps above" — unambiguously the Retrieve/Harmonize/
+Translate/Package cards, not some other part of the validation
+list). Crucially the fallback guidance does NOT attribute absent
+records to any single failure mode — `_validate_sarra_py_geotiffs`
+can emit zero range records on multiple paths (empty output dir,
+rasterio unavailable, uncaught translator exception), and the
+prior "translation didn't complete" phrasing would misdirect
+operators to the wrong stage.
 """
 
 import types
@@ -59,8 +65,9 @@ class TestClimateInfoLineDelegatesToPostTranslate(unittest.TestCase):
         self.assertEqual(records[0]['result'], 'info')
 
     def test_summary_uses_plain_language_with_honest_caveats(self):
-        """V2-22b/P.1 persona copy — the summary must read in plain
-        language and carry four load-bearing properties:
+        """V2-22b/P.1 persona copy (post codex HIGH round 2) — the
+        summary must read in plain language and carry five
+        load-bearing properties:
 
         1. Name the sampling policy honestly ('random sample of 10'
            — the scientific-honesty signal the user still needs).
@@ -72,7 +79,12 @@ class TestClimateInfoLineDelegatesToPostTranslate(unittest.TestCase):
            misread 'earlier steps' as 'earlier in this report'.
         4. NOT resurrect any of the prior misleading phrasings
            ('not checked' underclaim, 'spot-checked' overclaim,
-           'delegated' developer-copy)."""
+           'delegated' developer-copy).
+        5. NOT attribute absent records to a SPECIFIC failure mode
+           (e.g., 'translation didn't complete') — the post-translate
+           validator also emits zero range records on empty-output
+           paths and missing-rasterio paths, and the prior wording
+           would misdirect operators to the wrong pipeline stage."""
         climate = {'rainfall_dir': '/tmp/x', 'agera5_dir': '/tmp/y'}
         checks = _check_value_ranges(_make_unified_data(climate=climate))
         summary = next(
@@ -90,6 +102,68 @@ class TestClimateInfoLineDelegatesToPostTranslate(unittest.TestCase):
         self.assertNotIn('not checked', summary.lower())
         self.assertNotIn('spot-checked', summary.lower())
         self.assertNotIn('delegated', summary.lower())
+        # (5) must not attribute absence to a specific step. "one of
+        # the pipeline steps" is the accurate, plural framing.
+        self.assertNotIn("translation didn't complete", summary)
+        self.assertNotIn("translation did not complete", summary)
+        self.assertIn('one of the pipeline steps', summary)
+
+    def test_absent_range_records_can_come_from_post_translate_failure_paths(self):
+        """Codex self-check HIGH regression — proves that absent
+        `post_translate_range_sarra_py_*` records DO NOT imply a
+        failed translation. `_validate_sarra_py_geotiffs` emits a
+        warning record with NO range records when the climate
+        directory structure is missing files (empty-output path) —
+        the translation step may have completed and still produced
+        no files. If the info copy said "translation didn't
+        complete", it would misdirect operators to the wrong stage
+        for this case. The current "one of the pipeline steps
+        above" phrasing covers both the missing-files path AND
+        the translation-failed path without over-committing to
+        either diagnosis."""
+        import shutil
+        import tempfile
+        from pathlib import Path as _P
+        from prismpy.validators.post_translate import (
+            _validate_sarra_py_geotiffs,
+        )
+
+        tmpdir = _P(tempfile.mkdtemp(prefix='p1-regression-'))
+        try:
+            # Present the climate directory but no per-variable
+            # subdirs — mimics the post-translate-only failure mode
+            # where translation finished with empty output.
+            (tmpdir / 'data' / 'climate').mkdir(parents=True)
+
+            checks = _validate_sarra_py_geotiffs(tmpdir)
+
+            # A warning record IS emitted (the post-translate
+            # validator ran and found nothing) — but NO
+            # `post_translate_range_sarra_py_*` records. So the
+            # Results page user would see this warning but no
+            # per-variable ranges, and the scientific info copy's
+            # "one of the pipeline steps" guidance correctly points
+            # them at the report's pipeline cards to find which
+            # step produced the empty output.
+            range_records = [
+                c for c in checks
+                if c.get('check', '').startswith('post_translate_range_sarra_py_')
+            ]
+            self.assertEqual(
+                range_records, [],
+                f'expected no range records on empty-output path, got: {range_records}',
+            )
+            # Positive control — the warning DID fire (so the user
+            # gets a signal, it just isn't a range record).
+            warnings = [
+                c for c in checks if c.get('result') == 'warning'
+            ]
+            self.assertGreater(
+                len(warnings), 0,
+                'expected a warning record on empty-output path',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_details_tag_coverage_kind_as_delegated(self):
         """Downstream surfaces need a machine-readable flag that
