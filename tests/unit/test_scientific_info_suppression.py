@@ -1,14 +1,17 @@
-"""Issue 5 (warning-auditor HIGH) — the scientific validator's
-per-cell value-range check used to emit a stale
-'Climate value range not checked' info record for file-based
-(GeoTIFF) climate. The post-translate sampled validator
-(`_validate_sarra_py_geotiffs`) provides authoritative per-variable
-coverage by opening ~10 random rasters per variable, so the info
-line contradicted the real coverage users see in the ranges card.
+"""Issue 5 (warning-auditor HIGH + codex self-check MEDIUM) — the
+scientific validator's per-cell value-range check used to emit a
+'Climate value range not checked' info record on file-based
+(GeoTIFF) climate. That was wrong: the post-translate sampled
+validator (`_validate_sarra_py_geotiffs`) DOES check the ranges
+by opening 10 random rasters per variable. The first fix
+suppressed the record entirely, but codex caught that this
+removed the only user-visible caveat that the check is sampled,
+not exhaustive — a bad GeoTIFF outside the sample would pass
+silently.
 
-This file guards the suppression: file-based climate → no info
-record. Non-file-based (per-cell) climate → normal value-range
-records emitted as before.
+The current contract: file-based climate → one info record with
+the sampling policy disclosed; per-cell climate → normal
+`value_range_<var>` records as before.
 """
 
 import types
@@ -25,36 +28,62 @@ def _make_unified_data(*, climate, soil=None):
     return ud
 
 
-class TestClimateInfoLineSuppressedForPlatformsWithSampledCheck(unittest.TestCase):
-    """The info line was the only `value_range_climate` record
-    `_check_value_ranges` emitted on file-based climate. With the
-    suppression in place, no such record appears at all — the
-    post-translate sampled check owns that coverage."""
+class TestClimateInfoLineDisclosesSampledCoverage(unittest.TestCase):
+    """The info record must stay visible (one per file-based climate
+    call) and its summary must describe the sampled-coverage policy
+    — not the misleading 'not checked' phrasing the first Issue 5
+    fix replaced. The details block must also tag the coverage as
+    'sampled' so downstream surfaces can distinguish exhaustive from
+    sampled checks."""
 
-    def test_file_based_climate_emits_no_value_range_climate_info(self):
-        """SARRA-Py-shape climate dict (keyed by rainfall_dir /
-        agera5_dir) must NOT produce a `value_range_climate` info
-        record. Mutation-proof: restoring the append call would
-        re-introduce one record with result='info' and a summary
-        starting with 'Climate value range not checked'."""
+    def test_file_based_climate_emits_one_value_range_climate_record(self):
+        """Exactly one `value_range_climate` info record for
+        file-based climate. More than one would double-disclose;
+        zero would re-introduce the codex regression where users
+        lose the sampled-vs-exhaustive caveat."""
         climate = {
             'rainfall_dir': '/tmp/fake-rainfall',
             'agera5_dir': '/tmp/fake-agera5',
         }
         checks = _check_value_ranges(_make_unified_data(climate=climate))
-        summaries = [c.get('summary', '') for c in checks]
-        checks_with_name = [c for c in checks if c.get('check') == 'value_range_climate']
+        records = [c for c in checks if c.get('check') == 'value_range_climate']
         self.assertEqual(
-            checks_with_name, [],
-            f'expected no value_range_climate info on file-based climate, '
-            f'got: {checks_with_name}',
+            len(records), 1,
+            f'expected exactly one value_range_climate record, got: {records}',
         )
-        # Belt-and-braces: the specific suppressed phrase must not
-        # appear in any emitted summary.
-        self.assertFalse(
-            any('Climate value range not checked' in s for s in summaries),
-            f'stale info phrase leaked into summaries: {summaries}',
+        self.assertEqual(records[0]['result'], 'info')
+
+    def test_summary_describes_sampled_coverage_not_skip(self):
+        """The summary must advertise that the check IS running on
+        a sample, not that it was skipped. Mutation-proof against a
+        revert to the original 'not checked' phrasing."""
+        climate = {'rainfall_dir': '/tmp/x', 'agera5_dir': '/tmp/y'}
+        checks = _check_value_ranges(_make_unified_data(climate=climate))
+        summary = next(
+            c['summary'] for c in checks
+            if c.get('check') == 'value_range_climate'
         )
+        # The summary must name the sampled policy.
+        self.assertIn('sample', summary.lower())
+        # And must NOT resurrect the prior misleading phrasing.
+        self.assertNotIn('not checked', summary.lower())
+        # And must steer the reader to the authoritative per-variable
+        # records emitted by the post-translate validator.
+        self.assertIn('post_translate_range_sarra_py', summary)
+
+    def test_details_tag_coverage_kind_as_sampled(self):
+        """Downstream surfaces (report generation, UI) need a
+        machine-readable flag to differentiate sampled from
+        exhaustive climate checks. `coverage_kind='sampled'` on
+        the details dict is that flag."""
+        climate = {'rainfall_dir': '/tmp/x', 'agera5_dir': '/tmp/y'}
+        checks = _check_value_ranges(_make_unified_data(climate=climate))
+        details = next(
+            c['details'] for c in checks
+            if c.get('check') == 'value_range_climate'
+        )
+        self.assertEqual(details.get('coverage_kind'), 'sampled')
+        self.assertIn('sample_policy', details)
 
     def test_per_cell_climate_still_emits_value_range_records(self):
         """Two-way binding — suppression only fires on file-based

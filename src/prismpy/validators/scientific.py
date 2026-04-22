@@ -678,14 +678,35 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
     # GeoTIFF-based climate (SARRA-Py today; ACEA once it activates
     # srad): value-range coverage is provided by the post-translate
     # sampled validator (`post_translate._validate_sarra_py_geotiffs`)
-    # which opens a random ~10-file subset per variable and emits
-    # proper `post_translate_range_sarra_py_<var>` checks. Emitting
-    # a "Climate value range not checked" info line alongside those
-    # authoritative checks misled users into thinking the ranges had
-    # been skipped — Issue 5 (warning-auditor). Fall through to the
-    # soil value ranges (still checked below) without injecting a
-    # contradictory info record.
+    # which opens a random 10-file subset per variable and emits the
+    # authoritative `post_translate_range_sarra_py_<var>` records.
+    #
+    # The info record below tells the reader two things that the
+    # per-variable records don't say on their own: (1) the check is
+    # sampled, not exhaustive — a bad GeoTIFF outside the sample
+    # remains undetected, and (2) where to find the observed ranges.
+    # Issue 5 (warning-auditor + codex self-check MEDIUM): the prior
+    # "Climate value range not checked" phrasing was wrong — the
+    # checks ARE running, just on a sample. The new phrasing keeps
+    # the caveat visible without overclaiming or underclaiming.
     if _is_file_based_climate(climate):
+        checks.append({
+            "check": "value_range_climate",
+            "scope": "per_record",
+            "result": "info",
+            "summary": (
+                "Climate value ranges are spot-checked on a random "
+                "sample of output GeoTIFFs (10 files per variable). "
+                "See the `post_translate_range_sarra_py_*` records "
+                "below for the observed per-variable ranges."
+            ),
+            "manuscript_claim": "Section 2.5: value range verification (sampled)",
+            "details": {
+                "data_format": "geotiff_per_day",
+                "sample_policy": "random subset, 10 files per variable",
+                "coverage_kind": "sampled",
+            },
+        })
         climate_stats = {}  # empty → no per-variable climate checks emitted
     else:
         for cell_id, ts in climate.items():
