@@ -675,26 +675,17 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
     climate = unified_data.climate if unified_data and hasattr(unified_data, 'climate') else {}
     climate_stats = {}
 
-    # GeoTIFF-based climate: report limitation instead of silent skip
+    # GeoTIFF-based climate (SARRA-Py today; ACEA once it activates
+    # srad): value-range coverage is provided by the post-translate
+    # sampled validator (`post_translate._validate_sarra_py_geotiffs`)
+    # which opens a random ~10-file subset per variable and emits
+    # proper `post_translate_range_sarra_py_<var>` checks. Emitting
+    # a "Climate value range not checked" info line alongside those
+    # authoritative checks misled users into thinking the ranges had
+    # been skipped — Issue 5 (warning-auditor). Fall through to the
+    # soil value ranges (still checked below) without injecting a
+    # contradictory info record.
     if _is_file_based_climate(climate):
-        checks.append({
-            "check": "value_range_climate",
-            "scope": "per_record",
-            "result": "info",
-            "summary": (
-                "Climate value range not checked: data stored as "
-                "GeoTIFF rasters (would require reading all files)"
-            ),
-            "manuscript_claim": "Section 2.5: value range verification",
-            "details": {
-                "data_format": "geotiff_per_day",
-                "limitation": (
-                    "Per-value range checks require opening each GeoTIFF. "
-                    "Soil value ranges are still checked below."
-                ),
-            },
-        })
-        # Skip to soil value ranges (still check those)
         climate_stats = {}  # empty → no per-variable climate checks emitted
     else:
         for cell_id, ts in climate.items():
