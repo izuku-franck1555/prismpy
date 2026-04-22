@@ -515,11 +515,22 @@ def _build_climate_checks(
 # Explicit variable mapping for SARRA-Py GeoTIFF subdirectories.
 # Each entry: subdir_name → (internal_var, operation, operand)
 # Operations: "noop" = no conversion, "add" = additive, "mul" = multiplicative.
+#
+# Issue 5 (warning-auditor HIGH) fix — the SARRA_data_download library
+# already converts AgERA5 to researcher-friendly units before writing
+# its .tif files (tmax / tmin in °C, srad in kJ/m²/day, rain in mm/day).
+# The prior mapping assumed raw AgERA5 units and applied a redundant
+# second conversion, so the validator reported tmax around -251 °C and
+# srad around 0.02 MJ/m²/d. Actual file-unit verification on run
+# 121e66b5-... (Maradi 2020-01-01) confirmed:
+#   tmax: 18.6 .. 26.4 (already °C)  → noop
+#   tmin:  9.4 .. 14.3 (already °C)  → noop
+#   srad: 20388 .. 21168 (kJ/m²/d)   → mul 1e-3 to get 20.4 .. 21.2 MJ/m²/d
 SARRA_PY_VAR_MAPPING = {
     "rainfall": ("rain", "noop", 0.0),
-    "2m_temperature_24_hour_maximum": ("tmax", "add", -273.15),  # K→°C
-    "2m_temperature_24_hour_minimum": ("tmin", "add", -273.15),
-    "solar_radiation_flux_daily": ("srad", "mul", 1e-6),  # J/m²→MJ/m²
+    "2m_temperature_24_hour_maximum": ("tmax", "noop", 0.0),  # already °C
+    "2m_temperature_24_hour_minimum": ("tmin", "noop", 0.0),  # already °C
+    "solar_radiation_flux_daily": ("srad", "mul", 1e-3),  # kJ/m²/d → MJ/m²/d
 }
 
 

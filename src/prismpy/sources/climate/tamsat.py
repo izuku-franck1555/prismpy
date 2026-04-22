@@ -1033,9 +1033,25 @@ class TAMSATSource(DataSource):
         lon_min = min(lon_nw, lon_se)
         lon_max = max(lon_nw, lon_se)
 
-        # Partition dates into cached vs. to-download
+        # Partition dates across three disk states so the plan log
+        # reflects actual HTTP work instead of tif-partition state:
+        #   - final_tif_cached: the .tif already exists, no work to do
+        #   - nc_cached: the .tif is missing but the raw .nc is
+        #     already in `_raw_nc/`, so Phase 1 skips HTTP and only
+        #     Phase 2 runs
+        #   - http_needed: neither the .tif nor the .nc exists, so
+        #     Phase 1 will issue an HTTP request
+        #
+        # Issue 4 (warning-auditor MEDIUM) fix — the previous log said
+        # "{dates_to_download} to fetch, {cached} cached, total=..."
+        # which conflated the two cache tiers. A run that wiped the
+        # marker file but kept the .nc cache reported "1096 to fetch,
+        # 0 cached" even though only ~366 HTTP requests actually
+        # fired. The new log reports HTTP count honestly.
+        nc_dir = output_dir / "_raw_nc"
         dates_to_download = []
-        already_have = 0
+        final_tif_cached = 0
+        nc_cached = 0
         current_date = start_date
         while current_date <= end_date:
             tif_name = self.FILE_PATTERN.format(
@@ -1044,17 +1060,29 @@ class TAMSATSource(DataSource):
                 day=current_date.day,
             )
             if (output_dir / tif_name).exists():
-                already_have += 1
+                final_tif_cached += 1
             else:
                 dates_to_download.append(current_date)
+                nc_name = (
+                    f"rfe{current_date.year}_{current_date.month:02d}"
+                    f"_{current_date.day:02d}.nc"
+                )
+                if (nc_dir / nc_name).exists():
+                    nc_cached += 1
             current_date += timedelta(days=1)
 
         total_days = (end_date - start_date).days + 1
+        http_needed = len(dates_to_download) - nc_cached
+        # Retained for downstream callers that referenced the old
+        # local name; the log no longer uses it.
+        already_have = final_tif_cached
 
         self.logger.info(
-            f"TAMSAT download: {len(dates_to_download)} to fetch, "
-            f"{already_have} cached, total={total_days}, "
-            f"workers={max_workers}, region={region_name}"
+            f"TAMSAT plan: {total_days} total files for {region_name}, "
+            f"{http_needed} need HTTP download, "
+            f"{nc_cached} already in .nc cache, "
+            f"{final_tif_cached} already have final .tif "
+            f"(workers={max_workers})"
         )
 
         if not dates_to_download:
@@ -1062,8 +1090,9 @@ class TAMSATSource(DataSource):
                 progress_callback(total_days, total_days, '')
             return
 
-        # Temp dir for raw .nc files (Phase 1 output → Phase 2 input)
-        nc_dir = output_dir / "_raw_nc"
+        # Ensure the raw-nc dir exists before Phase 1 writes into it.
+        # Partition loop above only read it for existence checks —
+        # safe to delay mkdir until we know we actually have work.
         nc_dir.mkdir(exist_ok=True)
 
         # ── Phase 1: Parallel HTTP download (thread-safe, no GDAL) ──
@@ -1112,7 +1141,15 @@ class TAMSATSource(DataSource):
             except requests.exceptions.RequestException as e:
                 return f"download error: {e}"
 
-        dl_ok = 0
+        # Codex self-check MEDIUM — track HTTP fetches and .nc-cache
+        # hits SEPARATELY so Phase 1 progress + completion messages
+        # report actual network work, not the conflated "ok or cached"
+        # count. Extends the plan-log honesty (32a9ada) to the runtime
+        # path: a run whose .nc cache survived a marker wipe must not
+        # look like it downloaded N files when it actually served
+        # them from cache.
+        dl_http_fetched = 0
+        dl_nc_cache_served = 0
         dl_skipped = 0
         errors = []
 
@@ -1135,8 +1172,10 @@ class TAMSATSource(DataSource):
                 target_date = futures[future]
                 try:
                     result = future.result(timeout=90)
-                    if result in ("ok", "cached"):
-                        dl_ok += 1
+                    if result == "ok":
+                        dl_http_fetched += 1
+                    elif result == "cached":
+                        dl_nc_cache_served += 1
                     elif result == "skipped":
                         dl_skipped += 1
                     else:
@@ -1181,17 +1220,22 @@ class TAMSATSource(DataSource):
                     executor.shutdown(wait=False, cancel_futures=True)
                     raise PipelineCancelled("tamsat.phase1.as_completed")
 
-                processed = dl_ok + dl_skipped
+                processed = dl_http_fetched + dl_nc_cache_served + dl_skipped
                 if progress_callback and processed % 10 == 0:
                     progress_callback(
                         already_have + processed // 2,
                         total_days,
-                        f'TAMSAT rainfall: downloading {processed}/'
-                        f'{len(dates_to_download)} files',
+                        # Honest two-signal message: HTTP fetches are
+                        # the slow path; .nc cache hits are fast and
+                        # shouldn't be labelled "downloading".
+                        f'TAMSAT rainfall: {dl_http_fetched} HTTP fetched + '
+                        f'{dl_nc_cache_served} from cache ({processed}/'
+                        f'{len(dates_to_download)} processed)',
                     )
 
         self.logger.info(
-            f"TAMSAT Phase 1 complete: {dl_ok} downloaded, "
+            f"TAMSAT Phase 1 complete: {dl_http_fetched} HTTP fetched, "
+            f"{dl_nc_cache_served} nc-cache served, "
             f"{dl_skipped} skipped"
         )
 
@@ -1307,8 +1351,14 @@ class TAMSATSource(DataSource):
             progress_callback(total_days, total_days, '')
 
         total_done = already_have + converted
+        # Completion-level honesty (Codex self-check MEDIUM): mirror
+        # the plan log's three-tier partition so operators can
+        # reconstruct where the wall-time went.
         self.logger.info(
-            f"TAMSAT download complete: {total_done}/{total_days} files, "
+            f"TAMSAT download complete: {total_done}/{total_days} files "
+            f"({dl_http_fetched} HTTP fetched, "
+            f"{dl_nc_cache_served} nc-cache served, "
+            f"{already_have} .tif already cached), "
             f"{dl_skipped} skipped, {len(errors)} errors"
         )
         if errors:
