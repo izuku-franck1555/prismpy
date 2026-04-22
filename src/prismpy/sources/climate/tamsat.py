@@ -1141,7 +1141,15 @@ class TAMSATSource(DataSource):
             except requests.exceptions.RequestException as e:
                 return f"download error: {e}"
 
-        dl_ok = 0
+        # Codex self-check MEDIUM — track HTTP fetches and .nc-cache
+        # hits SEPARATELY so Phase 1 progress + completion messages
+        # report actual network work, not the conflated "ok or cached"
+        # count. Extends the plan-log honesty (32a9ada) to the runtime
+        # path: a run whose .nc cache survived a marker wipe must not
+        # look like it downloaded N files when it actually served
+        # them from cache.
+        dl_http_fetched = 0
+        dl_nc_cache_served = 0
         dl_skipped = 0
         errors = []
 
@@ -1164,8 +1172,10 @@ class TAMSATSource(DataSource):
                 target_date = futures[future]
                 try:
                     result = future.result(timeout=90)
-                    if result in ("ok", "cached"):
-                        dl_ok += 1
+                    if result == "ok":
+                        dl_http_fetched += 1
+                    elif result == "cached":
+                        dl_nc_cache_served += 1
                     elif result == "skipped":
                         dl_skipped += 1
                     else:
@@ -1210,17 +1220,22 @@ class TAMSATSource(DataSource):
                     executor.shutdown(wait=False, cancel_futures=True)
                     raise PipelineCancelled("tamsat.phase1.as_completed")
 
-                processed = dl_ok + dl_skipped
+                processed = dl_http_fetched + dl_nc_cache_served + dl_skipped
                 if progress_callback and processed % 10 == 0:
                     progress_callback(
                         already_have + processed // 2,
                         total_days,
-                        f'TAMSAT rainfall: downloading {processed}/'
-                        f'{len(dates_to_download)} files',
+                        # Honest two-signal message: HTTP fetches are
+                        # the slow path; .nc cache hits are fast and
+                        # shouldn't be labelled "downloading".
+                        f'TAMSAT rainfall: {dl_http_fetched} HTTP fetched + '
+                        f'{dl_nc_cache_served} from cache ({processed}/'
+                        f'{len(dates_to_download)} processed)',
                     )
 
         self.logger.info(
-            f"TAMSAT Phase 1 complete: {dl_ok} downloaded, "
+            f"TAMSAT Phase 1 complete: {dl_http_fetched} HTTP fetched, "
+            f"{dl_nc_cache_served} nc-cache served, "
             f"{dl_skipped} skipped"
         )
 
@@ -1336,8 +1351,14 @@ class TAMSATSource(DataSource):
             progress_callback(total_days, total_days, '')
 
         total_done = already_have + converted
+        # Completion-level honesty (Codex self-check MEDIUM): mirror
+        # the plan log's three-tier partition so operators can
+        # reconstruct where the wall-time went.
         self.logger.info(
-            f"TAMSAT download complete: {total_done}/{total_days} files, "
+            f"TAMSAT download complete: {total_done}/{total_days} files "
+            f"({dl_http_fetched} HTTP fetched, "
+            f"{dl_nc_cache_served} nc-cache served, "
+            f"{already_have} .tif already cached), "
             f"{dl_skipped} skipped, {len(errors)} errors"
         )
         if errors:
