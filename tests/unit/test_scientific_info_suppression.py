@@ -11,25 +11,27 @@ The third fix introduced a "delegated to the per-platform
 post-translate validator" copy which was honest but read as
 technical to non-developer personas — user flagged it.
 
-The current contract (P.1 persona copy, post codex rounds 2+3):
+The current contract (P.1 persona copy, post codex rounds 2+3+R3):
 file-based climate → one info record whose summary explains the
 sampling in plain language ("random sample of 10 output files per
-variable"), points the reader at the per-variable records that
-follow, and names BOTH domains where the failure might live:
+variable") and tells the reader to look for "another SARRA-Py
+post-translate message in this report" if a variable is missing.
 
-  1. The other post-translate messages IN THIS REPORT — for
-     validator-local failures (missing rasterio, unreadable
-     tiffs, empty climate output directory). These produce their
-     own info/warning records alongside `value_range_climate`.
-  2. The pipeline steps ABOVE (the processing page's
-     Retrieve/Harmonize/Translate/Package cards) — for upstream
-     failures where the pipeline never produced files for the
-     validator to sample.
+Copy is self-contained — it refers only to artifacts present IN
+THIS REPORT (the validation record list), not to "pipeline steps
+above" (which is a web-UI-only concept, missing from the packaged
+`validation_report.json` that researchers audit offline). Codex
+R3 HIGH caught that phrasing pointed users at dead-end context
+in the JSON artifact.
 
-Codex R2 HIGH caught that attributing absence to "one of the
-pipeline steps above didn't finish" alone misdirected operators
-when the real failure was validator-local, so the copy now
-advertises both search surfaces.
+To uphold the "look for another SARRA-Py message" promise, the
+post-translate validator (`_validate_sarra_py_geotiffs`) now
+emits an explicit warning for any variable whose 10-file sample
+yields zero readable values — previously that path silently
+skipped the variable, contradicting the copy's promise. The
+regression tests below prove the promise is honored across all
+three failure modes (empty climate dir, missing rasterio,
+unreadable sampled tiffs).
 """
 
 import types
@@ -101,8 +103,14 @@ class TestClimateInfoLineDelegatesToPostTranslate(unittest.TestCase):
         self.assertIn('random sample of 10', summary)
         # (2) code identifier stays out of persona copy.
         self.assertNotIn('post_translate_range_sarra_py', summary)
-        # (3) disambiguating phrase for the upstream-failure path.
-        self.assertIn('pipeline steps above', summary)
+        # (3) copy is self-contained — refers only to content
+        # present in the packaged `validation_report.json` AND the
+        # web UI. Codex R3 HIGH flagged that "pipeline steps above"
+        # was dead text inside the JSON artifact researchers audit.
+        self.assertNotIn('pipeline steps above', summary)
+        # Must still point users at the in-report follow-up so the
+        # silent-skip story codex caught is addressable.
+        self.assertIn('in this report', summary)
         # (4) prior misleading phrasings must not regress.
         self.assertNotIn('not checked', summary.lower())
         self.assertNotIn('spot-checked', summary.lower())
@@ -113,11 +121,61 @@ class TestClimateInfoLineDelegatesToPostTranslate(unittest.TestCase):
         self.assertNotIn(
             "one of the pipeline steps above didn't finish", summary,
             "narrower didn't-finish phrasing was the codex-R2 HIGH — "
-            "must name BOTH validator-local AND pipeline-step search surfaces",
+            "must not resurface",
         )
-        # (6) must name BOTH search surfaces (validator-local messages
-        # AND upstream pipeline steps) so codex-R2 HIGH stays fixed.
-        self.assertIn('post-translate messages', summary)
+
+    def test_unreadable_sampled_tifs_emit_explicit_warning(self):
+        """Codex self-check R3 HIGH — the info-copy promise that
+        "another SARRA-Py post-translate message explains why a
+        variable is missing" is only honest if the validator
+        actually emits such a message on every silent-skip path.
+        Previously, a variable whose entire 10-file sample failed
+        to open had NO record emitted — contradicting the
+        promise. The fix adds an explicit warning record for that
+        path so the user always has a paper trail."""
+        import shutil
+        import tempfile
+        from pathlib import Path as _P
+        from prismpy.validators.post_translate import (
+            _validate_sarra_py_geotiffs,
+            SARRA_PY_VAR_MAPPING,
+        )
+
+        tmpdir = _P(tempfile.mkdtemp(prefix='p1-unreadable-'))
+        try:
+            # Write placeholder bytes that rasterio cannot open as
+            # GeoTIFF. Every sampled file fails → the silent-skip
+            # branch is hit → must emit an explicit warning.
+            climate = tmpdir / 'data' / 'climate'
+            for subdir_name in SARRA_PY_VAR_MAPPING:
+                var_dir = climate / subdir_name
+                var_dir.mkdir(parents=True)
+                # Need at least one tif per subdir so the validator
+                # reaches the read loop (empty dirs short-circuit).
+                (var_dir / 'day_001.tif').write_bytes(b'not-a-tif')
+
+            checks = _validate_sarra_py_geotiffs(tmpdir)
+
+            # Exactly one warning per variable (4 total).
+            warnings = [
+                c for c in checks
+                if c.get('check', '').startswith('post_translate_range_sarra_py_')
+                and c.get('result') == 'warning'
+            ]
+            self.assertEqual(
+                len(warnings), len(SARRA_PY_VAR_MAPPING),
+                f'expected one warning per variable on all-unreadable path, got: {warnings}',
+            )
+            # Each warning must name the variable and the
+            # sample-size / unreadable count so an auditor reading
+            # the JSON report has grep-able context.
+            for w in warnings:
+                self.assertIn('sampled GeoTIFFs', w['summary'])
+                self.assertIn('unreadable', w['summary'])
+                self.assertIn('variable', w['details'])
+                self.assertIn('unreadable_count', w['details'])
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_absent_range_records_when_rasterio_missing(self):
         """Codex self-check R2 HIGH regression — the validator-local

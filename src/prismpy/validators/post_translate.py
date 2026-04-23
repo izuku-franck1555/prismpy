@@ -616,6 +616,7 @@ def _validate_sarra_py_geotiffs(
 
     for var, (sample_files, op, operand) in sampled_vars.items():
         all_vals = []
+        unreadable = 0
         for tif_path in sample_files:
             try:
                 with rasterio.open(tif_path) as src:
@@ -632,9 +633,38 @@ def _validate_sarra_py_geotiffs(
                         all_vals.extend([float(valid.min()), float(valid.max())])
             except Exception as e:
                 logger.debug(f"Skipping {tif_path.name}: {e}")
+                unreadable += 1
                 continue
 
         if not all_vals:
+            # Codex self-check R3 HIGH — the scientific validator's
+            # `value_range_climate` info record promises that "if a
+            # variable is missing, look for another SARRA-Py
+            # post-translate message in this report explaining
+            # why." Without this branch, a variable whose entire
+            # 10-file sample fails to open / has only nodata would
+            # produce NO record of any kind, contradicting that
+            # promise. Emit an explicit warning so the user always
+            # has a paper trail for the missing range record.
+            checks.append({
+                "check": f"post_translate_range_sarra_py_{var}",
+                "scope": "per_record",
+                "result": "warning",
+                "summary": (
+                    f"SARRA-Py {var} range not computed: all "
+                    f"{len(sample_files)} sampled GeoTIFFs either "
+                    f"failed to open or contained no finite values "
+                    f"({unreadable} unreadable)."
+                ),
+                "details": {
+                    "platform": "sarra_py",
+                    "variable": var,
+                    "sample_size": len(sample_files),
+                    "unreadable_count": unreadable,
+                    "reason": "all_sampled_files_yielded_no_values",
+                    "data_source": "GeoTIFF pixel values (10-file sample)",
+                },
+            })
             continue
 
         obs_min = min(all_vals)
