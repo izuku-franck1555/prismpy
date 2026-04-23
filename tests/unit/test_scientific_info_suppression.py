@@ -65,27 +65,33 @@ class TestClimateInfoLineDelegatesToPostTranslate(unittest.TestCase):
         )
         self.assertEqual(records[0]['result'], 'info')
 
-    def test_summary_uses_plain_language_with_honest_caveats(self):
-        """V2-22b/P.1 persona copy (post codex HIGH round 2) — the
-        summary must read in plain language and carry five
-        load-bearing properties:
+    def test_summary_exact_string(self):
+        """Gate B LOW — pin the exact published copy so any edit
+        to the shipped string is caught at test time. Complements
+        the fragment / forbidden-phrase assertions below with a
+        single authoritative snapshot."""
+        climate = {'rainfall_dir': '/tmp/x', 'agera5_dir': '/tmp/y'}
+        checks = _check_value_ranges(_make_unified_data(climate=climate))
+        summary = next(
+            c['summary'] for c in checks
+            if c.get('check') == 'value_range_climate'
+        )
+        self.assertEqual(
+            summary,
+            (
+                "Climate value ranges for SARRA-Py are computed "
+                "from a random sample of 10 output files per "
+                "variable. When available, the per-variable "
+                "ranges appear below."
+            ),
+        )
 
-        1. Name the sampling policy honestly ('random sample of 10'
-           — the scientific-honesty signal the user still needs).
-        2. NOT include the internal code identifier
-           `post_translate_range_sarra_py_*` (persona copy, not
-           developer copy).
-        3. Point the reader at 'pipeline steps above' — the
-           disambiguating phrase evaluator added so the user can't
-           misread 'earlier steps' as 'earlier in this report'.
-        4. NOT resurrect any of the prior misleading phrasings
-           ('not checked' underclaim, 'spot-checked' overclaim,
-           'delegated' developer-copy).
-        5. NOT attribute absent records to a SPECIFIC failure mode
-           (e.g., 'translation didn't complete') — the post-translate
-           validator also emits zero range records on empty-output
-           paths and missing-rasterio paths, and the prior wording
-           would misdirect operators to the wrong pipeline stage."""
+    def test_summary_uses_plain_language_with_honest_caveats(self):
+        """V2-22b/P.1 persona copy (post codex iterations 2-4) —
+        the summary must read in plain language and not regress
+        to any of the prior misleading phrasings. The exact-string
+        test above pins the current copy; the assertions here
+        document what each fragment / forbidden phrase guards."""
         climate = {'rainfall_dir': '/tmp/x', 'agera5_dir': '/tmp/y'}
         checks = _check_value_ranges(_make_unified_data(climate=climate))
         summary = next(
