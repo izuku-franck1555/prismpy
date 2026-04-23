@@ -558,11 +558,20 @@ def _validate_sarra_py_geotiffs(
         searched_paths.append(str(var_dir))
         if not var_dir.is_dir():
             continue
-        tifs = list(var_dir.glob("*.tif"))
+        tifs = sorted(var_dir.glob("*.tif"))
         total_files += len(tifs)
         if not tifs:
             continue
-        sample = random.sample(tifs, min(10, len(tifs)))
+        # Gate B MEDIUM — pick a deterministic 10-file sample so
+        # degraded-sample warnings are reproducible across runs.
+        # Strategy: sorted() above orders lexicographically by
+        # filename, and `random.Random(seed)` gives us a stable
+        # per-variable-per-dir selection. The seed uses the
+        # variable name + file count; identical inputs always
+        # produce the same sample, while a changed file set
+        # (corruption fixed, new output) reselects.
+        seed = f"{var}:{len(tifs)}"
+        sample = random.Random(seed).sample(tifs, min(10, len(tifs)))
         sampled_vars[var] = (sample, op, operand)
 
     if not sampled_vars:
@@ -616,8 +625,8 @@ def _validate_sarra_py_geotiffs(
 
     for var, (sample_files, op, operand) in sampled_vars.items():
         all_vals = []
-        unreadable = 0
-        empty = 0  # opened cleanly but contained no finite values
+        unreadable_names = []
+        empty_names = []
         for tif_path in sample_files:
             try:
                 with rasterio.open(tif_path) as src:
@@ -633,18 +642,16 @@ def _validate_sarra_py_geotiffs(
                             valid = valid * operand
                         all_vals.extend([float(valid.min()), float(valid.max())])
                     else:
-                        # Codex self-check — a file that opens cleanly
-                        # but has no finite values (all-nodata, all-NaN)
-                        # is degraded coverage just as much as one that
-                        # failed to open. Count it separately so the
-                        # user-facing warning names the specific
-                        # failure mode ("N unreadable, M empty") but
-                        # it still counts against the effective sample.
-                        empty += 1
+                        # Opened cleanly but no finite values
+                        # (all-nodata, all-NaN). Degraded coverage.
+                        empty_names.append(tif_path.name)
             except Exception as e:
                 logger.debug(f"Skipping {tif_path.name}: {e}")
-                unreadable += 1
+                unreadable_names.append(tif_path.name)
                 continue
+        unreadable = len(unreadable_names)
+        empty = len(empty_names)
+        sampled_names = [p.name for p in sample_files]
 
         if not all_vals:
             # Every variable-absent path emits an explicit warning
@@ -669,6 +676,14 @@ def _validate_sarra_py_geotiffs(
                     "sample_size": len(sample_files),
                     "unreadable_count": unreadable,
                     "empty_count": empty,
+                    # Gate B MEDIUM — persist file identity so an
+                    # operator can reproduce the warning / open the
+                    # exact corrupt files. Previously only counts
+                    # were stored, and the random sample changed
+                    # across runs, making warnings non-reproducible.
+                    "sampled_files": sampled_names,
+                    "unreadable_files": unreadable_names,
+                    "empty_files": empty_names,
                     "reason": "all_sampled_files_yielded_no_values",
                     "data_source": "GeoTIFF pixel values (10-file sample)",
                 },
@@ -728,10 +743,18 @@ def _validate_sarra_py_geotiffs(
                 # opened cleanly but had no finite values (nodata,
                 # NaN) so the operator can distinguish "files
                 # wouldn't open" from "files opened but were empty".
+                # `sampled_files` / `unreadable_files` / `empty_files`
+                # persist file identity (Gate B MEDIUM) so an
+                # operator can reproduce or diagnose the warning —
+                # critical now that the random selection is
+                # deterministic per (variable, file count).
                 "sample_size": len(sample_files),
                 "unreadable_count": unreadable,
                 "empty_count": empty,
                 "effective_sample_size": effective_sample,
+                "sampled_files": sampled_names,
+                "unreadable_files": unreadable_names,
+                "empty_files": empty_names,
                 "data_source": "GeoTIFF pixel values (10-file sample)",
             },
         })

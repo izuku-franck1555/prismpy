@@ -239,6 +239,58 @@ class TestSarraPyEmptySampleFiles(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    def test_sample_is_deterministic_and_persists_file_identity(self):
+        """Gate B MEDIUM — the sample must be reproducible and the
+        result must persist the actual filenames sampled + which
+        ones failed. Previously `random.sample` was unseeded and
+        details only had counts, so an operator couldn't reproduce
+        a warning or open the corrupt files. Two back-to-back
+        invocations must produce the same sampled_files list."""
+        checks_first = _validate_sarra_py_geotiffs(self.tmpdir)
+        checks_second = _validate_sarra_py_geotiffs(self.tmpdir)
+        first = next(
+            c for c in checks_first
+            if c.get('check') == 'post_translate_range_sarra_py_tmax'
+        )
+        second = next(
+            c for c in checks_second
+            if c.get('check') == 'post_translate_range_sarra_py_tmax'
+        )
+        # Deterministic sample: two invocations on the same input
+        # produce identical sampled_files lists.
+        self.assertEqual(
+            first['details']['sampled_files'],
+            second['details']['sampled_files'],
+        )
+        # Each sampled entry is a bare filename (not a full path)
+        # so the payload stays compact in the packaged report.
+        for name in first['details']['sampled_files']:
+            self.assertNotIn('/', name)
+
+    def test_partial_unreadable_sample_persists_file_identity(self):
+        """Companion to the above — when files DO fail, their
+        names land in the details payload so an operator can
+        grep which files corrupted. Persisted names are
+        filename-only, not absolute paths."""
+        checks = _validate_sarra_py_geotiffs(self.tmpdir)
+        record = next(
+            c for c in checks
+            if c.get('check') == 'post_translate_range_sarra_py_tmax'
+        )
+        details = record['details']
+        self.assertIn('unreadable_files', details)
+        self.assertIn('empty_files', details)
+        # 9-of-10 bad bytes → unreadable list is non-empty and
+        # the counts agree with the lists' lengths.
+        self.assertEqual(
+            len(details['unreadable_files']),
+            details['unreadable_count'],
+        )
+        self.assertEqual(
+            len(details['empty_files']),
+            details['empty_count'],
+        )
+
     def test_mixed_valid_and_empty_sample_warns_and_counts_empty(self):
         """The 1-good + 9-empty mix must produce `result=warning`
         AND report `empty_count` on the details payload."""
