@@ -535,6 +535,21 @@ class TranslationPipeline:
                     gadm_level=self.config.region.boundary.gadm_level or 2,
                 )
 
+            # V2-22b/P.1 — thread the config's boundary-source
+            # through to the resolved Region so downstream cache /
+            # path helpers can route on it. Manual regions key
+            # their cache by bbox (different bboxes share the same
+            # "Unnamed study area" display name, but each needs its
+            # own cache); GADM regions stay name-keyed.
+            try:
+                source_enum = self.config.region.boundary.source
+                region.boundary_source = (
+                    source_enum.value if hasattr(source_enum, 'value')
+                    else str(source_enum)
+                )
+            except AttributeError:
+                region.boundary_source = None
+
             data["region"] = region
 
             self.provenance.record_retrieval(
@@ -990,7 +1005,7 @@ class TranslationPipeline:
                         self.logger.warning(f"AgERA5 download failed: {agera5_result.errors}")
                         # Scan cache for partial files — report what IS on disk
                         # so validation can flag incomplete data honestly.
-                        self._report_partial_agera5(cache_dir, region.name, climate_data)
+                        self._report_partial_agera5(cache_dir, region, climate_data)
             except PipelineCancelled:
                 # V2-22b L F-4: Gate A's HIGH 1 list cited :924 (TAMSAT
                 # branch) but missed this AgERA5-branch site. Without
@@ -1000,7 +1015,7 @@ class TranslationPipeline:
                 raise
             except Exception as e:
                 self.logger.warning(f"AgERA5 download error: {e}")
-                self._report_partial_agera5(cache_dir, region.name, climate_data)
+                self._report_partial_agera5(cache_dir, region, climate_data)
 
             if got_data:
                 return climate_data
@@ -1009,7 +1024,7 @@ class TranslationPipeline:
         return None
 
     def _report_partial_agera5(
-        self, cache_dir: Path, region_name: str, climate_data: Dict,
+        self, cache_dir: Path, region, climate_data: Dict,
     ) -> None:
         """Scan AgERA5 cache for partial files after a failed download.
 
@@ -1017,9 +1032,15 @@ class TranslationPipeline:
         may already exist from partial downloads or previous runs.
         Report them so validation can flag incomplete data honestly
         instead of silently ignoring the gap.
+
+        Uses `region_cache_key(region)` so manual regions with
+        bbox-unique cache paths are looked up correctly — the
+        previous `normalize_region_name(region.name)` key would
+        collide across different manual projects that share the
+        `"Unnamed study area"` display name.
         """
-        from prismpy.utils.sanitization import normalize_region_name
-        safe_name = normalize_region_name(region_name)
+        from prismpy.utils.sanitization import region_cache_key
+        safe_name = region_cache_key(region)
         agera5_cache = cache_dir / "agera5" / f"AgERA5_{safe_name}"
         if not agera5_cache.exists():
             # Mark that AgERA5 was expected but has zero files

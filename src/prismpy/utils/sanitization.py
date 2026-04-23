@@ -190,3 +190,84 @@ def normalize_region_name(name: str) -> str:
     normalized = re.sub(r"_+", "_", normalized)
 
     return normalized.strip("_")
+
+
+def region_cache_key(region) -> str:
+    """Stable identifier for cache / lock / path construction.
+
+    Independent of the display name, so multiple unnamed-manual
+    projects that all carry the shared display name (e.g.,
+    "Unnamed study area") each get their own bbox-derived cache
+    instead of colliding on the shared key. GADM regions keep
+    the normalized-name key because admin names are already
+    unique identifiers.
+
+    Routing:
+    - GADM / shapefile / missing boundary_source: fall through to
+      `normalize_region_name(region.name)` — the display name IS
+      the identity key.
+    - Manual: `manual_{miny}_{maxy}_{minx}_{maxx}` (4-decimal
+      precision, matches the prismweb peer-match key format).
+
+    Accepts two shapes:
+    - `Region` (post-resolution): `region.boundary_source` + `region.bounds`
+      with `.minx/.miny/.maxx/.maxy`.
+    - `RegionConfig` (pre-resolution): `region.boundary.source` +
+      `region.boundary.manual_bounds` with the same bbox fields.
+    """
+    source_value = _region_boundary_source(region)
+    if source_value == 'manual':
+        bounds = _region_manual_bounds(region)
+        if bounds is not None:
+            miny, maxy, minx, maxx = bounds
+            return (
+                f"manual_"
+                f"{miny:.4f}_{maxy:.4f}_"
+                f"{minx:.4f}_{maxx:.4f}"
+            )
+        # Malformed manual region — fall through to name-key so
+        # caller isn't blocked. Validation upstream would reject
+        # this before reaching cache paths.
+    return normalize_region_name(getattr(region, 'name', ''))
+
+
+def _region_boundary_source(region) -> Optional[str]:
+    """Extract the boundary source as a string from either shape."""
+    # Post-resolution Region with optional `boundary_source`.
+    direct = getattr(region, 'boundary_source', None)
+    if direct:
+        return direct
+    # Pre-resolution RegionConfig with `boundary.source` enum.
+    boundary = getattr(region, 'boundary', None)
+    if boundary is None:
+        return None
+    source = getattr(boundary, 'source', None)
+    if source is None:
+        return None
+    return source.value if hasattr(source, 'value') else str(source)
+
+
+def _region_manual_bounds(region) -> Optional[tuple]:
+    """Return (miny, maxy, minx, maxx) floats for manual regions.
+    Handles both `RegionConfig.boundary.manual_bounds` and the
+    post-resolution `Region.bounds` BoundingBox."""
+    boundary = getattr(region, 'boundary', None)
+    candidates = []
+    if boundary is not None:
+        manual = getattr(boundary, 'manual_bounds', None)
+        if manual is not None:
+            candidates.append(manual)
+    # Post-resolution Region carries bounds directly; routing by
+    # boundary_source ensures we only fall here for manual regions.
+    bounds = getattr(region, 'bounds', None)
+    if bounds is not None:
+        candidates.append(bounds)
+    for src in candidates:
+        try:
+            return (
+                float(src.miny), float(src.maxy),
+                float(src.minx), float(src.maxx),
+            )
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return None

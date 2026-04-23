@@ -112,9 +112,9 @@ class DataSource(ABC):
         Returns:
             Path for cache file
         """
-        from prismpy.utils.sanitization import normalize_region_name
-        region_name = normalize_region_name(region.name)
-        filename = f"{self.NAME}_{region_name}{suffix}"
+        from prismpy.utils.sanitization import region_cache_key
+        region_key = region_cache_key(region)
+        filename = f"{self.NAME}_{region_key}{suffix}"
         return self.cache_dir / filename
 
     def is_cached(self, region: Region, suffix: str = "") -> bool:

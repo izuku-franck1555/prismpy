@@ -371,15 +371,27 @@ def bbox_field_for_log(bbox: Optional[Dict[str, float]]) -> str:
     )
 
 
-def cache_lock_path(cache_dir: Path, source: str, region_name: str) -> Path:
-    """Per-source, per-region lock path: .{source}-{normalized_region}.lock.
+def cache_lock_path(cache_dir: Path, source: str, region_name) -> Path:
+    """Per-source, per-region lock path: .{source}-{region_cache_key}.lock.
 
     Different sources on the same region use different lock files so a
     single SARRA-Py run can progress through TAMSAT then AgERA5 without
     self-blocking and so two users hitting the same region overlap on
     different sources but serialize on the same source.
+
+    V2-22b/P.1 — parameter is polymorphic for migration safety:
+    accepts either a `str` (legacy name-keyed callers) OR a full
+    region object (`Region` / `RegionConfig`). When given a region
+    object, manual boundaries key their lock by bbox so unnamed-
+    manual projects sharing the `"Unnamed study area"` display
+    name don't collide on the same lock. The `region_name` kwarg
+    label is kept for compatibility with existing callers.
     """
-    safe = normalize_region_name(region_name)
+    from prismpy.utils.sanitization import region_cache_key
+    if isinstance(region_name, str):
+        safe = normalize_region_name(region_name)
+    else:
+        safe = region_cache_key(region_name)
     return cache_dir / f".{source}-{safe}.lock"
 
 
@@ -521,8 +533,11 @@ class TAMSATSource(DataSource):
         elif self.config.data_dir:
             data_dir = self.config.data_dir
         else:
-            # Default: cache_dir/tamsat/{region_name}/
-            safe_name = normalize_region_name(region.name)
+            # Default: cache_dir/tamsat/{region_cache_key}/ — manual
+            # regions key by bbox so unnamed-manual projects don't
+            # collide on "Unnamed study area".
+            from prismpy.utils.sanitization import region_cache_key
+            safe_name = region_cache_key(region)
             data_dir = self.cache_dir / "tamsat" / safe_name
 
         # Get bounds in both formats
@@ -674,7 +689,7 @@ class TAMSATSource(DataSource):
             # Different sources on the same region run concurrently
             # (separate lock files); same source same region serializes.
             self.cache_dir.mkdir(parents=True, exist_ok=True)
-            lock_path = cache_lock_path(self.cache_dir, source=self.NAME, region_name=region.name)
+            lock_path = cache_lock_path(self.cache_dir, source=self.NAME, region_name=region)
             lock = FileLock(str(lock_path))
 
             # V2-22b L (AC L.5): pre-lock cancel observation. Lock-wait

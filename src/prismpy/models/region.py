@@ -140,6 +140,11 @@ class Region:
     geometry_wkt: Optional[str] = None
     crs: str = "EPSG:4326"
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # V2-22b/P.1 — populated from `RegionConfig.boundary.source.value`
+    # at resolve-region time so cache/path helpers can route on it.
+    # Optional (None) for legacy construction paths that predate the
+    # field; helpers treat None as "use name-based key".
+    boundary_source: Optional[str] = None
 
     def __post_init__(self):
         """Validate and normalize the region."""
