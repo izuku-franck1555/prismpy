@@ -352,10 +352,10 @@ class TestCarveOutRegression:
         ("src/prismpy/translators/craft/translator.py", 1692),
         # pygadm fallback inside _execute_retrieve: local pygadm import
         # + pygadm.Names/Items calls; no HTTP, cancel-inert.
-        ("src/prismpy/pipeline/executor.py", 421),
+        ("src/prismpy/pipeline/executor.py", 429),
         # Provenance-flush inside the translator-dispatch except handler
         # in _execute_translate: writes decision records, cancel-inert.
-        ("src/prismpy/pipeline/executor.py", 2245),
+        ("src/prismpy/pipeline/executor.py", 2271),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed

@@ -144,3 +144,196 @@ class TestSarraPyUnitConversion(unittest.TestCase):
         self.assertAlmostEqual(
             by_var['srad']['details']['observed_max'], 20.0, places=1,
         )
+
+
+class TestSarraPyPartialUnreadableSample(unittest.TestCase):
+    """Codex self-check R4 HIGH — a range check that draws from a
+    degraded sample (some files unreadable) must be flagged as
+    warning, not pass. Otherwise broad climate-file corruption
+    hides behind a happy-path record that still claims "10-file
+    sample" while actually drawing from one good file."""
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp(prefix='sarra-py-partial-'))
+        climate = self.tmpdir / 'data' / 'climate'
+        # tmax only — 2 valid °C TIFFs, 8 placeholder non-TIFF bytes.
+        # The helper's random.sample picks 10 files; whatever mix it
+        # picks, SOME will be valid and some won't, so the warning
+        # path fires deterministically as long as at least one of
+        # each is in the sample.
+        #
+        # Simpler fixture: 1 valid + 9 bad guarantees partial
+        # coverage regardless of sample selection.
+        tmax_dir = climate / '2m_temperature_24_hour_maximum'
+        tmax_dir.mkdir(parents=True)
+        _write_fixture_tiff(tmax_dir / 'valid_001.tif', 22.0)
+        for i in range(9):
+            (tmax_dir / f'bad_{i:03d}.tif').write_bytes(b'not-a-tif')
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_partial_unreadable_sample_downgrades_to_warning(self):
+        """A 1-good + 9-bad sample must emit `result: warning`, not
+        `pass`, so operators see the effective sample collapsed."""
+        checks = _validate_sarra_py_geotiffs(self.tmpdir)
+        tmax_records = [
+            c for c in checks
+            if c.get('check') == 'post_translate_range_sarra_py_tmax'
+        ]
+        self.assertEqual(len(tmax_records), 1)
+        self.assertEqual(
+            tmax_records[0]['result'], 'warning',
+            f'degraded sample should warn, got {tmax_records[0]}',
+        )
+
+    def test_partial_unreadable_sample_persists_effective_coverage(self):
+        """The record must carry `unreadable_count` and
+        `effective_sample_size` so the packaged
+        validation_report.json has machine-readable coverage data."""
+        checks = _validate_sarra_py_geotiffs(self.tmpdir)
+        record = next(
+            c for c in checks
+            if c.get('check') == 'post_translate_range_sarra_py_tmax'
+        )
+        details = record['details']
+        self.assertEqual(details.get('sample_size'), 10)
+        self.assertGreater(details.get('unreadable_count'), 0)
+        self.assertLess(details.get('effective_sample_size'), 10)
+        # The summary must name the degradation in plain text too.
+        self.assertIn('sample degraded', record['summary'])
+
+
+class TestSarraPyEmptySampleFiles(unittest.TestCase):
+    """Codex self-check — a SARRA-Py sample mix where files open
+    cleanly but yield no finite values (all-nodata, all-NaN) must
+    be flagged as degraded coverage. Earlier accounting only
+    counted `unreadable` (open-failure) files, so a 1-good +
+    9-empty sample would still pass silently as a "10-file
+    sample". The empty count now feeds into effective_sample and
+    the warning decision."""
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp(prefix='sarra-py-empty-'))
+        climate = self.tmpdir / 'data' / 'climate'
+        # 1 valid tmax TIFF + 9 nodata-only TIFFs (written with the
+        # fixture helper, which writes a constant value; setting the
+        # nodata tag to the written value makes every pixel fall out
+        # of `data[data != nodata]`).
+        tmax_dir = climate / '2m_temperature_24_hour_maximum'
+        tmax_dir.mkdir(parents=True)
+        _write_fixture_tiff(tmax_dir / 'valid_001.tif', 22.0)
+        for i in range(9):
+            path = tmax_dir / f'nodata_{i:03d}.tif'
+            # Write an all-zeros TIFF with nodata=0 so every pixel
+            # gets filtered out.
+            from rasterio.transform import from_bounds as _from_bounds
+            with rasterio.open(
+                path, 'w', driver='GTiff', height=2, width=2,
+                count=1, dtype='float32', crs='EPSG:4326',
+                transform=_from_bounds(9.5, 5.0, 10.0, 5.5, 2, 2),
+                nodata=0.0,
+            ) as dst:
+                dst.write(np.zeros((1, 2, 2), dtype=np.float32))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_sample_is_deterministic_and_persists_file_identity(self):
+        """Gate B MEDIUM — the sample must be reproducible and the
+        result must persist the actual filenames sampled + which
+        ones failed. Previously `random.sample` was unseeded and
+        details only had counts, so an operator couldn't reproduce
+        a warning or open the corrupt files. Two back-to-back
+        invocations must produce the same sampled_files list."""
+        checks_first = _validate_sarra_py_geotiffs(self.tmpdir)
+        checks_second = _validate_sarra_py_geotiffs(self.tmpdir)
+        first = next(
+            c for c in checks_first
+            if c.get('check') == 'post_translate_range_sarra_py_tmax'
+        )
+        second = next(
+            c for c in checks_second
+            if c.get('check') == 'post_translate_range_sarra_py_tmax'
+        )
+        # Deterministic sample: two invocations on the same input
+        # produce identical sampled_files lists.
+        self.assertEqual(
+            first['details']['sampled_files'],
+            second['details']['sampled_files'],
+        )
+        # Each sampled entry is a bare filename (not a full path)
+        # so the payload stays compact in the packaged report.
+        for name in first['details']['sampled_files']:
+            self.assertNotIn('/', name)
+
+    def test_sample_changes_when_file_set_changes(self):
+        """Codex Path A follow-up MEDIUM — the sample must depend
+        on the FILE SET, not just the file count. Earlier seed
+        was `{var}:{len(tifs)}` so every run with the same count
+        picked the same 10 positions — a corruption outside those
+        positions was systematically missed. The content-hashed
+        seed makes the sample reproducible AND responsive to any
+        file-set change."""
+        checks_before = _validate_sarra_py_geotiffs(self.tmpdir)
+        sampled_before = next(
+            c['details']['sampled_files'] for c in checks_before
+            if c.get('check') == 'post_translate_range_sarra_py_tmax'
+        )
+        # Add a new valid tif for tmax — different file set, same count+1.
+        new_path = (
+            self.tmpdir / 'data' / 'climate'
+            / '2m_temperature_24_hour_maximum' / 'extra_valid.tif'
+        )
+        _write_fixture_tiff(new_path, 23.0)
+        checks_after = _validate_sarra_py_geotiffs(self.tmpdir)
+        sampled_after = next(
+            c['details']['sampled_files'] for c in checks_after
+            if c.get('check') == 'post_translate_range_sarra_py_tmax'
+        )
+        # Different file set → the sample has changed.
+        self.assertNotEqual(sampled_before, sampled_after)
+
+    def test_partial_unreadable_sample_persists_file_identity(self):
+        """Companion to the above — when files DO fail, their
+        names land in the details payload so an operator can
+        grep which files corrupted. Persisted names are
+        filename-only, not absolute paths."""
+        checks = _validate_sarra_py_geotiffs(self.tmpdir)
+        record = next(
+            c for c in checks
+            if c.get('check') == 'post_translate_range_sarra_py_tmax'
+        )
+        details = record['details']
+        self.assertIn('unreadable_files', details)
+        self.assertIn('empty_files', details)
+        # 9-of-10 bad bytes → unreadable list is non-empty and
+        # the counts agree with the lists' lengths.
+        self.assertEqual(
+            len(details['unreadable_files']),
+            details['unreadable_count'],
+        )
+        self.assertEqual(
+            len(details['empty_files']),
+            details['empty_count'],
+        )
+
+    def test_mixed_valid_and_empty_sample_warns_and_counts_empty(self):
+        """The 1-good + 9-empty mix must produce `result=warning`
+        AND report `empty_count` on the details payload."""
+        checks = _validate_sarra_py_geotiffs(self.tmpdir)
+        record = next(
+            c for c in checks
+            if c.get('check') == 'post_translate_range_sarra_py_tmax'
+        )
+        details = record['details']
+        # Every file opened cleanly → unreadable is 0. But 9 of them
+        # had no finite values → empty counts them.
+        self.assertEqual(details.get('unreadable_count'), 0)
+        self.assertGreater(details.get('empty_count'), 0)
+        # Effective sample collapsed below target.
+        self.assertLess(details.get('effective_sample_size'), 10)
+        # And the record downgrades to warning so the user sees it.
+        self.assertEqual(record['result'], 'warning')
+        # Summary names BOTH failure modes so operator can diagnose.
+        self.assertIn('empty', record['summary'])

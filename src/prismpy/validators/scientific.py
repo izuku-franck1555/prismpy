@@ -698,14 +698,10 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
             "scope": "per_record",
             "result": "info",
             "summary": (
-                "Climate value-range checks are delegated to the "
-                "per-platform post-translate validator. When SARRA-Py "
-                "runs, the `post_translate_range_sarra_py_*` records "
-                "below report the observed per-variable ranges from a "
-                "random 10-file sample. Absence of those records "
-                "means the platform's translation or post-translate "
-                "validation did not run — check the other checks for "
-                "the reason."
+                "Climate value ranges for SARRA-Py are computed "
+                "from a random sample of 10 output files per "
+                "variable. When available, the per-variable "
+                "ranges appear below."
             ),
             "manuscript_claim": "Section 2.5: value range verification (delegated)",
             "details": {

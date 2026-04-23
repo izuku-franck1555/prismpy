@@ -558,11 +558,26 @@ def _validate_sarra_py_geotiffs(
         searched_paths.append(str(var_dir))
         if not var_dir.is_dir():
             continue
-        tifs = list(var_dir.glob("*.tif"))
+        tifs = sorted(var_dir.glob("*.tif"))
         total_files += len(tifs)
         if not tifs:
             continue
-        sample = random.sample(tifs, min(10, len(tifs)))
+        # Deterministic sample so degraded-sample warnings are
+        # reproducible across runs. Seed on the full filename list
+        # (sorted above) rather than just (var, count) so two
+        # runs with the SAME file set produce the same sample,
+        # but a single-file change — e.g., a new day added to
+        # a rolling output — reshuffles coverage. Earlier
+        # `{var}:{len(tifs)}` seed froze the sample positions for
+        # every run length; a corruption outside those positions
+        # was systematically missed. Hashing filenames keeps the
+        # sample reproducible AND responsive to file-set changes.
+        import hashlib as _hashlib
+        filenames_digest = _hashlib.sha256(
+            ('\n'.join(p.name for p in tifs)).encode('utf-8')
+        ).hexdigest()
+        seed = f"{var}:{filenames_digest}"
+        sample = random.Random(seed).sample(tifs, min(10, len(tifs)))
         sampled_vars[var] = (sample, op, operand)
 
     if not sampled_vars:
@@ -616,6 +631,8 @@ def _validate_sarra_py_geotiffs(
 
     for var, (sample_files, op, operand) in sampled_vars.items():
         all_vals = []
+        unreadable_names = []
+        empty_names = []
         for tif_path in sample_files:
             try:
                 with rasterio.open(tif_path) as src:
@@ -630,11 +647,53 @@ def _validate_sarra_py_geotiffs(
                         elif op == "mul":
                             valid = valid * operand
                         all_vals.extend([float(valid.min()), float(valid.max())])
+                    else:
+                        # Opened cleanly but no finite values
+                        # (all-nodata, all-NaN). Degraded coverage.
+                        empty_names.append(tif_path.name)
             except Exception as e:
                 logger.debug(f"Skipping {tif_path.name}: {e}")
+                unreadable_names.append(tif_path.name)
                 continue
+        unreadable = len(unreadable_names)
+        empty = len(empty_names)
+        sampled_names = [p.name for p in sample_files]
 
         if not all_vals:
+            # Every variable-absent path emits an explicit warning
+            # so the user always has a paper trail for a missing
+            # per-variable range record. Separate unreadable vs.
+            # empty counts so the operator can distinguish "files
+            # wouldn't open" from "files opened but were empty" —
+            # different diagnoses for the same symptom.
+            checks.append({
+                "check": f"post_translate_range_sarra_py_{var}",
+                "scope": "per_record",
+                "result": "warning",
+                "summary": (
+                    f"SARRA-Py {var} range not computed: all "
+                    f"{len(sample_files)} sampled GeoTIFFs yielded "
+                    f"no finite values "
+                    f"({unreadable} unreadable, {empty} empty)."
+                ),
+                "details": {
+                    "platform": "sarra_py",
+                    "variable": var,
+                    "sample_size": len(sample_files),
+                    "unreadable_count": unreadable,
+                    "empty_count": empty,
+                    # Gate B MEDIUM — persist file identity so an
+                    # operator can reproduce the warning / open the
+                    # exact corrupt files. Previously only counts
+                    # were stored, and the random sample changed
+                    # across runs, making warnings non-reproducible.
+                    "sampled_files": sampled_names,
+                    "unreadable_files": unreadable_names,
+                    "empty_files": empty_names,
+                    "reason": "all_sampled_files_yielded_no_values",
+                    "data_source": "GeoTIFF pixel values (10-file sample)",
+                },
+            })
             continue
 
         obs_min = min(all_vals)
@@ -645,16 +704,34 @@ def _validate_sarra_py_geotiffs(
             continue
 
         n_oor = sum(1 for v in all_vals if v < vmin or v > vmax)
-        result = "warning" if n_oor > 0 else "pass"
+        # Degraded-sample warning — any collapse below the target
+        # sample size flags this. Both code paths that shrink
+        # coverage count: files that failed to open (`unreadable`)
+        # and files that opened cleanly but yielded no finite values
+        # (`empty` — all-nodata, all-NaN). Missing the empty count
+        # was the codex-R5 HIGH.
+        degraded = unreadable + empty
+        effective_sample = len(sample_files) - degraded
+        if n_oor > 0 or degraded > 0:
+            result = "warning"
+        else:
+            result = "pass"
+        summary = (
+            f"SARRA-Py {var}: [{obs_min:.1f}, {obs_max:.1f}] "
+            f"{unit} (from output files)"
+        )
+        if degraded > 0:
+            summary += (
+                f" — sample degraded: {unreadable} unreadable + "
+                f"{empty} empty of {len(sample_files)}, effective "
+                f"sample = {effective_sample}"
+            )
 
         checks.append({
             "check": f"post_translate_range_sarra_py_{var}",
             "scope": "per_record",
             "result": result,
-            "summary": (
-                f"SARRA-Py {var}: [{obs_min:.1f}, {obs_max:.1f}] "
-                f"{unit} (from output files)"
-            ),
+            "summary": summary,
             "details": {
                 "platform": "sarra_py",
                 "variable": var,
@@ -665,6 +742,25 @@ def _validate_sarra_py_geotiffs(
                 "observed_max": round(obs_max, 2),
                 "out_of_range_count": n_oor,
                 "total_values": len(all_vals),
+                # Persist sample coverage so auditors reading the
+                # packaged `validation_report.json` can tell when a
+                # pass-looking record was backed by a degraded
+                # sample. `empty_count` splits out files that
+                # opened cleanly but had no finite values (nodata,
+                # NaN) so the operator can distinguish "files
+                # wouldn't open" from "files opened but were empty".
+                # `sampled_files` / `unreadable_files` / `empty_files`
+                # persist file identity (Gate B MEDIUM) so an
+                # operator can reproduce or diagnose the warning —
+                # critical now that the random selection is
+                # deterministic per (variable, file count).
+                "sample_size": len(sample_files),
+                "unreadable_count": unreadable,
+                "empty_count": empty,
+                "effective_sample_size": effective_sample,
+                "sampled_files": sampled_names,
+                "unreadable_files": unreadable_names,
+                "empty_files": empty_names,
                 "data_source": "GeoTIFF pixel values (10-file sample)",
             },
         })

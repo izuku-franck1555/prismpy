@@ -1,20 +1,30 @@
-"""Issue 5 (warning-auditor HIGH + codex self-check HIGH) — the
-scientific validator's per-cell value-range check used to emit a
-'Climate value range not checked' info record on file-based
-(GeoTIFF) climate. That was wrong: the post-translate sampled
-validator (`_validate_sarra_py_geotiffs`) DOES check the ranges
-by opening 10 random rasters per variable. The first fix
-suppressed the record entirely, which removed the only
-user-visible caveat that coverage is sampled. The second fix
-asserted the check had happened ("spot-checked"), which was an
-overclaim in cases where translation failed or post-translate
-validation was skipped.
+"""Issue 5 (warning-auditor HIGH + codex self-check HIGH + V2-22b/P.1
+persona copy pass) — the scientific validator's per-cell
+value-range check used to emit a 'Climate value range not checked'
+info record on file-based (GeoTIFF) climate. That was wrong: the
+post-translate sampled validator (`_validate_sarra_py_geotiffs`)
+DOES check the ranges by opening 10 random rasters per variable.
+The first fix suppressed the record entirely, losing the
+sampled-coverage caveat. The second fix asserted the check had
+happened ("spot-checked"), overclaiming when translation failed.
+The third fix introduced a "delegated to the per-platform
+post-translate validator" copy which was honest but read as
+technical to non-developer personas — user flagged it.
 
-The current contract: file-based climate → one info record that
-DELEGATES to the per-platform post-translate check. The summary
-tells the reader what to look for (`post_translate_range_sarra_py_*`
-records) and what absence means (translation or validation
-didn't run), so there's no overclaim or underclaim.
+The current contract (P.1 final, post codex-driven iterations):
+file-based climate → one info record whose summary is purely
+DESCRIPTIVE. It explains the sampling ("random sample of 10
+output files per variable") and hedges on absence ("when
+available, the per-variable ranges appear below") — no
+prescriptive "check X for the reason" cue.
+
+Earlier iterations tried to prescribe where to debug missing
+ranges, and each wording over- or under-promised on some code
+path (validator-local failures, executor-skip, translation
+error). Descriptive copy sidesteps the whole problem: if a
+variable is missing, the reader finds the explanation wherever
+it actually lives (other validation records, pipeline status,
+download logs) — we don't tell them where.
 """
 
 import types
@@ -55,33 +65,242 @@ class TestClimateInfoLineDelegatesToPostTranslate(unittest.TestCase):
         )
         self.assertEqual(records[0]['result'], 'info')
 
-    def test_summary_delegates_not_overclaims(self):
-        """Codex self-check HIGH — the summary must advertise that
-        ranges are handed off to the post-translate validator, not
-        claim the check already ran. The word 'delegated' + the
-        explicit reader-guidance for absence-of-records are the
-        anchors that distinguish this from the overclaim version."""
+    def test_summary_exact_string(self):
+        """Gate B LOW — pin the exact published copy so any edit
+        to the shipped string is caught at test time. Complements
+        the fragment / forbidden-phrase assertions below with a
+        single authoritative snapshot."""
         climate = {'rainfall_dir': '/tmp/x', 'agera5_dir': '/tmp/y'}
         checks = _check_value_ranges(_make_unified_data(climate=climate))
         summary = next(
             c['summary'] for c in checks
             if c.get('check') == 'value_range_climate'
         )
-        # The summary must name the delegation explicitly.
-        self.assertIn('delegated', summary.lower())
-        # And MUST NOT resurrect either of the prior misleading
-        # phrasings — neither the "not checked" underclaim nor the
-        # "spot-checked" overclaim.
+        self.assertEqual(
+            summary,
+            (
+                "Climate value ranges for SARRA-Py are computed "
+                "from a random sample of 10 output files per "
+                "variable. When available, the per-variable "
+                "ranges appear below."
+            ),
+        )
+
+    def test_summary_uses_plain_language_with_honest_caveats(self):
+        """V2-22b/P.1 persona copy (post codex iterations 2-4) —
+        the summary must read in plain language and not regress
+        to any of the prior misleading phrasings. The exact-string
+        test above pins the current copy; the assertions here
+        document what each fragment / forbidden phrase guards."""
+        climate = {'rainfall_dir': '/tmp/x', 'agera5_dir': '/tmp/y'}
+        checks = _check_value_ranges(_make_unified_data(climate=climate))
+        summary = next(
+            c['summary'] for c in checks
+            if c.get('check') == 'value_range_climate'
+        )
+        # (1) scientific-honesty signal preserved.
+        self.assertIn('random sample of 10', summary)
+        # (2) code identifier stays out of persona copy.
+        self.assertNotIn('post_translate_range_sarra_py', summary)
+        # (3) hedge signal — "when available" acknowledges that
+        # the per-variable records may or may not appear, without
+        # prescribing where to look for the reason when they don't.
+        # Codex rounds 2-4 each found a failure-mode for which the
+        # prescriptive cue was wrong; the descriptive hedge
+        # sidesteps the whole class.
+        self.assertIn('when available', summary.lower())
+        # (4) must NOT resurrect prescriptive phrasings codex flagged.
         self.assertNotIn('not checked', summary.lower())
         self.assertNotIn('spot-checked', summary.lower())
-        # And must point the reader at the per-variable records.
-        self.assertIn('post_translate_range_sarra_py', summary)
-        # And must say what absence of those records means — this
-        # is the load-bearing "honest signal" guarantee.
-        self.assertTrue(
-            'Absence' in summary or 'absence' in summary,
-            f'summary should explain what absence of post_translate records means: {summary!r}',
+        self.assertNotIn('delegated', summary.lower())
+        self.assertNotIn('pipeline steps above', summary)
+        self.assertNotIn('post-translate messages', summary)
+        self.assertNotIn("check the other records", summary.lower())
+        self.assertNotIn("translation didn't complete", summary)
+        self.assertNotIn("translation did not complete", summary)
+
+    def test_unreadable_sampled_tifs_emit_explicit_warning(self):
+        """Codex self-check R3 HIGH — the info-copy promise that
+        "another SARRA-Py post-translate message explains why a
+        variable is missing" is only honest if the validator
+        actually emits such a message on every silent-skip path.
+        Previously, a variable whose entire 10-file sample failed
+        to open had NO record emitted — contradicting the
+        promise. The fix adds an explicit warning record for that
+        path so the user always has a paper trail."""
+        import shutil
+        import tempfile
+        from pathlib import Path as _P
+        from prismpy.validators.post_translate import (
+            _validate_sarra_py_geotiffs,
+            SARRA_PY_VAR_MAPPING,
         )
+
+        tmpdir = _P(tempfile.mkdtemp(prefix='p1-unreadable-'))
+        try:
+            # Write placeholder bytes that rasterio cannot open as
+            # GeoTIFF. Every sampled file fails → the silent-skip
+            # branch is hit → must emit an explicit warning.
+            climate = tmpdir / 'data' / 'climate'
+            for subdir_name in SARRA_PY_VAR_MAPPING:
+                var_dir = climate / subdir_name
+                var_dir.mkdir(parents=True)
+                # Need at least one tif per subdir so the validator
+                # reaches the read loop (empty dirs short-circuit).
+                (var_dir / 'day_001.tif').write_bytes(b'not-a-tif')
+
+            checks = _validate_sarra_py_geotiffs(tmpdir)
+
+            # Exactly one warning per variable (4 total).
+            warnings = [
+                c for c in checks
+                if c.get('check', '').startswith('post_translate_range_sarra_py_')
+                and c.get('result') == 'warning'
+            ]
+            self.assertEqual(
+                len(warnings), len(SARRA_PY_VAR_MAPPING),
+                f'expected one warning per variable on all-unreadable path, got: {warnings}',
+            )
+            # Each warning must name the variable and the
+            # sample-size / unreadable count so an auditor reading
+            # the JSON report has grep-able context.
+            for w in warnings:
+                self.assertIn('sampled GeoTIFFs', w['summary'])
+                self.assertIn('unreadable', w['summary'])
+                self.assertIn('variable', w['details'])
+                self.assertIn('unreadable_count', w['details'])
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_absent_range_records_when_rasterio_missing(self):
+        """Codex self-check R2 HIGH regression — the validator-local
+        failure mode the R1 test didn't cover. `_validate_sarra_py_geotiffs`
+        has a try/except around its `import rasterio` that emits a
+        `post_translate_climate_sarra_py` info record ("rasterio not
+        available") and returns WITHOUT any `post_translate_range_sarra_py_*`
+        records. All pipeline steps finished, the translation produced
+        files, but the validator couldn't read them.
+
+        If the info-copy guidance said only "check the pipeline steps
+        above", a user hitting this environment issue would investigate
+        the wrong subsystem. The "post-translate messages in this
+        report" branch of the guidance is what covers this path.
+        """
+        import shutil
+        import sys
+        import tempfile
+        from pathlib import Path as _P
+        from unittest.mock import patch as _patch
+        from prismpy.validators.post_translate import (
+            _validate_sarra_py_geotiffs,
+            SARRA_PY_VAR_MAPPING,
+        )
+
+        tmpdir = _P(tempfile.mkdtemp(prefix='p1-rasterio-miss-'))
+        try:
+            # Create the climate tree with at least one tif per
+            # variable so the validator reaches the `import rasterio`
+            # branch (empty-dir case short-circuits earlier).
+            climate = tmpdir / 'data' / 'climate'
+            for subdir_name in SARRA_PY_VAR_MAPPING:
+                var_dir = climate / subdir_name
+                var_dir.mkdir(parents=True)
+                # Placeholder file — won't actually be read because
+                # the import fails before the read loop.
+                (var_dir / 'fake.tif').write_bytes(b'')
+
+            # Simulate `import rasterio` failing with ImportError.
+            import builtins
+            real_import = builtins.__import__
+
+            def _patched_import(name, *args, **kwargs):
+                if name == 'rasterio':
+                    raise ImportError('simulated missing rasterio')
+                return real_import(name, *args, **kwargs)
+
+            with _patch.object(builtins, '__import__', side_effect=_patched_import):
+                checks = _validate_sarra_py_geotiffs(tmpdir)
+
+            # No range records emitted.
+            range_records = [
+                c for c in checks
+                if c.get('check', '').startswith('post_translate_range_sarra_py_')
+            ]
+            self.assertEqual(
+                range_records, [],
+                f'expected no range records on rasterio-missing path, got: {range_records}',
+            )
+            # But an info record IS emitted explaining rasterio
+            # unavailability — this is the thing the info-copy
+            # guidance points the user at.
+            rasterio_info = [
+                c for c in checks
+                if c.get('check') == 'post_translate_climate_sarra_py'
+                and 'rasterio' in c.get('summary', '').lower()
+            ]
+            self.assertGreater(
+                len(rasterio_info), 0,
+                'expected a post_translate_climate_sarra_py info record mentioning rasterio',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_absent_range_records_can_come_from_post_translate_failure_paths(self):
+        """Codex self-check HIGH regression — proves that absent
+        `post_translate_range_sarra_py_*` records DO NOT imply a
+        failed translation. `_validate_sarra_py_geotiffs` emits a
+        warning record with NO range records when the climate
+        directory structure is missing files (empty-output path) —
+        the translation step may have completed and still produced
+        no files. If the info copy said "translation didn't
+        complete", it would misdirect operators to the wrong stage
+        for this case. The current "one of the pipeline steps
+        above" phrasing covers both the missing-files path AND
+        the translation-failed path without over-committing to
+        either diagnosis."""
+        import shutil
+        import tempfile
+        from pathlib import Path as _P
+        from prismpy.validators.post_translate import (
+            _validate_sarra_py_geotiffs,
+        )
+
+        tmpdir = _P(tempfile.mkdtemp(prefix='p1-regression-'))
+        try:
+            # Present the climate directory but no per-variable
+            # subdirs — mimics the post-translate-only failure mode
+            # where translation finished with empty output.
+            (tmpdir / 'data' / 'climate').mkdir(parents=True)
+
+            checks = _validate_sarra_py_geotiffs(tmpdir)
+
+            # A warning record IS emitted (the post-translate
+            # validator ran and found nothing) — but NO
+            # `post_translate_range_sarra_py_*` records. So the
+            # Results page user would see this warning but no
+            # per-variable ranges, and the scientific info copy's
+            # "one of the pipeline steps" guidance correctly points
+            # them at the report's pipeline cards to find which
+            # step produced the empty output.
+            range_records = [
+                c for c in checks
+                if c.get('check', '').startswith('post_translate_range_sarra_py_')
+            ]
+            self.assertEqual(
+                range_records, [],
+                f'expected no range records on empty-output path, got: {range_records}',
+            )
+            # Positive control — the warning DID fire (so the user
+            # gets a signal, it just isn't a range record).
+            warnings = [
+                c for c in checks if c.get('result') == 'warning'
+            ]
+            self.assertGreater(
+                len(warnings), 0,
+                'expected a warning record on empty-output path',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_details_tag_coverage_kind_as_delegated(self):
         """Downstream surfaces need a machine-readable flag that

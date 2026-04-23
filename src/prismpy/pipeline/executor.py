@@ -297,6 +297,14 @@ class TranslationPipeline:
             # Check boundary source type
             boundary_source = self.config.region.boundary.source.value
 
+            # Codex Path A — track the RESOLVED boundary source
+            # independently of config.source, since the GADM failure
+            # path falls back to manual_bounds while config.source
+            # still reads "gadm". `region.boundary_source` must
+            # reflect what the pipeline actually used so cache /
+            # lock / ETA paths route correctly.
+            resolved_boundary_source = boundary_source
+
             if boundary_source == "manual" and self.config.region.boundary.manual_bounds:
                 # Use manual bounds from config
                 mb = self.config.region.boundary.manual_bounds
@@ -510,6 +518,9 @@ class TranslationPipeline:
                                 bounds=bounds,
                                 gadm_level=gadm_level,
                             )
+                            # Resolved source is manual on this fallback
+                            # path even though config.source was gadm.
+                            resolved_boundary_source = 'manual'
                             warnings.append(f"GADM and pygadm failed, using manual bounds fallback: {result.errors}")
                         else:
                             raise ValueError(
@@ -522,6 +533,8 @@ class TranslationPipeline:
                 if self.config.region.boundary.manual_bounds:
                     mb = self.config.region.boundary.manual_bounds
                     bounds = BoundingBox(minx=mb.minx, miny=mb.miny, maxx=mb.maxx, maxy=mb.maxy)
+                    # Unsupported-source branch also resolves to manual.
+                    resolved_boundary_source = 'manual'
                 else:
                     raise ValueError(
                         f"Unsupported boundary source '{boundary_source}' and no manual bounds provided. "
@@ -534,6 +547,13 @@ class TranslationPipeline:
                     bounds=bounds,
                     gadm_level=self.config.region.boundary.gadm_level or 2,
                 )
+
+            # V2-22b/P.1 — record the RESOLVED boundary source, not
+            # the requested config source. Fallback branches (GADM
+            # failed → manual_bounds) set `resolved_boundary_source
+            # = 'manual'` above so cache / lock / ETA paths route by
+            # bbox, not by the stale config.source value.
+            region.boundary_source = resolved_boundary_source
 
             data["region"] = region
 
@@ -990,7 +1010,7 @@ class TranslationPipeline:
                         self.logger.warning(f"AgERA5 download failed: {agera5_result.errors}")
                         # Scan cache for partial files — report what IS on disk
                         # so validation can flag incomplete data honestly.
-                        self._report_partial_agera5(cache_dir, region.name, climate_data)
+                        self._report_partial_agera5(cache_dir, region, climate_data)
             except PipelineCancelled:
                 # V2-22b L F-4: Gate A's HIGH 1 list cited :924 (TAMSAT
                 # branch) but missed this AgERA5-branch site. Without
@@ -1000,7 +1020,7 @@ class TranslationPipeline:
                 raise
             except Exception as e:
                 self.logger.warning(f"AgERA5 download error: {e}")
-                self._report_partial_agera5(cache_dir, region.name, climate_data)
+                self._report_partial_agera5(cache_dir, region, climate_data)
 
             if got_data:
                 return climate_data
@@ -1009,7 +1029,7 @@ class TranslationPipeline:
         return None
 
     def _report_partial_agera5(
-        self, cache_dir: Path, region_name: str, climate_data: Dict,
+        self, cache_dir: Path, region, climate_data: Dict,
     ) -> None:
         """Scan AgERA5 cache for partial files after a failed download.
 
@@ -1017,9 +1037,15 @@ class TranslationPipeline:
         may already exist from partial downloads or previous runs.
         Report them so validation can flag incomplete data honestly
         instead of silently ignoring the gap.
+
+        Uses `region_cache_key(region)` so manual regions with
+        bbox-unique cache paths are looked up correctly — the
+        previous `normalize_region_name(region.name)` key would
+        collide across different manual projects that share the
+        `"Unnamed study area"` display name.
         """
-        from prismpy.utils.sanitization import normalize_region_name
-        safe_name = normalize_region_name(region_name)
+        from prismpy.utils.sanitization import region_cache_key
+        safe_name = region_cache_key(region)
         agera5_cache = cache_dir / "agera5" / f"AgERA5_{safe_name}"
         if not agera5_cache.exists():
             # Mark that AgERA5 was expected but has zero files
