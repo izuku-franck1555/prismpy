@@ -375,30 +375,41 @@ class BoundaryConfig(BaseModel):
         `Path('')` / `Path('.')` hole codex R13 identified."""
         if value is None:
             return value
+        # Derive the raw string form for segment-level checks.
+        # String inputs are NOT stripped (R21 MEDIUM — whole-string
+        # `.strip()` silently removes the very trailing space we're
+        # meant to reject). PathLike inputs are stringified as-is.
+        raw_str = value if isinstance(value, str) else str(value)
         if isinstance(value, str):
-            stripped = value.strip()
-            if _contains_invisible_path_char(stripped):
-                raise ValueError(
-                    f"shapefile_path {value!r} contains non-printable "
-                    "or invisible characters; paths accept letters, "
-                    "numbers, and standard POSIX / Windows path "
-                    "punctuation (including `+`, `[`, `]`, `@`, "
-                    "`:`, `\\`) — only controls, format chars, and "
-                    "invisible codepoints are rejected"
-                )
-            if not stripped:
+            if not raw_str.strip():
                 raise ValueError(
                     f"shapefile_path {value!r} is empty or "
                     "whitespace-only; provide a real path or "
                     "omit the field entirely"
                 )
-            value = stripped
+            if raw_str != raw_str.strip():
+                raise ValueError(
+                    f"shapefile_path {value!r} has leading or "
+                    "trailing whitespace; paths must be declared "
+                    "without incidental whitespace padding — a "
+                    "terminal-space filename is ambiguous on "
+                    "POSIX and illegal on Windows"
+                )
+        if _contains_invisible_path_char(raw_str):
+            raise ValueError(
+                f"shapefile_path {value!r} contains non-printable "
+                "or invisible characters; paths accept letters, "
+                "numbers, and standard POSIX / Windows path "
+                "punctuation (including `+`, `[`, `]`, `@`, "
+                "`:`, `\\`) — only controls, format chars, and "
+                "invisible codepoints are rejected"
+            )
         # PathLike normalization: coerce to Path and reject the
         # empty-sentinel (`Path('')` == `Path('.')`) that would
         # otherwise pass Pydantic's type check and resolve to
         # the current working directory at retrieve time.
         try:
-            candidate = Path(value)
+            candidate = Path(raw_str)
         except (TypeError, ValueError):
             return value  # let Pydantic's type validator reject
         if candidate == Path('.') or str(candidate).strip() in ('', '.'):
@@ -407,40 +418,34 @@ class BoundaryConfig(BaseModel):
                 "working directory (`Path('.')`); provide an "
                 "explicit path to a shapefile"
             )
-        if _contains_invisible_path_char(str(candidate)):
-            raise ValueError(
-                f"shapefile_path {value!r} contains non-printable "
-                "or invisible characters"
-            )
         # Windows-path segment policy — reject reserved device
         # names (CON, PRN, AUX, NUL, COMn, LPTn) and segments
-        # ending in a trailing dot or space. Checked on each
-        # path component; drive prefix (e.g., `C:`) is skipped.
-        # Promotes "Windows-invalid filename" from runtime
-        # DataSourceError to a validation-time error.
-        for part in candidate.parts:
-            # Skip drive / root sentinels (`C:`, `/`, `\\`).
-            if part in ('/', '\\') or (
-                len(part) == 2 and part.endswith(':')
-            ):
+        # ending in a trailing dot or space. Splits on BOTH `/`
+        # and `\` separators directly from the raw input, so the
+        # check works even when the validator runs on POSIX
+        # against a Windows-style input like `C:\CON\region.shp`
+        # (R21 HIGH — `pathlib.Path.parts` on POSIX would
+        # otherwise see that as a single segment and miss the
+        # reserved-name collision).
+        for seg in re.split(r'[\\/]+', raw_str):
+            if not seg:  # leading-slash empty segment
                 continue
-            # Trailing dot / space on a segment is Windows-invalid
-            # (the shell silently strips them, creating a
-            # different on-disk name).
-            if part.endswith('.') or part.endswith(' '):
+            # Skip drive prefix like 'C:' (2 chars ending with colon).
+            if len(seg) == 2 and seg.endswith(':'):
+                continue
+            if seg.endswith('.') or seg.endswith(' '):
                 raise ValueError(
                     f"shapefile_path {value!r} has a segment "
-                    f"ending with a dot or space ({part!r}); "
+                    f"ending with a dot or space ({seg!r}); "
                     "Windows strips those, so the on-disk name "
                     "won't match the declared path"
                 )
-            # Reserved device name — with or without extension.
-            stem = part.split('.', 1)[0].upper()
+            stem = seg.split('.', 1)[0].upper()
             if stem in _WINDOWS_RESERVED_NAMES:
                 raise ValueError(
                     f"shapefile_path {value!r} has a segment "
                     f"matching a Windows reserved device name "
-                    f"({part!r}); those names are unusable as "
+                    f"({seg!r}); those names are unusable as "
                     "files on Windows"
                 )
         return candidate

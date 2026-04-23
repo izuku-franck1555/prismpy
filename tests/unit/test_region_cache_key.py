@@ -805,12 +805,74 @@ class TestShapefilePathUniversalInvariants(unittest.TestCase):
             rc.boundary.shapefile_path, Path('/some/path/boundaries.shp'),
         )
 
-    def test_surrounding_whitespace_stripped(self):
-        from pathlib import Path
-        rc = self._build_with_shapefile('  /some/path/boundaries.shp  ')
-        self.assertEqual(
-            rc.boundary.shapefile_path, Path('/some/path/boundaries.shp'),
-        )
+    def test_surrounding_whitespace_rejected(self):
+        """V2-22b/P.2 AC-AUDIT-20 codex R21 MEDIUM update — paths
+        with leading/trailing whitespace are now rejected rather
+        than silently stripped. Stripping masked the R21 case
+        where the trailing whitespace WAS the illegal Windows
+        segment-ending-with-space, producing a different on-disk
+        name. Explicit rejection forces the caller to trim
+        intentionally, surfacing any ambiguity as a validation
+        error rather than a silent mutation."""
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(
+            ValidationError, 'leading or trailing whitespace',
+        ):
+            self._build_with_shapefile('  /some/path/boundaries.shp  ')
+
+    def test_trailing_space_on_filename_rejected(self):
+        """R21 MEDIUM verbatim: `/tmp/region ` with a terminal
+        space is ambiguous on POSIX and illegal on Windows. Must
+        now fail at validate time — the prior `.strip()` call
+        would have silently converted this to `/tmp/region`."""
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(
+            ValidationError, 'leading or trailing whitespace',
+        ):
+            self._build_with_shapefile('/tmp/region ')
+
+
+class TestShapefilePathWindowsSegmentsSeparatorAgnostic(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-20 codex R21 HIGH — the Windows
+    reserved-name / trailing-dot-or-space segment check must work
+    against native backslash paths even when the validator runs
+    on POSIX. `pathlib.Path.parts` on POSIX sees a string like
+    `r'C:\\CON\\region.shp'` as a single segment; the fixed
+    validator splits the raw input on both `/` and `\\` so
+    segment-level rejection is separator-agnostic."""
+
+    @staticmethod
+    def _build_with_shapefile(shapefile_path):
+        from prismpy.config.schema import RegionConfig
+        return RegionConfig.model_validate({
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'shapefile',
+                'shapefile_path': shapefile_path,
+            },
+        })
+
+    def test_con_in_windows_backslash_path_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'reserved'):
+            self._build_with_shapefile(r'C:\CON\region.shp')
+
+    def test_trailing_dot_in_windows_backslash_path_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'dot or space'):
+            self._build_with_shapefile(r'C:\bad.\region.shp')
+
+    def test_trailing_space_in_windows_backslash_path_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'dot or space'):
+            self._build_with_shapefile(r'C:\bad \region.shp')
+
+    def test_legitimate_windows_backslash_path_accepted(self):
+        """Control — a clean Windows path with no reserved names
+        and no trailing whitespace/dot still validates so the
+        segment check isn't over-rejecting."""
+        rc = self._build_with_shapefile(r'C:\data\region.shp')
+        self.assertIn(':', str(rc.boundary.shapefile_path))
 
 
 class TestUnicodeHiddenCharsUniversalInvariants(unittest.TestCase):
