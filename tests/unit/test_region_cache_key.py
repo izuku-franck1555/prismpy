@@ -435,3 +435,105 @@ class TestFromConfigValidationBoundary(unittest.TestCase):
                     },
                 },
             })
+
+
+class TestRegionConfigNormalizableNameCountry(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-10 — `RegionConfig.name` and
+    `RegionConfig.country` must reject values whose normalized
+    form is empty.
+
+    Pre-AC-AUDIT-10 schema: `Field(..., min_length=1)` accepted
+    strings like `'   '`, `'!!!'`, `'___'` — which validated
+    upstream but collapsed to `''` when passed through
+    `normalize_region_name` or `sanitize_admin_name` downstream.
+    Result: two different malformed configs aliasing onto the
+    same empty-string cache key / lock path / filename prefix.
+
+    The schema-level validator catches those inputs at
+    `model_validate` time so every downstream consumer gets the
+    invariant for free. Covers both fields; both hit
+    filename-normalization paths (name → `normalize_region_name`,
+    country → `sanitize_admin_name` inside several translators).
+    """
+
+    @staticmethod
+    def _build(**overrides):
+        """Minimal valid config builder. Callers override name /
+        country to exercise the new validator."""
+        from prismpy.config.schema import RegionConfig
+        payload = {
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'manual',
+                'manual_bounds': {
+                    'minx': -5.0, 'miny': 12.0,
+                    'maxx': -3.0, 'maxy': 14.0,
+                },
+            },
+        }
+        payload.update(overrides)
+        return RegionConfig.model_validate(payload)
+
+    def test_pure_whitespace_name_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'empty identifier'):
+            self._build(name='   ')
+
+    def test_pure_punctuation_name_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'empty identifier'):
+            self._build(name='!!!')
+
+    def test_pure_underscore_name_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'empty identifier'):
+            self._build(name='___')
+
+    def test_name_whitespace_trimmed(self):
+        """`mode='before'` strips surrounding whitespace so a
+        legitimate name with trailing/leading spaces doesn't
+        fail downstream file-naming while preserving the UX of
+        accepting copy-paste input."""
+        rc = self._build(name='  Koutiala  ')
+        self.assertEqual(rc.name, 'Koutiala')
+
+    def test_pure_whitespace_country_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'empty identifier'):
+            self._build(country='   ')
+
+    def test_pure_punctuation_country_rejected(self):
+        """Country strings feed translators' `sanitize_admin_name`
+        path, which strips punctuation. `'!!!'` collapses to ''
+        there too, producing malformed output paths."""
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'empty identifier'):
+            self._build(country='!!!')
+
+    def test_country_whitespace_trimmed(self):
+        rc = self._build(country='  Mali  ')
+        self.assertEqual(rc.country, 'Mali')
+
+    def test_name_country_parity_with_from_region(self):
+        """Codex R9 observation — pre-AC-AUDIT-10, `from_config`
+        silently returned '' for malformed names while
+        `from_region` raised. The schema-level validator closes
+        the divergence: both entry points now refuse the same
+        logical input, just at different layers (validate vs
+        helper-call)."""
+        from pydantic import ValidationError
+        # Pre-resolution path: RegionConfig rejects at validate.
+        with self.assertRaises(ValidationError):
+            self._build(name='   ')
+        # Post-resolution path: Region with empty name raises
+        # inside the helper (existing behaviour, unchanged).
+        with self.assertRaises(ValueError):
+            region_cache_key_from_region(
+                types.SimpleNamespace(
+                    name='   ',
+                    boundary_source='gadm',
+                    bounds=types.SimpleNamespace(
+                        miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0,
+                    ),
+                )
+            )

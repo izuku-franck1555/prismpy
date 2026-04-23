@@ -131,6 +131,37 @@ class RegionConfig(BaseModel):
     def validate_iso3(cls, v: str) -> str:
         return v.upper()
 
+    @field_validator("name", "country", mode="before")
+    @classmethod
+    def _strip_and_require_normalizable(cls, value):
+        """Enforce the invariant downstream cache-key / filename /
+        path consumers rely on: the field must normalize to a
+        non-empty identifier. `min_length=1` alone accepts
+        whitespace-only (`'   '`), punctuation-only (`'!!!'`), or
+        underscore-only (`'___'`) inputs that validate upstream
+        but collapse to an empty key when passed through
+        `normalize_region_name` / `sanitize_admin_name` — so two
+        different malformed inputs silently alias onto the same
+        cache path, lock file, or filename prefix.
+
+        `mode='before'` so the stripped value is stored (no UX
+        regression on `'  Koutiala  '`). Import
+        `normalize_region_name` lazily to avoid any future
+        sanitization → schema cycle."""
+        if not isinstance(value, str):
+            # Let Pydantic's type validation handle non-strings.
+            return value
+        stripped = value.strip()
+        from prismpy.utils.sanitization import normalize_region_name
+        if not normalize_region_name(stripped):
+            raise ValueError(
+                f"{value!r} normalizes to an empty identifier; "
+                "at least one alphanumeric character required "
+                "(letters or digits, possibly separated by "
+                "spaces, hyphens, or underscores)"
+            )
+        return stripped
+
 
 # =============================================================================
 # Crop Configuration
