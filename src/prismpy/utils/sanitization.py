@@ -236,16 +236,30 @@ def region_cache_key(region) -> str:
     source_value = _region_boundary_source(region)
     if source_value == 'manual':
         bounds = _region_manual_bounds(region)
-        if bounds is not None:
-            miny, maxy, minx, maxx = (_canon_zero(v) for v in bounds)
-            return (
-                f"manual_"
-                f"{miny:.6f}_{maxy:.6f}_"
-                f"{minx:.6f}_{maxx:.6f}"
+        if bounds is None:
+            # Malformed manual region — DO NOT fall through to
+            # name-key. Silent fallback would collapse unrelated
+            # manual regions (two different bboxes both labeled
+            # "Unnamed study area" but with missing / malformed
+            # manual_bounds fields) onto the same cache/lock
+            # path, recreating exactly the cross-tenant collision
+            # the V2-22b/P.2 unification was meant to eliminate.
+            # `source == 'manual'` is a hard contract: the caller
+            # promised manual bounds, so failing to parse them is
+            # a version-skew bug at the call site, not a graceful
+            # fallback moment.
+            raise ValueError(
+                "region_cache_key: manual boundary requires "
+                "parseable manual_bounds (miny, maxy, minx, maxx); "
+                f"got boundary={_attr_or_key(region, 'boundary', None)!r} "
+                f"bounds={_attr_or_key(region, 'bounds', None)!r}"
             )
-        # Malformed manual region — fall through to name-key so
-        # caller isn't blocked. Validation upstream would reject
-        # this before reaching cache paths.
+        miny, maxy, minx, maxx = (_canon_zero(v) for v in bounds)
+        return (
+            f"manual_"
+            f"{miny:.6f}_{maxy:.6f}_"
+            f"{minx:.6f}_{maxx:.6f}"
+        )
     key = normalize_region_name(_attr_or_key(region, 'name', '') or '')
     if not key:
         # Strict contract: the helper is the CROSS-REPO IDENTITY

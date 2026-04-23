@@ -785,6 +785,28 @@ class TestFilelockSerialization:
                 cache_dir, source="tamsat", region_name="raw_string",
             )
 
+    def test_malformed_manual_mapping_rejected(
+        self, cache_dir: Path,
+    ) -> None:
+        """V2-22b/P.2 AC-AUDIT-6 — a prismweb-shaped Mapping with
+        `boundary.source == 'manual'` but missing `manual_bounds`
+        must fail loudly at the `cache_lock_path` entry point, not
+        only inside `region_cache_key`. Locks the strict contract
+        end-to-end so a version-skewed persisted payload can't
+        silently produce a name-keyed lock that collides with
+        unrelated manual regions sharing the same display name."""
+        malformed = {
+            'name': 'Unnamed study area',
+            'boundary': {
+                'source': 'manual',
+                # manual_bounds missing (version-skew scenario).
+            },
+        }
+        with pytest.raises(ValueError, match='manual_bounds'):
+            cache_lock_path(
+                cache_dir, source="tamsat", region_name=malformed,
+            )
+
     def test_cross_process_serialization_via_spawned_interpreters(
         self, tmp_path: Path, maradi_region: Region,
     ) -> None:

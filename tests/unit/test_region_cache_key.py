@@ -175,22 +175,65 @@ class TestRegionCacheKeyFallbacks(unittest.TestCase):
             region_cache_key(r), normalize_region_name('Legacy Region'),
         )
 
-    def test_malformed_manual_bbox_falls_back_to_name_key(self):
-        """If boundary_source says manual but bbox fields are
-        missing, fall through to name-key rather than raising —
-        upstream validation would reject this before cache paths
-        are built, but the fallback keeps the helper itself
-        robust."""
+    def test_malformed_manual_bbox_raises_value_error(self):
+        """V2-22b/P.2 AC-AUDIT-6 — when boundary_source says
+        'manual' but bounds are missing / malformed, raise
+        ValueError instead of falling through to the name key.
+        The earlier fall-through quietly collapsed unrelated
+        manual regions (two different bboxes both labeled
+        "Unnamed study area" but with missing manual_bounds)
+        onto the same cache/lock path, recreating the
+        cross-tenant collision the unification was meant to
+        eliminate. `source == 'manual'` is a hard contract —
+        callers promising manual bounds and failing to provide
+        them have a version-skew bug, not a graceful fallback
+        case."""
         r = types.SimpleNamespace(
             name='Malformed',
             boundary_source='manual',
             bounds=None,  # missing
             boundary=None,
         )
-        # No exception, falls through to name-key.
-        self.assertEqual(
-            region_cache_key(r), normalize_region_name('Malformed'),
-        )
+        with self.assertRaisesRegex(ValueError, 'manual_bounds'):
+            region_cache_key(r)
+
+    def test_malformed_prismweb_mapping_raises(self):
+        """Codex R6 HIGH — the V2-22b/P.2 Mapping-shape contract
+        (AC-A1.c) made dicts first-class; paired with AC-AUDIT-5
+        moving `cache_lock_path` onto `region_cache_key`, a
+        version-skewed prismweb payload (e.g., `boundary.source`
+        was persisted but `manual_bounds` was not) would have
+        silently degraded to the display-name key, collapsing
+        every "Unnamed study area" project onto the same lock.
+        AC-AUDIT-6 makes that a hard failure; this test pins the
+        prismweb-shaped payload that codex identified."""
+        d = {
+            'name': 'Unnamed study area',
+            'boundary': {
+                'source': 'manual',
+                # manual_bounds omitted entirely (version-skew
+                # scenario: older prismweb persisted the source
+                # flag but not the bounds dict).
+            },
+        }
+        with self.assertRaisesRegex(ValueError, 'manual_bounds'):
+            region_cache_key(d)
+
+    def test_malformed_manual_bounds_missing_keys_raises(self):
+        """Partial bounds dict — source is manual and
+        `manual_bounds` exists but is missing required keys.
+        Must also raise; a partial dict cannot silently produce
+        a numeric key."""
+        d = {
+            'name': 'Partial area',
+            'boundary': {
+                'source': 'manual',
+                'manual_bounds': {'minx': -5.0, 'miny': 12.0},
+                # maxx, maxy missing
+            },
+        }
+        with self.assertRaisesRegex(ValueError, 'manual_bounds'):
+            region_cache_key(d)
 
 
 class TestRegionCacheKeyDictShape(unittest.TestCase):
