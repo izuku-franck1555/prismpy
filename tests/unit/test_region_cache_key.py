@@ -225,272 +225,213 @@ class TestRegionRoundTripPreservesBoundarySource(unittest.TestCase):
 # =============================================================================
 
 
-def _config_dict(
-    *, name='Unnamed study area', source='manual',
+def _build_manual_config(
+    *, name='Unnamed study area', country='Mali', iso3='MLI',
     miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0,
 ):
-    """Mapping-shaped config dict (prismweb's persisted shape)."""
-    return {
-        'name': name,
+    """Build a validated `RegionConfig` for a manual-boundary region
+    through `RegionConfig.model_validate`. All Pydantic validators
+    fire — ManualBoundsConfig checks ranges + ordering, BoundaryConfig
+    enforces manual → manual_bounds, RegionConfig enforces name
+    min_length=1, iso3 length==3. Callers that want to probe
+    invalid inputs build the raw dict directly and assert the
+    validate step fails."""
+    from prismpy.config.schema import RegionConfig
+    return RegionConfig.model_validate({
+        'name': name, 'country': country, 'country_iso3': iso3,
         'boundary': {
-            'source': source,
+            'source': 'manual',
             'manual_bounds': {
-                'minx': minx, 'miny': miny,
-                'maxx': maxx, 'maxy': maxy,
+                'minx': minx, 'miny': miny, 'maxx': maxx, 'maxy': maxy,
             },
         },
-    }
+    })
 
 
-def _config_ns(
-    *, name='Unnamed study area', source='manual',
-    miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0,
-):
-    """Pydantic-like SimpleNamespace shaped like RegionConfig. For
-    assertions that attribute access works alongside Mapping access."""
-    manual = types.SimpleNamespace(
-        miny=miny, maxy=maxy, minx=minx, maxx=maxx,
-    )
-    boundary = types.SimpleNamespace(source=source, manual_bounds=manual)
-    return types.SimpleNamespace(name=name, boundary=boundary)
+def _build_gadm_config(name='Boulemane', country='Morocco', iso3='MAR'):
+    from prismpy.config.schema import RegionConfig
+    return RegionConfig.model_validate({
+        'name': name, 'country': country, 'country_iso3': iso3,
+        'boundary': {
+            'source': 'gadm',
+            'gadm_level': 2,
+            'gadm_filter_field': 'NAME_2',
+            'gadm_filter_value': name,
+        },
+    })
 
 
 class TestFromConfigManual(unittest.TestCase):
-    """Manual-source configs — bbox-keyed via nested
-    `boundary.manual_bounds`. Both Mapping and Pydantic-style
-    inputs supported."""
+    """Manual-source `RegionConfig` → bbox-keyed identity. The
+    helper reads `config.boundary.source` (BoundarySource enum)
+    and `config.boundary.manual_bounds` (ManualBoundsConfig
+    Pydantic model) directly — no coercion, no fallback."""
 
-    def test_dict_manual_keys_by_bbox(self):
-        d = _config_dict(
-            source='manual', miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0,
-        )
-        key = region_cache_key_from_config(d)
-        self.assertTrue(key.startswith('manual_'))
-        self.assertIn('12.000000', key)
-
-    def test_pydantic_like_manual_keys_by_bbox(self):
-        rc = _config_ns(
-            source='manual', miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0,
-        )
-        self.assertTrue(region_cache_key_from_config(rc).startswith('manual_'))
-
-    def test_enum_source_value_accepted(self):
-        """Pydantic's real BoundarySource enum has `.value == 'manual'`."""
-        source_enum = types.SimpleNamespace(value='manual')
-        manual = types.SimpleNamespace(
+    def test_manual_config_keys_by_bbox(self):
+        rc = _build_manual_config(
             miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0,
         )
-        boundary = types.SimpleNamespace(
-            source=source_enum, manual_bounds=manual,
-        )
-        rc = types.SimpleNamespace(name='x', boundary=boundary)
-        self.assertTrue(region_cache_key_from_config(rc).startswith('manual_'))
+        key = region_cache_key_from_config(rc)
+        self.assertTrue(key.startswith('manual_'))
+        self.assertIn('12.000000', key)
+        self.assertIn('14.000000', key)
+        self.assertIn('-5.000000', key)
+        self.assertIn('-3.000000', key)
 
-    def test_dict_and_pydantic_agree(self):
-        """Mapping and attribute-style inputs with identical
-        semantics produce identical keys — prismweb can persist
-        via dict and prismpy can read via Pydantic without drift."""
-        d = _config_dict(
-            source='manual', miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0,
-        )
-        ns = _config_ns(
-            source='manual', miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0,
-        )
+    def test_same_bbox_same_key(self):
+        rc1 = _build_manual_config(miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0)
+        rc2 = _build_manual_config(miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0)
         self.assertEqual(
-            region_cache_key_from_config(d),
-            region_cache_key_from_config(ns),
+            region_cache_key_from_config(rc1),
+            region_cache_key_from_config(rc2),
         )
 
-    def test_negative_zero_canonicalizes(self):
-        d_nz = _config_dict(
-            source='manual', minx=-0.0, miny=0.0, maxx=1.0, maxy=1.0,
+    def test_different_bbox_different_key(self):
+        rc1 = _build_manual_config(miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0)
+        rc2 = _build_manual_config(miny=6.0, maxy=9.0, minx=37.0, maxx=40.0)
+        self.assertNotEqual(
+            region_cache_key_from_config(rc1),
+            region_cache_key_from_config(rc2),
         )
-        d_pz = _config_dict(
-            source='manual', minx=0.0, miny=-0.0, maxx=1.0, maxy=1.0,
-        )
-        self.assertEqual(
-            region_cache_key_from_config(d_nz),
-            region_cache_key_from_config(d_pz),
-        )
-        self.assertNotIn('-0', region_cache_key_from_config(d_nz))
 
     def test_nearby_boxes_produce_different_keys(self):
-        d1 = _config_dict(
-            source='manual', miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0,
-        )
-        d2 = _config_dict(
-            source='manual',
+        rc1 = _build_manual_config(miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0)
+        rc2 = _build_manual_config(
             miny=12.00001, maxy=14.00001,
             minx=-5.00001, maxx=-3.00001,
         )
         self.assertNotEqual(
-            region_cache_key_from_config(d1),
-            region_cache_key_from_config(d2),
+            region_cache_key_from_config(rc1),
+            region_cache_key_from_config(rc2),
         )
+
+    def test_negative_zero_canonicalizes(self):
+        """A bbox with a prime-meridian / equator edge produces
+        `-0.0` from some JS / GeoJSON round-trips. Pydantic
+        accepts `-0.0` as a valid float; the helper normalizes
+        it to `0.0` so two mathematically-identical bboxes
+        produce the same key."""
+        rc_nz = _build_manual_config(
+            minx=-0.0, miny=0.0, maxx=1.0, maxy=1.0,
+        )
+        rc_pz = _build_manual_config(
+            minx=0.0, miny=-0.0, maxx=1.0, maxy=1.0,
+        )
+        self.assertEqual(
+            region_cache_key_from_config(rc_nz),
+            region_cache_key_from_config(rc_pz),
+        )
+        self.assertNotIn('-0', region_cache_key_from_config(rc_nz))
 
 
 class TestFromConfigGadm(unittest.TestCase):
-    """GADM configs — name-keyed; no bbox fallback even if a
-    manual_bounds dict is present under a gadm source."""
+    """GADM-source `RegionConfig` → name-keyed identity."""
 
-    def test_dict_gadm_name_keyed(self):
-        d = {
-            'name': 'Boulemane',
-            'boundary': {'source': 'gadm'},
-        }
+    def test_gadm_config_name_keyed(self):
+        rc = _build_gadm_config(name='Boulemane')
         self.assertEqual(
-            region_cache_key_from_config(d),
+            region_cache_key_from_config(rc),
             normalize_region_name('Boulemane'),
         )
 
-    def test_pydantic_gadm_name_keyed(self):
-        rc = _config_ns(name='Maradi', source='gadm')
+    def test_same_admin_name_same_key(self):
+        rc1 = _build_gadm_config(name='Maradi')
+        rc2 = _build_gadm_config(name='Maradi')
+        self.assertEqual(
+            region_cache_key_from_config(rc1),
+            region_cache_key_from_config(rc2),
+        )
+
+    def test_accented_admin_name_normalizes(self):
+        rc = _build_gadm_config(name='Ségou')
+        # normalize_region_name strips accents + lowercases.
         self.assertEqual(
             region_cache_key_from_config(rc),
-            normalize_region_name('Maradi'),
-        )
-
-    def test_missing_boundary_defaults_to_name_key(self):
-        """Config without a `boundary` section at all — fall through
-        to the name-key path (non-manual treatment)."""
-        d = {'name': 'Plain name-only region'}
-        self.assertEqual(
-            region_cache_key_from_config(d),
-            normalize_region_name('Plain name-only region'),
+            normalize_region_name('Ségou'),
         )
 
 
-class TestFromConfigStrict(unittest.TestCase):
-    """Strict guards — pre-resolution inputs with malformed shapes
-    raise `ValueError` instead of silently degrading. Closes the
-    codex R3 / R6 / R7 surfaces:
-    - dict-valued `boundary.source` silently stringified;
-    - conflicting top-level vs nested source (removed — AC-AUDIT-8
-      doesn't support top-level `boundary_source` on the config
-      shape; it's a Region-dataclass field);
-    - partial / stray `manual_bounds`;
-    - top-level `bounds` recovery fallback for Mappings."""
+class TestFromConfigValidationBoundary(unittest.TestCase):
+    """Pydantic validation happens at `RegionConfig.model_validate`
+    — NOT inside `region_cache_key_from_config`. Malformed inputs
+    never reach the helper; the tests here document that boundary
+    by asserting Pydantic raises before the helper runs.
 
-    def test_raw_string_config_rejected(self):
-        """A raw string as the whole config — no boundary, no name
-        attr — should raise. Catches callers that pre-AC-AUDIT-5
-        pattern-matched the old polymorphic signature."""
-        with self.assertRaises(ValueError):
-            region_cache_key_from_config('raw_string')
+    Prior rounds (R3 / R6 / R7) tested imperative strict guards
+    inside the helper. AC-AUDIT-9 collapsed those guards —
+    validation lives in the schema models, and shipping the
+    helper without duplicated validation is the point.
+    """
 
-    def test_empty_dict_rejected(self):
-        with self.assertRaises(ValueError):
-            region_cache_key_from_config({})
-
-    def test_manual_missing_manual_bounds_raises(self):
-        d = {
-            'name': 'Unnamed study area',
-            'boundary': {'source': 'manual'},
-            # no manual_bounds
-        }
-        with self.assertRaisesRegex(ValueError, 'manual_bounds'):
-            region_cache_key_from_config(d)
-
-    def test_manual_with_partial_manual_bounds_raises(self):
-        d = {
-            'name': 'Partial area',
-            'boundary': {
-                'source': 'manual',
-                'manual_bounds': {'minx': -5.0, 'miny': 12.0},
-                # maxx / maxy missing
-            },
-        }
-        with self.assertRaisesRegex(ValueError, 'numeric'):
-            region_cache_key_from_config(d)
-
-    def test_manual_with_stray_top_level_bounds_raises(self):
-        """Codex R7 scenario — a Mapping with partial
-        `manual_bounds` AND a stray fully-populated top-level
-        `bounds`. Under the polymorphic helper this returned the
-        stray bbox's key. Under the strict `from_config` entry
-        point, the stray `bounds` is NOT consulted — the partial
-        `manual_bounds` fails its numeric-parse guard and
-        surfaces as a ValueError."""
-        d = {
-            'name': 'Unnamed study area',
-            'boundary': {
-                'source': 'manual',
-                'manual_bounds': {'minx': -5.0, 'miny': 12.0},
-            },
-            'bounds': {
-                'minx': 1.0, 'miny': 2.0, 'maxx': 3.0, 'maxy': 4.0,
-            },
-        }
-        with self.assertRaisesRegex(ValueError, 'numeric'):
-            region_cache_key_from_config(d)
-
-    def test_manual_no_manual_bounds_with_stray_top_level_bounds_raises(self):
-        """Variant of the above — NO `manual_bounds` at all + stray
-        top-level `bounds`. Previously would silently use the
-        stray bounds; now raises because manual_bounds is missing."""
-        d = {
-            'name': 'Unnamed study area',
-            'boundary': {'source': 'manual'},
-            'bounds': {
-                'minx': 1.0, 'miny': 2.0, 'maxx': 3.0, 'maxy': 4.0,
-            },
-        }
-        with self.assertRaisesRegex(ValueError, 'manual_bounds'):
-            region_cache_key_from_config(d)
-
-    def test_dict_valued_source_rejected(self):
-        """Non-string / non-enum source — e.g., a dict with a
-        `'value'` key (codex R7 scenario: a version-skewed
-        serializer that didn't unwrap the enum) — rejected with a
-        clear message rather than stringified silently."""
-        d = {
-            'name': 'x',
-            'boundary': {
-                'source': {'value': 'manual'},
-                'manual_bounds': {
-                    'minx': -5.0, 'miny': 12.0,
-                    'maxx': -3.0, 'maxy': 14.0,
+    def test_empty_name_rejected_by_model(self):
+        """`RegionConfig.name` is `Field(..., min_length=1)` — an
+        empty name fails at model_validate, never reaches the
+        helper."""
+        from pydantic import ValidationError
+        from prismpy.config.schema import RegionConfig
+        with self.assertRaises(ValidationError):
+            RegionConfig.model_validate({
+                'name': '', 'country': 'Mali', 'country_iso3': 'MLI',
+                'boundary': {
+                    'source': 'manual',
+                    'manual_bounds': {
+                        'minx': -5.0, 'miny': 12.0,
+                        'maxx': -3.0, 'maxy': 14.0,
+                    },
                 },
-            },
-        }
-        with self.assertRaisesRegex(ValueError, 'invalid boundary source'):
-            region_cache_key_from_config(d)
+            })
 
-    def test_list_valued_source_rejected(self):
-        d = {
-            'name': 'x',
-            'boundary': {
-                'source': ['manual'],
-                'manual_bounds': {
-                    'minx': -5.0, 'miny': 12.0,
-                    'maxx': -3.0, 'maxy': 14.0,
+    def test_unknown_source_rejected_by_model(self):
+        """`BoundarySource` is a strict Enum — a typo like
+        `'manual '` (trailing space) or unknown source string
+        fails at the enum coercion step."""
+        from pydantic import ValidationError
+        from prismpy.config.schema import RegionConfig
+        with self.assertRaises(ValidationError):
+            RegionConfig.model_validate({
+                'name': 'x', 'country': 'Mali', 'country_iso3': 'MLI',
+                'boundary': {'source': 'manual '},
+            })
+
+    def test_manual_without_bounds_rejected_by_model(self):
+        """`BoundaryConfig.validate_source_requirements` raises
+        when `source == manual` but `manual_bounds` is absent."""
+        from pydantic import ValidationError
+        from prismpy.config.schema import RegionConfig
+        with self.assertRaises(ValidationError):
+            RegionConfig.model_validate({
+                'name': 'x', 'country': 'Mali', 'country_iso3': 'MLI',
+                'boundary': {'source': 'manual'},
+            })
+
+    def test_manual_bounds_wrong_ordering_rejected_by_model(self):
+        """`ManualBoundsConfig.validate_bounds` raises when minx
+        >= maxx or miny >= maxy."""
+        from pydantic import ValidationError
+        from prismpy.config.schema import RegionConfig
+        with self.assertRaises(ValidationError):
+            RegionConfig.model_validate({
+                'name': 'x', 'country': 'Mali', 'country_iso3': 'MLI',
+                'boundary': {
+                    'source': 'manual',
+                    'manual_bounds': {
+                        'minx': 5.0, 'miny': 12.0,
+                        'maxx': 3.0, 'maxy': 14.0,
+                    },
                 },
-            },
-        }
-        with self.assertRaisesRegex(ValueError, 'invalid boundary source'):
-            region_cache_key_from_config(d)
+            })
 
-    def test_enum_like_with_non_string_value_rejected(self):
-        """Enum-like object whose `.value` is a non-string —
-        guards against duck-typed enum impersonators that pass
-        `hasattr(source, 'value')` but aren't the real enum."""
-        fake = types.SimpleNamespace(value=42)
-        rc = types.SimpleNamespace(
-            name='x',
-            boundary=types.SimpleNamespace(
-                source=fake,
-                manual_bounds=types.SimpleNamespace(
-                    miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0,
-                ),
-            ),
-        )
-        with self.assertRaisesRegex(ValueError, 'invalid boundary source'):
-            region_cache_key_from_config(rc)
-
-    def test_non_manual_with_empty_name_raises(self):
-        """Config without a manual source AND with an empty name
-        has no identity to key off; raise instead of returning an
-        empty-key cache path."""
-        d = {'name': '', 'boundary': {'source': 'gadm'}}
-        with self.assertRaisesRegex(ValueError, 'non-empty name'):
-            region_cache_key_from_config(d)
+    def test_manual_bounds_out_of_geographic_range_rejected_by_model(self):
+        from pydantic import ValidationError
+        from prismpy.config.schema import RegionConfig
+        with self.assertRaises(ValidationError):
+            RegionConfig.model_validate({
+                'name': 'x', 'country': 'Mali', 'country_iso3': 'MLI',
+                'boundary': {
+                    'source': 'manual',
+                    'manual_bounds': {
+                        'minx': -5.0, 'miny': 12.0,
+                        'maxx': -3.0, 'maxy': 95.0,  # latitude > 90
+                    },
+                },
+            })

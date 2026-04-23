@@ -7,7 +7,7 @@ and handle special characters in administrative names.
 
 import re
 import unicodedata
-from typing import Any, Mapping, Optional
+from typing import Optional
 
 
 def remove_accents(text: str) -> str:
@@ -250,76 +250,46 @@ def region_cache_key_from_region(region: Any) -> str:
     return key
 
 
-def region_cache_key_from_config(config: Any) -> str:
+def region_cache_key_from_config(config: "RegionConfig") -> str:
     """Cross-repo region identity contract — PRE-RESOLUTION shape.
 
     Canonical identifier for the region persisted in project
-    configuration (prismweb's `config.region` JSON dict, or the
-    `RegionConfig` Pydantic model). Strict on every field so
-    malformed or version-skewed payloads fail loudly instead of
-    collapsing onto a display-name key that collides with every
-    other broken input.
+    configuration. Accepts a validated `RegionConfig` Pydantic
+    model — all the strictness this helper used to enforce
+    imperatively (non-empty name, enum source, populated
+    `manual_bounds` with numeric coords inside geographic ranges,
+    `minx < maxx`, `miny < maxy`) is already enforced by
+    `RegionConfig` + `BoundaryConfig` + `ManualBoundsConfig`
+    validators at `model_validate()` time. This helper assumes a
+    validated input and reads fields directly; passing an
+    unvalidated dict is a caller-side mistake that Pydantic
+    catches at the validate boundary upstream.
 
-    Accepts:
-    - A plain `Mapping` (prismweb's JSON-persisted shape):
-      `config["boundary"]["source"]` (str) +
-      `config["boundary"]["manual_bounds"]` (dict with
-      `minx / miny / maxx / maxy`) + `config["name"]` (str).
-    - A Pydantic-like / `RegionConfig` object with the same
-      nested shape via attribute access.
+    Routing:
+    - `boundary.source == BoundarySource.MANUAL`: bbox-derived
+      key at 6-decimal precision (~11 cm at the equator) with
+      `-0.0 → 0.0` canonicalization.
+    - `boundary.source in (GADM, SHAPEFILE)`: `normalize_region_name(name)`.
 
-    Strict guards:
-    - `boundary.source` must be `str` or enum-with-string-`.value`.
-      Dict / list / other shapes raise `ValueError`.
-    - Manual `source` requires a fully-populated
-      `boundary.manual_bounds` with all four numeric fields.
-      Missing / partial / non-numeric → `ValueError`.
-    - No fallback to top-level `bounds` on Mappings (that's a
-      post-resolution Region field; cross-shape drift hazard).
-    - No fallback to `name` when `source == 'manual'` (caller
-      must declare a parseable bbox).
-
-    Raises `ValueError` on any malformed shape.
+    Callers should build a `RegionConfig` via
+    `RegionConfig.model_validate(region_dict)` at the boundary
+    they receive the dict (e.g., prismweb's view layer), then
+    hand the validated model to this helper.
     """
-    boundary = _cfg_get(config, 'boundary')
-    source_value = None
-    if boundary is not None:
-        raw_source = _cfg_get(boundary, 'source')
-        if raw_source is not None:
-            source_value = _coerce_source_value(raw_source)
-    if source_value == 'manual':
-        manual = _cfg_get(boundary, 'manual_bounds')
-        if manual is None:
-            raise ValueError(
-                "region_cache_key_from_config: manual source "
-                "requires boundary.manual_bounds with "
-                f"(minx, miny, maxx, maxy); got {config!r}"
-            )
-        try:
-            miny = _canon_zero(float(_cfg_get(manual, 'miny')))
-            maxy = _canon_zero(float(_cfg_get(manual, 'maxy')))
-            minx = _canon_zero(float(_cfg_get(manual, 'minx')))
-            maxx = _canon_zero(float(_cfg_get(manual, 'maxx')))
-        except (AttributeError, TypeError, ValueError) as e:
-            raise ValueError(
-                "region_cache_key_from_config: manual_bounds must "
-                "have numeric (minx, miny, maxx, maxy); got "
-                f"{manual!r}"
-            ) from e
+    from prismpy.config.schema import BoundarySource
+
+    if config.boundary.source == BoundarySource.MANUAL:
+        bounds = config.boundary.manual_bounds
+        miny = _canon_zero(bounds.miny)
+        maxy = _canon_zero(bounds.maxy)
+        minx = _canon_zero(bounds.minx)
+        maxx = _canon_zero(bounds.maxx)
         return (
             f"manual_"
             f"{miny:.6f}_{maxy:.6f}_"
             f"{minx:.6f}_{maxx:.6f}"
         )
-    # Non-manual: name-keyed. No fallback to any other shape.
-    name = _cfg_get(config, 'name') or ''
-    key = normalize_region_name(name) if isinstance(name, str) else ''
-    if not key:
-        raise ValueError(
-            "region_cache_key_from_config: non-manual source "
-            f"requires a non-empty name; got {config!r}"
-        )
-    return key
+    return normalize_region_name(config.name)
 
 
 def _canon_zero(val: float) -> float:
@@ -329,35 +299,3 @@ def _canon_zero(val: float) -> float:
     equator could produce two different keys for the same
     region without this guard."""
     return 0.0 if val == 0 else float(val)
-
-
-def _cfg_get(obj: Any, key: str) -> Any:
-    """Read `key` off a pre-resolution config object.
-
-    Scoped helper for `region_cache_key_from_config` — accepts
-    either `Mapping` (JSON dict) or a Pydantic / attribute-style
-    object. Returns `None` when the key is absent. Not used by
-    `region_cache_key_from_region`; each entry point's access
-    pattern stays isolated so future refactors to one don't
-    reshape the other."""
-    if isinstance(obj, Mapping):
-        return obj.get(key)
-    return getattr(obj, key, None)
-
-
-def _coerce_source_value(raw: Any) -> str:
-    """Return `raw` as a string. Accept `str` directly; accept
-    enum-like objects with a string `.value`. Reject everything
-    else with `ValueError` — silent stringification of dicts /
-    lists was how malformed payloads used to miss the exact
-    `'manual'` check and fall through to a name-key."""
-    if isinstance(raw, str):
-        return raw
-    value_attr = getattr(raw, 'value', None)
-    if isinstance(value_attr, str):
-        return value_attr
-    raise ValueError(
-        "region_cache_key_from_config: invalid boundary source — "
-        "expected str or enum with string .value, got "
-        f"{type(raw).__name__}: {raw!r}"
-    )
