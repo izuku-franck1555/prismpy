@@ -591,21 +591,21 @@ class TestRegionConfigUniversalInvariants(unittest.TestCase):
         JSON reports, fixed-width records."""
         from pydantic import ValidationError
         with self.assertRaisesRegex(
-            ValidationError, 'disallowed',
+            ValidationError, 'disallowed|non-printable|invisible',
         ):
             self._build(name='Kou\ntiala')
 
     def test_name_rejects_embedded_tab(self):
         from pydantic import ValidationError
         with self.assertRaisesRegex(
-            ValidationError, 'disallowed',
+            ValidationError, 'disallowed|non-printable|invisible',
         ):
             self._build(name='Kou\ttiala')
 
     def test_country_rejects_embedded_newline(self):
         from pydantic import ValidationError
         with self.assertRaisesRegex(
-            ValidationError, 'disallowed',
+            ValidationError, 'disallowed|non-printable|invisible',
         ):
             self._build(country='Mali\nWest')
 
@@ -613,7 +613,7 @@ class TestRegionConfigUniversalInvariants(unittest.TestCase):
         """Full ASCII control range \\x00-\\x1f + \\x7f."""
         from pydantic import ValidationError
         with self.assertRaisesRegex(
-            ValidationError, 'disallowed',
+            ValidationError, 'disallowed|non-printable|invisible',
         ):
             self._build(country='Mali\x07West')  # bell
 
@@ -700,7 +700,7 @@ class TestGadmFilterValueUniversalInvariants(unittest.TestCase):
 
     def test_control_char_filter_value_rejected(self):
         from pydantic import ValidationError
-        with self.assertRaisesRegex(ValidationError, 'disallowed'):
+        with self.assertRaisesRegex(ValidationError, 'disallowed|non-printable|invisible'):
             self._build_gadm('Koutiala\ntext')
 
     def test_surrounding_whitespace_stripped(self):
@@ -751,7 +751,7 @@ class TestGadmFilterFieldUniversalInvariants(unittest.TestCase):
 
     def test_control_char_filter_field_rejected(self):
         from pydantic import ValidationError
-        with self.assertRaisesRegex(ValidationError, 'disallowed'):
+        with self.assertRaisesRegex(ValidationError, 'disallowed|non-printable|invisible'):
             self._build_with_filter_field('NAME\t2')
 
     def test_surrounding_whitespace_stripped(self):
@@ -795,7 +795,7 @@ class TestShapefilePathUniversalInvariants(unittest.TestCase):
 
     def test_control_char_shapefile_path_rejected(self):
         from pydantic import ValidationError
-        with self.assertRaisesRegex(ValidationError, 'disallowed'):
+        with self.assertRaisesRegex(ValidationError, 'disallowed|non-printable|invisible'):
             self._build_with_shapefile('/path/\nfile.shp')
 
     def test_valid_shapefile_path_accepted(self):
@@ -854,7 +854,7 @@ class TestUnicodeHiddenCharsUniversalInvariants(unittest.TestCase):
         for char, label in self.HIDDEN_CHARS:
             with self.subTest(label=label):
                 with self.assertRaisesRegex(
-                    ValidationError, 'disallowed',
+                    ValidationError, 'disallowed|non-printable|invisible',
                 ):
                     self._build(name=f'Kou{char}tiala')
 
@@ -863,7 +863,7 @@ class TestUnicodeHiddenCharsUniversalInvariants(unittest.TestCase):
         for char, label in self.HIDDEN_CHARS:
             with self.subTest(label=label):
                 with self.assertRaisesRegex(
-                    ValidationError, 'disallowed',
+                    ValidationError, 'disallowed|non-printable|invisible',
                 ):
                     self._build(country=f'Ma{char}li')
 
@@ -873,7 +873,7 @@ class TestUnicodeHiddenCharsUniversalInvariants(unittest.TestCase):
         for char, label in self.HIDDEN_CHARS:
             with self.subTest(label=label):
                 with self.assertRaisesRegex(
-                    ValidationError, 'disallowed',
+                    ValidationError, 'disallowed|non-printable|invisible',
                 ):
                     RegionConfig.model_validate({
                         'name': 'Koutiala',
@@ -892,7 +892,7 @@ class TestUnicodeHiddenCharsUniversalInvariants(unittest.TestCase):
         for char, label in self.HIDDEN_CHARS:
             with self.subTest(label=label):
                 with self.assertRaisesRegex(
-                    ValidationError, 'disallowed',
+                    ValidationError, 'disallowed|non-printable|invisible',
                 ):
                     RegionConfig.model_validate({
                         'name': 'Koutiala',
@@ -952,6 +952,77 @@ class TestShapefilePathLikeNormalization(unittest.TestCase):
         )
 
 
+class TestShapefilePathPunctuationAcceptance(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-18 codex R18 MEDIUM — paths legitimately
+    contain punctuation outside the identifier allowlist: `+`,
+    `[`, `]`, `@`, `:` (Windows drive), `\\` (Windows separator),
+    `~`, `$`, `#`. The AC-AUDIT-16 whitelist pivot applied the
+    identifier policy to `shapefile_path` too, which caused
+    legitimate paths to fail validation. This class pins the
+    path-specific policy: paths accept a broader punctuation set,
+    rejecting only control / format / invisible codepoints."""
+
+    @staticmethod
+    def _build_with_shapefile(shapefile_path):
+        from prismpy.config.schema import RegionConfig
+        return RegionConfig.model_validate({
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'shapefile',
+                'shapefile_path': shapefile_path,
+            },
+        })
+
+    def test_plus_in_directory_name_accepted(self):
+        from pathlib import Path
+        rc = self._build_with_shapefile('/tmp/v1+2/region.shp')
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('/tmp/v1+2/region.shp'),
+        )
+
+    def test_brackets_in_directory_name_accepted(self):
+        from pathlib import Path
+        rc = self._build_with_shapefile('/tmp/[draft]/region.shp')
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('/tmp/[draft]/region.shp'),
+        )
+
+    def test_at_symbol_in_directory_name_accepted(self):
+        from pathlib import Path
+        rc = self._build_with_shapefile('/tmp/@me/region.shp')
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('/tmp/@me/region.shp'),
+        )
+
+    def test_windows_drive_path_accepted(self):
+        """`C:\\data\\region.shp` contains `:` and `\\` which the
+        identifier allowlist rejects — paths need the broader
+        acceptance policy."""
+        from pathlib import Path
+        rc = self._build_with_shapefile(r'C:\data\region.shp')
+        # pathlib on POSIX normalizes this literally.
+        self.assertEqual(
+            str(rc.boundary.shapefile_path), r'C:\data\region.shp',
+        )
+
+    def test_tilde_home_path_accepted(self):
+        from pathlib import Path
+        rc = self._build_with_shapefile('~/data/region.shp')
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('~/data/region.shp'),
+        )
+
+    def test_dollar_variable_in_path_accepted(self):
+        """Shell-style `$VAR` paths — not expanded by the schema
+        (resolution happens at read time), but the validator
+        shouldn't reject them on character grounds."""
+        from pathlib import Path
+        rc = self._build_with_shapefile('/tmp/$DATA/region.shp')
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('/tmp/$DATA/region.shp'),
+        )
+
+
 class TestInvisibleCodePointsUniversalInvariants(unittest.TestCase):
     """V2-22b/P.2 AC-AUDIT-15 — Python's `str.isprintable()` alone
     doesn't catch default-ignorable Unicode code points that
@@ -998,6 +1069,19 @@ class TestInvisibleCodePointsUniversalInvariants(unittest.TestCase):
         ('\U00013441', 'EGYPTIAN HIEROGLYPH FULL BLANK'),
         ('\U00013442', 'EGYPTIAN HIEROGLYPH HALF BLANK'),
         ('\U00016FE4', 'KHITAN SMALL SCRIPT FILLER'),
+        # V2-22b/P.2 AC-AUDIT-18 — codex R18 follow-up. Mn-category
+        # joiners / selectors from non-Latin scripts that the
+        # previous `Mn` blanket-accept admitted. The schema now
+        # narrows Mn acceptance to the Latin Combining Diacritical
+        # Marks block (U+0300-U+036F); every other Mn codepoint,
+        # including these script-specific zero-width joiners, is
+        # rejected structurally.
+        ('\u2D7F', 'TIFINAGH CONSONANT JOINER'),
+        ('\U0001107F', 'BRAHMI NUMBER JOINER'),
+        ('\U00011A47', 'ZANABAZAR SQUARE SUBJOINER'),
+        ('\U00011A99', 'SOYOMBO SUBJOINER'),
+        ('\U00011F42', 'KAWI CONJOINER'),
+        ('\U0001BC9D', 'DUPLOYAN THICK LETTER SELECTOR'),
     ]
 
     @staticmethod
@@ -1021,7 +1105,7 @@ class TestInvisibleCodePointsUniversalInvariants(unittest.TestCase):
         for char, label in self.INVISIBLE_CHARS:
             with self.subTest(label=label):
                 with self.assertRaisesRegex(
-                    ValidationError, 'disallowed',
+                    ValidationError, 'disallowed|non-printable|invisible',
                 ):
                     self._build(name=f'Kou{char}tiala')
 
@@ -1030,7 +1114,7 @@ class TestInvisibleCodePointsUniversalInvariants(unittest.TestCase):
         for char, label in self.INVISIBLE_CHARS:
             with self.subTest(label=label):
                 with self.assertRaisesRegex(
-                    ValidationError, 'disallowed',
+                    ValidationError, 'disallowed|non-printable|invisible',
                 ):
                     self._build(country=f'Ma{char}li')
 
@@ -1040,7 +1124,7 @@ class TestInvisibleCodePointsUniversalInvariants(unittest.TestCase):
         for char, label in self.INVISIBLE_CHARS:
             with self.subTest(label=label):
                 with self.assertRaisesRegex(
-                    ValidationError, 'disallowed',
+                    ValidationError, 'disallowed|non-printable|invisible',
                 ):
                     RegionConfig.model_validate({
                         'name': 'Koutiala',
@@ -1059,7 +1143,7 @@ class TestInvisibleCodePointsUniversalInvariants(unittest.TestCase):
         for char, label in self.INVISIBLE_CHARS:
             with self.subTest(label=label):
                 with self.assertRaisesRegex(
-                    ValidationError, 'disallowed',
+                    ValidationError, 'disallowed|non-printable|invisible',
                 ):
                     RegionConfig.model_validate({
                         'name': 'Koutiala',
@@ -1078,7 +1162,7 @@ class TestInvisibleCodePointsUniversalInvariants(unittest.TestCase):
         for char, label in self.INVISIBLE_CHARS:
             with self.subTest(label=label):
                 with self.assertRaisesRegex(
-                    ValidationError, 'disallowed',
+                    ValidationError, 'disallowed|non-printable|invisible',
                 ):
                     RegionConfig.model_validate({
                         'name': 'Koutiala',

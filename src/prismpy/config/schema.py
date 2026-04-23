@@ -67,38 +67,46 @@ def _is_default_ignorable(c: str) -> bool:
 
 
 # Unicode general categories accepted in identifier strings
-# (region name, country, gadm_filter_value, gadm_filter_field,
-# shapefile_path). Includes letters (L*), numbers (N*), and
-# combining marks (Mn, Mc) so NFD-decomposed accented Latin
-# names like 'Ségou' (e + U+0301) still validate regardless of
-# how the caller normalized them.
+# (region name, country, gadm_filter_value, gadm_filter_field).
+# Letters + numbers only at category level; combining marks are
+# admitted via a narrow range check below so NFD-decomposed Latin
+# accents work but script-specific invisible joiners don't.
 _IDENTIFIER_CATEGORIES = frozenset({
     "Lu", "Ll", "Lt", "Lm", "Lo",    # letters
     "Nd", "Nl", "No",                 # numbers
-    "Mn", "Mc",                       # combining marks
 })
 
-# Printable punctuation + separators that appear legitimately in
-# region / country / filter / path identifier strings.
+# Combining Diacritical Marks block (U+0300-U+036F). NFD-decomposed
+# accented Latin names (`'Ségou'` = `'e' + U+0301`) need these Mn
+# codepoints. Narrowing the Mn acceptance to this one block rejects
+# Mn-category invisible joiners / selectors from other scripts —
+# Tifinagh, Brahmi, Kawi, Duployan, etc. — without re-introducing
+# a growing blocklist. Per V2-22b/P.2 §2.8 persona-relevance gate,
+# the target PRISMWEB audience writes Latin-script names, so the
+# Latin diacritics block is sufficient.
+_LATIN_COMBINING_MARK_RANGE = (0x0300, 0x036F)
+
+# Printable punctuation + separators accepted in identifier strings
+# (region name / country / GADM filter values). Shapefile paths
+# use a separate, broader policy (see `_is_path_char`) because
+# POSIX and Windows paths legitimately contain `+`, `[`, `]`, `@`,
+# `:`, `\`, etc. that are not identifier-safe.
 _IDENTIFIER_PUNCT = frozenset(" -_.',/()&")
 
 
 def _is_identifier_char(c: str) -> bool:
-    """True if `c` is acceptable in an identifier string.
+    """True if `c` is acceptable in an identifier string
+    (region name, country, GADM filter field/value).
 
-    Positive-acceptance check: ONLY chars in the identifier-category
-    allowlist or the punctuation allowlist pass. Two rejection
-    overlays catch invisibles whose Unicode general category would
-    otherwise let them through:
-
-    - `_is_default_ignorable(c)` — Hangul Jamo fillers, variation
-      selectors, combining grapheme joiner, Khmer inherent vowels,
-      Khitan Small Script Filler, SOFT HYPHEN, etc.
-    - `_INVISIBLE_LO_CODEPOINTS` — Letter-Other codepoints that
-      render visually blank despite their script-letter
-      classification (Egyptian Hieroglyph Full/Half Blank). These
-      aren't in Unicode's Default_Ignorable property so the
-      previous overlay misses them.
+    Positive-acceptance check:
+    - Default-ignorable or invisible-Lo overlays reject first.
+    - Identifier punctuation (`_IDENTIFIER_PUNCT`) accepts.
+    - Letter / number categories accept.
+    - Mn-category chars accept ONLY inside the Latin Combining
+      Diacritical Marks block (U+0300-U+036F). Other Mn
+      codepoints are script-specific joiners or selectors that
+      render invisibly; the narrow range rejects them
+      structurally without a growing blocklist.
     """
     if _is_default_ignorable(c):
         return False
@@ -106,30 +114,70 @@ def _is_identifier_char(c: str) -> bool:
         return False
     if c in _IDENTIFIER_PUNCT:
         return True
-    return unicodedata.category(c) in _IDENTIFIER_CATEGORIES
+    cat = unicodedata.category(c)
+    if cat in _IDENTIFIER_CATEGORIES:
+        return True
+    if cat == 'Mn':
+        lo, hi = _LATIN_COMBINING_MARK_RANGE
+        return lo <= ord(c) <= hi
+    return False
+
+
+def _is_path_char(c: str) -> bool:
+    """True if `c` is acceptable in a filesystem-path string.
+
+    Path policy differs from the identifier policy: POSIX and
+    Windows paths legitimately contain `+`, `[`, `]`, `:` (Windows
+    drive), `\\` (Windows separator), `@`, `~`, `$`, etc. that
+    aren't identifier-safe. This helper rejects only truly invalid
+    path characters: control codes, format characters, invisibles,
+    and the Egyptian Hieroglyph Blanks + Khitan filler that
+    R17/R18 flagged as categorically unsafe anywhere.
+
+    The shapefile_path validator uses this helper instead of
+    `_is_identifier_char` so a path like `/tmp/v1+2/region.shp`
+    or `C:\\data\\region.shp` passes without tripping the
+    identifier punctuation allowlist.
+    """
+    if _is_default_ignorable(c):
+        return False
+    if ord(c) in _INVISIBLE_LO_CODEPOINTS:
+        return False
+    cat = unicodedata.category(c)
+    # Reject controls / format / line & paragraph separators.
+    if cat in ('Cc', 'Cf', 'Cs', 'Cn', 'Zl', 'Zp'):
+        return False
+    # Reject non-space whitespace (NBSP, thin space, etc.).
+    if cat == 'Zs' and c != ' ':
+        return False
+    # Reject invisible Mn chars outside the Latin diacritic block.
+    if cat == 'Mn':
+        lo, hi = _LATIN_COMBINING_MARK_RANGE
+        return lo <= ord(c) <= hi
+    # Everything else (letters, numbers, symbols, punctuation,
+    # ASCII space) is accepted — paths legitimately contain a wide
+    # character set and the schema's job here is to block the
+    # categorically-invalid cases, not to enforce a narrow
+    # identifier-safe allowlist.
+    return True
 
 
 def _contains_invisible_char(s: str) -> bool:
-    """True if `s` contains any character that isn't a valid
-    identifier char.
-
-    Positive-whitelist shape (V2-22b/P.2 AC-AUDIT-16): earlier
-    rounds (R13/R14/R15) each surfaced a new invisible Unicode
-    class the blocklist didn't cover — ASCII controls → Cf format
-    characters → Other_Default_Ignorable tail (Hangul fillers,
-    variation selectors, Khmer inherent vowels). The pattern was
-    "blocklist can't enumerate all bad inputs." AC-AUDIT-16
-    inverts the check: only Unicode categories defined as
-    identifier-acceptable pass, plus a narrow
-    `Default_Ignorable_Code_Point` overlay for invisible chars
-    whose category overlaps the allowlist (Lo/Mn/Mc).
-
-    The function name stays `_contains_invisible_char` so callers
-    don't change; semantically it's now "contains any disallowed
-    char" but the original name captures the primary risk we're
-    guarding against.
-    """
+    """True if `s` contains any character not accepted by the
+    identifier-whitelist (`_is_identifier_char`). Used for region
+    name, country, and GADM filter string fields."""
     return any(not _is_identifier_char(c) for c in s)
+
+
+def _contains_invisible_path_char(s: str) -> bool:
+    """True if `s` contains any character not accepted by the
+    path-whitelist (`_is_path_char`). Used for shapefile_path —
+    path strings legitimately contain `+`, `[`, `]`, `@`, `:`,
+    `\\` that the identifier policy rejects, so this helper uses
+    a broader acceptance set while still blocking invisibles,
+    controls, and the categorically-unsafe codepoints R17 flagged.
+    """
+    return any(not _is_path_char(c) for c in s)
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -280,14 +328,14 @@ class BoundaryConfig(BaseModel):
             return value
         if isinstance(value, str):
             stripped = value.strip()
-            if _contains_invisible_char(stripped):
+            if _contains_invisible_path_char(stripped):
                 raise ValueError(
-                    f"shapefile_path {value!r} contains disallowed "
-                    "characters; path strings accept the same "
-                    "letters, numbers, and common punctuation as "
-                    "other identifier fields — non-printable, "
-                    "invisible, or other symbol characters are "
-                    "rejected"
+                    f"shapefile_path {value!r} contains non-printable "
+                    "or invisible characters; paths accept letters, "
+                    "numbers, and standard POSIX / Windows path "
+                    "punctuation (including `+`, `[`, `]`, `@`, "
+                    "`:`, `\\`) — only controls, format chars, and "
+                    "invisible codepoints are rejected"
                 )
             if not stripped:
                 raise ValueError(
@@ -310,11 +358,10 @@ class BoundaryConfig(BaseModel):
                 "working directory (`Path('.')`); provide an "
                 "explicit path to a shapefile"
             )
-        if _contains_invisible_char(str(candidate)):
+        if _contains_invisible_path_char(str(candidate)):
             raise ValueError(
                 f"shapefile_path {value!r} contains non-printable "
-                "or invisible characters; only visible, printable "
-                "characters are allowed"
+                "or invisible characters"
             )
         return candidate
 
