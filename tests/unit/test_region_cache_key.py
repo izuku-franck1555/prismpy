@@ -66,10 +66,23 @@ class TestRegionCacheKeyManual(unittest.TestCase):
         r = _make_region(miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0)
         key = region_cache_key(r)
         self.assertTrue(key.startswith('manual_'))
-        self.assertIn('12.0000', key)
-        self.assertIn('14.0000', key)
-        self.assertIn('-5.0000', key)
-        self.assertIn('-3.0000', key)
+        # 6-decimal precision keeps nearby-but-distinct boxes from
+        # aliasing onto the same key (Gate B MEDIUM).
+        self.assertIn('12.000000', key)
+        self.assertIn('14.000000', key)
+        self.assertIn('-5.000000', key)
+        self.assertIn('-3.000000', key)
+
+    def test_nearby_boxes_produce_different_keys(self):
+        """Codex Path A follow-up MEDIUM — boxes that differ by
+        more than 1e-6 degrees (~11 cm at the equator) must get
+        distinct keys. The earlier 4-decimal precision collapsed
+        differences finer than 1e-4 (~11 m) onto the same key."""
+        r1 = _make_region(miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0)
+        r2 = _make_region(
+            miny=12.00001, maxy=14.00001, minx=-5.00001, maxx=-3.00001,
+        )
+        self.assertNotEqual(region_cache_key(r1), region_cache_key(r2))
 
     def test_regionconfig_manual_keyed_by_bbox(self):
         """RegionConfig path — pre-resolution pydantic-shaped input

@@ -220,10 +220,16 @@ def region_cache_key(region) -> str:
         bounds = _region_manual_bounds(region)
         if bounds is not None:
             miny, maxy, minx, maxx = bounds
+            # Use 6-decimal precision (~11 cm at the equator) so
+            # nearby-but-distinct manual boxes can't silently alias
+            # onto the same cache/lock path. Earlier 4-decimal
+            # precision (~11 m) still aliased at pixel-level
+            # differences a user dragging a bbox could realistically
+            # produce.
             return (
                 f"manual_"
-                f"{miny:.4f}_{maxy:.4f}_"
-                f"{minx:.4f}_{maxx:.4f}"
+                f"{miny:.6f}_{maxy:.6f}_"
+                f"{minx:.6f}_{maxx:.6f}"
             )
         # Malformed manual region — fall through to name-key so
         # caller isn't blocked. Validation upstream would reject

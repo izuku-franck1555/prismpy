@@ -562,15 +562,21 @@ def _validate_sarra_py_geotiffs(
         total_files += len(tifs)
         if not tifs:
             continue
-        # Gate B MEDIUM — pick a deterministic 10-file sample so
-        # degraded-sample warnings are reproducible across runs.
-        # Strategy: sorted() above orders lexicographically by
-        # filename, and `random.Random(seed)` gives us a stable
-        # per-variable-per-dir selection. The seed uses the
-        # variable name + file count; identical inputs always
-        # produce the same sample, while a changed file set
-        # (corruption fixed, new output) reselects.
-        seed = f"{var}:{len(tifs)}"
+        # Deterministic sample so degraded-sample warnings are
+        # reproducible across runs. Seed on the full filename list
+        # (sorted above) rather than just (var, count) so two
+        # runs with the SAME file set produce the same sample,
+        # but a single-file change — e.g., a new day added to
+        # a rolling output — reshuffles coverage. Earlier
+        # `{var}:{len(tifs)}` seed froze the sample positions for
+        # every run length; a corruption outside those positions
+        # was systematically missed. Hashing filenames keeps the
+        # sample reproducible AND responsive to file-set changes.
+        import hashlib as _hashlib
+        filenames_digest = _hashlib.sha256(
+            ('\n'.join(p.name for p in tifs)).encode('utf-8')
+        ).hexdigest()
+        seed = f"{var}:{filenames_digest}"
         sample = random.Random(seed).sample(tifs, min(10, len(tifs)))
         sampled_vars[var] = (sample, op, operand)
 

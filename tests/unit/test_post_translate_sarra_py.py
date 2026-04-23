@@ -267,6 +267,33 @@ class TestSarraPyEmptySampleFiles(unittest.TestCase):
         for name in first['details']['sampled_files']:
             self.assertNotIn('/', name)
 
+    def test_sample_changes_when_file_set_changes(self):
+        """Codex Path A follow-up MEDIUM — the sample must depend
+        on the FILE SET, not just the file count. Earlier seed
+        was `{var}:{len(tifs)}` so every run with the same count
+        picked the same 10 positions — a corruption outside those
+        positions was systematically missed. The content-hashed
+        seed makes the sample reproducible AND responsive to any
+        file-set change."""
+        checks_before = _validate_sarra_py_geotiffs(self.tmpdir)
+        sampled_before = next(
+            c['details']['sampled_files'] for c in checks_before
+            if c.get('check') == 'post_translate_range_sarra_py_tmax'
+        )
+        # Add a new valid tif for tmax — different file set, same count+1.
+        new_path = (
+            self.tmpdir / 'data' / 'climate'
+            / '2m_temperature_24_hour_maximum' / 'extra_valid.tif'
+        )
+        _write_fixture_tiff(new_path, 23.0)
+        checks_after = _validate_sarra_py_geotiffs(self.tmpdir)
+        sampled_after = next(
+            c['details']['sampled_files'] for c in checks_after
+            if c.get('check') == 'post_translate_range_sarra_py_tmax'
+        )
+        # Different file set → the sample has changed.
+        self.assertNotEqual(sampled_before, sampled_after)
+
     def test_partial_unreadable_sample_persists_file_identity(self):
         """Companion to the above — when files DO fail, their
         names land in the details payload so an operator can

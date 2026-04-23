@@ -527,18 +527,26 @@ class TAMSATSource(DataSource):
         metadata["start_date"] = start_date.isoformat()
         metadata["end_date"] = end_date.isoformat()
 
+        # Codex Path A follow-up — compute the cache key ONCE for
+        # this run and thread it through every identity use
+        # downstream (filenames, existence checks, validation, lock,
+        # download). Using `region.name` for some and `cache_key`
+        # for others produces a split brain where manual-unnamed
+        # runs re-download dates that are already on disk under a
+        # different filename.
+        from prismpy.utils.sanitization import region_cache_key
+        region_key = region_cache_key(region)
+
         # Determine data directory
         if data_dir:
             data_dir = Path(data_dir)
         elif self.config.data_dir:
             data_dir = self.config.data_dir
         else:
-            # Default: cache_dir/tamsat/{region_cache_key}/ — manual
+            # Default: cache_dir/tamsat/{region_key}/ — manual
             # regions key by bbox so unnamed-manual projects don't
             # collide on "Unnamed study area".
-            from prismpy.utils.sanitization import region_cache_key
-            safe_name = region_cache_key(region)
-            data_dir = self.cache_dir / "tamsat" / safe_name
+            data_dir = self.cache_dir / "tamsat" / region_key
 
         # Get bounds in both formats
         bounds_gis = region.bounds.to_gis_format()
@@ -576,7 +584,7 @@ class TAMSATSource(DataSource):
         if data_dir.exists():
             file_info = self._validate_local_files(
                 data_dir=data_dir,
-                region_name=region.name,
+                region_name=region_key,
                 start_date=start_date,
                 end_date=end_date,
             )
@@ -637,7 +645,7 @@ class TAMSATSource(DataSource):
                 )
 
                 tamsat_data = TAMSATData(
-                    region_name=region.name,
+                    region_name=region_key,
                     bounds=bounds_gis,
                     bounds_sarra_py=bounds_sarra_py,
                     start_date=start_date,
@@ -708,7 +716,7 @@ class TAMSATSource(DataSource):
                     write_marker(
                         marker_path,
                         source=self.NAME,
-                        region_name=region.name,
+                        region_name=region_key,
                         run_id=run_id,
                     )
 
@@ -742,7 +750,7 @@ class TAMSATSource(DataSource):
                         start_date=start_date,
                         end_date=end_date,
                         output_dir=data_dir,
-                        region_name=region.name,
+                        region_name=region_key,
                         progress_callback=kwargs.get('progress_callback'),
                         cancel_check=cancel_check,
                     )
@@ -750,13 +758,13 @@ class TAMSATSource(DataSource):
                     # Re-validate after download
                     file_info = self._validate_local_files(
                         data_dir=data_dir,
-                        region_name=region.name,
+                        region_name=region_key,
                         start_date=start_date,
                         end_date=end_date,
                     )
 
                     tamsat_data = TAMSATData(
-                        region_name=region.name,
+                        region_name=region_key,
                         bounds=bounds_gis,
                         bounds_sarra_py=bounds_sarra_py,
                         start_date=start_date,
@@ -792,7 +800,7 @@ class TAMSATSource(DataSource):
                     write_cache_manifest(
                         manifest_path,
                         source=self.NAME,
-                        region_name=region.name,
+                        region_name=region_key,
                         bbox=bbox_dict,
                         start_date=start_date,
                         end_date=end_date,
