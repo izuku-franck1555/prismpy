@@ -11,31 +11,20 @@ The third fix introduced a "delegated to the per-platform
 post-translate validator" copy which was honest but read as
 technical to non-developer personas — user flagged it.
 
-The current contract (P.1 persona copy, post codex rounds 2-4):
-file-based climate → one info record whose summary explains the
-sampling in plain language ("random sample of 10 output files per
-variable") and tells the reader to look for "the other records in
-this report" if a variable is missing.
+The current contract (P.1 final, post codex-driven iterations):
+file-based climate → one info record whose summary is purely
+DESCRIPTIVE. It explains the sampling ("random sample of 10
+output files per variable") and hedges on absence ("when
+available, the per-variable ranges appear below") — no
+prescriptive "check X for the reason" cue.
 
-Copy is self-contained AND promise-safe:
-
-- Self-contained: refers only to artifacts present IN THIS REPORT
-  (the validation record list), works in both the web UI and the
-  packaged `validation_report.json` researchers audit offline.
-- Promise-safe: the broad "other records in this report" wording
-  works whether the explanation comes from a post-translate
-  warning, a skipped-translation note the executor may append,
-  or another validator entirely. Earlier "post-translate messages
-  in this report AND pipeline steps above" phrasing over-promised
-  in executor-skip paths where post-translate never ran.
-
-The validator (`_validate_sarra_py_geotiffs`) emits an explicit
-record for every silent-skip failure mode — empty climate dir,
-missing rasterio, unreadable sampled tiffs, partial-unreadable
-samples — so when post-translate DOES run, some explanatory
-record always lands. When the executor skips post-translate
-entirely, the upstream error is surfaced in the broader report
-context; the copy's "other records" phrasing captures that too.
+Earlier iterations tried to prescribe where to debug missing
+ranges, and each wording over- or under-promised on some code
+path (validator-local failures, executor-skip, translation
+error). Descriptive copy sidesteps the whole problem: if a
+variable is missing, the reader finds the explanation wherever
+it actually lives (other validation records, pipeline status,
+download logs) — we don't tell them where.
 """
 
 import types
@@ -107,33 +96,22 @@ class TestClimateInfoLineDelegatesToPostTranslate(unittest.TestCase):
         self.assertIn('random sample of 10', summary)
         # (2) code identifier stays out of persona copy.
         self.assertNotIn('post_translate_range_sarra_py', summary)
-        # (3) copy is self-contained — refers only to content
-        # present in the packaged `validation_report.json` AND the
-        # web UI. Codex R3 HIGH flagged that "pipeline steps above"
-        # was dead text inside the JSON artifact researchers audit.
-        self.assertNotIn('pipeline steps above', summary)
-        # Codex R4 MEDIUM — the narrower "post-translate messages
-        # in this report" wording over-promised in executor-skip
-        # paths where post-translate never ran. The broader
-        # "other records in this report" phrasing works for both
-        # validator-local failures AND executor-skip cases.
-        self.assertNotIn('post-translate messages', summary)
-        # Must still point users at in-report follow-up so the
-        # silent-skip story is addressable.
-        self.assertIn('in this report', summary)
-        self.assertIn('other records', summary)
-        # (4) prior misleading phrasings must not regress.
+        # (3) hedge signal — "when available" acknowledges that
+        # the per-variable records may or may not appear, without
+        # prescribing where to look for the reason when they don't.
+        # Codex rounds 2-4 each found a failure-mode for which the
+        # prescriptive cue was wrong; the descriptive hedge
+        # sidesteps the whole class.
+        self.assertIn('when available', summary.lower())
+        # (4) must NOT resurrect prescriptive phrasings codex flagged.
         self.assertNotIn('not checked', summary.lower())
         self.assertNotIn('spot-checked', summary.lower())
         self.assertNotIn('delegated', summary.lower())
-        # (5) must not attribute absence to a single failure mode.
+        self.assertNotIn('pipeline steps above', summary)
+        self.assertNotIn('post-translate messages', summary)
+        self.assertNotIn("check the other records", summary.lower())
         self.assertNotIn("translation didn't complete", summary)
         self.assertNotIn("translation did not complete", summary)
-        self.assertNotIn(
-            "one of the pipeline steps above didn't finish", summary,
-            "narrower didn't-finish phrasing was the codex-R2 HIGH — "
-            "must not resurface",
-        )
 
     def test_unreadable_sampled_tifs_emit_explicit_warning(self):
         """Codex self-check R3 HIGH — the info-copy promise that

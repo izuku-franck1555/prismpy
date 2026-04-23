@@ -700,9 +700,8 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
             "summary": (
                 "Climate value ranges for SARRA-Py are computed "
                 "from a random sample of 10 output files per "
-                "variable. The per-variable ranges appear below. "
-                "If you don't see them, check the other records "
-                "in this report for the reason."
+                "variable. When available, the per-variable "
+                "ranges appear below."
             ),
             "manuscript_claim": "Section 2.5: value range verification (delegated)",
             "details": {
