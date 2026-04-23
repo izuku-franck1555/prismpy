@@ -94,6 +94,31 @@ _LATIN_COMBINING_MARK_RANGE = (0x0300, 0x036F)
 _IDENTIFIER_PUNCT = frozenset(" -_.',/()&")
 
 
+def _normalizes_to_ascii_alnum(c: str) -> bool:
+    """True if `c`'s NFD decomposition contains at least one
+    ASCII letter or digit.
+
+    The `normalize_region_name` downstream keying function strips
+    everything outside `[a-z0-9_]` after NFD decomposition and
+    combining-mark removal. Accented Latin chars ('é' = 'e' + U+0301
+    in NFD) survive because their base letter is ASCII. Latin-Extended
+    ligatures and stroke letters ('Ø', 'Æ', 'ß', 'Ł', 'Œ') have no
+    NFD decomposition and get stripped entirely, which means they
+    pass schema validation but produce a lossy cache/output key —
+    `Østfold` would key off `stfold`, colliding with any other
+    name that happens to normalize to `stfold`.
+
+    Rejecting these at schema time aligns acceptance with the
+    downstream keying contract. Per V2-22b/P.2 §2.8
+    persona-relevance gate, the target PRISMWEB audience
+    (Francophone/Anglophone West & East Africa) writes names
+    covered by ASCII Latin + NFD-decomposable accents; Danish /
+    German / Polish Latin-Extended characters are out of scope.
+    """
+    decomposed = unicodedata.normalize('NFD', c)
+    return any(d.isascii() and d.isalnum() for d in decomposed)
+
+
 def _is_identifier_char(c: str) -> bool:
     """True if `c` is acceptable in an identifier string
     (region name, country, GADM filter field/value).
@@ -101,7 +126,12 @@ def _is_identifier_char(c: str) -> bool:
     Positive-acceptance check:
     - Default-ignorable or invisible-Lo overlays reject first.
     - Identifier punctuation (`_IDENTIFIER_PUNCT`) accepts.
-    - Letter / number categories accept.
+    - Letter / number categories accept ONLY if the character
+      normalizes (via NFD) to an ASCII letter or digit. This
+      matches what `normalize_region_name` preserves, so the
+      schema's acceptance set and the downstream cache-key set
+      agree — a name that validates always produces a non-lossy
+      keying result.
     - Mn-category chars accept ONLY inside the Latin Combining
       Diacritical Marks block (U+0300-U+036F). Other Mn
       codepoints are script-specific joiners or selectors that
@@ -116,7 +146,7 @@ def _is_identifier_char(c: str) -> bool:
         return True
     cat = unicodedata.category(c)
     if cat in _IDENTIFIER_CATEGORIES:
-        return True
+        return _normalizes_to_ascii_alnum(c)
     if cat == 'Mn':
         lo, hi = _LATIN_COMBINING_MARK_RANGE
         return lo <= ord(c) <= hi
@@ -129,6 +159,17 @@ def _is_identifier_char(c: str) -> bool:
 # Rejecting at schema time promotes "Windows-invalid path" from
 # a runtime `DataSourceError` to a validation-time error.
 _PATH_FORBIDDEN_SYMBOLS = frozenset('*?"<>|')
+
+# Windows reserved device names that can't appear as any segment of
+# a filesystem path (case-insensitive, with or without extension).
+# Matches the list in `sanitize_filename`.
+_WINDOWS_RESERVED_NAMES = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5",
+    "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5",
+    "LPT6", "LPT7", "LPT8", "LPT9",
+})
 
 
 def _is_path_char(c: str) -> bool:
@@ -371,6 +412,37 @@ class BoundaryConfig(BaseModel):
                 f"shapefile_path {value!r} contains non-printable "
                 "or invisible characters"
             )
+        # Windows-path segment policy — reject reserved device
+        # names (CON, PRN, AUX, NUL, COMn, LPTn) and segments
+        # ending in a trailing dot or space. Checked on each
+        # path component; drive prefix (e.g., `C:`) is skipped.
+        # Promotes "Windows-invalid filename" from runtime
+        # DataSourceError to a validation-time error.
+        for part in candidate.parts:
+            # Skip drive / root sentinels (`C:`, `/`, `\\`).
+            if part in ('/', '\\') or (
+                len(part) == 2 and part.endswith(':')
+            ):
+                continue
+            # Trailing dot / space on a segment is Windows-invalid
+            # (the shell silently strips them, creating a
+            # different on-disk name).
+            if part.endswith('.') or part.endswith(' '):
+                raise ValueError(
+                    f"shapefile_path {value!r} has a segment "
+                    f"ending with a dot or space ({part!r}); "
+                    "Windows strips those, so the on-disk name "
+                    "won't match the declared path"
+                )
+            # Reserved device name — with or without extension.
+            stem = part.split('.', 1)[0].upper()
+            if stem in _WINDOWS_RESERVED_NAMES:
+                raise ValueError(
+                    f"shapefile_path {value!r} has a segment "
+                    f"matching a Windows reserved device name "
+                    f"({part!r}); those names are unusable as "
+                    "files on Windows"
+                )
         return candidate
 
     @model_validator(mode="after")

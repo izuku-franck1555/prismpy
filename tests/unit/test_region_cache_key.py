@@ -1093,6 +1093,153 @@ class TestShapefilePathWindowsForbiddenChars(unittest.TestCase):
         self.assertIn('\\', str(rc.boundary.shapefile_path))
 
 
+class TestShapefilePathWindowsReservedNames(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-19 codex R20 MEDIUM — Windows reserved
+    device names (CON, PRN, AUX, NUL, COMn, LPTn) cannot appear
+    as any path segment on Windows, regardless of extension. The
+    validator checks each path part after normalization and
+    rejects if any stem (before the first `.`) matches a reserved
+    name. Also rejects trailing-dot or trailing-space segments,
+    which Windows silently strips (producing an on-disk name
+    that doesn't match the declared path)."""
+
+    @staticmethod
+    def _build_with_shapefile(shapefile_path):
+        from prismpy.config.schema import RegionConfig
+        return RegionConfig.model_validate({
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'shapefile',
+                'shapefile_path': shapefile_path,
+            },
+        })
+
+    def test_con_reserved_name_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'reserved'):
+            self._build_with_shapefile('/tmp/CON.shp')
+
+    def test_con_case_insensitive(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'reserved'):
+            self._build_with_shapefile('/tmp/con.shp')
+
+    def test_nul_in_subdirectory_rejected(self):
+        """Reserved-name check applies to every segment, not just
+        the basename."""
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'reserved'):
+            self._build_with_shapefile('/tmp/NUL/region.shp')
+
+    def test_com1_reserved_name_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'reserved'):
+            self._build_with_shapefile('/tmp/COM1.shp')
+
+    def test_lpt9_reserved_name_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'reserved'):
+            self._build_with_shapefile('/tmp/LPT9.shp')
+
+    def test_trailing_dot_segment_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'dot or space'):
+            self._build_with_shapefile('/tmp/bad./region.shp')
+
+    def test_trailing_space_segment_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'dot or space'):
+            self._build_with_shapefile('/tmp/bad /region.shp')
+
+    def test_legitimate_extension_not_a_trailing_dot(self):
+        """A segment like `region.shp` has `.shp` as extension,
+        not a trailing dot. Must pass."""
+        from pathlib import Path
+        rc = self._build_with_shapefile('/tmp/region.shp')
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('/tmp/region.shp'),
+        )
+
+
+class TestIdentifierLatinExtendedRejection(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-19 codex R20 HIGH — Latin-Extended
+    ligatures and stroke letters (Ø, Æ, ß, Ł, Œ, Þ) pass
+    category checks but `normalize_region_name` strips them to
+    empty / different residues. Previously the schema accepted
+    them, then the cache-key / output-path derivation silently
+    produced lossy keys — `Østfold` → `stfold`, `Ærø` → `r`,
+    `ß` → `''`. Per §2.8 persona-relevance gate, target PRISMWEB
+    users don't write Scandinavian / German / Polish names, so
+    rejecting these aligns the schema acceptance set with the
+    downstream keying contract."""
+
+    @staticmethod
+    def _build(**overrides):
+        from prismpy.config.schema import RegionConfig
+        payload = {
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'manual',
+                'manual_bounds': {
+                    'minx': -5.0, 'miny': 12.0,
+                    'maxx': -3.0, 'maxy': 14.0,
+                },
+            },
+        }
+        payload.update(overrides)
+        return RegionConfig.model_validate(payload)
+
+    def test_o_with_stroke_rejected(self):
+        """`Østfold` — Ø has no NFD decomposition and survives
+        to normalize_region_name as a non-ASCII char that gets
+        stripped, leaving `stfold` (different identity)."""
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build(name='Østfold')
+
+    def test_ae_ligature_rejected(self):
+        """`Ærø` — Æ is a ligature (A+E) with no NFD
+        decomposition; both letters get stripped, leaving `r`."""
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build(name='Ærø')
+
+    def test_eszett_rejected(self):
+        """`ß` — German sharp S normalizes to nothing under
+        normalize_region_name (no ASCII decomposition)."""
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build(name='Straße')
+
+    def test_l_with_stroke_rejected(self):
+        """`Ł` — Polish L with stroke, no NFD decomposition."""
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build(name='Łódź')
+
+    def test_oe_ligature_rejected(self):
+        """`Œ` — French OE ligature, no NFD decomposition."""
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build(name='Œuvre')
+
+    def test_nfc_accented_latin_still_accepted(self):
+        """Regression guard — NFC-composed accented Latin
+        ('Ségou' with single é char) still accepts because é
+        NFD-decomposes to `e` (ASCII) + U+0301 (combining mark)."""
+        rc = self._build(name='Ségou')
+        self.assertEqual(rc.name, 'Ségou')
+
+    def test_nfd_accented_latin_still_accepted(self):
+        """NFD-decomposed form with explicit combining mark also
+        accepts — same base letter, same accepted_latin predicate
+        result."""
+        import unicodedata
+        nfd_name = unicodedata.normalize('NFD', 'Ségou')
+        rc = self._build(name=nfd_name)
+        self.assertEqual(rc.name, nfd_name)
+
+
 class TestInvisibleCodePointsUniversalInvariants(unittest.TestCase):
     """V2-22b/P.2 AC-AUDIT-15 — Python's `str.isprintable()` alone
     doesn't catch default-ignorable Unicode code points that
