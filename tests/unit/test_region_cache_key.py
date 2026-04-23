@@ -875,6 +875,79 @@ class TestShapefilePathWindowsSegmentsSeparatorAgnostic(unittest.TestCase):
         self.assertIn(':', str(rc.boundary.shapefile_path))
 
 
+class TestShapefilePathRelativeNavigators(unittest.TestCase):
+    """V2-22b/P.2 Gate B finding — the AC-AUDIT-18 trailing-dot
+    segment check over-rejected legitimate `.` and `..` relative-
+    path navigators. The executor (`pipeline/executor.py:~408`)
+    explicitly supports non-absolute shapefile paths and resolves
+    them against the project root, so configs like
+    `./boundaries/region.shp` must validate at schema time.
+
+    The fix treats `.` and `..` as navigation markers, not
+    trailing-dot filenames, and skips them from the segment
+    rules. Actual filenames and directory names are still
+    checked for trailing dot / trailing space / Windows
+    reserved names on their own iteration."""
+
+    @staticmethod
+    def _build_with_shapefile(shapefile_path):
+        from prismpy.config.schema import RegionConfig
+        return RegionConfig.model_validate({
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'shapefile',
+                'shapefile_path': shapefile_path,
+            },
+        })
+
+    def test_shapefile_path_accepts_dot_relative(self):
+        """`./boundaries/region.shp` — the `.` segment is a
+        relative-path marker, not a trailing-dot filename. Must
+        validate."""
+        from pathlib import Path
+        rc = self._build_with_shapefile('./boundaries/region.shp')
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('boundaries/region.shp'),
+        )
+
+    def test_shapefile_path_accepts_parent_relative(self):
+        """`../data/region.shp` — `..` is a parent-directory
+        navigator."""
+        from pathlib import Path
+        rc = self._build_with_shapefile('../data/region.shp')
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('../data/region.shp'),
+        )
+
+    def test_shapefile_path_accepts_embedded_parent(self):
+        """`dir/../region.shp` — embedded `..` that resolves the
+        same as `region.shp`. Must validate; `pathlib.Path` keeps
+        the literal segments unless we explicitly `resolve()`."""
+        rc = self._build_with_shapefile('dir/../region.shp')
+        self.assertIn('..', str(rc.boundary.shapefile_path))
+
+    def test_shapefile_path_accepts_windows_dot_relative(self):
+        rc = self._build_with_shapefile(r'.\boundaries\region.shp')
+        # pathlib on POSIX keeps the literal string with backslashes.
+        self.assertIn('region.shp', str(rc.boundary.shapefile_path))
+
+    def test_trailing_dot_filename_still_rejects(self):
+        """Regression guard — a real trailing-dot filename
+        (`bad.`) still rejects; the `.`/`..` exception is narrow
+        and doesn't reopen the Windows invalid-segment class."""
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'dot or space'):
+            self._build_with_shapefile('/tmp/bad./region.shp')
+
+    def test_reserved_name_in_relative_path_still_rejects(self):
+        """Regression guard — `./CON/region.shp` still rejects
+        because CON is a reserved name segment that follows the
+        `.` navigator."""
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'reserved'):
+            self._build_with_shapefile('./CON/region.shp')
+
+
 class TestUnicodeHiddenCharsUniversalInvariants(unittest.TestCase):
     """V2-22b/P.2 AC-AUDIT-14 — Unicode non-ASCII hidden characters
     (U+2028 LINE SEPARATOR, U+0085 NEXT LINE, U+200B ZERO WIDTH

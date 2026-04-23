@@ -433,6 +433,16 @@ class BoundaryConfig(BaseModel):
             # Skip drive prefix like 'C:' (2 chars ending with colon).
             if len(seg) == 2 and seg.endswith(':'):
                 continue
+            # Path navigators — `.` and `..` are legal relative-path
+            # markers, not filenames with trailing dots. The executor
+            # (`pipeline/executor.py:~408`) supports non-absolute
+            # shapefile paths and resolves them against the project
+            # root, so configs like `./boundaries/region.shp` or
+            # `../data/region.shp` must validate. Skip these
+            # segments from the trailing-dot / reserved-name rules;
+            # actual filenames are checked in the next iteration.
+            if seg in ('.', '..'):
+                continue
             if seg.endswith('.') or seg.endswith(' '):
                 raise ValueError(
                     f"shapefile_path {value!r} has a segment "
