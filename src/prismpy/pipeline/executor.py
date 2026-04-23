@@ -73,6 +73,73 @@ def _extract_run_id(callback) -> Optional[str]:
     return str(inner_id) if inner_id is not None else None
 
 
+def _gate_value_range_climate_delegation(
+    sci: Dict[str, Any],
+    sarra_py_enabled: bool,
+) -> None:
+    """Escalate a `value_range_climate` info to warning post-merge.
+
+    Rationale: the scientific validator emits the `value_range_climate`
+    info record unconditionally when it detects SARRA-Py-style
+    file-based climate data, delegating actual range verification to
+    the platform validator (`post_translate_range_sarra_py_<var>`
+    records). The info's "When available, the per-variable ranges
+    appear below" hedge is honest ONLY when those delegated records
+    actually land. If translation failed, the platform validator
+    skipped, or rasterio errored, the info is misleading — the user
+    looks for ranges that aren't there.
+
+    Called unconditionally at the post-merge surfacing point in the
+    executor so every exit path — successful merge, post-translate
+    skipped entirely, or post-translate raised — observes the same
+    gating logic. Idempotent: if the delegated records are present,
+    the check is a no-op; if the check has already been escalated,
+    re-running this helper is a safe no-op as well. Presence of AT
+    LEAST ONE delegated record proves the validator ran; no
+    escalation fires in the partial-variable case.
+
+    `sarra_py_enabled` gates the entire escalation so a non-SARRA-Py
+    run (e.g., ACEA-only with file-based climate config populated)
+    does NOT manufacture a bogus SARRA-Py warning. The scientific
+    validator's `_is_file_based_climate()` detector keys on dict
+    shape (`rainfall_dir` / `agera5_dir`) and would emit the
+    delegation info even when SARRA-Py wasn't in the pipeline; the
+    gate must reconcile that against the pipeline's actual enabled
+    platforms before escalating.
+
+    On escalation, both `result` ("info" → "warning") AND `passed`
+    (True → False) are updated together so downstream consumers
+    that key off either field (UI renderers, audit tooling, JSON
+    report serializers) agree on the check's outcome. `check`,
+    `scope`, `manuscript_claim`, and `details.coverage_kind` are
+    preserved so cross-run diffing still matches the same record.
+    """
+    if not sarra_py_enabled:
+        return
+    checks = sci.get("checks", [])
+    delegated = [
+        c for c in checks
+        if c.get("check", "").startswith(
+            "post_translate_range_sarra_py_"
+        )
+    ]
+    info_idx = next(
+        (
+            i for i, c in enumerate(checks)
+            if c.get("check") == "value_range_climate"
+            and c.get("details", {}).get("coverage_kind") == "delegated"
+        ),
+        None,
+    )
+    if info_idx is not None and not delegated:
+        checks[info_idx]["result"] = "warning"
+        checks[info_idx]["passed"] = False
+        checks[info_idx]["summary"] = (
+            "SARRA-Py sampled climate range check did not run — "
+            "platform validator produced no per-variable records."
+        )
+
+
 @dataclass
 class StageResult:
     """Result of a pipeline stage execution.
@@ -1038,14 +1105,14 @@ class TranslationPipeline:
         Report them so validation can flag incomplete data honestly
         instead of silently ignoring the gap.
 
-        Uses `region_cache_key(region)` so manual regions with
-        bbox-unique cache paths are looked up correctly — the
-        previous `normalize_region_name(region.name)` key would
-        collide across different manual projects that share the
-        `"Unnamed study area"` display name.
+        Uses `region_cache_key_from_region(region)` so manual
+        regions with bbox-unique cache paths are looked up
+        correctly — the previous `normalize_region_name(region.name)`
+        key would collide across different manual projects that
+        share the `"Unnamed study area"` display name.
         """
-        from prismpy.utils.sanitization import region_cache_key
-        safe_name = region_cache_key(region)
+        from prismpy.utils.sanitization import region_cache_key_from_region
+        safe_name = region_cache_key_from_region(region)
         agera5_cache = cache_dir / "agera5" / f"AgERA5_{safe_name}"
         if not agera5_cache.exists():
             # Mark that AgERA5 was expected but has zero files
@@ -2362,8 +2429,18 @@ class TranslationPipeline:
                     "note": "No validator available",
                 }
 
-        # Layer 2: Scientific data quality checks (V2-19 Phase 2a)
+        # Layer 2: Scientific data quality checks (V2-19 Phase 2a).
+        # Runs the scientific validator and stores the raw report.
+        # Surfacing (CLI warnings, logger.info, provenance) is
+        # deferred to AFTER Layer 3's post-translate merge + gate, so
+        # every output channel observes the final escalated state —
+        # not the pre-merge snapshot. (V2-22b/P.2 codex self-check
+        # MEDIUM: emitting warnings/log/provenance before the
+        # delegation gate runs caused operators to see a clean
+        # scientific summary in CLI + provenance while the final
+        # JSON report was a warning.)
         scientific_report = None
+        post_translate_report = None
         if unified_data:
             try:
                 from prismpy.validators.scientific import run_scientific_validation
@@ -2375,77 +2452,11 @@ class TranslationPipeline:
                     unified_data, self.config, enabled_platforms
                 )
                 validation_summary["scientific"] = scientific_report
-
-                # Surface fail/warning-level checks as pipeline WARNINGS
-                # (not errors). Validation is a REPORTING mechanism, not
-                # a GATE — users should receive their package + the
-                # validation report showing what failed. Pipeline errors
-                # are reserved for actual pipeline failures (data
-                # retrieval crash, translation failure).
-                for check in scientific_report.get("checks", []):
-                    if check["result"] == "fail":
-                        warnings.append(
-                            f"Scientific validation FAIL: {check['summary']}"
-                        )
-                    elif check["result"] == "warning":
-                        warnings.append(
-                            f"Scientific validation: {check['summary']}"
-                        )
-
-                self.logger.info(
-                    f"  Scientific validation: {scientific_report['overall_result']} "
-                    f"({scientific_report['n_pass']} pass, "
-                    f"{scientific_report['n_warning']} warn, "
-                    f"{scientific_report['n_fail']} fail)"
-                )
-
-                # Wire validation into provenance
-                if self.provenance and self.provenance.enabled:
-                    self.provenance.start_artifact(
-                        "validation", artifact_id="validation",
-                        stage="validate",
-                    )
-                    self.provenance.record_transformation(
-                        operation=OperationType.VALIDATE,
-                        parameters={
-                            "n_checks": scientific_report["n_checks"],
-                            "overall_result": scientific_report["overall_result"],
-                            "n_pass": scientific_report["n_pass"],
-                            "n_warning": scientific_report["n_warning"],
-                            "n_fail": scientific_report["n_fail"],
-                        },
-                        artifact_id="validation",
-                    )
-                    # Record a QUALITY_CHECK decision summarizing the outcome
-                    self.provenance.record_decision(
-                        decision_type=DecisionType.QUALITY_CHECK,
-                        description=(
-                            f"Scientific validation: "
-                            f"{scientific_report['overall_result'].upper()} "
-                            f"({scientific_report['n_checks']} checks)"
-                        ),
-                        rationale=(
-                            f"6 automated quality checks covering temporal "
-                            f"completeness, cross-variable consistency, value "
-                            f"ranges, soil completeness, format compliance, "
-                            f"and spatial/temporal coverage. "
-                            f"Result: {scientific_report['n_pass']} pass, "
-                            f"{scientific_report['n_warning']} warning, "
-                            f"{scientific_report['n_fail']} fail."
-                        ),
-                        alternatives=[
-                            "Skip validation (not recommended for research use)",
-                            "Region-specific thresholds (planned enhancement)",
-                        ],
-                        reference="prismpy.validators.scientific.run_scientific_validation",
-                        artifact_id="validation",
-                    )
-
             except Exception as e:
                 self.logger.warning(f"Scientific validation failed: {e}")
                 warnings.append(f"Scientific validation skipped: {e}")
 
-        # Layer 3: Post-translate climate validation (V2-20)
+        # Layer 3: Post-translate climate validation (V2-20).
         # Validates ACTUAL per-cell weather data from translator output
         # files (.WTH for PYTHIA, .pckl for ACEA). Replaces the V2-19
         # placeholder-based checks with real-data validation.
@@ -2500,7 +2511,137 @@ class TranslationPipeline:
                 )
             else:
                 validation_summary["post_translate"] = post_translate_report
+        except Exception as e:
+            self.logger.warning(f"Post-translate validation failed: {e}")
+            warnings.append(f"Post-translate validation skipped: {e}")
+            post_translate_report = None
 
+        # Gate runs unconditionally — covers three paths equally:
+        # (1) post-translate succeeded + merged: gate either no-ops
+        #     (delegated records present) or escalates (they aren't).
+        # (2) post-translate raised BEFORE merging: gate sees no
+        #     delegated records and escalates the info. This is the
+        #     exact failure path the gate is meant to expose, and
+        #     was previously bypassed by the try/except envelope.
+        # (3) scientific validator failed: `final_sci` is None and
+        #     the gate no-ops against its `sci.get("checks", [])`
+        #     defensive read.
+        # After escalation, totals in `sci` may drift from the
+        # pre-gate counts (one info → warning shifts n_warning up
+        # and the overall_result). Recompute here so every channel
+        # surfaces the gated state.
+        final_sci = validation_summary.get("scientific")
+        if final_sci is not None:
+            sarra_py_enabled = any(
+                p == Platform.SARRA_PY
+                for p in self.config.get_enabled_platforms()
+            )
+            _gate_value_range_climate_delegation(
+                final_sci, sarra_py_enabled=sarra_py_enabled,
+            )
+            all_checks = final_sci.get("checks", [])
+            final_sci["n_checks"] = len(all_checks)
+            results_all = [c.get("result", "pass") for c in all_checks]
+            final_sci["n_pass"] = sum(
+                1 for r in results_all if r == "pass"
+            )
+            final_sci["n_warning"] = sum(
+                1 for r in results_all if r == "warning"
+            )
+            final_sci["n_fail"] = sum(
+                1 for r in results_all if r == "fail"
+            )
+            if "fail" in results_all:
+                final_sci["overall_result"] = "fail"
+                final_sci["passed"] = False
+            elif "warning" in results_all:
+                final_sci["overall_result"] = "warning"
+
+        # Post-merge surfacing: emit CLI warnings, logger info, and
+        # provenance from the FINAL merged+gated state so every
+        # output channel agrees. When the merge landed, iterate
+        # over `sci["checks"]` (includes post-translate, escalated
+        # value_range_climate, etc.). When the merge didn't land
+        # (scientific validation failed, or post-translate had no
+        # scientific to merge into), fall back to the raw reports.
+        if final_sci is not None:
+            # Surface fail/warning-level checks as pipeline WARNINGS
+            # (not errors). Validation is a REPORTING mechanism, not
+            # a GATE — users receive their package alongside the
+            # validation report showing what failed. Pipeline errors
+            # are reserved for actual pipeline failures (data
+            # retrieval crash, translation failure).
+            for check in final_sci.get("checks", []):
+                label = (
+                    "Post-translate validation"
+                    if check.get("check", "").startswith("post_translate_")
+                    else "Scientific validation"
+                )
+                result = check.get("result")
+                if result == "fail":
+                    warnings.append(f"{label} FAIL: {check['summary']}")
+                elif result == "warning":
+                    warnings.append(f"{label}: {check['summary']}")
+
+            self.logger.info(
+                f"  Scientific validation: "
+                f"{final_sci.get('overall_result', 'unknown')} "
+                f"({final_sci.get('n_pass', 0)} pass, "
+                f"{final_sci.get('n_warning', 0)} warn, "
+                f"{final_sci.get('n_fail', 0)} fail)"
+            )
+
+            # Wire the FINAL merged result into provenance so the
+            # artifact record matches the JSON report an auditor
+            # downloads. Recording pre-merge state here would leave
+            # provenance claiming "PASS" while the report says
+            # "WARNING" — exactly the inconsistency codex flagged.
+            if self.provenance and self.provenance.enabled:
+                self.provenance.start_artifact(
+                    "validation", artifact_id="validation",
+                    stage="validate",
+                )
+                self.provenance.record_transformation(
+                    operation=OperationType.VALIDATE,
+                    parameters={
+                        "n_checks": final_sci.get("n_checks", 0),
+                        "overall_result": final_sci.get(
+                            "overall_result", "unknown"
+                        ),
+                        "n_pass": final_sci.get("n_pass", 0),
+                        "n_warning": final_sci.get("n_warning", 0),
+                        "n_fail": final_sci.get("n_fail", 0),
+                    },
+                    artifact_id="validation",
+                )
+                # Record a QUALITY_CHECK decision summarizing the outcome
+                self.provenance.record_decision(
+                    decision_type=DecisionType.QUALITY_CHECK,
+                    description=(
+                        f"Scientific validation: "
+                        f"{final_sci.get('overall_result', 'unknown').upper()} "
+                        f"({final_sci.get('n_checks', 0)} checks)"
+                    ),
+                    rationale=(
+                        f"6 automated quality checks covering temporal "
+                        f"completeness, cross-variable consistency, value "
+                        f"ranges, soil completeness, format compliance, "
+                        f"and spatial/temporal coverage. "
+                        f"Result: {final_sci.get('n_pass', 0)} pass, "
+                        f"{final_sci.get('n_warning', 0)} warning, "
+                        f"{final_sci.get('n_fail', 0)} fail."
+                    ),
+                    alternatives=[
+                        "Skip validation (not recommended for research use)",
+                        "Region-specific thresholds (planned enhancement)",
+                    ],
+                    reference="prismpy.validators.scientific.run_scientific_validation",
+                    artifact_id="validation",
+                )
+        elif post_translate_report is not None:
+            # No scientific report (validator failed earlier) — but
+            # post-translate ran solo. Surface its checks on their
+            # own so the user still sees the signal.
             for check in post_translate_report.get("checks", []):
                 if check["result"] == "fail":
                     warnings.append(
@@ -2511,15 +2652,12 @@ class TranslationPipeline:
                         f"Post-translate validation: {check['summary']}"
                     )
 
+        if post_translate_report is not None:
             self.logger.info(
                 f"  Post-translate validation: "
                 f"{post_translate_report['overall_result']} "
                 f"({post_translate_report['n_checks']} checks)"
             )
-
-        except Exception as e:
-            self.logger.warning(f"Post-translate validation failed: {e}")
-            warnings.append(f"Post-translate validation skipped: {e}")
 
         duration = (datetime.now() - start_time).total_seconds()
         return StageResult(

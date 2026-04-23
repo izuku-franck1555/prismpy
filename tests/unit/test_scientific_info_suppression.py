@@ -80,9 +80,10 @@ class TestClimateInfoLineDelegatesToPostTranslate(unittest.TestCase):
             summary,
             (
                 "Climate value ranges for SARRA-Py are computed "
-                "from a random sample of 10 output files per "
-                "variable. When available, the per-variable "
-                "ranges appear below."
+                "from 10 output files per variable: first, last, "
+                "and 8 interior files chosen by filename-digest "
+                "within evenly-spaced buckets. When available, "
+                "the per-variable ranges appear below."
             ),
         )
 
@@ -98,8 +99,21 @@ class TestClimateInfoLineDelegatesToPostTranslate(unittest.TestCase):
             c['summary'] for c in checks
             if c.get('check') == 'value_range_climate'
         )
-        # (1) scientific-honesty signal preserved.
-        self.assertIn('random sample of 10', summary)
+        # (1) scientific-honesty signal preserved — the sample-size
+        # + strategy together document what the check actually did.
+        self.assertIn('10 output files per variable', summary)
+        self.assertIn('filename-digest', summary)
+        # (1a) legacy "random sample" wording must not resurrect —
+        # sampling is deterministic (stratified buckets with digest-
+        # steered interior picks), and V2-22b/P.2 + audit AC-AUDIT-3
+        # are explicit about that.
+        self.assertNotIn('random sample', summary)
+        # (1b) the prior "evenly-spaced interior files" phrasing also
+        # drifted from reality — the hybrid sampler shifts interior
+        # picks within each bucket based on the filename digest,
+        # not at fixed positions. Forbid it to catch a future
+        # copy-edit that regresses to the R3-era phrasing.
+        self.assertNotIn('evenly-spaced interior files', summary)
         # (2) code identifier stays out of persona copy.
         self.assertNotIn('post_translate_range_sarra_py', summary)
         # (3) hedge signal — "when available" acknowledges that

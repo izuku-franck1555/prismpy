@@ -6,10 +6,227 @@ data-to-model translation framework, including region, crop, temporal,
 and platform-specific settings.
 """
 
+import re
+import unicodedata
 from datetime import date, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Union
+
+
+_DEFAULT_IGNORABLE_CODE_POINTS = frozenset({
+    # Derived from Unicode's Default_Ignorable_Code_Point property.
+    # Covers characters that render invisibly but are not category
+    # Cc/Cf (so `.isprintable()` returns True). Most Cf characters
+    # are handled by the category check below; this set is the
+    # Other_Default_Ignorable_Code_Point tail the category check
+    # misses.
+    0x00AD,                                  # SOFT HYPHEN
+    0x034F,                                  # COMBINING GRAPHEME JOINER
+    0x061C,                                  # ARABIC LETTER MARK
+    0x115F, 0x1160,                          # HANGUL JAMO FILLERS (Lo)
+    0x17B4, 0x17B5,                          # KHMER VOWEL INHERENT AQ/AA
+    0x16FE4,                                 # KHITAN SMALL SCRIPT FILLER (Mn)
+    0x3164,                                  # HANGUL FILLER (Lo)
+    0xFFA0,                                  # HALFWIDTH HANGUL FILLER (Lo)
+})
+
+# Letter-Other (Lo) code points that render visually blank but
+# are NOT in Unicode's Default_Ignorable_Code_Point property —
+# Unicode classifies these as regular letters in their script
+# despite rendering as whitespace. The whitelist's `Lo` category
+# would otherwise accept them; this overlay rejects them
+# explicitly. Hand-maintained list (Unicode introduces new
+# script blocks periodically; this set captures the known
+# invisible Lo codepoints as of Unicode 17).
+_INVISIBLE_LO_CODEPOINTS = frozenset({
+    0x13441,  # EGYPTIAN HIEROGLYPH FULL BLANK (Unicode 5.2)
+    0x13442,  # EGYPTIAN HIEROGLYPH HALF BLANK (Unicode 5.2)
+})
+_DEFAULT_IGNORABLE_RANGES = (
+    (0x180B, 0x180F),      # MONGOLIAN FREE VARIATION SELECTORS
+    (0x200B, 0x200F),      # ZERO WIDTH / LEFT-TO-RIGHT MARK family
+    (0x202A, 0x202E),      # DIRECTIONAL FORMATTING
+    (0x2060, 0x206F),      # WORD JOINER / INVISIBLE OPERATORS family
+    (0xFE00, 0xFE0F),      # VARIATION SELECTORS 1-16
+    (0xFFF0, 0xFFFB),      # INTERLINEAR ANNOTATION ANCHORS family
+    (0x1BCA0, 0x1BCA3),    # SHORTHAND FORMAT CONTROLS
+    (0x1D173, 0x1D17A),    # MUSICAL SYMBOL BEGIN/END family
+    (0xE0000, 0xE0FFF),    # TAG characters + SUPP. VARIATION SELECTORS
+)
+
+
+def _is_default_ignorable(c: str) -> bool:
+    code = ord(c)
+    if code in _DEFAULT_IGNORABLE_CODE_POINTS:
+        return True
+    for lo, hi in _DEFAULT_IGNORABLE_RANGES:
+        if lo <= code <= hi:
+            return True
+    return False
+
+
+# Unicode general categories accepted in identifier strings
+# (region name, country, gadm_filter_value, gadm_filter_field).
+# Letters + numbers only at category level; combining marks are
+# admitted via a narrow range check below so NFD-decomposed Latin
+# accents work but script-specific invisible joiners don't.
+_IDENTIFIER_CATEGORIES = frozenset({
+    "Lu", "Ll", "Lt", "Lm", "Lo",    # letters
+    "Nd", "Nl", "No",                 # numbers
+})
+
+# Combining Diacritical Marks block (U+0300-U+036F). NFD-decomposed
+# accented Latin names (`'Ségou'` = `'e' + U+0301`) need these Mn
+# codepoints. Narrowing the Mn acceptance to this one block rejects
+# Mn-category invisible joiners / selectors from other scripts —
+# Tifinagh, Brahmi, Kawi, Duployan, etc. — without re-introducing
+# a growing blocklist. Per V2-22b/P.2 §2.8 persona-relevance gate,
+# the target PRISMWEB audience writes Latin-script names, so the
+# Latin diacritics block is sufficient.
+_LATIN_COMBINING_MARK_RANGE = (0x0300, 0x036F)
+
+# Printable punctuation + separators accepted in identifier strings
+# (region name / country / GADM filter values). Shapefile paths
+# use a separate, broader policy (see `_is_path_char`) because
+# POSIX and Windows paths legitimately contain `+`, `[`, `]`, `@`,
+# `:`, `\`, etc. that are not identifier-safe.
+_IDENTIFIER_PUNCT = frozenset(" -_.',/()&")
+
+
+def _normalizes_to_ascii_alnum(c: str) -> bool:
+    """True if `c`'s NFD decomposition contains at least one
+    ASCII letter or digit.
+
+    The `normalize_region_name` downstream keying function strips
+    everything outside `[a-z0-9_]` after NFD decomposition and
+    combining-mark removal. Accented Latin chars ('é' = 'e' + U+0301
+    in NFD) survive because their base letter is ASCII. Latin-Extended
+    ligatures and stroke letters ('Ø', 'Æ', 'ß', 'Ł', 'Œ') have no
+    NFD decomposition and get stripped entirely, which means they
+    pass schema validation but produce a lossy cache/output key —
+    `Østfold` would key off `stfold`, colliding with any other
+    name that happens to normalize to `stfold`.
+
+    Rejecting these at schema time aligns acceptance with the
+    downstream keying contract. Per V2-22b/P.2 §2.8
+    persona-relevance gate, the target PRISMWEB audience
+    (Francophone/Anglophone West & East Africa) writes names
+    covered by ASCII Latin + NFD-decomposable accents; Danish /
+    German / Polish Latin-Extended characters are out of scope.
+    """
+    decomposed = unicodedata.normalize('NFD', c)
+    return any(d.isascii() and d.isalnum() for d in decomposed)
+
+
+def _is_identifier_char(c: str) -> bool:
+    """True if `c` is acceptable in an identifier string
+    (region name, country, GADM filter field/value).
+
+    Positive-acceptance check:
+    - Default-ignorable or invisible-Lo overlays reject first.
+    - Identifier punctuation (`_IDENTIFIER_PUNCT`) accepts.
+    - Letter / number categories accept ONLY if the character
+      normalizes (via NFD) to an ASCII letter or digit. This
+      matches what `normalize_region_name` preserves, so the
+      schema's acceptance set and the downstream cache-key set
+      agree — a name that validates always produces a non-lossy
+      keying result.
+    - Mn-category chars accept ONLY inside the Latin Combining
+      Diacritical Marks block (U+0300-U+036F). Other Mn
+      codepoints are script-specific joiners or selectors that
+      render invisibly; the narrow range rejects them
+      structurally without a growing blocklist.
+    """
+    if _is_default_ignorable(c):
+        return False
+    if ord(c) in _INVISIBLE_LO_CODEPOINTS:
+        return False
+    if c in _IDENTIFIER_PUNCT:
+        return True
+    cat = unicodedata.category(c)
+    if cat in _IDENTIFIER_CATEGORIES:
+        return _normalizes_to_ascii_alnum(c)
+    if cat == 'Mn':
+        lo, hi = _LATIN_COMBINING_MARK_RANGE
+        return lo <= ord(c) <= hi
+    return False
+
+
+# Windows-forbidden filename characters. These are never valid
+# in a filesystem path on Windows (POSIX allows some of them but
+# quoting / shell escaping makes them operationally painful).
+# Rejecting at schema time promotes "Windows-invalid path" from
+# a runtime `DataSourceError` to a validation-time error.
+_PATH_FORBIDDEN_SYMBOLS = frozenset('*?"<>|')
+
+# Windows reserved device names that can't appear as any segment of
+# a filesystem path (case-insensitive, with or without extension).
+# Matches the list in `sanitize_filename`.
+_WINDOWS_RESERVED_NAMES = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5",
+    "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5",
+    "LPT6", "LPT7", "LPT8", "LPT9",
+})
+
+
+def _is_path_char(c: str) -> bool:
+    """True if `c` is acceptable in a filesystem-path string.
+
+    Path policy differs from the identifier policy: POSIX and
+    Windows paths legitimately contain `+`, `[`, `]`, `:` (Windows
+    drive), `\\` (Windows separator), `@`, `~`, `$`, etc. that
+    aren't identifier-safe. This helper accepts those but rejects
+    characters that are categorically unusable in a filesystem
+    path — controls, invisibles, and the Windows-forbidden symbol
+    set (`< > : " / \\ | ? *`, minus the path separators which
+    we DO need). `:` is intentionally admitted so Windows drive
+    prefixes like `C:\\` validate; callers that want drive-letter-
+    only enforcement can layer a stricter policy on top.
+    """
+    if _is_default_ignorable(c):
+        return False
+    if ord(c) in _INVISIBLE_LO_CODEPOINTS:
+        return False
+    if c in _PATH_FORBIDDEN_SYMBOLS:
+        return False
+    cat = unicodedata.category(c)
+    # Reject controls / format / line & paragraph separators.
+    if cat in ('Cc', 'Cf', 'Cs', 'Cn', 'Zl', 'Zp'):
+        return False
+    # Reject non-space whitespace (NBSP, thin space, etc.).
+    if cat == 'Zs' and c != ' ':
+        return False
+    # Reject invisible Mn chars outside the Latin diacritic block.
+    if cat == 'Mn':
+        lo, hi = _LATIN_COMBINING_MARK_RANGE
+        return lo <= ord(c) <= hi
+    # Everything else (letters, numbers, symbols, punctuation,
+    # ASCII space) is accepted — paths legitimately contain a wide
+    # character set and the schema's job here is to block the
+    # categorically-invalid cases, not to enforce a narrow
+    # identifier-safe allowlist.
+    return True
+
+
+def _contains_invisible_char(s: str) -> bool:
+    """True if `s` contains any character not accepted by the
+    identifier-whitelist (`_is_identifier_char`). Used for region
+    name, country, and GADM filter string fields."""
+    return any(not _is_identifier_char(c) for c in s)
+
+
+def _contains_invisible_path_char(s: str) -> bool:
+    """True if `s` contains any character not accepted by the
+    path-whitelist (`_is_path_char`). Used for shapefile_path —
+    path strings legitimately contain `+`, `[`, `]`, `@`, `:`,
+    `\\` that the identifier policy rejects, so this helper uses
+    a broader acceptance set while still blocking invisibles,
+    controls, and the categorically-unsafe codepoints R17 flagged.
+    """
+    return any(not _is_path_char(c) for c in s)
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -97,6 +314,152 @@ class BoundaryConfig(BaseModel):
         description="Manual bounding box if source is 'manual'"
     )
 
+    @field_validator(
+        "gadm_filter_value", "gadm_filter_field", mode="before",
+    )
+    @classmethod
+    def _strip_and_validate_gadm_identifier(cls, value):
+        """Universal-invariant rules for GADM identifier strings —
+        `gadm_filter_value` and `gadm_filter_field` both flow
+        through `if filter_field and filter_value:` guards in
+        `GADMSource._extract_bounds`, where a whitespace-only or
+        control-char-bearing string is truthy but semantically
+        broken. Same rules as `RegionConfig.name` / `country`
+        (V2-22b/P.2 AC-AUDIT-10/11).
+
+        `None` stays `None` — both fields are optional at schema
+        level, and `validate_source_requirements` handles the
+        source-specific None-required checks. Non-None values
+        strip surrounding whitespace, reject control characters,
+        and reject values that normalize to an empty identifier.
+        """
+        if value is None:
+            return value
+        if not isinstance(value, str):
+            return value
+        stripped = value.strip()
+        if _contains_invisible_char(stripped):
+            raise ValueError(
+                f"GADM identifier {value!r} contains disallowed "
+                "characters; identifier strings accept letters, "
+                "numbers, and common punctuation (space, hyphen, "
+                "underscore, dot, apostrophe, slash, parentheses, "
+                "comma, ampersand) — non-printable, invisible, or "
+                "other symbol characters are rejected"
+            )
+        from prismpy.utils.sanitization import normalize_region_name
+        if not normalize_region_name(stripped):
+            raise ValueError(
+                f"GADM identifier {value!r} normalizes to an "
+                "empty identifier; at least one alphanumeric "
+                "character required"
+            )
+        return stripped
+
+    @field_validator("shapefile_path", mode="before")
+    @classmethod
+    def _validate_shapefile_path(cls, value):
+        """Reject empty, whitespace-only, or empty-path-sentinel
+        inputs before or after Pydantic's `Path` coercion. The
+        coercion quietly turns `''` and other empty-equivalents
+        into `Path('.')` (the current working directory), which
+        then passes `Path.exists()` checks downstream and is
+        handed to `geopandas.read_file`, surfacing only as a
+        runtime DataSourceError instead of a validation error.
+
+        `None` stays `None` (field is optional; the model
+        validator requires the path only when
+        `source == shapefile`). Both raw-string and PathLike
+        inputs run through the same strip + printable-char +
+        non-sentinel checks — AC-AUDIT-14 closed the typed
+        `Path('')` / `Path('.')` hole codex R13 identified."""
+        if value is None:
+            return value
+        # Derive the raw string form for segment-level checks.
+        # String inputs are NOT stripped (R21 MEDIUM — whole-string
+        # `.strip()` silently removes the very trailing space we're
+        # meant to reject). PathLike inputs are stringified as-is.
+        raw_str = value if isinstance(value, str) else str(value)
+        if isinstance(value, str):
+            if not raw_str.strip():
+                raise ValueError(
+                    f"shapefile_path {value!r} is empty or "
+                    "whitespace-only; provide a real path or "
+                    "omit the field entirely"
+                )
+            if raw_str != raw_str.strip():
+                raise ValueError(
+                    f"shapefile_path {value!r} has leading or "
+                    "trailing whitespace; paths must be declared "
+                    "without incidental whitespace padding — a "
+                    "terminal-space filename is ambiguous on "
+                    "POSIX and illegal on Windows"
+                )
+        if _contains_invisible_path_char(raw_str):
+            raise ValueError(
+                f"shapefile_path {value!r} contains non-printable "
+                "or invisible characters; paths accept letters, "
+                "numbers, and standard POSIX / Windows path "
+                "punctuation (including `+`, `[`, `]`, `@`, "
+                "`:`, `\\`) — only controls, format chars, and "
+                "invisible codepoints are rejected"
+            )
+        # PathLike normalization: coerce to Path and reject the
+        # empty-sentinel (`Path('')` == `Path('.')`) that would
+        # otherwise pass Pydantic's type check and resolve to
+        # the current working directory at retrieve time.
+        try:
+            candidate = Path(raw_str)
+        except (TypeError, ValueError):
+            return value  # let Pydantic's type validator reject
+        if candidate == Path('.') or str(candidate).strip() in ('', '.'):
+            raise ValueError(
+                f"shapefile_path {value!r} resolves to the current "
+                "working directory (`Path('.')`); provide an "
+                "explicit path to a shapefile"
+            )
+        # Windows-path segment policy — reject reserved device
+        # names (CON, PRN, AUX, NUL, COMn, LPTn) and segments
+        # ending in a trailing dot or space. Splits on BOTH `/`
+        # and `\` separators directly from the raw input, so the
+        # check works even when the validator runs on POSIX
+        # against a Windows-style input like `C:\CON\region.shp`
+        # (R21 HIGH — `pathlib.Path.parts` on POSIX would
+        # otherwise see that as a single segment and miss the
+        # reserved-name collision).
+        for seg in re.split(r'[\\/]+', raw_str):
+            if not seg:  # leading-slash empty segment
+                continue
+            # Skip drive prefix like 'C:' (2 chars ending with colon).
+            if len(seg) == 2 and seg.endswith(':'):
+                continue
+            # Path navigators — `.` and `..` are legal relative-path
+            # markers, not filenames with trailing dots. The executor
+            # (`pipeline/executor.py:~408`) supports non-absolute
+            # shapefile paths and resolves them against the project
+            # root, so configs like `./boundaries/region.shp` or
+            # `../data/region.shp` must validate. Skip these
+            # segments from the trailing-dot / reserved-name rules;
+            # actual filenames are checked in the next iteration.
+            if seg in ('.', '..'):
+                continue
+            if seg.endswith('.') or seg.endswith(' '):
+                raise ValueError(
+                    f"shapefile_path {value!r} has a segment "
+                    f"ending with a dot or space ({seg!r}); "
+                    "Windows strips those, so the on-disk name "
+                    "won't match the declared path"
+                )
+            stem = seg.split('.', 1)[0].upper()
+            if stem in _WINDOWS_RESERVED_NAMES:
+                raise ValueError(
+                    f"shapefile_path {value!r} has a segment "
+                    f"matching a Windows reserved device name "
+                    f"({seg!r}); those names are unusable as "
+                    "files on Windows"
+                )
+        return candidate
+
     @model_validator(mode="after")
     def validate_source_requirements(self) -> "BoundaryConfig":
         if self.source == BoundarySource.GADM:
@@ -129,7 +492,76 @@ class RegionConfig(BaseModel):
     @field_validator("country_iso3")
     @classmethod
     def validate_iso3(cls, v: str) -> str:
-        return v.upper()
+        """ISO 3166-1 alpha-3: exactly three uppercase ASCII letters.
+
+        Length-only validation (`min_length=3, max_length=3`) accepts
+        non-letter codes like `'ML2'` or `'ML!'`, which would flow
+        through every downstream consumer that treats the field as a
+        short identifier — file paths, logs, provenance records, and
+        the CRAFT country-code field. Reject anything outside the
+        alpha pattern so an invalid code fails at validate time."""
+        stripped = v.strip().upper() if isinstance(v, str) else v
+        if not isinstance(stripped, str) or not re.match(r'^[A-Z]{3}$', stripped):
+            raise ValueError(
+                f"country_iso3 must be exactly three alphabetic "
+                f"characters (ISO 3166-1 alpha-3); got {v!r}"
+            )
+        return stripped
+
+    @field_validator("name", "country", mode="before")
+    @classmethod
+    def _strip_and_require_normalizable(cls, value):
+        """Enforce the universal invariants downstream consumers
+        rely on:
+
+        1. `min_length=1` alone accepts whitespace-only (`'   '`),
+           punctuation-only (`'!!!'`), or underscore-only (`'___'`)
+           inputs that validate upstream but collapse to an empty
+           key when passed through `normalize_region_name` /
+           `sanitize_admin_name`. Two different malformed inputs
+           silently alias onto the same cache path, lock file, or
+           filename prefix. REJECT those here.
+
+        2. Internal ASCII control characters (`\\x00-\\x1f`, `\\x7f`)
+           are never legitimate in a region name or country name;
+           they survive `normalize_region_name` by becoming a `_`
+           but corrupt any downstream consumer that writes the raw
+           value into a structured format (logs, JSON reports,
+           fixed-width records). REJECT them at schema time —
+           universal invariant, applies regardless of which
+           downstream consumer ultimately reads the value.
+
+        `mode='before'` so the stripped value is stored (no UX
+        regression on `'  Koutiala  '`). Import
+        `normalize_region_name` lazily to avoid any future
+        sanitization → schema cycle."""
+        if not isinstance(value, str):
+            # Let Pydantic's type validation handle non-strings.
+            return value
+        stripped = value.strip()
+        if _contains_invisible_char(stripped):
+            raise ValueError(
+                f"{value!r} contains disallowed characters; "
+                "identifier strings accept letters, numbers, and "
+                "common punctuation (space, hyphen, underscore, "
+                "dot, apostrophe, slash, parentheses, comma, "
+                "ampersand) — non-printable, invisible, or other "
+                "symbol characters are rejected"
+            )
+        from prismpy.utils.sanitization import normalize_region_name
+        if not normalize_region_name(stripped):
+            raise ValueError(
+                f"{value!r} is not a Latin-script-compatible "
+                "identifier; region name / country must contain "
+                "at least one alphanumeric character (letters or "
+                "digits, possibly with accents or Latin-Extended "
+                "diacritics). Non-Latin scripts (Korean, Arabic, "
+                "Cyrillic, Devanagari, Chinese, etc.) require "
+                "upstream transliteration before reaching "
+                "RegionConfig — see PRISMWEB identifier policy "
+                "in prismpy/config/schema.py"
+            )
+        return stripped
 
 
 # =============================================================================

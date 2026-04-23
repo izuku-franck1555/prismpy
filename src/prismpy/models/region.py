@@ -174,8 +174,8 @@ class Region:
             "gadm_level": self.gadm_level,
             "crs": self.crs,
             "metadata": self.metadata,
-            # V2-22b/P.1 — persist so `region_cache_key()` still
-            # routes manual regions to bbox identity after a
+            # V2-22b/P.1 — persist so `region_cache_key_from_region()`
+            # still routes manual regions to bbox identity after a
             # to_dict/from_dict round-trip. Without this, reloaded
             # Region objects had `boundary_source=None` and fell
             # back to name-keyed cache paths.

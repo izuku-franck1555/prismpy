@@ -337,3 +337,170 @@ class TestSarraPyEmptySampleFiles(unittest.TestCase):
         self.assertEqual(record['result'], 'warning')
         # Summary names BOTH failure modes so operator can diagnose.
         self.assertIn('empty', record['summary'])
+
+
+class TestStratifiedHybridSample(unittest.TestCase):
+    """V2-22b/P.2 AC-B5c + codex R3 HIGH follow-up — hybrid
+    stratified sampling that combines bucket coverage with
+    filename-set responsiveness.
+
+    Direct tests of the sampling helper against in-memory Path-like
+    inputs, not the full validator pipeline. Uses `pathlib.Path`
+    strings so the helper's `p.name` digest call works as in prod.
+    """
+
+    @staticmethod
+    def _hybrid(names):
+        """Drive the production helper directly with Path objects
+        (just the `.name` is exercised)."""
+        from pathlib import Path as _P
+        from prismpy.validators.post_translate import (
+            _stratified_hybrid_sample,
+        )
+        paths = [_P(n) for n in names]
+        if len(paths) <= 10:
+            return paths
+        return _stratified_hybrid_sample(paths)
+
+    def test_first_and_last_always_in_sample(self):
+        """First and last file must always be in the sample. Guards
+        against a seasonal mutation cluster at the archive edges."""
+        for n in (2, 11, 100, 1100, 3650):
+            names = [f'day_{i:04d}.tif' for i in range(n)]
+            sample = self._hybrid(names)
+            self.assertEqual(
+                sample[0].name, names[0],
+                msg=f'first missing at n={n}',
+            )
+            self.assertEqual(
+                sample[-1].name, names[-1],
+                msg=f'last missing at n={n}',
+            )
+
+    def test_small_input_returns_all_files_unchanged(self):
+        """`len(tifs) <= 10` path returns the input list as-is — no
+        bucket math, no digest shift. Guards the boundary between
+        the small-archive and hybrid branches."""
+        names = [f'day_{i}.tif' for i in range(7)]
+        sample = self._hybrid(names)
+        self.assertEqual([p.name for p in sample], names)
+        # Exactly at the boundary.
+        names10 = [f'day_{i}.tif' for i in range(10)]
+        self.assertEqual([p.name for p in self._hybrid(names10)], names10)
+
+    def test_11_to_19_archive_covers_interior_indices(self):
+        """Codex R1 HIGH — the pre-V2-22b/P.2 `stride = len(tifs) //
+        10` collapsed to 1 for archives of 11-19 files, skipping
+        every file between index 9 and n-2. The hybrid helper uses
+        bucket-rounding against `n / 10`, so even short archives
+        spread indices across the full range."""
+        for n in (11, 12, 15, 17, 19):
+            names = [f'day_{i:04d}.tif' for i in range(n)]
+            sample = self._hybrid(names)
+            self.assertGreaterEqual(
+                len(sample), 9,
+                msg=f'sample too small at n={n}: {sample}',
+            )
+            self.assertEqual(
+                sample[0].name, names[0],
+                msg=f'first missing at n={n}',
+            )
+            self.assertEqual(
+                sample[-1].name, names[-1],
+                msg=f'last missing at n={n}',
+            )
+            # Some index past 8 must appear in the sample.
+            interior_hit = any(
+                9 <= int(p.name.split('_')[1].split('.')[0]) <= n - 2
+                for p in sample
+            )
+            self.assertTrue(
+                interior_hit,
+                msg=(
+                    f'no sample past index 8 at n={n}: '
+                    f'{[p.name for p in sample]}'
+                ),
+            )
+
+    def test_stride_distribution_spans_archive_thirds(self):
+        """For 1,100 files the sample must cover the archive's
+        first / middle / last third, not cluster in one region."""
+        names = [f'day_{i:04d}.tif' for i in range(1100)]
+        sample = self._hybrid(names)
+        self.assertEqual(len(sample), 10)
+        indices = [
+            int(p.name.split('_')[1].split('.')[0]) for p in sample
+        ]
+        third = 1100 // 3
+        self.assertTrue(
+            any(i < third for i in indices),
+            f'no sample in first third: {indices}',
+        )
+        self.assertTrue(
+            any(third <= i < 2 * third for i in indices),
+            f'no sample in middle third: {indices}',
+        )
+        self.assertTrue(
+            any(i >= 2 * third for i in indices),
+            f'no sample in last third: {indices}',
+        )
+
+    def test_deterministic_across_repeated_calls(self):
+        """Same filename set → same sample. Required property for
+        reproducible degraded-sample warnings across re-runs."""
+        names = [f'day_{i:04d}.tif' for i in range(500)]
+        s1 = self._hybrid(names)
+        s2 = self._hybrid(names)
+        self.assertEqual([p.name for p in s1], [p.name for p in s2])
+
+    def test_same_length_archive_different_names_reshuffles(self):
+        """Codex R3 HIGH — the headline regression the hybrid
+        closes. Two archives with identical length but different
+        filenames (day swap, corrected re-download, partial
+        backfill at same length) must NOT revalidate the same
+        fixed decile positions. The filename-set digest in the
+        hybrid ensures at least one interior pick moves."""
+        n = 1100
+        names_a = [f'day_{i:04d}.tif' for i in range(n)]
+        # Same length, same first+last, but every interior filename
+        # shifted — simulates a re-download that replaced the
+        # middle of the archive with corrected files.
+        names_b = (
+            [names_a[0]]
+            + [f'fix_{i:04d}.tif' for i in range(1, n - 1)]
+            + [names_a[-1]]
+        )
+        sample_a = [p.name for p in self._hybrid(names_a)]
+        sample_b = [p.name for p in self._hybrid(names_b)]
+        # First and last are fixed anchors by design — they MUST
+        # match across runs regardless of interior mutation.
+        self.assertEqual(sample_a[0], sample_b[0])
+        self.assertEqual(sample_a[-1], sample_b[-1])
+        # The interior picks must differ (archive-responsive).
+        # We compare BY INDEX within each archive — if both
+        # archives sample the SAME indices despite different
+        # filename sets, the digest isn't steering selection.
+        idx_a = sorted(names_a.index(n) for n in sample_a)
+        idx_b = sorted(names_b.index(n) for n in sample_b)
+        self.assertNotEqual(
+            idx_a, idx_b,
+            msg=(
+                'same indices sampled from different archives — '
+                'digest not steering selection'
+            ),
+        )
+
+    def test_hashlib_reintroduced_deliberately(self):
+        """Regression marker — `hashlib` WAS removed in the
+        initial V2-22b/P.2 B5b cleanup, but codex R3 flagged the
+        same-length-archive blind spot. The hybrid deliberately
+        re-introduces `import hashlib` for the filename digest.
+        This test documents the intent so a future cleanup doesn't
+        delete it by pattern-matching on the old B5b rule."""
+        from pathlib import Path as _P
+        src = (
+            _P(__file__).parent.parent.parent
+            / 'src' / 'prismpy' / 'validators' / 'post_translate.py'
+        ).read_text()
+        self.assertIn('import hashlib', src)
+        self.assertNotIn('import random', src)

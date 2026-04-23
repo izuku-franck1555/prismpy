@@ -112,8 +112,8 @@ class DataSource(ABC):
         Returns:
             Path for cache file
         """
-        from prismpy.utils.sanitization import region_cache_key
-        region_key = region_cache_key(region)
+        from prismpy.utils.sanitization import region_cache_key_from_region
+        region_key = region_cache_key_from_region(region)
         filename = f"{self.NAME}_{region_key}{suffix}"
         return self.cache_dir / filename
 

@@ -11,12 +11,54 @@ Platform support:
   - SARRA-Py: not applicable (GeoTIFF file-count validation in scientific.py)
 """
 
+import hashlib
 import logging
 import pickle
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+def _stratified_hybrid_sample(tifs: List[Path]) -> List[Path]:
+    """Pick 10 sample files across an archive with both temporal
+    coverage AND responsiveness to filename-set changes.
+
+    Strategy: split the archive into 10 stratified buckets. First
+    and last buckets always pick the archive edges (index 0 and
+    n-1) so start/end coverage never shifts. The 8 interior buckets
+    pick one file each using a byte of the filename-set digest,
+    modulo the bucket's width. Same filename set → same digest →
+    same sample; a single filename swap (day re-download, corrected
+    swap-in-place, partial backfill at the same archive length)
+    changes the digest and reshuffles the interior picks.
+
+    Caller must guarantee `len(tifs) > 10`; the small-archive path
+    in `_validate_sarra_py_geotiffs` returns the full list for
+    smaller inputs, where bucket arithmetic loses precision.
+    """
+    n = len(tifs)
+    digest = hashlib.sha256(
+        '\n'.join(p.name for p in tifs).encode('utf-8')
+    ).digest()
+    indices: List[int] = [0]
+    # 8 interior buckets span indices (n/10, 9n/10). Each bucket i
+    # covers [round(i * n / 10), round((i + 1) * n / 10)); the
+    # digest byte selects one index inside. `max(1, size)` keeps
+    # the modulo safe even when the archive is just barely above
+    # the <=10 threshold and bucket rounding collapses to zero.
+    for i in range(1, 9):
+        bucket_start = round(i * n / 10)
+        bucket_end = round((i + 1) * n / 10)
+        size = max(1, bucket_end - bucket_start)
+        idx = bucket_start + digest[i] % size
+        indices.append(min(idx, n - 2))  # keep inside (0, n-1)
+    indices.append(n - 1)
+    # Dedup + sort so boundary collisions (very short archives,
+    # unusual bucket rounding) collapse gracefully rather than
+    # double-counting a slot.
+    indices = sorted(set(indices))
+    return [tifs[i] for i in indices]
 
 # Same thresholds as scientific.py — single source of truth
 CLIMATE_RANGES = {
@@ -544,8 +586,6 @@ def _validate_sarra_py_geotiffs(
     the pattern of _validate_pythia_wth and _validate_acea_pickles),
     not from the shared download cache.
     """
-    import random
-
     checks = []
     climate_base = platform_dir / "data" / "climate"
 
@@ -562,22 +602,30 @@ def _validate_sarra_py_geotiffs(
         total_files += len(tifs)
         if not tifs:
             continue
-        # Deterministic sample so degraded-sample warnings are
-        # reproducible across runs. Seed on the full filename list
-        # (sorted above) rather than just (var, count) so two
-        # runs with the SAME file set produce the same sample,
-        # but a single-file change — e.g., a new day added to
-        # a rolling output — reshuffles coverage. Earlier
-        # `{var}:{len(tifs)}` seed froze the sample positions for
-        # every run length; a corruption outside those positions
-        # was systematically missed. Hashing filenames keeps the
-        # sample reproducible AND responsive to file-set changes.
-        import hashlib as _hashlib
-        filenames_digest = _hashlib.sha256(
-            ('\n'.join(p.name for p in tifs)).encode('utf-8')
-        ).hexdigest()
-        seed = f"{var}:{filenames_digest}"
-        sample = random.Random(seed).sample(tifs, min(10, len(tifs)))
+        # Hybrid sample — stratified bucket anchors + a filename-set
+        # digest that shifts each interior pick within its bucket.
+        # Guarantees (1) first / last always covered (archive edges),
+        # (2) temporal spread (every 10th of the archive gets one
+        # pick), and (3) responsiveness to filename-set changes (a
+        # day swap or a partial re-download that keeps `n` constant
+        # but replaces a filename still reshuffles which file in each
+        # bucket is opened, so stale bytes past the old sample
+        # positions can no longer hide behind fixed-index sampling).
+        #
+        # Pure stratified was codex R1's preferred shape, but codex
+        # R3 flagged that it re-validates the exact same 10 slots on
+        # any same-length archive. The hybrid preserves R1's
+        # coverage guarantees while closing that responsiveness gap.
+        # First and last indices stay fixed (archive edges are
+        # always the most load-bearing coverage positions); only the
+        # 8 interior anchors shift.
+        #
+        # The fallback `<= 10` path still returns every file, so
+        # short archives lose no coverage to bucket arithmetic.
+        if len(tifs) <= 10:
+            sample = tifs
+        else:
+            sample = _stratified_hybrid_sample(tifs)
         sampled_vars[var] = (sample, op, operand)
 
     if not sampled_vars:
@@ -682,11 +730,12 @@ def _validate_sarra_py_geotiffs(
                     "sample_size": len(sample_files),
                     "unreadable_count": unreadable,
                     "empty_count": empty,
-                    # Gate B MEDIUM — persist file identity so an
-                    # operator can reproduce the warning / open the
-                    # exact corrupt files. Previously only counts
-                    # were stored, and the random sample changed
-                    # across runs, making warnings non-reproducible.
+                    # Persist file identity so an operator can
+                    # reproduce the warning or open the exact corrupt
+                    # files. Stratified sampling is already
+                    # reproducible (same archive → same sample), but
+                    # surfacing the filenames still matters for
+                    # triage when the archive itself changes.
                     "sampled_files": sampled_names,
                     "unreadable_files": unreadable_names,
                     "empty_files": empty_names,
@@ -750,10 +799,10 @@ def _validate_sarra_py_geotiffs(
                 # NaN) so the operator can distinguish "files
                 # wouldn't open" from "files opened but were empty".
                 # `sampled_files` / `unreadable_files` / `empty_files`
-                # persist file identity (Gate B MEDIUM) so an
-                # operator can reproduce or diagnose the warning —
-                # critical now that the random selection is
-                # deterministic per (variable, file count).
+                # persist file identity so an operator can reproduce
+                # or diagnose the warning. Stratified sampling is
+                # already reproducible — surfacing the filenames
+                # anchors the warning to a specific archive state.
                 "sample_size": len(sample_files),
                 "unreadable_count": unreadable,
                 "empty_count": empty,

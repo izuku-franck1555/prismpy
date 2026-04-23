@@ -28,7 +28,6 @@ from prismpy.models.region import BoundingBox, Region
 from prismpy.provenance.tracker import DecisionType, ProvenanceTracker
 from prismpy.sources.base import DataSource, RetrievalResult
 from prismpy.sources.climate._cancel import PipelineCancelled, raise_if_cancelled
-from prismpy.utils.sanitization import normalize_region_name
 
 
 logger = logging.getLogger(__name__)
@@ -372,26 +371,23 @@ def bbox_field_for_log(bbox: Optional[Dict[str, float]]) -> str:
 
 
 def cache_lock_path(cache_dir: Path, source: str, region_name) -> Path:
-    """Per-source, per-region lock path: .{source}-{region_cache_key}.lock.
+    """Per-source, per-region lock path: .{source}-{key}.lock.
 
-    Different sources on the same region use different lock files so a
-    single SARRA-Py run can progress through TAMSAT then AgERA5 without
-    self-blocking and so two users hitting the same region overlap on
-    different sources but serialize on the same source.
+    Different sources on the same region use different lock files so
+    a single SARRA-Py run can progress through TAMSAT then AgERA5
+    without self-blocking, and two users hitting the same region
+    overlap on different sources but serialize on the same source.
 
-    V2-22b/P.1 — parameter is polymorphic for migration safety:
-    accepts either a `str` (legacy name-keyed callers) OR a full
-    region object (`Region` / `RegionConfig`). When given a region
-    object, manual boundaries key their lock by bbox so unnamed-
-    manual projects sharing the `"Unnamed study area"` display
-    name don't collide on the same lock. The `region_name` kwarg
-    label is kept for compatibility with existing callers.
+    `region_name` must be a `Region` dataclass (post-resolution).
+    `cache_lock_path` is a source-internal helper for prismpy
+    retrieval flows — every live caller passes a `Region`. The
+    parameter keeps the `region_name` label for call-site
+    symmetry; the helper delegates to
+    `region_cache_key_from_region` so any non-`Region` shape
+    fails loudly at `getattr` on `.boundary_source` / `.bounds`.
     """
-    from prismpy.utils.sanitization import region_cache_key
-    if isinstance(region_name, str):
-        safe = normalize_region_name(region_name)
-    else:
-        safe = region_cache_key(region_name)
+    from prismpy.utils.sanitization import region_cache_key_from_region
+    safe = region_cache_key_from_region(region_name)
     return cache_dir / f".{source}-{safe}.lock"
 
 
@@ -534,8 +530,8 @@ class TAMSATSource(DataSource):
         # for others produces a split brain where manual-unnamed
         # runs re-download dates that are already on disk under a
         # different filename.
-        from prismpy.utils.sanitization import region_cache_key
-        region_key = region_cache_key(region)
+        from prismpy.utils.sanitization import region_cache_key_from_region
+        region_key = region_cache_key_from_region(region)
 
         # Determine data directory
         if data_dir:

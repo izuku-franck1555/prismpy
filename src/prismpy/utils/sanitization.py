@@ -192,88 +192,110 @@ def normalize_region_name(name: str) -> str:
     return normalized.strip("_")
 
 
-def region_cache_key(region) -> str:
-    """Stable identifier for cache / lock / path construction.
+def region_cache_key_from_region(region: Any) -> str:
+    """Cross-repo region identity contract — POST-RESOLUTION shape.
 
-    Independent of the display name, so multiple unnamed-manual
-    projects that all carry the shared display name (e.g.,
-    "Unnamed study area") each get their own bbox-derived cache
-    instead of colliding on the shared key. GADM regions keep
-    the normalized-name key because admin names are already
-    unique identifiers.
+    Canonical identifier used for cache directories, lock files,
+    and output paths inside prismpy. Accepts the `Region`
+    dataclass (or any object carrying `.boundary_source: str`,
+    `.bounds` with `.minx / .miny / .maxx / .maxy`, and `.name:
+    str`). Display name (`region.name`) is metadata only for
+    manual regions; it IS the identity for GADM / shapefile /
+    unknown-source regions where admin names are already unique.
 
     Routing:
-    - GADM / shapefile / missing boundary_source: fall through to
-      `normalize_region_name(region.name)` — the display name IS
-      the identity key.
-    - Manual: `manual_{miny}_{maxy}_{minx}_{maxx}` (4-decimal
-      precision, matches the prismweb peer-match key format).
+    - **Manual boundary**: bbox-derived key at 6-decimal
+      precision (~11 cm at the equator). `-0.0` components
+      canonicalize to `0.0` so a meridian / equator edge doesn't
+      produce two different keys for the same region.
+    - **Everything else**: `normalize_region_name(region.name)`.
 
-    Accepts two shapes:
-    - `Region` (post-resolution): `region.boundary_source` + `region.bounds`
-      with `.minx/.miny/.maxx/.maxy`.
-    - `RegionConfig` (pre-resolution): `region.boundary.source` +
-      `region.boundary.manual_bounds` with the same bbox fields.
+    Strict on every field — a missing `.bounds` under a manual
+    source, non-numeric bbox coordinates, or an empty `.name`
+    under a non-manual source all raise `ValueError`. No silent
+    name-key fallback for malformed manual inputs; no empty-key
+    cache path.
     """
-    source_value = _region_boundary_source(region)
-    if source_value == 'manual':
-        bounds = _region_manual_bounds(region)
-        if bounds is not None:
-            miny, maxy, minx, maxx = bounds
-            # Use 6-decimal precision (~11 cm at the equator) so
-            # nearby-but-distinct manual boxes can't silently alias
-            # onto the same cache/lock path. Earlier 4-decimal
-            # precision (~11 m) still aliased at pixel-level
-            # differences a user dragging a bbox could realistically
-            # produce.
-            return (
-                f"manual_"
-                f"{miny:.6f}_{maxy:.6f}_"
-                f"{minx:.6f}_{maxx:.6f}"
+    boundary_source = getattr(region, 'boundary_source', None)
+    if boundary_source == 'manual':
+        bounds = getattr(region, 'bounds', None)
+        if bounds is None:
+            raise ValueError(
+                "region_cache_key_from_region: manual region "
+                f"requires .bounds; got {region!r}"
             )
-        # Malformed manual region — fall through to name-key so
-        # caller isn't blocked. Validation upstream would reject
-        # this before reaching cache paths.
-    return normalize_region_name(getattr(region, 'name', ''))
-
-
-def _region_boundary_source(region) -> Optional[str]:
-    """Extract the boundary source as a string from either shape."""
-    # Post-resolution Region with optional `boundary_source`.
-    direct = getattr(region, 'boundary_source', None)
-    if direct:
-        return direct
-    # Pre-resolution RegionConfig with `boundary.source` enum.
-    boundary = getattr(region, 'boundary', None)
-    if boundary is None:
-        return None
-    source = getattr(boundary, 'source', None)
-    if source is None:
-        return None
-    return source.value if hasattr(source, 'value') else str(source)
-
-
-def _region_manual_bounds(region) -> Optional[tuple]:
-    """Return (miny, maxy, minx, maxx) floats for manual regions.
-    Handles both `RegionConfig.boundary.manual_bounds` and the
-    post-resolution `Region.bounds` BoundingBox."""
-    boundary = getattr(region, 'boundary', None)
-    candidates = []
-    if boundary is not None:
-        manual = getattr(boundary, 'manual_bounds', None)
-        if manual is not None:
-            candidates.append(manual)
-    # Post-resolution Region carries bounds directly; routing by
-    # boundary_source ensures we only fall here for manual regions.
-    bounds = getattr(region, 'bounds', None)
-    if bounds is not None:
-        candidates.append(bounds)
-    for src in candidates:
         try:
-            return (
-                float(src.miny), float(src.maxy),
-                float(src.minx), float(src.maxx),
-            )
-        except (AttributeError, TypeError, ValueError):
-            continue
-    return None
+            miny = _canon_zero(float(bounds.miny))
+            maxy = _canon_zero(float(bounds.maxy))
+            minx = _canon_zero(float(bounds.minx))
+            maxx = _canon_zero(float(bounds.maxx))
+        except (AttributeError, TypeError, ValueError) as e:
+            raise ValueError(
+                "region_cache_key_from_region: manual region "
+                ".bounds must have numeric .minx / .miny / .maxx "
+                f"/ .maxy; got {bounds!r}"
+            ) from e
+        return (
+            f"manual_"
+            f"{miny:.6f}_{maxy:.6f}_"
+            f"{minx:.6f}_{maxx:.6f}"
+        )
+    name = getattr(region, 'name', '') or ''
+    key = normalize_region_name(name)
+    if not key:
+        raise ValueError(
+            "region_cache_key_from_region: non-manual region "
+            f"requires a non-empty .name; got {region!r}"
+        )
+    return key
+
+
+def region_cache_key_from_config(config: "RegionConfig") -> str:
+    """Cross-repo region identity contract — PRE-RESOLUTION shape.
+
+    Canonical identifier for the region persisted in project
+    configuration. Accepts a validated `RegionConfig` Pydantic
+    model — all the strictness this helper used to enforce
+    imperatively (non-empty name, enum source, populated
+    `manual_bounds` with numeric coords inside geographic ranges,
+    `minx < maxx`, `miny < maxy`) is already enforced by
+    `RegionConfig` + `BoundaryConfig` + `ManualBoundsConfig`
+    validators at `model_validate()` time. This helper assumes a
+    validated input and reads fields directly; passing an
+    unvalidated dict is a caller-side mistake that Pydantic
+    catches at the validate boundary upstream.
+
+    Routing:
+    - `boundary.source == BoundarySource.MANUAL`: bbox-derived
+      key at 6-decimal precision (~11 cm at the equator) with
+      `-0.0 → 0.0` canonicalization.
+    - `boundary.source in (GADM, SHAPEFILE)`: `normalize_region_name(name)`.
+
+    Callers should build a `RegionConfig` via
+    `RegionConfig.model_validate(region_dict)` at the boundary
+    they receive the dict (e.g., prismweb's view layer), then
+    hand the validated model to this helper.
+    """
+    from prismpy.config.schema import BoundarySource
+
+    if config.boundary.source == BoundarySource.MANUAL:
+        bounds = config.boundary.manual_bounds
+        miny = _canon_zero(bounds.miny)
+        maxy = _canon_zero(bounds.maxy)
+        minx = _canon_zero(bounds.minx)
+        maxx = _canon_zero(bounds.maxx)
+        return (
+            f"manual_"
+            f"{miny:.6f}_{maxy:.6f}_"
+            f"{minx:.6f}_{maxx:.6f}"
+        )
+    return normalize_region_name(config.name)
+
+
+def _canon_zero(val: float) -> float:
+    """Canonicalize -0.0 → 0.0 so `.6f` formatting is stable.
+    Python formats `-0.0` as `"-0.000000"` which is text-distinct
+    from `"0.000000"`; a bbox edge on the prime meridian /
+    equator could produce two different keys for the same
+    region without this guard."""
+    return 0.0 if val == 0 else float(val)

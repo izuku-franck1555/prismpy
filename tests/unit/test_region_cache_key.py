@@ -1,13 +1,19 @@
-"""Gate B / Path A — `region_cache_key()` routes cache/lock/path
-identity by boundary source so unnamed-manual projects sharing the
-`"Unnamed study area"` display name don't collide on a single
-on-disk cache.
+"""V2-22b/P.2 AC-AUDIT-8 — narrow entry points for region identity.
 
-The function is polymorphic: it accepts either `Region` (post-
-resolution dataclass with `boundary_source` + `bounds`) or
-`RegionConfig` (pre-resolution pydantic model with
-`boundary.source` + `boundary.manual_bounds`). Both paths are
-tested below.
+The polymorphic `region_cache_key(region)` was replaced with two
+narrow entry points so each caller is explicit about which shape
+it's working with:
+
+- `region_cache_key_from_region(region)` — POST-RESOLUTION. Takes a
+  `Region` dataclass (or any object with `.boundary_source`,
+  `.bounds`, `.name` attributes). Used by every prismpy caller.
+- `region_cache_key_from_config(config)` — PRE-RESOLUTION. Takes a
+  plain `Mapping` (prismweb's persisted JSON) or a Pydantic-like
+  attribute-access object with `.boundary.source`,
+  `.boundary.manual_bounds`, `.name`.
+
+Both entry points are strict: malformed inputs raise `ValueError`
+rather than silently degrading to a name-keyed identity.
 """
 
 from __future__ import annotations
@@ -15,119 +21,168 @@ from __future__ import annotations
 import types
 import unittest
 
-from prismpy.utils.sanitization import normalize_region_name, region_cache_key
+from prismpy.utils.sanitization import (
+    normalize_region_name,
+    region_cache_key_from_config,
+    region_cache_key_from_region,
+)
 
 
-def _make_region(
+# =============================================================================
+# region_cache_key_from_region — POST-RESOLUTION entry point
+# =============================================================================
+
+
+def _region_obj(
     *, name='Unnamed study area', boundary_source='manual',
     miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0,
 ):
-    """Post-resolution Region-shaped stub."""
+    """Region-dataclass-shaped SimpleNamespace with boundary_source
+    + bounds. Used in `from_region` tests."""
     bounds = types.SimpleNamespace(miny=miny, maxy=maxy, minx=minx, maxx=maxx)
     return types.SimpleNamespace(
-        name=name,
-        boundary_source=boundary_source,
-        bounds=bounds,
+        name=name, boundary_source=boundary_source, bounds=bounds,
     )
 
 
-def _make_region_config(
-    *, name='Unnamed study area', source='manual',
-    miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0,
-):
-    """Pre-resolution RegionConfig-shaped stub."""
-    manual = types.SimpleNamespace(miny=miny, maxy=maxy, minx=minx, maxx=maxx)
-    boundary = types.SimpleNamespace(source=source, manual_bounds=manual)
-    return types.SimpleNamespace(name=name, boundary=boundary)
+class TestFromRegionManual(unittest.TestCase):
+    """Manual-source regions get bbox-keyed identity so unnamed
+    manual projects sharing the `"Unnamed study area"` default
+    display name each cache separately."""
 
-
-class TestRegionCacheKeyManual(unittest.TestCase):
     def test_same_bbox_same_key(self):
-        """Manual regions at identical bboxes share a cache key
-        (legitimate cache reuse — same climate data needed)."""
-        r1 = _make_region(miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0)
-        r2 = _make_region(miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0)
-        self.assertEqual(region_cache_key(r1), region_cache_key(r2))
-
-    def test_different_bbox_different_key(self):
-        """Manual regions at different bboxes get different cache
-        keys even if they share the `"Unnamed study area"` display
-        name. This is the whole point of Path A."""
-        r_mali = _make_region(miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0)
-        r_ethiopia = _make_region(miny=6.0, maxy=9.0, minx=37.0, maxx=40.0)
-        self.assertNotEqual(
-            region_cache_key(r_mali), region_cache_key(r_ethiopia),
+        r1 = _region_obj(miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0)
+        r2 = _region_obj(miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0)
+        self.assertEqual(
+            region_cache_key_from_region(r1),
+            region_cache_key_from_region(r2),
         )
 
-    def test_key_is_bbox_prefixed_not_name(self):
-        """The key format signals its source (`manual_` prefix +
-        coord quadruple) so an operator seeing the cache dir can
-        tell a manual-keyed entry from a GADM-keyed one."""
-        r = _make_region(miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0)
-        key = region_cache_key(r)
+    def test_different_bbox_different_key(self):
+        r_mali = _region_obj(miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0)
+        r_ethiopia = _region_obj(miny=6.0, maxy=9.0, minx=37.0, maxx=40.0)
+        self.assertNotEqual(
+            region_cache_key_from_region(r_mali),
+            region_cache_key_from_region(r_ethiopia),
+        )
+
+    def test_key_is_bbox_prefixed_at_6_decimal(self):
+        r = _region_obj(miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0)
+        key = region_cache_key_from_region(r)
         self.assertTrue(key.startswith('manual_'))
-        # 6-decimal precision keeps nearby-but-distinct boxes from
-        # aliasing onto the same key (Gate B MEDIUM).
         self.assertIn('12.000000', key)
         self.assertIn('14.000000', key)
         self.assertIn('-5.000000', key)
         self.assertIn('-3.000000', key)
 
     def test_nearby_boxes_produce_different_keys(self):
-        """Codex Path A follow-up MEDIUM — boxes that differ by
-        more than 1e-6 degrees (~11 cm at the equator) must get
-        distinct keys. The earlier 4-decimal precision collapsed
-        differences finer than 1e-4 (~11 m) onto the same key."""
-        r1 = _make_region(miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0)
-        r2 = _make_region(
+        """Sub-6-decimal differences distinguish bboxes — an earlier
+        4-decimal format collapsed ~11 m differences onto the same
+        key."""
+        r1 = _region_obj(miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0)
+        r2 = _region_obj(
             miny=12.00001, maxy=14.00001, minx=-5.00001, maxx=-3.00001,
         )
-        self.assertNotEqual(region_cache_key(r1), region_cache_key(r2))
-
-    def test_regionconfig_manual_keyed_by_bbox(self):
-        """RegionConfig path — pre-resolution pydantic-shaped input
-        also routes to the bbox key."""
-        rc = _make_region_config(
-            source='manual', miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0,
+        self.assertNotEqual(
+            region_cache_key_from_region(r1),
+            region_cache_key_from_region(r2),
         )
-        self.assertTrue(region_cache_key(rc).startswith('manual_'))
 
-    def test_regionconfig_enum_source(self):
-        """When `boundary.source` is an Enum (as in the real
-        `BoundarySource.MANUAL`), the helper extracts `.value`
-        correctly and still routes manual → bbox."""
-        source_enum = types.SimpleNamespace(value='manual')
-        manual = types.SimpleNamespace(
-            miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0,
+    def test_negative_zero_canonicalizes(self):
+        """A bbox edge on the prime meridian / equator can surface
+        `-0.0` from JS / GeoJSON round-trips; `-0.0` and `0.0` must
+        produce the same key."""
+        r_nz = _region_obj(minx=-0.0, miny=0.0, maxx=1.0, maxy=1.0)
+        r_pz = _region_obj(minx=0.0, miny=-0.0, maxx=1.0, maxy=1.0)
+        self.assertEqual(
+            region_cache_key_from_region(r_nz),
+            region_cache_key_from_region(r_pz),
         )
-        boundary = types.SimpleNamespace(source=source_enum, manual_bounds=manual)
-        rc = types.SimpleNamespace(name='Unnamed study area', boundary=boundary)
-        self.assertTrue(region_cache_key(rc).startswith('manual_'))
+        self.assertNotIn('-0', region_cache_key_from_region(r_nz))
 
 
-class TestRegionCacheKeyGadm(unittest.TestCase):
-    def test_gadm_region_falls_through_to_name_key(self):
-        """GADM regions keep the name-keyed cache path because
-        admin names are unique identifiers. The migration is
-        backward-compatible — existing on-disk caches stay valid."""
-        r = _make_region(
-            name='Boulemane', boundary_source='gadm',
+class TestFromRegionGadm(unittest.TestCase):
+    """GADM / shapefile / unknown-source regions use the normalized
+    display name — admin names are already unique identifiers."""
+
+    def test_gadm_region_name_keyed(self):
+        r = _region_obj(name='Boulemane', boundary_source='gadm')
+        self.assertEqual(
+            region_cache_key_from_region(r),
+            normalize_region_name('Boulemane'),
         )
-        self.assertEqual(region_cache_key(r), normalize_region_name('Boulemane'))
 
-    def test_regionconfig_gadm_falls_through_to_name_key(self):
-        """RegionConfig GADM path — same name-keyed behavior."""
-        rc = _make_region_config(name='Maradi', source='gadm')
-        self.assertEqual(region_cache_key(rc), normalize_region_name('Maradi'))
+    def test_missing_boundary_source_defaults_to_name_key(self):
+        """Legacy Region constructor path with `boundary_source=None`
+        falls to the name-key branch."""
+        r = _region_obj(name='Legacy Region', boundary_source=None)
+        self.assertEqual(
+            region_cache_key_from_region(r),
+            normalize_region_name('Legacy Region'),
+        )
+
+    def test_two_same_admin_regions_same_key(self):
+        r1 = _region_obj(name='Maradi', boundary_source='gadm')
+        r2 = _region_obj(name='Maradi', boundary_source='gadm')
+        self.assertEqual(
+            region_cache_key_from_region(r1),
+            region_cache_key_from_region(r2),
+        )
+
+
+class TestFromRegionStrict(unittest.TestCase):
+    """Strict guards — malformed post-resolution inputs raise
+    `ValueError` instead of silently producing a degenerate key."""
+
+    def test_manual_without_bounds_raises(self):
+        r = types.SimpleNamespace(
+            name='Malformed', boundary_source='manual', bounds=None,
+        )
+        with self.assertRaisesRegex(ValueError, 'requires .bounds'):
+            region_cache_key_from_region(r)
+
+    def test_manual_with_non_numeric_bounds_raises(self):
+        """A bounds object with non-numeric coords fails fast, not
+        silently falling through to the name-key."""
+        bounds = types.SimpleNamespace(
+            miny='not-a-number', maxy=1.0, minx=0.0, maxx=1.0,
+        )
+        r = types.SimpleNamespace(
+            name='Bad region', boundary_source='manual', bounds=bounds,
+        )
+        with self.assertRaisesRegex(ValueError, 'numeric'):
+            region_cache_key_from_region(r)
+
+    def test_manual_bounds_missing_attribute_raises(self):
+        """A bounds namespace with partial coordinates (missing
+        attrs) raises via the numeric-parse guard."""
+        bounds = types.SimpleNamespace(miny=1.0, maxy=2.0)
+        # no minx / maxx
+        r = types.SimpleNamespace(
+            name='Partial', boundary_source='manual', bounds=bounds,
+        )
+        with self.assertRaisesRegex(ValueError, 'numeric'):
+            region_cache_key_from_region(r)
+
+    def test_non_manual_with_empty_name_raises(self):
+        """GADM / shapefile regions must have a non-empty name —
+        empty-name fallback used to produce a degenerate empty-key
+        cache path that collided with every other empty-name input."""
+        r = _region_obj(name='', boundary_source='gadm')
+        with self.assertRaisesRegex(ValueError, 'non-empty .name'):
+            region_cache_key_from_region(r)
+
+    def test_non_manual_with_none_name_raises(self):
+        r = _region_obj(name=None, boundary_source='gadm')
+        with self.assertRaisesRegex(ValueError, 'non-empty .name'):
+            region_cache_key_from_region(r)
 
 
 class TestRegionRoundTripPreservesBoundarySource(unittest.TestCase):
-    """Codex Path A MEDIUM — `Region.to_dict()` / `from_dict()`
-    must round-trip `boundary_source` so reloaded objects still
-    route to the bbox cache key for manual regions. Previously
-    the field was dropped, causing reloaded manual regions to
-    fall back to name-keyed caches and collide on the shared
-    `UNNAMED_MANUAL_REGION_NAME`."""
+    """`Region.to_dict()` / `from_dict()` must round-trip
+    `boundary_source` so reloaded objects still route to the bbox
+    cache key for manual regions. Locked structurally so a future
+    serialization change can't drop the field."""
 
     def test_manual_region_round_trip_preserves_bbox_routing(self):
         from prismpy.models.region import BoundingBox, Region
@@ -139,11 +194,14 @@ class TestRegionRoundTripPreservesBoundarySource(unittest.TestCase):
             boundary_source='manual',
         )
         reloaded = Region.from_dict(original.to_dict())
-        # Field survives the round-trip.
         self.assertEqual(reloaded.boundary_source, 'manual')
-        # And the cache key still routes to bbox.
-        self.assertEqual(region_cache_key(original), region_cache_key(reloaded))
-        self.assertTrue(region_cache_key(reloaded).startswith('manual_'))
+        self.assertEqual(
+            region_cache_key_from_region(original),
+            region_cache_key_from_region(reloaded),
+        )
+        self.assertTrue(
+            region_cache_key_from_region(reloaded).startswith('manual_'),
+        )
 
     def test_gadm_region_round_trip_preserves_name_routing(self):
         from prismpy.models.region import BoundingBox, Region
@@ -156,38 +214,1313 @@ class TestRegionRoundTripPreservesBoundarySource(unittest.TestCase):
         )
         reloaded = Region.from_dict(original.to_dict())
         self.assertEqual(reloaded.boundary_source, 'gadm')
-        self.assertEqual(region_cache_key(reloaded), normalize_region_name('Boulemane'))
+        self.assertEqual(
+            region_cache_key_from_region(reloaded),
+            normalize_region_name('Boulemane'),
+        )
 
 
-class TestRegionCacheKeyFallbacks(unittest.TestCase):
-    def test_missing_boundary_source_defaults_to_name_key(self):
-        """If `boundary_source` is None (legacy Region constructor
-        path), fall back to the name-based key so behavior doesn't
-        regress."""
-        r = types.SimpleNamespace(
-            name='Legacy Region',
-            boundary_source=None,
-            bounds=types.SimpleNamespace(
-                miny=10.0, maxy=12.0, minx=-5.0, maxx=-3.0,
-            ),
+# =============================================================================
+# region_cache_key_from_config — PRE-RESOLUTION entry point
+# =============================================================================
+
+
+def _build_manual_config(
+    *, name='Unnamed study area', country='Mali', iso3='MLI',
+    miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0,
+):
+    """Build a validated `RegionConfig` for a manual-boundary region
+    through `RegionConfig.model_validate`. All Pydantic validators
+    fire — ManualBoundsConfig checks ranges + ordering, BoundaryConfig
+    enforces manual → manual_bounds, RegionConfig enforces name
+    min_length=1, iso3 length==3. Callers that want to probe
+    invalid inputs build the raw dict directly and assert the
+    validate step fails."""
+    from prismpy.config.schema import RegionConfig
+    return RegionConfig.model_validate({
+        'name': name, 'country': country, 'country_iso3': iso3,
+        'boundary': {
+            'source': 'manual',
+            'manual_bounds': {
+                'minx': minx, 'miny': miny, 'maxx': maxx, 'maxy': maxy,
+            },
+        },
+    })
+
+
+def _build_gadm_config(name='Boulemane', country='Morocco', iso3='MAR'):
+    from prismpy.config.schema import RegionConfig
+    return RegionConfig.model_validate({
+        'name': name, 'country': country, 'country_iso3': iso3,
+        'boundary': {
+            'source': 'gadm',
+            'gadm_level': 2,
+            'gadm_filter_field': 'NAME_2',
+            'gadm_filter_value': name,
+        },
+    })
+
+
+class TestFromConfigManual(unittest.TestCase):
+    """Manual-source `RegionConfig` → bbox-keyed identity. The
+    helper reads `config.boundary.source` (BoundarySource enum)
+    and `config.boundary.manual_bounds` (ManualBoundsConfig
+    Pydantic model) directly — no coercion, no fallback."""
+
+    def test_manual_config_keys_by_bbox(self):
+        rc = _build_manual_config(
+            miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0,
+        )
+        key = region_cache_key_from_config(rc)
+        self.assertTrue(key.startswith('manual_'))
+        self.assertIn('12.000000', key)
+        self.assertIn('14.000000', key)
+        self.assertIn('-5.000000', key)
+        self.assertIn('-3.000000', key)
+
+    def test_same_bbox_same_key(self):
+        rc1 = _build_manual_config(miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0)
+        rc2 = _build_manual_config(miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0)
+        self.assertEqual(
+            region_cache_key_from_config(rc1),
+            region_cache_key_from_config(rc2),
+        )
+
+    def test_different_bbox_different_key(self):
+        rc1 = _build_manual_config(miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0)
+        rc2 = _build_manual_config(miny=6.0, maxy=9.0, minx=37.0, maxx=40.0)
+        self.assertNotEqual(
+            region_cache_key_from_config(rc1),
+            region_cache_key_from_config(rc2),
+        )
+
+    def test_nearby_boxes_produce_different_keys(self):
+        rc1 = _build_manual_config(miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0)
+        rc2 = _build_manual_config(
+            miny=12.00001, maxy=14.00001,
+            minx=-5.00001, maxx=-3.00001,
+        )
+        self.assertNotEqual(
+            region_cache_key_from_config(rc1),
+            region_cache_key_from_config(rc2),
+        )
+
+    def test_negative_zero_canonicalizes(self):
+        """A bbox with a prime-meridian / equator edge produces
+        `-0.0` from some JS / GeoJSON round-trips. Pydantic
+        accepts `-0.0` as a valid float; the helper normalizes
+        it to `0.0` so two mathematically-identical bboxes
+        produce the same key."""
+        rc_nz = _build_manual_config(
+            minx=-0.0, miny=0.0, maxx=1.0, maxy=1.0,
+        )
+        rc_pz = _build_manual_config(
+            minx=0.0, miny=-0.0, maxx=1.0, maxy=1.0,
         )
         self.assertEqual(
-            region_cache_key(r), normalize_region_name('Legacy Region'),
+            region_cache_key_from_config(rc_nz),
+            region_cache_key_from_config(rc_pz),
+        )
+        self.assertNotIn('-0', region_cache_key_from_config(rc_nz))
+
+
+class TestFromConfigGadm(unittest.TestCase):
+    """GADM-source `RegionConfig` → name-keyed identity."""
+
+    def test_gadm_config_name_keyed(self):
+        rc = _build_gadm_config(name='Boulemane')
+        self.assertEqual(
+            region_cache_key_from_config(rc),
+            normalize_region_name('Boulemane'),
         )
 
-    def test_malformed_manual_bbox_falls_back_to_name_key(self):
-        """If boundary_source says manual but bbox fields are
-        missing, fall through to name-key rather than raising —
-        upstream validation would reject this before cache paths
-        are built, but the fallback keeps the helper itself
-        robust."""
-        r = types.SimpleNamespace(
-            name='Malformed',
-            boundary_source='manual',
-            bounds=None,  # missing
-            boundary=None,
-        )
-        # No exception, falls through to name-key.
+    def test_same_admin_name_same_key(self):
+        rc1 = _build_gadm_config(name='Maradi')
+        rc2 = _build_gadm_config(name='Maradi')
         self.assertEqual(
-            region_cache_key(r), normalize_region_name('Malformed'),
+            region_cache_key_from_config(rc1),
+            region_cache_key_from_config(rc2),
         )
+
+    def test_accented_admin_name_normalizes(self):
+        rc = _build_gadm_config(name='Ségou')
+        # normalize_region_name strips accents + lowercases.
+        self.assertEqual(
+            region_cache_key_from_config(rc),
+            normalize_region_name('Ségou'),
+        )
+
+
+class TestFromConfigValidationBoundary(unittest.TestCase):
+    """Pydantic validation happens at `RegionConfig.model_validate`
+    — NOT inside `region_cache_key_from_config`. Malformed inputs
+    never reach the helper; the tests here document that boundary
+    by asserting Pydantic raises before the helper runs.
+
+    Prior rounds (R3 / R6 / R7) tested imperative strict guards
+    inside the helper. AC-AUDIT-9 collapsed those guards —
+    validation lives in the schema models, and shipping the
+    helper without duplicated validation is the point.
+    """
+
+    def test_empty_name_rejected_by_model(self):
+        """`RegionConfig.name` is `Field(..., min_length=1)` — an
+        empty name fails at model_validate, never reaches the
+        helper."""
+        from pydantic import ValidationError
+        from prismpy.config.schema import RegionConfig
+        with self.assertRaises(ValidationError):
+            RegionConfig.model_validate({
+                'name': '', 'country': 'Mali', 'country_iso3': 'MLI',
+                'boundary': {
+                    'source': 'manual',
+                    'manual_bounds': {
+                        'minx': -5.0, 'miny': 12.0,
+                        'maxx': -3.0, 'maxy': 14.0,
+                    },
+                },
+            })
+
+    def test_unknown_source_rejected_by_model(self):
+        """`BoundarySource` is a strict Enum — a typo like
+        `'manual '` (trailing space) or unknown source string
+        fails at the enum coercion step."""
+        from pydantic import ValidationError
+        from prismpy.config.schema import RegionConfig
+        with self.assertRaises(ValidationError):
+            RegionConfig.model_validate({
+                'name': 'x', 'country': 'Mali', 'country_iso3': 'MLI',
+                'boundary': {'source': 'manual '},
+            })
+
+    def test_manual_without_bounds_rejected_by_model(self):
+        """`BoundaryConfig.validate_source_requirements` raises
+        when `source == manual` but `manual_bounds` is absent."""
+        from pydantic import ValidationError
+        from prismpy.config.schema import RegionConfig
+        with self.assertRaises(ValidationError):
+            RegionConfig.model_validate({
+                'name': 'x', 'country': 'Mali', 'country_iso3': 'MLI',
+                'boundary': {'source': 'manual'},
+            })
+
+    def test_manual_bounds_wrong_ordering_rejected_by_model(self):
+        """`ManualBoundsConfig.validate_bounds` raises when minx
+        >= maxx or miny >= maxy."""
+        from pydantic import ValidationError
+        from prismpy.config.schema import RegionConfig
+        with self.assertRaises(ValidationError):
+            RegionConfig.model_validate({
+                'name': 'x', 'country': 'Mali', 'country_iso3': 'MLI',
+                'boundary': {
+                    'source': 'manual',
+                    'manual_bounds': {
+                        'minx': 5.0, 'miny': 12.0,
+                        'maxx': 3.0, 'maxy': 14.0,
+                    },
+                },
+            })
+
+    def test_manual_bounds_out_of_geographic_range_rejected_by_model(self):
+        from pydantic import ValidationError
+        from prismpy.config.schema import RegionConfig
+        with self.assertRaises(ValidationError):
+            RegionConfig.model_validate({
+                'name': 'x', 'country': 'Mali', 'country_iso3': 'MLI',
+                'boundary': {
+                    'source': 'manual',
+                    'manual_bounds': {
+                        'minx': -5.0, 'miny': 12.0,
+                        'maxx': -3.0, 'maxy': 95.0,  # latitude > 90
+                    },
+                },
+            })
+
+
+class TestRegionConfigNormalizableNameCountry(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-10 — `RegionConfig.name` and
+    `RegionConfig.country` must reject values whose normalized
+    form is empty.
+
+    Pre-AC-AUDIT-10 schema: `Field(..., min_length=1)` accepted
+    strings like `'   '`, `'!!!'`, `'___'` — which validated
+    upstream but collapsed to `''` when passed through
+    `normalize_region_name` or `sanitize_admin_name` downstream.
+    Result: two different malformed configs aliasing onto the
+    same empty-string cache key / lock path / filename prefix.
+
+    The schema-level validator catches those inputs at
+    `model_validate` time so every downstream consumer gets the
+    invariant for free. Covers both fields; both hit
+    filename-normalization paths (name → `normalize_region_name`,
+    country → `sanitize_admin_name` inside several translators).
+    """
+
+    @staticmethod
+    def _build(**overrides):
+        """Minimal valid config builder. Callers override name /
+        country to exercise the new validator."""
+        from prismpy.config.schema import RegionConfig
+        payload = {
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'manual',
+                'manual_bounds': {
+                    'minx': -5.0, 'miny': 12.0,
+                    'maxx': -3.0, 'maxy': 14.0,
+                },
+            },
+        }
+        payload.update(overrides)
+        return RegionConfig.model_validate(payload)
+
+    def test_pure_whitespace_name_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'empty identifier|Latin-script|disallowed'):
+            self._build(name='   ')
+
+    def test_pure_punctuation_name_rejected(self):
+        """Pure-punctuation names are rejected by the identifier
+        whitelist (`!` isn't in the allowed-punctuation set), not
+        by the `normalize_region_name` empty-identifier fallback
+        that handled whitespace-only / underscore-only. Either
+        error path is acceptable — both mean 'reject this input';
+        match on the broader `disallowed|empty identifier`
+        pattern so the test survives future wording tweaks."""
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(
+            ValidationError, 'disallowed|empty identifier',
+        ):
+            self._build(name='!!!')
+
+    def test_pure_underscore_name_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'empty identifier|Latin-script|disallowed'):
+            self._build(name='___')
+
+    def test_name_whitespace_trimmed(self):
+        """`mode='before'` strips surrounding whitespace so a
+        legitimate name with trailing/leading spaces doesn't
+        fail downstream file-naming while preserving the UX of
+        accepting copy-paste input."""
+        rc = self._build(name='  Koutiala  ')
+        self.assertEqual(rc.name, 'Koutiala')
+
+    def test_pure_whitespace_country_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'empty identifier|Latin-script|disallowed'):
+            self._build(country='   ')
+
+    def test_pure_punctuation_country_rejected(self):
+        """Country strings feed translators' `sanitize_admin_name`
+        path, which strips punctuation. `'!!!'` collapses to ''
+        there too, producing malformed output paths. Either the
+        whitelist or empty-identifier fallback rejects; match
+        both."""
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(
+            ValidationError, 'disallowed|empty identifier',
+        ):
+            self._build(country='!!!')
+
+    def test_country_whitespace_trimmed(self):
+        rc = self._build(country='  Mali  ')
+        self.assertEqual(rc.country, 'Mali')
+
+    def test_name_country_parity_with_from_region(self):
+        """Codex R9 observation — pre-AC-AUDIT-10, `from_config`
+        silently returned '' for malformed names while
+        `from_region` raised. The schema-level validator closes
+        the divergence: both entry points now refuse the same
+        logical input, just at different layers (validate vs
+        helper-call)."""
+        from pydantic import ValidationError
+        # Pre-resolution path: RegionConfig rejects at validate.
+        with self.assertRaises(ValidationError):
+            self._build(name='   ')
+        # Post-resolution path: Region with empty name raises
+        # inside the helper (existing behaviour, unchanged).
+        with self.assertRaises(ValueError):
+            region_cache_key_from_region(
+                types.SimpleNamespace(
+                    name='   ',
+                    boundary_source='gadm',
+                    bounds=types.SimpleNamespace(
+                        miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0,
+                    ),
+                )
+            )
+
+
+class TestRegionConfigUniversalInvariants(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-11 — schema-level rejection of values
+    that are pathological across every downstream consumer, not
+    only the cache-key path.
+
+    Scope boundary (from the sprint's stopping criterion): only
+    UNIVERSAL invariants live here. Consumer-specific format
+    requirements (CRAFT fixed-width column widths, DSSAT file
+    structure rules) belong at the writer layer, not the schema.
+    Codex R10's CRAFT-specific fixed-width concerns are deferred
+    to V2-22b/S (platform-translator correctness sprint); this
+    class covers only what's universal: embedded control
+    characters never legitimate in any identifier, ISO3 codes
+    must be three ASCII letters.
+    """
+
+    @staticmethod
+    def _build(**overrides):
+        from prismpy.config.schema import RegionConfig
+        payload = {
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'manual',
+                'manual_bounds': {
+                    'minx': -5.0, 'miny': 12.0,
+                    'maxx': -3.0, 'maxy': 14.0,
+                },
+            },
+        }
+        payload.update(overrides)
+        return RegionConfig.model_validate(payload)
+
+    def test_name_rejects_embedded_newline(self):
+        """Control chars inside the string survive
+        `normalize_region_name` (turn into `_`) but corrupt
+        structured outputs that write the raw name — log lines,
+        JSON reports, fixed-width records."""
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(
+            ValidationError, 'disallowed|non-printable|invisible',
+        ):
+            self._build(name='Kou\ntiala')
+
+    def test_name_rejects_embedded_tab(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(
+            ValidationError, 'disallowed|non-printable|invisible',
+        ):
+            self._build(name='Kou\ttiala')
+
+    def test_country_rejects_embedded_newline(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(
+            ValidationError, 'disallowed|non-printable|invisible',
+        ):
+            self._build(country='Mali\nWest')
+
+    def test_country_rejects_embedded_control_char(self):
+        """Full ASCII control range \\x00-\\x1f + \\x7f."""
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(
+            ValidationError, 'disallowed|non-printable|invisible',
+        ):
+            self._build(country='Mali\x07West')  # bell
+
+    def test_country_iso3_rejects_lowercase(self):
+        """`validate_iso3` used to just uppercase; now rejects
+        inputs that aren't exactly three ASCII letters. An
+        already-uppercase code still passes; a lowercase one
+        ALSO passes because the validator strips + uppercases
+        first, then validates. A genuinely invalid code (digits,
+        punctuation, length) is rejected."""
+        # lowercase still passes (upper-cased + pattern-checked).
+        rc = self._build(country_iso3='mli')
+        self.assertEqual(rc.country_iso3, 'MLI')
+
+    def test_country_iso3_rejects_digits(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(
+            ValidationError, 'ISO 3166',
+        ):
+            self._build(country_iso3='ML2')
+
+    def test_country_iso3_rejects_punctuation(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(
+            ValidationError, 'ISO 3166',
+        ):
+            self._build(country_iso3='ML!')
+
+
+class TestGadmFilterValueUniversalInvariants(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-12 — symmetric expansion of the AC-AUDIT-10/11
+    validators to `BoundaryConfig.gadm_filter_value`, closing the
+    codex R11 universal gap.
+
+    GADM filter_value flows into `GADMSource._extract_bounds()`'s
+    `if filter_field and filter_value:` guard. Empty, whitespace,
+    or malformed strings are falsy (`'   '` is truthy but
+    normalizes to empty) — the guard skipped filtering, unioned
+    the entire shapefile, and returned a silently-widened
+    `"Full Region"` instead of failing fast.
+
+    Universal invariant (same as name / country): identifier must
+    strip non-empty, contain no control characters, normalize to
+    a non-empty identifier. `None` still allowed at the field
+    level (the model_validator rejects None only for
+    `source='gadm'` so non-GADM runs don't need the field)."""
+
+    @staticmethod
+    def _build_gadm(filter_value):
+        """GADM RegionConfig with explicit filter_value. Raises
+        `ValidationError` when filter_value fails the universal
+        invariants."""
+        from prismpy.config.schema import RegionConfig
+        return RegionConfig.model_validate({
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'gadm',
+                'gadm_level': 2,
+                'gadm_filter_field': 'NAME_2',
+                'gadm_filter_value': filter_value,
+            },
+        })
+
+    def test_empty_string_filter_value_rejected(self):
+        """Pre-AC-AUDIT-12: `gadm_filter_value=''` passed the
+        schema (`model_validator` only checks for None) and the
+        executor skipped filtering, returning a silently-widened
+        `Full Region`. Must now fail at validate time."""
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build_gadm('')
+
+    def test_whitespace_only_filter_value_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'empty identifier|Latin-script|disallowed'):
+            self._build_gadm('   ')
+
+    def test_punctuation_only_filter_value_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(
+            ValidationError, 'disallowed|empty identifier',
+        ):
+            self._build_gadm('!!!')
+
+    def test_control_char_filter_value_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'disallowed|non-printable|invisible'):
+            self._build_gadm('Koutiala\ntext')
+
+    def test_surrounding_whitespace_stripped(self):
+        rc = self._build_gadm('  Koutiala  ')
+        self.assertEqual(rc.boundary.gadm_filter_value, 'Koutiala')
+
+    def test_valid_filter_value_accepted(self):
+        rc = self._build_gadm('Koutiala')
+        self.assertEqual(rc.boundary.gadm_filter_value, 'Koutiala')
+
+    def test_none_filter_value_still_rejected_for_gadm_source(self):
+        """The existing `validate_source_requirements` model
+        validator — AC-AUDIT-12 doesn't change it. None on a
+        non-GADM source remains legal."""
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(
+            ValidationError, 'gadm_filter_value required',
+        ):
+            self._build_gadm(None)
+
+
+class TestGadmFilterFieldUniversalInvariants(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-13 — extend the universal-identifier
+    guard to `BoundaryConfig.gadm_filter_field` (the column name
+    in the GADM shapefile to filter on). Same downstream
+    truthiness check in `GADMSource._extract_bounds`; whitespace-
+    or control-bearing values bypass the `NAME_{level}` fallback
+    and surface as "Column '...' not found" at retrieve time
+    instead of validation-time."""
+
+    @staticmethod
+    def _build_with_filter_field(filter_field):
+        from prismpy.config.schema import RegionConfig
+        return RegionConfig.model_validate({
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'gadm',
+                'gadm_level': 2,
+                'gadm_filter_field': filter_field,
+                'gadm_filter_value': 'Koutiala',
+            },
+        })
+
+    def test_whitespace_only_filter_field_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'empty identifier|Latin-script|disallowed'):
+            self._build_with_filter_field('   ')
+
+    def test_control_char_filter_field_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'disallowed|non-printable|invisible'):
+            self._build_with_filter_field('NAME\t2')
+
+    def test_surrounding_whitespace_stripped(self):
+        rc = self._build_with_filter_field('  NAME_2  ')
+        self.assertEqual(rc.boundary.gadm_filter_field, 'NAME_2')
+
+    def test_valid_filter_field_accepted(self):
+        rc = self._build_with_filter_field('NAME_2')
+        self.assertEqual(rc.boundary.gadm_filter_field, 'NAME_2')
+
+
+class TestShapefilePathUniversalInvariants(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-13 — empty-string / whitespace-only
+    `shapefile_path` inputs used to silently coerce to
+    `Path('.')` (the current working directory), which then
+    passed `Path.exists()` checks and was handed to
+    `geopandas.read_file`, surfacing only as a runtime
+    `DataSourceError`. Schema-level validation now rejects these
+    at model_validate."""
+
+    @staticmethod
+    def _build_with_shapefile(shapefile_path):
+        from prismpy.config.schema import RegionConfig
+        return RegionConfig.model_validate({
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'shapefile',
+                'shapefile_path': shapefile_path,
+            },
+        })
+
+    def test_empty_string_shapefile_path_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'empty or whitespace'):
+            self._build_with_shapefile('')
+
+    def test_whitespace_only_shapefile_path_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'empty or whitespace'):
+            self._build_with_shapefile('   ')
+
+    def test_control_char_shapefile_path_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'disallowed|non-printable|invisible'):
+            self._build_with_shapefile('/path/\nfile.shp')
+
+    def test_valid_shapefile_path_accepted(self):
+        from pathlib import Path
+        rc = self._build_with_shapefile('/some/path/boundaries.shp')
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('/some/path/boundaries.shp'),
+        )
+
+    def test_surrounding_whitespace_rejected(self):
+        """V2-22b/P.2 AC-AUDIT-20 codex R21 MEDIUM update — paths
+        with leading/trailing whitespace are now rejected rather
+        than silently stripped. Stripping masked the R21 case
+        where the trailing whitespace WAS the illegal Windows
+        segment-ending-with-space, producing a different on-disk
+        name. Explicit rejection forces the caller to trim
+        intentionally, surfacing any ambiguity as a validation
+        error rather than a silent mutation."""
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(
+            ValidationError, 'leading or trailing whitespace',
+        ):
+            self._build_with_shapefile('  /some/path/boundaries.shp  ')
+
+    def test_trailing_space_on_filename_rejected(self):
+        """R21 MEDIUM verbatim: `/tmp/region ` with a terminal
+        space is ambiguous on POSIX and illegal on Windows. Must
+        now fail at validate time — the prior `.strip()` call
+        would have silently converted this to `/tmp/region`."""
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(
+            ValidationError, 'leading or trailing whitespace',
+        ):
+            self._build_with_shapefile('/tmp/region ')
+
+
+class TestShapefilePathWindowsSegmentsSeparatorAgnostic(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-20 codex R21 HIGH — the Windows
+    reserved-name / trailing-dot-or-space segment check must work
+    against native backslash paths even when the validator runs
+    on POSIX. `pathlib.Path.parts` on POSIX sees a string like
+    `r'C:\\CON\\region.shp'` as a single segment; the fixed
+    validator splits the raw input on both `/` and `\\` so
+    segment-level rejection is separator-agnostic."""
+
+    @staticmethod
+    def _build_with_shapefile(shapefile_path):
+        from prismpy.config.schema import RegionConfig
+        return RegionConfig.model_validate({
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'shapefile',
+                'shapefile_path': shapefile_path,
+            },
+        })
+
+    def test_con_in_windows_backslash_path_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'reserved'):
+            self._build_with_shapefile(r'C:\CON\region.shp')
+
+    def test_trailing_dot_in_windows_backslash_path_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'dot or space'):
+            self._build_with_shapefile(r'C:\bad.\region.shp')
+
+    def test_trailing_space_in_windows_backslash_path_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'dot or space'):
+            self._build_with_shapefile(r'C:\bad \region.shp')
+
+    def test_legitimate_windows_backslash_path_accepted(self):
+        """Control — a clean Windows path with no reserved names
+        and no trailing whitespace/dot still validates so the
+        segment check isn't over-rejecting."""
+        rc = self._build_with_shapefile(r'C:\data\region.shp')
+        self.assertIn(':', str(rc.boundary.shapefile_path))
+
+
+class TestShapefilePathRelativeNavigators(unittest.TestCase):
+    """V2-22b/P.2 Gate B finding — the AC-AUDIT-18 trailing-dot
+    segment check over-rejected legitimate `.` and `..` relative-
+    path navigators. The executor (`pipeline/executor.py:~408`)
+    explicitly supports non-absolute shapefile paths and resolves
+    them against the project root, so configs like
+    `./boundaries/region.shp` must validate at schema time.
+
+    The fix treats `.` and `..` as navigation markers, not
+    trailing-dot filenames, and skips them from the segment
+    rules. Actual filenames and directory names are still
+    checked for trailing dot / trailing space / Windows
+    reserved names on their own iteration."""
+
+    @staticmethod
+    def _build_with_shapefile(shapefile_path):
+        from prismpy.config.schema import RegionConfig
+        return RegionConfig.model_validate({
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'shapefile',
+                'shapefile_path': shapefile_path,
+            },
+        })
+
+    def test_shapefile_path_accepts_dot_relative(self):
+        """`./boundaries/region.shp` — the `.` segment is a
+        relative-path marker, not a trailing-dot filename. Must
+        validate."""
+        from pathlib import Path
+        rc = self._build_with_shapefile('./boundaries/region.shp')
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('boundaries/region.shp'),
+        )
+
+    def test_shapefile_path_accepts_parent_relative(self):
+        """`../data/region.shp` — `..` is a parent-directory
+        navigator."""
+        from pathlib import Path
+        rc = self._build_with_shapefile('../data/region.shp')
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('../data/region.shp'),
+        )
+
+    def test_shapefile_path_accepts_embedded_parent(self):
+        """`dir/../region.shp` — embedded `..` that resolves the
+        same as `region.shp`. Must validate; `pathlib.Path` keeps
+        the literal segments unless we explicitly `resolve()`."""
+        rc = self._build_with_shapefile('dir/../region.shp')
+        self.assertIn('..', str(rc.boundary.shapefile_path))
+
+    def test_shapefile_path_accepts_windows_dot_relative(self):
+        rc = self._build_with_shapefile(r'.\boundaries\region.shp')
+        # pathlib on POSIX keeps the literal string with backslashes.
+        self.assertIn('region.shp', str(rc.boundary.shapefile_path))
+
+    def test_trailing_dot_filename_still_rejects(self):
+        """Regression guard — a real trailing-dot filename
+        (`bad.`) still rejects; the `.`/`..` exception is narrow
+        and doesn't reopen the Windows invalid-segment class."""
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'dot or space'):
+            self._build_with_shapefile('/tmp/bad./region.shp')
+
+    def test_reserved_name_in_relative_path_still_rejects(self):
+        """Regression guard — `./CON/region.shp` still rejects
+        because CON is a reserved name segment that follows the
+        `.` navigator."""
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'reserved'):
+            self._build_with_shapefile('./CON/region.shp')
+
+
+class TestUnicodeHiddenCharsUniversalInvariants(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-14 — Unicode non-ASCII hidden characters
+    (U+2028 LINE SEPARATOR, U+0085 NEXT LINE, U+200B ZERO WIDTH
+    SPACE, etc.) bypass ASCII-only control-character checks but
+    corrupt structured downstream consumers just as badly as ASCII
+    control characters. `str.isprintable()` is Unicode-aware and
+    catches the full set.
+
+    Covers all identifier fields the schema validates:
+    RegionConfig.name, RegionConfig.country,
+    BoundaryConfig.gadm_filter_value, .gadm_filter_field,
+    .shapefile_path."""
+
+    # Representative hidden-char samples per codex R13 empirical test.
+    HIDDEN_CHARS = [
+        ('\u2028', 'LINE SEPARATOR'),
+        ('\u0085', 'NEXT LINE'),
+        ('\u200b', 'ZERO WIDTH SPACE'),
+    ]
+
+    @staticmethod
+    def _build(**overrides):
+        from prismpy.config.schema import RegionConfig
+        payload = {
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'manual',
+                'manual_bounds': {
+                    'minx': -5.0, 'miny': 12.0,
+                    'maxx': -3.0, 'maxy': 14.0,
+                },
+            },
+        }
+        payload.update(overrides)
+        return RegionConfig.model_validate(payload)
+
+    def test_name_rejects_unicode_hidden_chars(self):
+        from pydantic import ValidationError
+        for char, label in self.HIDDEN_CHARS:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    ValidationError, 'disallowed|non-printable|invisible',
+                ):
+                    self._build(name=f'Kou{char}tiala')
+
+    def test_country_rejects_unicode_hidden_chars(self):
+        from pydantic import ValidationError
+        for char, label in self.HIDDEN_CHARS:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    ValidationError, 'disallowed|non-printable|invisible',
+                ):
+                    self._build(country=f'Ma{char}li')
+
+    def test_gadm_filter_value_rejects_unicode_hidden_chars(self):
+        from pydantic import ValidationError
+        from prismpy.config.schema import RegionConfig
+        for char, label in self.HIDDEN_CHARS:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    ValidationError, 'disallowed|non-printable|invisible',
+                ):
+                    RegionConfig.model_validate({
+                        'name': 'Koutiala',
+                        'country': 'Mali', 'country_iso3': 'MLI',
+                        'boundary': {
+                            'source': 'gadm',
+                            'gadm_level': 2,
+                            'gadm_filter_field': 'NAME_2',
+                            'gadm_filter_value': f'Kou{char}tiala',
+                        },
+                    })
+
+    def test_shapefile_path_rejects_unicode_hidden_chars(self):
+        from pydantic import ValidationError
+        from prismpy.config.schema import RegionConfig
+        for char, label in self.HIDDEN_CHARS:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    ValidationError, 'disallowed|non-printable|invisible',
+                ):
+                    RegionConfig.model_validate({
+                        'name': 'Koutiala',
+                        'country': 'Mali', 'country_iso3': 'MLI',
+                        'boundary': {
+                            'source': 'shapefile',
+                            'shapefile_path': f'/path{char}/file.shp',
+                        },
+                    })
+
+
+class TestShapefilePathLikeNormalization(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-14 — codex R13 MEDIUM. The earlier
+    `shapefile_path` validator only checked raw strings;
+    `Path('')` / `Path('.')` inputs bypassed the guard and
+    resolved to the current working directory. Now the validator
+    normalizes every input to `Path` and rejects the
+    empty-sentinel regardless of whether the caller passed a
+    string or a `Path` object."""
+
+    @staticmethod
+    def _build_with_shapefile(shapefile_path):
+        from prismpy.config.schema import RegionConfig
+        return RegionConfig.model_validate({
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'shapefile',
+                'shapefile_path': shapefile_path,
+            },
+        })
+
+    def test_path_empty_string_rejected(self):
+        """`Path('')` is a PathLike whose str-form is `'.'` — the
+        empty-sentinel. Must raise just like the string case."""
+        from pathlib import Path
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'current working'):
+            self._build_with_shapefile(Path(''))
+
+    def test_path_dot_rejected(self):
+        """`Path('.')` literally names the current working
+        directory — a pathological shapefile path that would
+        silently pass `Path.exists()` and reach
+        `geopandas.read_file`."""
+        from pathlib import Path
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'current working'):
+            self._build_with_shapefile(Path('.'))
+
+    def test_path_legitimate_absolute_path_accepted(self):
+        from pathlib import Path
+        rc = self._build_with_shapefile(
+            Path('/some/absolute/path.shp'),
+        )
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('/some/absolute/path.shp'),
+        )
+
+
+class TestShapefilePathPunctuationAcceptance(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-18 codex R18 MEDIUM — paths legitimately
+    contain punctuation outside the identifier allowlist: `+`,
+    `[`, `]`, `@`, `:` (Windows drive), `\\` (Windows separator),
+    `~`, `$`, `#`. The AC-AUDIT-16 whitelist pivot applied the
+    identifier policy to `shapefile_path` too, which caused
+    legitimate paths to fail validation. This class pins the
+    path-specific policy: paths accept a broader punctuation set,
+    rejecting only control / format / invisible codepoints."""
+
+    @staticmethod
+    def _build_with_shapefile(shapefile_path):
+        from prismpy.config.schema import RegionConfig
+        return RegionConfig.model_validate({
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'shapefile',
+                'shapefile_path': shapefile_path,
+            },
+        })
+
+    def test_plus_in_directory_name_accepted(self):
+        from pathlib import Path
+        rc = self._build_with_shapefile('/tmp/v1+2/region.shp')
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('/tmp/v1+2/region.shp'),
+        )
+
+    def test_brackets_in_directory_name_accepted(self):
+        from pathlib import Path
+        rc = self._build_with_shapefile('/tmp/[draft]/region.shp')
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('/tmp/[draft]/region.shp'),
+        )
+
+    def test_at_symbol_in_directory_name_accepted(self):
+        from pathlib import Path
+        rc = self._build_with_shapefile('/tmp/@me/region.shp')
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('/tmp/@me/region.shp'),
+        )
+
+    def test_windows_drive_path_accepted(self):
+        """`C:\\data\\region.shp` contains `:` and `\\` which the
+        identifier allowlist rejects — paths need the broader
+        acceptance policy."""
+        from pathlib import Path
+        rc = self._build_with_shapefile(r'C:\data\region.shp')
+        # pathlib on POSIX normalizes this literally.
+        self.assertEqual(
+            str(rc.boundary.shapefile_path), r'C:\data\region.shp',
+        )
+
+    def test_tilde_home_path_accepted(self):
+        from pathlib import Path
+        rc = self._build_with_shapefile('~/data/region.shp')
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('~/data/region.shp'),
+        )
+
+    def test_dollar_variable_in_path_accepted(self):
+        """Shell-style `$VAR` paths — not expanded by the schema
+        (resolution happens at read time), but the validator
+        shouldn't reject them on character grounds."""
+        from pathlib import Path
+        rc = self._build_with_shapefile('/tmp/$DATA/region.shp')
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('/tmp/$DATA/region.shp'),
+        )
+
+
+class TestShapefilePathWindowsForbiddenChars(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-18 codex R19 MEDIUM — Windows-forbidden
+    filename characters (`< > " | ? *`) are categorically unusable
+    in a filesystem path on Windows and operationally painful on
+    POSIX (shell quoting / globbing). Rejecting them at schema
+    promotes the failure from runtime DataSourceError to a
+    validation-time error. `:` and `/` / `\\` are NOT in the
+    forbidden set — `:` is needed for Windows drive prefixes
+    (`C:\\`) and the path separators are obviously required."""
+
+    @staticmethod
+    def _build_with_shapefile(shapefile_path):
+        from prismpy.config.schema import RegionConfig
+        return RegionConfig.model_validate({
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'shapefile',
+                'shapefile_path': shapefile_path,
+            },
+        })
+
+    def test_pipe_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build_with_shapefile('/tmp/bad|name.shp')
+
+    def test_question_mark_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build_with_shapefile('/tmp/bad?name.shp')
+
+    def test_star_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build_with_shapefile('/tmp/bad*name.shp')
+
+    def test_double_quote_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build_with_shapefile('/tmp/bad"name.shp')
+
+    def test_less_than_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build_with_shapefile('/tmp/bad<name.shp')
+
+    def test_greater_than_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build_with_shapefile('/tmp/bad>name.shp')
+
+    def test_colon_still_accepted_for_drive_letter(self):
+        """`:` stays accepted so Windows drive prefixes validate
+        (`C:\\data\\region.shp`). Schema-level drive-letter-only
+        enforcement would over-constrain valid POSIX paths that
+        legitimately contain `:` in filenames."""
+        rc = self._build_with_shapefile(r'D:\data\region.shp')
+        self.assertIn(':', str(rc.boundary.shapefile_path))
+
+    def test_slash_and_backslash_still_accepted(self):
+        """Path separators are obviously required."""
+        from pathlib import Path
+        rc = self._build_with_shapefile('/posix/style/path.shp')
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('/posix/style/path.shp'),
+        )
+        rc = self._build_with_shapefile(r'C:\windows\style\path.shp')
+        self.assertIn('\\', str(rc.boundary.shapefile_path))
+
+
+class TestShapefilePathWindowsReservedNames(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-19 codex R20 MEDIUM — Windows reserved
+    device names (CON, PRN, AUX, NUL, COMn, LPTn) cannot appear
+    as any path segment on Windows, regardless of extension. The
+    validator checks each path part after normalization and
+    rejects if any stem (before the first `.`) matches a reserved
+    name. Also rejects trailing-dot or trailing-space segments,
+    which Windows silently strips (producing an on-disk name
+    that doesn't match the declared path)."""
+
+    @staticmethod
+    def _build_with_shapefile(shapefile_path):
+        from prismpy.config.schema import RegionConfig
+        return RegionConfig.model_validate({
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'shapefile',
+                'shapefile_path': shapefile_path,
+            },
+        })
+
+    def test_con_reserved_name_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'reserved'):
+            self._build_with_shapefile('/tmp/CON.shp')
+
+    def test_con_case_insensitive(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'reserved'):
+            self._build_with_shapefile('/tmp/con.shp')
+
+    def test_nul_in_subdirectory_rejected(self):
+        """Reserved-name check applies to every segment, not just
+        the basename."""
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'reserved'):
+            self._build_with_shapefile('/tmp/NUL/region.shp')
+
+    def test_com1_reserved_name_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'reserved'):
+            self._build_with_shapefile('/tmp/COM1.shp')
+
+    def test_lpt9_reserved_name_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'reserved'):
+            self._build_with_shapefile('/tmp/LPT9.shp')
+
+    def test_trailing_dot_segment_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'dot or space'):
+            self._build_with_shapefile('/tmp/bad./region.shp')
+
+    def test_trailing_space_segment_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'dot or space'):
+            self._build_with_shapefile('/tmp/bad /region.shp')
+
+    def test_legitimate_extension_not_a_trailing_dot(self):
+        """A segment like `region.shp` has `.shp` as extension,
+        not a trailing dot. Must pass."""
+        from pathlib import Path
+        rc = self._build_with_shapefile('/tmp/region.shp')
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('/tmp/region.shp'),
+        )
+
+
+class TestIdentifierLatinExtendedRejection(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-19 codex R20 HIGH — Latin-Extended
+    ligatures and stroke letters (Ø, Æ, ß, Ł, Œ, Þ) pass
+    category checks but `normalize_region_name` strips them to
+    empty / different residues. Previously the schema accepted
+    them, then the cache-key / output-path derivation silently
+    produced lossy keys — `Østfold` → `stfold`, `Ærø` → `r`,
+    `ß` → `''`. Per §2.8 persona-relevance gate, target PRISMWEB
+    users don't write Scandinavian / German / Polish names, so
+    rejecting these aligns the schema acceptance set with the
+    downstream keying contract."""
+
+    @staticmethod
+    def _build(**overrides):
+        from prismpy.config.schema import RegionConfig
+        payload = {
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'manual',
+                'manual_bounds': {
+                    'minx': -5.0, 'miny': 12.0,
+                    'maxx': -3.0, 'maxy': 14.0,
+                },
+            },
+        }
+        payload.update(overrides)
+        return RegionConfig.model_validate(payload)
+
+    def test_o_with_stroke_rejected(self):
+        """`Østfold` — Ø has no NFD decomposition and survives
+        to normalize_region_name as a non-ASCII char that gets
+        stripped, leaving `stfold` (different identity)."""
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build(name='Østfold')
+
+    def test_ae_ligature_rejected(self):
+        """`Ærø` — Æ is a ligature (A+E) with no NFD
+        decomposition; both letters get stripped, leaving `r`."""
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build(name='Ærø')
+
+    def test_eszett_rejected(self):
+        """`ß` — German sharp S normalizes to nothing under
+        normalize_region_name (no ASCII decomposition)."""
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build(name='Straße')
+
+    def test_l_with_stroke_rejected(self):
+        """`Ł` — Polish L with stroke, no NFD decomposition."""
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build(name='Łódź')
+
+    def test_oe_ligature_rejected(self):
+        """`Œ` — French OE ligature, no NFD decomposition."""
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build(name='Œuvre')
+
+    def test_nfc_accented_latin_still_accepted(self):
+        """Regression guard — NFC-composed accented Latin
+        ('Ségou' with single é char) still accepts because é
+        NFD-decomposes to `e` (ASCII) + U+0301 (combining mark)."""
+        rc = self._build(name='Ségou')
+        self.assertEqual(rc.name, 'Ségou')
+
+    def test_nfd_accented_latin_still_accepted(self):
+        """NFD-decomposed form with explicit combining mark also
+        accepts — same base letter, same accepted_latin predicate
+        result."""
+        import unicodedata
+        nfd_name = unicodedata.normalize('NFD', 'Ségou')
+        rc = self._build(name=nfd_name)
+        self.assertEqual(rc.name, nfd_name)
+
+
+class TestInvisibleCodePointsUniversalInvariants(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-15 — Python's `str.isprintable()` alone
+    doesn't catch default-ignorable Unicode code points that
+    render invisibly: U+034F (Combining Grapheme Joiner), U+FE0F
+    (Variation Selector-16), U+180B-U+180D (Mongolian Free
+    Variation Selectors), and characters in the Cf format
+    category generally (U+200B ZWSP, U+200D ZWJ, U+FEFF BOM,
+    U+2060 Word Joiner). Each of these can sit inside an
+    identifier string, pass `.isprintable()`, and produce silent
+    downstream string-matching failures: GADM filter lookups
+    that miss every feature, filesystem paths that point at
+    names almost impossible to reproduce by sight.
+
+    The schema now uses `_contains_invisible_char` which
+    combines `.isprintable()` with explicit category-Cf and
+    variation-selector/joiner checks to catch the full
+    default-ignorable set.
+    """
+
+    # Representative invisible code points across the Unicode-hidden
+    # classes codex R13/R14/R15/R17 flagged:
+    # - Cf format characters (ZWSP, ZWJ, BOM, Word Joiner)
+    # - Other_Default_Ignorable tail (Hangul fillers, variation
+    #   selectors, Khmer inherent vowels, SOFT HYPHEN, ARABIC
+    #   LETTER MARK, Khitan Small Script Filler)
+    # - Letter-Other codepoints that render visually blank
+    #   (Egyptian Hieroglyph Full/Half Blank)
+    INVISIBLE_CHARS = [
+        ('\u034F', 'COMBINING GRAPHEME JOINER'),
+        ('\u180B', 'MONGOLIAN FREE VARIATION SELECTOR ONE'),
+        ('\uFE00', 'VARIATION SELECTOR-1'),
+        ('\uFE0F', 'VARIATION SELECTOR-16'),
+        ('\u200D', 'ZERO WIDTH JOINER'),
+        ('\u2060', 'WORD JOINER'),
+        ('\uFEFF', 'ZERO WIDTH NO-BREAK SPACE (BOM)'),
+        ('\u115F', 'HANGUL CHOSEONG FILLER'),
+        ('\u1160', 'HANGUL JUNGSEONG FILLER'),
+        ('\u3164', 'HANGUL FILLER'),
+        ('\uFFA0', 'HALFWIDTH HANGUL FILLER'),
+        ('\u17B4', 'KHMER VOWEL INHERENT AQ'),
+        ('\u00AD', 'SOFT HYPHEN'),
+        ('\u061C', 'ARABIC LETTER MARK'),
+        # V2-22b/P.2 AC-AUDIT-17 — codex R17 follow-up.
+        ('\U00013441', 'EGYPTIAN HIEROGLYPH FULL BLANK'),
+        ('\U00013442', 'EGYPTIAN HIEROGLYPH HALF BLANK'),
+        ('\U00016FE4', 'KHITAN SMALL SCRIPT FILLER'),
+        # V2-22b/P.2 AC-AUDIT-18 — codex R18 follow-up. Mn-category
+        # joiners / selectors from non-Latin scripts that the
+        # previous `Mn` blanket-accept admitted. The schema now
+        # narrows Mn acceptance to the Latin Combining Diacritical
+        # Marks block (U+0300-U+036F); every other Mn codepoint,
+        # including these script-specific zero-width joiners, is
+        # rejected structurally.
+        ('\u2D7F', 'TIFINAGH CONSONANT JOINER'),
+        ('\U0001107F', 'BRAHMI NUMBER JOINER'),
+        ('\U00011A47', 'ZANABAZAR SQUARE SUBJOINER'),
+        ('\U00011A99', 'SOYOMBO SUBJOINER'),
+        ('\U00011F42', 'KAWI CONJOINER'),
+        ('\U0001BC9D', 'DUPLOYAN THICK LETTER SELECTOR'),
+    ]
+
+    @staticmethod
+    def _build(**overrides):
+        from prismpy.config.schema import RegionConfig
+        payload = {
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'manual',
+                'manual_bounds': {
+                    'minx': -5.0, 'miny': 12.0,
+                    'maxx': -3.0, 'maxy': 14.0,
+                },
+            },
+        }
+        payload.update(overrides)
+        return RegionConfig.model_validate(payload)
+
+    def test_name_rejects_default_ignorable_chars(self):
+        from pydantic import ValidationError
+        for char, label in self.INVISIBLE_CHARS:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    ValidationError, 'disallowed|non-printable|invisible',
+                ):
+                    self._build(name=f'Kou{char}tiala')
+
+    def test_country_rejects_default_ignorable_chars(self):
+        from pydantic import ValidationError
+        for char, label in self.INVISIBLE_CHARS:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    ValidationError, 'disallowed|non-printable|invisible',
+                ):
+                    self._build(country=f'Ma{char}li')
+
+    def test_gadm_filter_value_rejects_default_ignorable_chars(self):
+        from pydantic import ValidationError
+        from prismpy.config.schema import RegionConfig
+        for char, label in self.INVISIBLE_CHARS:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    ValidationError, 'disallowed|non-printable|invisible',
+                ):
+                    RegionConfig.model_validate({
+                        'name': 'Koutiala',
+                        'country': 'Mali', 'country_iso3': 'MLI',
+                        'boundary': {
+                            'source': 'gadm',
+                            'gadm_level': 2,
+                            'gadm_filter_field': 'NAME_2',
+                            'gadm_filter_value': f'Kou{char}tiala',
+                        },
+                    })
+
+    def test_gadm_filter_field_rejects_default_ignorable_chars(self):
+        from pydantic import ValidationError
+        from prismpy.config.schema import RegionConfig
+        for char, label in self.INVISIBLE_CHARS:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    ValidationError, 'disallowed|non-printable|invisible',
+                ):
+                    RegionConfig.model_validate({
+                        'name': 'Koutiala',
+                        'country': 'Mali', 'country_iso3': 'MLI',
+                        'boundary': {
+                            'source': 'gadm',
+                            'gadm_level': 2,
+                            'gadm_filter_field': f'NAME{char}_2',
+                            'gadm_filter_value': 'Koutiala',
+                        },
+                    })
+
+    def test_shapefile_path_rejects_default_ignorable_chars(self):
+        from pydantic import ValidationError
+        from prismpy.config.schema import RegionConfig
+        for char, label in self.INVISIBLE_CHARS:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    ValidationError, 'disallowed|non-printable|invisible',
+                ):
+                    RegionConfig.model_validate({
+                        'name': 'Koutiala',
+                        'country': 'Mali', 'country_iso3': 'MLI',
+                        'boundary': {
+                            'source': 'shapefile',
+                            'shapefile_path': f'/path{char}/file.shp',
+                        },
+                    })
