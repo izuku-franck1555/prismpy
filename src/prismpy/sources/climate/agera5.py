@@ -480,12 +480,21 @@ class AgERA5Source(DataSource):
                             except OSError:
                                 pass
 
+                    # Codex Path A — pass the SAME cache key used to
+                    # build `data_dir` so SARRA_data_download's
+                    # library-side subdir creation (`AgERA5_{key}`)
+                    # lands in the directory `retrieve()` later
+                    # validates and manifests. Using `region.name`
+                    # here would split brain: manual-unnamed runs
+                    # wrote to `AgERA5_Unnamed study area/` while
+                    # data_dir pointed at `AgERA5_manual_…/`.
+                    from prismpy.utils.sanitization import region_cache_key
                     self._download_agera5(
                         bounds=bounds_sarra_py,
                         start_date=start_date,
                         end_date=end_date,
                         output_dir=data_dir.parent,  # Library creates subdir
-                        region_name=region.name,
+                        region_name=region_cache_key(region),
                         progress_callback=kwargs.get('progress_callback'),
                         cancel_check=cancel_check,
                     )

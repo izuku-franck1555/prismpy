@@ -174,6 +174,12 @@ class Region:
             "gadm_level": self.gadm_level,
             "crs": self.crs,
             "metadata": self.metadata,
+            # V2-22b/P.1 — persist so `region_cache_key()` still
+            # routes manual regions to bbox identity after a
+            # to_dict/from_dict round-trip. Without this, reloaded
+            # Region objects had `boundary_source=None` and fell
+            # back to name-keyed cache paths.
+            "boundary_source": self.boundary_source,
         }
 
     def to_json_file(self, path: str) -> None:
@@ -201,4 +207,5 @@ class Region:
             gadm_level=data.get("gadm_level", 2),
             crs=data.get("crs", "EPSG:4326"),
             metadata=data.get("metadata", {}),
+            boundary_source=data.get("boundary_source"),
         )

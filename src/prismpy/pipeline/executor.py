@@ -297,6 +297,14 @@ class TranslationPipeline:
             # Check boundary source type
             boundary_source = self.config.region.boundary.source.value
 
+            # Codex Path A — track the RESOLVED boundary source
+            # independently of config.source, since the GADM failure
+            # path falls back to manual_bounds while config.source
+            # still reads "gadm". `region.boundary_source` must
+            # reflect what the pipeline actually used so cache /
+            # lock / ETA paths route correctly.
+            resolved_boundary_source = boundary_source
+
             if boundary_source == "manual" and self.config.region.boundary.manual_bounds:
                 # Use manual bounds from config
                 mb = self.config.region.boundary.manual_bounds
@@ -510,6 +518,9 @@ class TranslationPipeline:
                                 bounds=bounds,
                                 gadm_level=gadm_level,
                             )
+                            # Resolved source is manual on this fallback
+                            # path even though config.source was gadm.
+                            resolved_boundary_source = 'manual'
                             warnings.append(f"GADM and pygadm failed, using manual bounds fallback: {result.errors}")
                         else:
                             raise ValueError(
@@ -522,6 +533,8 @@ class TranslationPipeline:
                 if self.config.region.boundary.manual_bounds:
                     mb = self.config.region.boundary.manual_bounds
                     bounds = BoundingBox(minx=mb.minx, miny=mb.miny, maxx=mb.maxx, maxy=mb.maxy)
+                    # Unsupported-source branch also resolves to manual.
+                    resolved_boundary_source = 'manual'
                 else:
                     raise ValueError(
                         f"Unsupported boundary source '{boundary_source}' and no manual bounds provided. "
@@ -535,20 +548,12 @@ class TranslationPipeline:
                     gadm_level=self.config.region.boundary.gadm_level or 2,
                 )
 
-            # V2-22b/P.1 — thread the config's boundary-source
-            # through to the resolved Region so downstream cache /
-            # path helpers can route on it. Manual regions key
-            # their cache by bbox (different bboxes share the same
-            # "Unnamed study area" display name, but each needs its
-            # own cache); GADM regions stay name-keyed.
-            try:
-                source_enum = self.config.region.boundary.source
-                region.boundary_source = (
-                    source_enum.value if hasattr(source_enum, 'value')
-                    else str(source_enum)
-                )
-            except AttributeError:
-                region.boundary_source = None
+            # V2-22b/P.1 — record the RESOLVED boundary source, not
+            # the requested config source. Fallback branches (GADM
+            # failed → manual_bounds) set `resolved_boundary_source
+            # = 'manual'` above so cache / lock / ETA paths route by
+            # bbox, not by the stale config.source value.
+            region.boundary_source = resolved_boundary_source
 
             data["region"] = region
 

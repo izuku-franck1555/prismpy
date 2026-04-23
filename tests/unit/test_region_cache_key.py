@@ -108,6 +108,44 @@ class TestRegionCacheKeyGadm(unittest.TestCase):
         self.assertEqual(region_cache_key(rc), normalize_region_name('Maradi'))
 
 
+class TestRegionRoundTripPreservesBoundarySource(unittest.TestCase):
+    """Codex Path A MEDIUM — `Region.to_dict()` / `from_dict()`
+    must round-trip `boundary_source` so reloaded objects still
+    route to the bbox cache key for manual regions. Previously
+    the field was dropped, causing reloaded manual regions to
+    fall back to name-keyed caches and collide on the shared
+    `UNNAMED_MANUAL_REGION_NAME`."""
+
+    def test_manual_region_round_trip_preserves_bbox_routing(self):
+        from prismpy.models.region import BoundingBox, Region
+        original = Region(
+            name='Unnamed study area',
+            country='Mali',
+            country_iso3='MLI',
+            bounds=BoundingBox(minx=-5.0, miny=12.0, maxx=-3.0, maxy=14.0),
+            boundary_source='manual',
+        )
+        reloaded = Region.from_dict(original.to_dict())
+        # Field survives the round-trip.
+        self.assertEqual(reloaded.boundary_source, 'manual')
+        # And the cache key still routes to bbox.
+        self.assertEqual(region_cache_key(original), region_cache_key(reloaded))
+        self.assertTrue(region_cache_key(reloaded).startswith('manual_'))
+
+    def test_gadm_region_round_trip_preserves_name_routing(self):
+        from prismpy.models.region import BoundingBox, Region
+        original = Region(
+            name='Boulemane',
+            country='Morocco',
+            country_iso3='MAR',
+            bounds=BoundingBox(minx=-5.0, miny=33.0, maxx=-4.0, maxy=34.0),
+            boundary_source='gadm',
+        )
+        reloaded = Region.from_dict(original.to_dict())
+        self.assertEqual(reloaded.boundary_source, 'gadm')
+        self.assertEqual(region_cache_key(reloaded), normalize_region_name('Boulemane'))
+
+
 class TestRegionCacheKeyFallbacks(unittest.TestCase):
     def test_missing_boundary_source_defaults_to_name_key(self):
         """If `boundary_source` is None (legacy Region constructor
