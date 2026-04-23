@@ -14,37 +14,72 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Union
 
 
+_DEFAULT_IGNORABLE_CODE_POINTS = frozenset({
+    # Derived from Unicode's Default_Ignorable_Code_Point property.
+    # Covers characters that render invisibly but are not category
+    # Cc/Cf (so `.isprintable()` returns True). Most Cf characters
+    # are handled by the category check below; this set is the
+    # Other_Default_Ignorable_Code_Point tail the category check
+    # misses.
+    0x00AD,                                  # SOFT HYPHEN
+    0x034F,                                  # COMBINING GRAPHEME JOINER
+    0x061C,                                  # ARABIC LETTER MARK
+    0x115F, 0x1160,                          # HANGUL JAMO FILLERS (Lo)
+    0x17B4, 0x17B5,                          # KHMER VOWEL INHERENT AQ/AA
+    0x3164,                                  # HANGUL FILLER (Lo)
+    0xFFA0,                                  # HALFWIDTH HANGUL FILLER (Lo)
+})
+_DEFAULT_IGNORABLE_RANGES = (
+    (0x180B, 0x180F),      # MONGOLIAN FREE VARIATION SELECTORS
+    (0x200B, 0x200F),      # ZERO WIDTH / LEFT-TO-RIGHT MARK family
+    (0x202A, 0x202E),      # DIRECTIONAL FORMATTING
+    (0x2060, 0x206F),      # WORD JOINER / INVISIBLE OPERATORS family
+    (0xFE00, 0xFE0F),      # VARIATION SELECTORS 1-16
+    (0xFFF0, 0xFFFB),      # INTERLINEAR ANNOTATION ANCHORS family
+    (0x1BCA0, 0x1BCA3),    # SHORTHAND FORMAT CONTROLS
+    (0x1D173, 0x1D17A),    # MUSICAL SYMBOL BEGIN/END family
+    (0xE0000, 0xE0FFF),    # TAG characters + SUPP. VARIATION SELECTORS
+)
+
+
+def _is_default_ignorable(c: str) -> bool:
+    code = ord(c)
+    if code in _DEFAULT_IGNORABLE_CODE_POINTS:
+        return True
+    for lo, hi in _DEFAULT_IGNORABLE_RANGES:
+        if lo <= code <= hi:
+            return True
+    return False
+
+
 def _contains_invisible_char(s: str) -> bool:
     """True if `s` contains a non-printable or default-ignorable
     Unicode character.
 
-    `str.isprintable()` alone is not sufficient: default-ignorable
-    code points such as U+034F (Combining Grapheme Joiner), U+FE0F
-    (Variation Selector-16), U+200B (Zero Width Space), and
-    U+180B-U+180D (Mongolian Free Variation Selectors) may return
-    `True` from `.isprintable()` yet render invisibly — a hidden
-    char in an identifier string passes `.isprintable()` but
-    silently corrupts downstream string matching (GADM filter
-    lookup, filesystem path resolution, cache-key equality).
+    Three layers of check:
+    1. `str.isprintable()` — catches control / surrogate / unassigned
+       (category Cc, Cs, Cn).
+    2. General category `Cf` — catches format characters (U+200B
+       ZWSP, U+200D ZWJ, U+FEFF BOM, U+2060 Word Joiner, etc.) that
+       `.isprintable()` treats as printable.
+    3. Unicode `Default_Ignorable_Code_Point` tail — Hangul Jamo
+       fillers (U+115F, U+1160, U+3164, U+FFA0), Khmer inherent
+       vowels, variation selectors, SOFT HYPHEN, and other code
+       points that fall outside Cf but are defined as invisible.
+       Hand-maintained from Unicode's
+       `DerivedCoreProperties.txt#Default_Ignorable_Code_Point`.
 
-    This helper combines the `.isprintable()` check with an explicit
-    rejection of Unicode format-category (`Cf`) characters and the
-    specific variation-selector / joiner blocks so the schema
-    layer catches the full invisible set.
+    Together these catch the full invisible set — a hidden char in
+    an identifier string can't pass the schema and silently
+    corrupt downstream string matching (GADM filter lookup,
+    filesystem path resolution, cache-key equality).
     """
     for c in s:
         if not c.isprintable():
             return True
-        cat = unicodedata.category(c)
-        if cat == 'Cf':  # format characters (ZWSP, ZWJ, BOM, etc.)
+        if unicodedata.category(c) == 'Cf':
             return True
-        if '\uFE00' <= c <= '\uFE0F':  # variation selectors 1-16
-            return True
-        if '\U000E0100' <= c <= '\U000E01EF':  # supp. variation selectors
-            return True
-        if c == '\u034F':  # combining grapheme joiner
-            return True
-        if '\u180B' <= c <= '\u180D':  # Mongolian free var. selectors
+        if _is_default_ignorable(c):
             return True
     return False
 

@@ -956,7 +956,11 @@ class TestInvisibleCodePointsUniversalInvariants(unittest.TestCase):
     default-ignorable set.
     """
 
-    # Representative default-ignorable code points codex R14 flagged.
+    # Representative default-ignorable code points codex R14/R15 flagged.
+    # Covers both the Cf-category set (caught by `unicodedata.category`)
+    # and the Other_Default_Ignorable_Code_Point tail (Lo-category
+    # Hangul fillers, Khmer inherent vowels, SOFT HYPHEN, ARABIC
+    # LETTER MARK, etc.) that `.isprintable()` + `Cf` alone miss.
     INVISIBLE_CHARS = [
         ('\u034F', 'COMBINING GRAPHEME JOINER'),
         ('\u180B', 'MONGOLIAN FREE VARIATION SELECTOR ONE'),
@@ -965,6 +969,14 @@ class TestInvisibleCodePointsUniversalInvariants(unittest.TestCase):
         ('\u200D', 'ZERO WIDTH JOINER'),
         ('\u2060', 'WORD JOINER'),
         ('\uFEFF', 'ZERO WIDTH NO-BREAK SPACE (BOM)'),
+        # V2-22b/P.2 AC-AUDIT-15 codex R15 follow-up:
+        ('\u115F', 'HANGUL CHOSEONG FILLER'),
+        ('\u1160', 'HANGUL JUNGSEONG FILLER'),
+        ('\u3164', 'HANGUL FILLER'),
+        ('\uFFA0', 'HALFWIDTH HANGUL FILLER'),
+        ('\u17B4', 'KHMER VOWEL INHERENT AQ'),
+        ('\u00AD', 'SOFT HYPHEN'),
+        ('\u061C', 'ARABIC LETTER MARK'),
     ]
 
     @staticmethod
