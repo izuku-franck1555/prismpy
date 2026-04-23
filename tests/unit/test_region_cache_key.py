@@ -935,3 +935,123 @@ class TestShapefilePathLikeNormalization(unittest.TestCase):
         self.assertEqual(
             rc.boundary.shapefile_path, Path('/some/absolute/path.shp'),
         )
+
+
+class TestInvisibleCodePointsUniversalInvariants(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-15 — Python's `str.isprintable()` alone
+    doesn't catch default-ignorable Unicode code points that
+    render invisibly: U+034F (Combining Grapheme Joiner), U+FE0F
+    (Variation Selector-16), U+180B-U+180D (Mongolian Free
+    Variation Selectors), and characters in the Cf format
+    category generally (U+200B ZWSP, U+200D ZWJ, U+FEFF BOM,
+    U+2060 Word Joiner). Each of these can sit inside an
+    identifier string, pass `.isprintable()`, and produce silent
+    downstream string-matching failures: GADM filter lookups
+    that miss every feature, filesystem paths that point at
+    names almost impossible to reproduce by sight.
+
+    The schema now uses `_contains_invisible_char` which
+    combines `.isprintable()` with explicit category-Cf and
+    variation-selector/joiner checks to catch the full
+    default-ignorable set.
+    """
+
+    # Representative default-ignorable code points codex R14 flagged.
+    INVISIBLE_CHARS = [
+        ('\u034F', 'COMBINING GRAPHEME JOINER'),
+        ('\u180B', 'MONGOLIAN FREE VARIATION SELECTOR ONE'),
+        ('\uFE00', 'VARIATION SELECTOR-1'),
+        ('\uFE0F', 'VARIATION SELECTOR-16'),
+        ('\u200D', 'ZERO WIDTH JOINER'),
+        ('\u2060', 'WORD JOINER'),
+        ('\uFEFF', 'ZERO WIDTH NO-BREAK SPACE (BOM)'),
+    ]
+
+    @staticmethod
+    def _build(**overrides):
+        from prismpy.config.schema import RegionConfig
+        payload = {
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'manual',
+                'manual_bounds': {
+                    'minx': -5.0, 'miny': 12.0,
+                    'maxx': -3.0, 'maxy': 14.0,
+                },
+            },
+        }
+        payload.update(overrides)
+        return RegionConfig.model_validate(payload)
+
+    def test_name_rejects_default_ignorable_chars(self):
+        from pydantic import ValidationError
+        for char, label in self.INVISIBLE_CHARS:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    ValidationError, 'invisible',
+                ):
+                    self._build(name=f'Kou{char}tiala')
+
+    def test_country_rejects_default_ignorable_chars(self):
+        from pydantic import ValidationError
+        for char, label in self.INVISIBLE_CHARS:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    ValidationError, 'invisible',
+                ):
+                    self._build(country=f'Ma{char}li')
+
+    def test_gadm_filter_value_rejects_default_ignorable_chars(self):
+        from pydantic import ValidationError
+        from prismpy.config.schema import RegionConfig
+        for char, label in self.INVISIBLE_CHARS:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    ValidationError, 'invisible',
+                ):
+                    RegionConfig.model_validate({
+                        'name': 'Koutiala',
+                        'country': 'Mali', 'country_iso3': 'MLI',
+                        'boundary': {
+                            'source': 'gadm',
+                            'gadm_level': 2,
+                            'gadm_filter_field': 'NAME_2',
+                            'gadm_filter_value': f'Kou{char}tiala',
+                        },
+                    })
+
+    def test_gadm_filter_field_rejects_default_ignorable_chars(self):
+        from pydantic import ValidationError
+        from prismpy.config.schema import RegionConfig
+        for char, label in self.INVISIBLE_CHARS:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    ValidationError, 'invisible',
+                ):
+                    RegionConfig.model_validate({
+                        'name': 'Koutiala',
+                        'country': 'Mali', 'country_iso3': 'MLI',
+                        'boundary': {
+                            'source': 'gadm',
+                            'gadm_level': 2,
+                            'gadm_filter_field': f'NAME{char}_2',
+                            'gadm_filter_value': 'Koutiala',
+                        },
+                    })
+
+    def test_shapefile_path_rejects_default_ignorable_chars(self):
+        from pydantic import ValidationError
+        from prismpy.config.schema import RegionConfig
+        for char, label in self.INVISIBLE_CHARS:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    ValidationError, 'invisible',
+                ):
+                    RegionConfig.model_validate({
+                        'name': 'Koutiala',
+                        'country': 'Mali', 'country_iso3': 'MLI',
+                        'boundary': {
+                            'source': 'shapefile',
+                            'shapefile_path': f'/path{char}/file.shp',
+                        },
+                    })

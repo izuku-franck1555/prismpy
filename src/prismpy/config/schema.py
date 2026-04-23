@@ -7,10 +7,46 @@ and platform-specific settings.
 """
 
 import re
+import unicodedata
 from datetime import date, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Union
+
+
+def _contains_invisible_char(s: str) -> bool:
+    """True if `s` contains a non-printable or default-ignorable
+    Unicode character.
+
+    `str.isprintable()` alone is not sufficient: default-ignorable
+    code points such as U+034F (Combining Grapheme Joiner), U+FE0F
+    (Variation Selector-16), U+200B (Zero Width Space), and
+    U+180B-U+180D (Mongolian Free Variation Selectors) may return
+    `True` from `.isprintable()` yet render invisibly — a hidden
+    char in an identifier string passes `.isprintable()` but
+    silently corrupts downstream string matching (GADM filter
+    lookup, filesystem path resolution, cache-key equality).
+
+    This helper combines the `.isprintable()` check with an explicit
+    rejection of Unicode format-category (`Cf`) characters and the
+    specific variation-selector / joiner blocks so the schema
+    layer catches the full invisible set.
+    """
+    for c in s:
+        if not c.isprintable():
+            return True
+        cat = unicodedata.category(c)
+        if cat == 'Cf':  # format characters (ZWSP, ZWJ, BOM, etc.)
+            return True
+        if '\uFE00' <= c <= '\uFE0F':  # variation selectors 1-16
+            return True
+        if '\U000E0100' <= c <= '\U000E01EF':  # supp. variation selectors
+            return True
+        if c == '\u034F':  # combining grapheme joiner
+            return True
+        if '\u180B' <= c <= '\u180D':  # Mongolian free var. selectors
+            return True
+    return False
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -122,10 +158,11 @@ class BoundaryConfig(BaseModel):
         if not isinstance(value, str):
             return value
         stripped = value.strip()
-        if not stripped.isprintable():
+        if _contains_invisible_char(stripped):
             raise ValueError(
                 f"GADM identifier {value!r} contains non-printable "
-                "characters; only printable characters are allowed"
+                "or invisible characters; only visible, printable "
+                "characters are allowed"
             )
         from prismpy.utils.sanitization import normalize_region_name
         if not normalize_region_name(stripped):
@@ -157,10 +194,11 @@ class BoundaryConfig(BaseModel):
             return value
         if isinstance(value, str):
             stripped = value.strip()
-            if not stripped.isprintable():
+            if _contains_invisible_char(stripped):
                 raise ValueError(
                     f"shapefile_path {value!r} contains non-printable "
-                    "characters; only printable characters are allowed"
+                    "or invisible characters; only visible, printable "
+                    "characters are allowed"
                 )
             if not stripped:
                 raise ValueError(
@@ -183,13 +221,13 @@ class BoundaryConfig(BaseModel):
                 "working directory (`Path('.')`); provide an "
                 "explicit path to a shapefile"
             )
-        if not str(candidate).isprintable():
+        if _contains_invisible_char(str(candidate)):
             raise ValueError(
                 f"shapefile_path {value!r} contains non-printable "
-                "characters; only printable characters are allowed"
+                "or invisible characters; only visible, printable "
+                "characters are allowed"
             )
         return candidate
-        return value
 
     @model_validator(mode="after")
     def validate_source_requirements(self) -> "BoundaryConfig":
@@ -270,18 +308,23 @@ class RegionConfig(BaseModel):
             # Let Pydantic's type validation handle non-strings.
             return value
         stripped = value.strip()
-        if not stripped.isprintable():
+        if _contains_invisible_char(stripped):
             raise ValueError(
-                f"{value!r} contains non-printable characters; "
-                "only printable characters are allowed"
+                f"{value!r} contains non-printable or invisible "
+                "characters; only visible, printable characters "
+                "are allowed"
             )
         from prismpy.utils.sanitization import normalize_region_name
         if not normalize_region_name(stripped):
             raise ValueError(
                 f"{value!r} normalizes to an empty identifier; "
-                "at least one alphanumeric character required "
-                "(letters or digits, possibly separated by "
-                "spaces, hyphens, or underscores)"
+                "at least one alphanumeric ASCII character is "
+                "required (letters or digits, possibly separated "
+                "by spaces, hyphens, or underscores). The current "
+                "pipeline generates ASCII-only filenames for "
+                "cache keys, translator outputs, and lock paths; "
+                "non-Latin identifiers would collapse to an "
+                "empty cache key and silently collide"
             )
         return stripped
 
