@@ -202,4 +202,59 @@ class TestSarraPyPartialUnreadableSample(unittest.TestCase):
         self.assertLess(details.get('effective_sample_size'), 10)
         # The summary must name the degradation in plain text too.
         self.assertIn('sample degraded', record['summary'])
-        self.assertIn('unreadable', record['summary'])
+
+
+class TestSarraPyEmptySampleFiles(unittest.TestCase):
+    """Codex self-check — a SARRA-Py sample mix where files open
+    cleanly but yield no finite values (all-nodata, all-NaN) must
+    be flagged as degraded coverage. Earlier accounting only
+    counted `unreadable` (open-failure) files, so a 1-good +
+    9-empty sample would still pass silently as a "10-file
+    sample". The empty count now feeds into effective_sample and
+    the warning decision."""
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp(prefix='sarra-py-empty-'))
+        climate = self.tmpdir / 'data' / 'climate'
+        # 1 valid tmax TIFF + 9 nodata-only TIFFs (written with the
+        # fixture helper, which writes a constant value; setting the
+        # nodata tag to the written value makes every pixel fall out
+        # of `data[data != nodata]`).
+        tmax_dir = climate / '2m_temperature_24_hour_maximum'
+        tmax_dir.mkdir(parents=True)
+        _write_fixture_tiff(tmax_dir / 'valid_001.tif', 22.0)
+        for i in range(9):
+            path = tmax_dir / f'nodata_{i:03d}.tif'
+            # Write an all-zeros TIFF with nodata=0 so every pixel
+            # gets filtered out.
+            from rasterio.transform import from_bounds as _from_bounds
+            with rasterio.open(
+                path, 'w', driver='GTiff', height=2, width=2,
+                count=1, dtype='float32', crs='EPSG:4326',
+                transform=_from_bounds(9.5, 5.0, 10.0, 5.5, 2, 2),
+                nodata=0.0,
+            ) as dst:
+                dst.write(np.zeros((1, 2, 2), dtype=np.float32))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_mixed_valid_and_empty_sample_warns_and_counts_empty(self):
+        """The 1-good + 9-empty mix must produce `result=warning`
+        AND report `empty_count` on the details payload."""
+        checks = _validate_sarra_py_geotiffs(self.tmpdir)
+        record = next(
+            c for c in checks
+            if c.get('check') == 'post_translate_range_sarra_py_tmax'
+        )
+        details = record['details']
+        # Every file opened cleanly → unreadable is 0. But 9 of them
+        # had no finite values → empty counts them.
+        self.assertEqual(details.get('unreadable_count'), 0)
+        self.assertGreater(details.get('empty_count'), 0)
+        # Effective sample collapsed below target.
+        self.assertLess(details.get('effective_sample_size'), 10)
+        # And the record downgrades to warning so the user sees it.
+        self.assertEqual(record['result'], 'warning')
+        # Summary names BOTH failure modes so operator can diagnose.
+        self.assertIn('empty', record['summary'])

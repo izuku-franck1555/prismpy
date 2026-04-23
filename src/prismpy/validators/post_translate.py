@@ -617,6 +617,7 @@ def _validate_sarra_py_geotiffs(
     for var, (sample_files, op, operand) in sampled_vars.items():
         all_vals = []
         unreadable = 0
+        empty = 0  # opened cleanly but contained no finite values
         for tif_path in sample_files:
             try:
                 with rasterio.open(tif_path) as src:
@@ -631,36 +632,43 @@ def _validate_sarra_py_geotiffs(
                         elif op == "mul":
                             valid = valid * operand
                         all_vals.extend([float(valid.min()), float(valid.max())])
+                    else:
+                        # Codex self-check — a file that opens cleanly
+                        # but has no finite values (all-nodata, all-NaN)
+                        # is degraded coverage just as much as one that
+                        # failed to open. Count it separately so the
+                        # user-facing warning names the specific
+                        # failure mode ("N unreadable, M empty") but
+                        # it still counts against the effective sample.
+                        empty += 1
             except Exception as e:
                 logger.debug(f"Skipping {tif_path.name}: {e}")
                 unreadable += 1
                 continue
 
         if not all_vals:
-            # Codex self-check R3 HIGH — the scientific validator's
-            # `value_range_climate` info record promises that "if a
-            # variable is missing, look for another SARRA-Py
-            # post-translate message in this report explaining
-            # why." Without this branch, a variable whose entire
-            # 10-file sample fails to open / has only nodata would
-            # produce NO record of any kind, contradicting that
-            # promise. Emit an explicit warning so the user always
-            # has a paper trail for the missing range record.
+            # Every variable-absent path emits an explicit warning
+            # so the user always has a paper trail for a missing
+            # per-variable range record. Separate unreadable vs.
+            # empty counts so the operator can distinguish "files
+            # wouldn't open" from "files opened but were empty" —
+            # different diagnoses for the same symptom.
             checks.append({
                 "check": f"post_translate_range_sarra_py_{var}",
                 "scope": "per_record",
                 "result": "warning",
                 "summary": (
                     f"SARRA-Py {var} range not computed: all "
-                    f"{len(sample_files)} sampled GeoTIFFs either "
-                    f"failed to open or contained no finite values "
-                    f"({unreadable} unreadable)."
+                    f"{len(sample_files)} sampled GeoTIFFs yielded "
+                    f"no finite values "
+                    f"({unreadable} unreadable, {empty} empty)."
                 ),
                 "details": {
                     "platform": "sarra_py",
                     "variable": var,
                     "sample_size": len(sample_files),
                     "unreadable_count": unreadable,
+                    "empty_count": empty,
                     "reason": "all_sampled_files_yielded_no_values",
                     "data_source": "GeoTIFF pixel values (10-file sample)",
                 },
@@ -675,14 +683,15 @@ def _validate_sarra_py_geotiffs(
             continue
 
         n_oor = sum(1 for v in all_vals if v < vmin or v > vmax)
-        # Codex self-check R4 HIGH — downgrade to warning when the
-        # effective sample collapsed below the target size. Without
-        # this, a 9-of-10-unreadable sample emits a clean 'pass'
-        # record that claims "10-file sample" while actually drawing
-        # from one file — broad climate-file corruption would hide
-        # behind the happy-path.
-        effective_sample = len(sample_files) - unreadable
-        if n_oor > 0 or unreadable > 0:
+        # Degraded-sample warning — any collapse below the target
+        # sample size flags this. Both code paths that shrink
+        # coverage count: files that failed to open (`unreadable`)
+        # and files that opened cleanly but yielded no finite values
+        # (`empty` — all-nodata, all-NaN). Missing the empty count
+        # was the codex-R5 HIGH.
+        degraded = unreadable + empty
+        effective_sample = len(sample_files) - degraded
+        if n_oor > 0 or degraded > 0:
             result = "warning"
         else:
             result = "pass"
@@ -690,10 +699,10 @@ def _validate_sarra_py_geotiffs(
             f"SARRA-Py {var}: [{obs_min:.1f}, {obs_max:.1f}] "
             f"{unit} (from output files)"
         )
-        if unreadable > 0:
+        if degraded > 0:
             summary += (
-                f" — sample degraded: {unreadable} of "
-                f"{len(sample_files)} files were unreadable, effective "
+                f" — sample degraded: {unreadable} unreadable + "
+                f"{empty} empty of {len(sample_files)}, effective "
                 f"sample = {effective_sample}"
             )
 
@@ -712,12 +721,16 @@ def _validate_sarra_py_geotiffs(
                 "observed_max": round(obs_max, 2),
                 "out_of_range_count": n_oor,
                 "total_values": len(all_vals),
-                # Codex R4 HIGH — persist sample coverage so auditors
-                # reading the packaged `validation_report.json` can
-                # tell when a pass-looking record was backed by a
-                # degraded sample.
+                # Persist sample coverage so auditors reading the
+                # packaged `validation_report.json` can tell when a
+                # pass-looking record was backed by a degraded
+                # sample. `empty_count` splits out files that
+                # opened cleanly but had no finite values (nodata,
+                # NaN) so the operator can distinguish "files
+                # wouldn't open" from "files opened but were empty".
                 "sample_size": len(sample_files),
                 "unreadable_count": unreadable,
+                "empty_count": empty,
                 "effective_sample_size": effective_sample,
                 "data_source": "GeoTIFF pixel values (10-file sample)",
             },
