@@ -649,14 +649,14 @@ class TestFilelockSerialization:
     concurrent calls and allow cross-source concurrency."""
 
     def test_same_source_same_region_serializes_two_threads(
-        self, cache_dir: Path
+        self, cache_dir: Path, maradi_region: Region,
     ) -> None:
         """Thread 1 acquires; Thread 2 blocks on the same lock until
         Thread 1 releases. Order of completion reflects acquisition
         order; both finish without exception."""
         from filelock import FileLock
 
-        lock_path = cache_lock_path(cache_dir, source="tamsat", region_name="Maradi")
+        lock_path = cache_lock_path(cache_dir, source="tamsat", region_name=maradi_region)
         events: List[str] = []
         events_lock = threading.Lock()
         ready_to_release_t1 = threading.Event()
@@ -702,15 +702,15 @@ class TestFilelockSerialization:
         assert lock_path.name == ".tamsat-maradi.lock"
 
     def test_different_sources_same_region_run_concurrently(
-        self, cache_dir: Path
+        self, cache_dir: Path, maradi_region: Region,
     ) -> None:
         """TAMSAT lock and AgERA5 lock for the same region are SEPARATE
         files — a single SARRA-Py run can progress through both, and two
         users can overlap on TAMSAT vs. AgERA5 without contention."""
         from filelock import FileLock
 
-        tamsat_lock = cache_lock_path(cache_dir, source="tamsat", region_name="Maradi")
-        agera5_lock = cache_lock_path(cache_dir, source="agera5", region_name="Maradi")
+        tamsat_lock = cache_lock_path(cache_dir, source="tamsat", region_name=maradi_region)
+        agera5_lock = cache_lock_path(cache_dir, source="agera5", region_name=maradi_region)
 
         assert tamsat_lock != agera5_lock
         assert tamsat_lock.name == ".tamsat-maradi.lock"
@@ -755,14 +755,38 @@ class TestFilelockSerialization:
         """Region names with whitespace, accents, or punctuation must
         normalize to the same stable lock-file name as the cache dir
         — otherwise two requests for the same region would never
-        contend."""
-        a = cache_lock_path(cache_dir, source="tamsat", region_name="Ségou")
-        b = cache_lock_path(cache_dir, source="tamsat", region_name="segou")
-        c = cache_lock_path(cache_dir, source="tamsat", region_name="Ségou")
+        contend. GADM regions route through `normalize_region_name`
+        inside `region_cache_key`, so accent + case differences
+        collapse to the same lock key."""
+        def _region(name: str) -> Region:
+            return Region(
+                name=name, country="Mali", country_iso3="MLI",
+                bounds=BoundingBox(minx=-6.5, miny=12.5, maxx=-5.0, maxy=14.0),
+                gadm_level=1,
+            )
+        a = cache_lock_path(cache_dir, source="tamsat", region_name=_region("Ségou"))
+        b = cache_lock_path(cache_dir, source="tamsat", region_name=_region("segou"))
+        c = cache_lock_path(cache_dir, source="tamsat", region_name=_region("Ségou"))
         assert a.name == b.name == c.name
 
+    def test_raw_string_region_name_rejected(
+        self, cache_dir: Path,
+    ) -> None:
+        """V2-22b/P.2 AC-AUDIT-5 — the old schema let callers pass a
+        raw string `region_name`; `cache_lock_path` normalized it via
+        `normalize_region_name`. That schema died with the cross-repo
+        unification, but the polymorphic branch lingered as dead
+        code. A raw-string call now raises `ValueError` from
+        `region_cache_key`, so a future caller accidentally reverting
+        to the old pattern fails loudly instead of silently producing
+        a broken `.tamsat-.lock` path."""
+        with pytest.raises(ValueError):
+            cache_lock_path(
+                cache_dir, source="tamsat", region_name="raw_string",
+            )
+
     def test_cross_process_serialization_via_spawned_interpreters(
-        self, tmp_path: Path
+        self, tmp_path: Path, maradi_region: Region,
     ) -> None:
         """AC 1.7.4 sub-test 3 (Apr 18 evaluator CA-2 patch): the lock
         must serialize across SEPARATE PROCESSES, not just threads —
@@ -783,7 +807,7 @@ class TestFilelockSerialization:
 
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
-        lock_path = cache_lock_path(cache_dir, source="tamsat", region_name="Maradi")
+        lock_path = cache_lock_path(cache_dir, source="tamsat", region_name=maradi_region)
         log_path = tmp_path / "filelock_events.log"
 
         ctx = multiprocessing.get_context("spawn")
@@ -1759,7 +1783,7 @@ class TestFilelockTimeout:
 
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
-        lock_path = cache_lock_path(cache_dir, source="tamsat", region_name=maradi_region.name)
+        lock_path = cache_lock_path(cache_dir, source="tamsat", region_name=maradi_region)
         cache_dir.mkdir(exist_ok=True)
         # Hold the lock in a sibling thread so the source's acquire
         # hits the timeout deterministically.

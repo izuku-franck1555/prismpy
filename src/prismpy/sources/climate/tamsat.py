@@ -28,7 +28,6 @@ from prismpy.models.region import BoundingBox, Region
 from prismpy.provenance.tracker import DecisionType, ProvenanceTracker
 from prismpy.sources.base import DataSource, RetrievalResult
 from prismpy.sources.climate._cancel import PipelineCancelled, raise_if_cancelled
-from prismpy.utils.sanitization import normalize_region_name
 
 
 logger = logging.getLogger(__name__)
@@ -379,19 +378,17 @@ def cache_lock_path(cache_dir: Path, source: str, region_name) -> Path:
     self-blocking and so two users hitting the same region overlap on
     different sources but serialize on the same source.
 
-    V2-22b/P.1 — parameter is polymorphic for migration safety:
-    accepts either a `str` (legacy name-keyed callers) OR a full
-    region object (`Region` / `RegionConfig`). When given a region
-    object, manual boundaries key their lock by bbox so unnamed-
-    manual projects sharing the `"Unnamed study area"` display
-    name don't collide on the same lock. The `region_name` kwarg
-    label is kept for compatibility with existing callers.
+    `region_name` accepts any shape `region_cache_key` accepts — a
+    `Region`, `RegionConfig`, or `Mapping` with boundary + manual_bounds
+    or a non-empty `name`. Passing a raw string is rejected by
+    `region_cache_key` with a ValueError (the pre-unification
+    normalize-by-display-name schema; the unified contract keys on
+    bbox for manual regions and normalized admin names for GADM).
+    The `region_name` kwarg label is kept for call-site symmetry
+    with existing invocations.
     """
     from prismpy.utils.sanitization import region_cache_key
-    if isinstance(region_name, str):
-        safe = normalize_region_name(region_name)
-    else:
-        safe = region_cache_key(region_name)
+    safe = region_cache_key(region_name)
     return cache_dir / f".{source}-{safe}.lock"
 
 

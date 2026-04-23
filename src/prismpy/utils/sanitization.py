@@ -246,7 +246,22 @@ def region_cache_key(region) -> str:
         # Malformed manual region — fall through to name-key so
         # caller isn't blocked. Validation upstream would reject
         # this before reaching cache paths.
-    return normalize_region_name(_attr_or_key(region, 'name', '') or '')
+    key = normalize_region_name(_attr_or_key(region, 'name', '') or '')
+    if not key:
+        # Strict contract: the helper is the CROSS-REPO IDENTITY
+        # CONTRACT, so "I don't know what this region is" must
+        # fail loudly, not silently produce a degenerate empty-key
+        # cache path that would collide with every other broken
+        # input. Catches callers that accidentally pass a raw
+        # string (old-schema lookup) or a dict missing both
+        # `boundary` and `name` fields.
+        raise ValueError(
+            "region_cache_key requires a Region / RegionConfig / "
+            "Mapping with either `boundary.source='manual'` + "
+            "`manual_bounds`, or a non-empty `name`; got "
+            f"{type(region).__name__}: {region!r}"
+        )
+    return key
 
 
 def _canon_zero(val: float) -> float:
