@@ -11,27 +11,31 @@ The third fix introduced a "delegated to the per-platform
 post-translate validator" copy which was honest but read as
 technical to non-developer personas — user flagged it.
 
-The current contract (P.1 persona copy, post codex rounds 2+3+R3):
+The current contract (P.1 persona copy, post codex rounds 2-4):
 file-based climate → one info record whose summary explains the
 sampling in plain language ("random sample of 10 output files per
-variable") and tells the reader to look for "another SARRA-Py
-post-translate message in this report" if a variable is missing.
+variable") and tells the reader to look for "the other records in
+this report" if a variable is missing.
 
-Copy is self-contained — it refers only to artifacts present IN
-THIS REPORT (the validation record list), not to "pipeline steps
-above" (which is a web-UI-only concept, missing from the packaged
-`validation_report.json` that researchers audit offline). Codex
-R3 HIGH caught that phrasing pointed users at dead-end context
-in the JSON artifact.
+Copy is self-contained AND promise-safe:
 
-To uphold the "look for another SARRA-Py message" promise, the
-post-translate validator (`_validate_sarra_py_geotiffs`) now
-emits an explicit warning for any variable whose 10-file sample
-yields zero readable values — previously that path silently
-skipped the variable, contradicting the copy's promise. The
-regression tests below prove the promise is honored across all
-three failure modes (empty climate dir, missing rasterio,
-unreadable sampled tiffs).
+- Self-contained: refers only to artifacts present IN THIS REPORT
+  (the validation record list), works in both the web UI and the
+  packaged `validation_report.json` researchers audit offline.
+- Promise-safe: the broad "other records in this report" wording
+  works whether the explanation comes from a post-translate
+  warning, a skipped-translation note the executor may append,
+  or another validator entirely. Earlier "post-translate messages
+  in this report AND pipeline steps above" phrasing over-promised
+  in executor-skip paths where post-translate never ran.
+
+The validator (`_validate_sarra_py_geotiffs`) emits an explicit
+record for every silent-skip failure mode — empty climate dir,
+missing rasterio, unreadable sampled tiffs, partial-unreadable
+samples — so when post-translate DOES run, some explanatory
+record always lands. When the executor skips post-translate
+entirely, the upstream error is surfaced in the broader report
+context; the copy's "other records" phrasing captures that too.
 """
 
 import types
@@ -108,9 +112,16 @@ class TestClimateInfoLineDelegatesToPostTranslate(unittest.TestCase):
         # web UI. Codex R3 HIGH flagged that "pipeline steps above"
         # was dead text inside the JSON artifact researchers audit.
         self.assertNotIn('pipeline steps above', summary)
-        # Must still point users at the in-report follow-up so the
-        # silent-skip story codex caught is addressable.
+        # Codex R4 MEDIUM — the narrower "post-translate messages
+        # in this report" wording over-promised in executor-skip
+        # paths where post-translate never ran. The broader
+        # "other records in this report" phrasing works for both
+        # validator-local failures AND executor-skip cases.
+        self.assertNotIn('post-translate messages', summary)
+        # Must still point users at in-report follow-up so the
+        # silent-skip story is addressable.
         self.assertIn('in this report', summary)
+        self.assertIn('other records', summary)
         # (4) prior misleading phrasings must not regress.
         self.assertNotIn('not checked', summary.lower())
         self.assertNotIn('spot-checked', summary.lower())
