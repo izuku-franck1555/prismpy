@@ -675,16 +675,33 @@ def _validate_sarra_py_geotiffs(
             continue
 
         n_oor = sum(1 for v in all_vals if v < vmin or v > vmax)
-        result = "warning" if n_oor > 0 else "pass"
+        # Codex self-check R4 HIGH — downgrade to warning when the
+        # effective sample collapsed below the target size. Without
+        # this, a 9-of-10-unreadable sample emits a clean 'pass'
+        # record that claims "10-file sample" while actually drawing
+        # from one file — broad climate-file corruption would hide
+        # behind the happy-path.
+        effective_sample = len(sample_files) - unreadable
+        if n_oor > 0 or unreadable > 0:
+            result = "warning"
+        else:
+            result = "pass"
+        summary = (
+            f"SARRA-Py {var}: [{obs_min:.1f}, {obs_max:.1f}] "
+            f"{unit} (from output files)"
+        )
+        if unreadable > 0:
+            summary += (
+                f" — sample degraded: {unreadable} of "
+                f"{len(sample_files)} files were unreadable, effective "
+                f"sample = {effective_sample}"
+            )
 
         checks.append({
             "check": f"post_translate_range_sarra_py_{var}",
             "scope": "per_record",
             "result": result,
-            "summary": (
-                f"SARRA-Py {var}: [{obs_min:.1f}, {obs_max:.1f}] "
-                f"{unit} (from output files)"
-            ),
+            "summary": summary,
             "details": {
                 "platform": "sarra_py",
                 "variable": var,
@@ -695,6 +712,13 @@ def _validate_sarra_py_geotiffs(
                 "observed_max": round(obs_max, 2),
                 "out_of_range_count": n_oor,
                 "total_values": len(all_vals),
+                # Codex R4 HIGH — persist sample coverage so auditors
+                # reading the packaged `validation_report.json` can
+                # tell when a pass-looking record was backed by a
+                # degraded sample.
+                "sample_size": len(sample_files),
+                "unreadable_count": unreadable,
+                "effective_sample_size": effective_sample,
                 "data_source": "GeoTIFF pixel values (10-file sample)",
             },
         })

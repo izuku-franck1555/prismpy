@@ -144,3 +144,62 @@ class TestSarraPyUnitConversion(unittest.TestCase):
         self.assertAlmostEqual(
             by_var['srad']['details']['observed_max'], 20.0, places=1,
         )
+
+
+class TestSarraPyPartialUnreadableSample(unittest.TestCase):
+    """Codex self-check R4 HIGH — a range check that draws from a
+    degraded sample (some files unreadable) must be flagged as
+    warning, not pass. Otherwise broad climate-file corruption
+    hides behind a happy-path record that still claims "10-file
+    sample" while actually drawing from one good file."""
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp(prefix='sarra-py-partial-'))
+        climate = self.tmpdir / 'data' / 'climate'
+        # tmax only — 2 valid °C TIFFs, 8 placeholder non-TIFF bytes.
+        # The helper's random.sample picks 10 files; whatever mix it
+        # picks, SOME will be valid and some won't, so the warning
+        # path fires deterministically as long as at least one of
+        # each is in the sample.
+        #
+        # Simpler fixture: 1 valid + 9 bad guarantees partial
+        # coverage regardless of sample selection.
+        tmax_dir = climate / '2m_temperature_24_hour_maximum'
+        tmax_dir.mkdir(parents=True)
+        _write_fixture_tiff(tmax_dir / 'valid_001.tif', 22.0)
+        for i in range(9):
+            (tmax_dir / f'bad_{i:03d}.tif').write_bytes(b'not-a-tif')
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_partial_unreadable_sample_downgrades_to_warning(self):
+        """A 1-good + 9-bad sample must emit `result: warning`, not
+        `pass`, so operators see the effective sample collapsed."""
+        checks = _validate_sarra_py_geotiffs(self.tmpdir)
+        tmax_records = [
+            c for c in checks
+            if c.get('check') == 'post_translate_range_sarra_py_tmax'
+        ]
+        self.assertEqual(len(tmax_records), 1)
+        self.assertEqual(
+            tmax_records[0]['result'], 'warning',
+            f'degraded sample should warn, got {tmax_records[0]}',
+        )
+
+    def test_partial_unreadable_sample_persists_effective_coverage(self):
+        """The record must carry `unreadable_count` and
+        `effective_sample_size` so the packaged
+        validation_report.json has machine-readable coverage data."""
+        checks = _validate_sarra_py_geotiffs(self.tmpdir)
+        record = next(
+            c for c in checks
+            if c.get('check') == 'post_translate_range_sarra_py_tmax'
+        )
+        details = record['details']
+        self.assertEqual(details.get('sample_size'), 10)
+        self.assertGreater(details.get('unreadable_count'), 0)
+        self.assertLess(details.get('effective_sample_size'), 10)
+        # The summary must name the degradation in plain text too.
+        self.assertIn('sample degraded', record['summary'])
+        self.assertIn('unreadable', record['summary'])
