@@ -1105,14 +1105,14 @@ class TranslationPipeline:
         Report them so validation can flag incomplete data honestly
         instead of silently ignoring the gap.
 
-        Uses `region_cache_key(region)` so manual regions with
-        bbox-unique cache paths are looked up correctly — the
-        previous `normalize_region_name(region.name)` key would
-        collide across different manual projects that share the
-        `"Unnamed study area"` display name.
+        Uses `region_cache_key_from_region(region)` so manual
+        regions with bbox-unique cache paths are looked up
+        correctly — the previous `normalize_region_name(region.name)`
+        key would collide across different manual projects that
+        share the `"Unnamed study area"` display name.
         """
-        from prismpy.utils.sanitization import region_cache_key
-        safe_name = region_cache_key(region)
+        from prismpy.utils.sanitization import region_cache_key_from_region
+        safe_name = region_cache_key_from_region(region)
         agera5_cache = cache_dir / "agera5" / f"AgERA5_{safe_name}"
         if not agera5_cache.exists():
             # Mark that AgERA5 was expected but has zero files

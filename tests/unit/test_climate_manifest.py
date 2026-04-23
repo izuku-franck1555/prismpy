@@ -772,37 +772,41 @@ class TestFilelockSerialization:
     def test_raw_string_region_name_rejected(
         self, cache_dir: Path,
     ) -> None:
-        """V2-22b/P.2 AC-AUDIT-5 — the old schema let callers pass a
-        raw string `region_name`; `cache_lock_path` normalized it via
-        `normalize_region_name`. That schema died with the cross-repo
-        unification, but the polymorphic branch lingered as dead
-        code. A raw-string call now raises `ValueError` from
-        `region_cache_key`, so a future caller accidentally reverting
-        to the old pattern fails loudly instead of silently producing
-        a broken `.tamsat-.lock` path."""
+        """V2-22b/P.2 AC-AUDIT-5 + AC-AUDIT-8 — `cache_lock_path`
+        takes a `Region` dataclass only. A raw string doesn't carry
+        `.boundary_source` / `.bounds` / `.name` so the call fails
+        inside `region_cache_key_from_region` with ValueError
+        (empty-name fallback after `getattr('raw_string', 'name')`
+        returns the default). Catches callers that accidentally
+        revert to the pre-unification name-as-key pattern."""
         with pytest.raises(ValueError):
             cache_lock_path(
                 cache_dir, source="tamsat", region_name="raw_string",
             )
 
-    def test_malformed_manual_mapping_rejected(
+    def test_mapping_region_name_rejected(
         self, cache_dir: Path,
     ) -> None:
-        """V2-22b/P.2 AC-AUDIT-6 — a prismweb-shaped Mapping with
-        `boundary.source == 'manual'` but missing `manual_bounds`
-        must fail loudly at the `cache_lock_path` entry point, not
-        only inside `region_cache_key`. Locks the strict contract
-        end-to-end so a version-skewed persisted payload can't
-        silently produce a name-keyed lock that collides with
-        unrelated manual regions sharing the same display name."""
+        """V2-22b/P.2 AC-AUDIT-8 — `cache_lock_path` takes a
+        `Region` dataclass only; a Mapping is the pre-resolution
+        shape, not a post-resolution Region. The helper delegates
+        to `region_cache_key_from_region`, which reads
+        `.boundary_source` via `getattr` and returns the default
+        on a dict (which doesn't carry that attribute), then falls
+        to the name-key path and raises when the dict's `.name`
+        attribute access returns empty. Locks the post-resolution
+        contract at the entry point the pipeline actually uses."""
         malformed = {
             'name': 'Unnamed study area',
             'boundary': {
                 'source': 'manual',
-                # manual_bounds missing (version-skew scenario).
+                'manual_bounds': {
+                    'minx': -5.0, 'miny': 12.0,
+                    'maxx': -3.0, 'maxy': 14.0,
+                },
             },
         }
-        with pytest.raises(ValueError, match='manual_bounds'):
+        with pytest.raises(ValueError):
             cache_lock_path(
                 cache_dir, source="tamsat", region_name=malformed,
             )
