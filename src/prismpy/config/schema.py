@@ -52,36 +52,62 @@ def _is_default_ignorable(c: str) -> bool:
     return False
 
 
-def _contains_invisible_char(s: str) -> bool:
-    """True if `s` contains a non-printable or default-ignorable
-    Unicode character.
+# Unicode general categories accepted in identifier strings
+# (region name, country, gadm_filter_value, gadm_filter_field,
+# shapefile_path). Includes letters (L*), numbers (N*), and
+# combining marks (Mn, Mc) so NFD-decomposed accented Latin
+# names like 'Ségou' (e + U+0301) still validate regardless of
+# how the caller normalized them.
+_IDENTIFIER_CATEGORIES = frozenset({
+    "Lu", "Ll", "Lt", "Lm", "Lo",    # letters
+    "Nd", "Nl", "No",                 # numbers
+    "Mn", "Mc",                       # combining marks
+})
 
-    Three layers of check:
-    1. `str.isprintable()` — catches control / surrogate / unassigned
-       (category Cc, Cs, Cn).
-    2. General category `Cf` — catches format characters (U+200B
-       ZWSP, U+200D ZWJ, U+FEFF BOM, U+2060 Word Joiner, etc.) that
-       `.isprintable()` treats as printable.
-    3. Unicode `Default_Ignorable_Code_Point` tail — Hangul Jamo
-       fillers (U+115F, U+1160, U+3164, U+FFA0), Khmer inherent
-       vowels, variation selectors, SOFT HYPHEN, and other code
-       points that fall outside Cf but are defined as invisible.
-       Hand-maintained from Unicode's
-       `DerivedCoreProperties.txt#Default_Ignorable_Code_Point`.
+# Printable punctuation + separators that appear legitimately in
+# region / country / filter / path identifier strings.
+_IDENTIFIER_PUNCT = frozenset(" -_.',/()&")
 
-    Together these catch the full invisible set — a hidden char in
-    an identifier string can't pass the schema and silently
-    corrupt downstream string matching (GADM filter lookup,
-    filesystem path resolution, cache-key equality).
+
+def _is_identifier_char(c: str) -> bool:
+    """True if `c` is acceptable in an identifier string.
+
+    Positive-acceptance check: ONLY chars in the identifier-category
+    allowlist or the punctuation allowlist pass. A
+    `Default_Ignorable_Code_Point` overlay catches the handful of
+    invisible characters whose Unicode general category is Lo/Mn/Mc
+    (Hangul Jamo fillers, variation selectors, combining grapheme
+    joiner, Khmer inherent vowels) — the category check alone would
+    accept those.
     """
-    for c in s:
-        if not c.isprintable():
-            return True
-        if unicodedata.category(c) == 'Cf':
-            return True
-        if _is_default_ignorable(c):
-            return True
-    return False
+    if _is_default_ignorable(c):
+        return False
+    if c in _IDENTIFIER_PUNCT:
+        return True
+    return unicodedata.category(c) in _IDENTIFIER_CATEGORIES
+
+
+def _contains_invisible_char(s: str) -> bool:
+    """True if `s` contains any character that isn't a valid
+    identifier char.
+
+    Positive-whitelist shape (V2-22b/P.2 AC-AUDIT-16): earlier
+    rounds (R13/R14/R15) each surfaced a new invisible Unicode
+    class the blocklist didn't cover — ASCII controls → Cf format
+    characters → Other_Default_Ignorable tail (Hangul fillers,
+    variation selectors, Khmer inherent vowels). The pattern was
+    "blocklist can't enumerate all bad inputs." AC-AUDIT-16
+    inverts the check: only Unicode categories defined as
+    identifier-acceptable pass, plus a narrow
+    `Default_Ignorable_Code_Point` overlay for invisible chars
+    whose category overlaps the allowlist (Lo/Mn/Mc).
+
+    The function name stays `_contains_invisible_char` so callers
+    don't change; semantically it's now "contains any disallowed
+    char" but the original name captures the primary risk we're
+    guarding against.
+    """
+    return any(not _is_identifier_char(c) for c in s)
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -195,9 +221,12 @@ class BoundaryConfig(BaseModel):
         stripped = value.strip()
         if _contains_invisible_char(stripped):
             raise ValueError(
-                f"GADM identifier {value!r} contains non-printable "
-                "or invisible characters; only visible, printable "
-                "characters are allowed"
+                f"GADM identifier {value!r} contains disallowed "
+                "characters; identifier strings accept letters, "
+                "numbers, and common punctuation (space, hyphen, "
+                "underscore, dot, apostrophe, slash, parentheses, "
+                "comma, ampersand) — non-printable, invisible, or "
+                "other symbol characters are rejected"
             )
         from prismpy.utils.sanitization import normalize_region_name
         if not normalize_region_name(stripped):
@@ -231,9 +260,12 @@ class BoundaryConfig(BaseModel):
             stripped = value.strip()
             if _contains_invisible_char(stripped):
                 raise ValueError(
-                    f"shapefile_path {value!r} contains non-printable "
-                    "or invisible characters; only visible, printable "
-                    "characters are allowed"
+                    f"shapefile_path {value!r} contains disallowed "
+                    "characters; path strings accept the same "
+                    "letters, numbers, and common punctuation as "
+                    "other identifier fields — non-printable, "
+                    "invisible, or other symbol characters are "
+                    "rejected"
                 )
             if not stripped:
                 raise ValueError(
@@ -345,9 +377,12 @@ class RegionConfig(BaseModel):
         stripped = value.strip()
         if _contains_invisible_char(stripped):
             raise ValueError(
-                f"{value!r} contains non-printable or invisible "
-                "characters; only visible, printable characters "
-                "are allowed"
+                f"{value!r} contains disallowed characters; "
+                "identifier strings accept letters, numbers, and "
+                "common punctuation (space, hyphen, underscore, "
+                "dot, apostrophe, slash, parentheses, comma, "
+                "ampersand) — non-printable, invisible, or other "
+                "symbol characters are rejected"
             )
         from prismpy.utils.sanitization import normalize_region_name
         if not normalize_region_name(stripped):

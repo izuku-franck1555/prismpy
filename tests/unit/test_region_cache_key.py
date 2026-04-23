@@ -480,8 +480,17 @@ class TestRegionConfigNormalizableNameCountry(unittest.TestCase):
             self._build(name='   ')
 
     def test_pure_punctuation_name_rejected(self):
+        """Pure-punctuation names are rejected by the identifier
+        whitelist (`!` isn't in the allowed-punctuation set), not
+        by the `normalize_region_name` empty-identifier fallback
+        that handled whitespace-only / underscore-only. Either
+        error path is acceptable — both mean 'reject this input';
+        match on the broader `disallowed|empty identifier`
+        pattern so the test survives future wording tweaks."""
         from pydantic import ValidationError
-        with self.assertRaisesRegex(ValidationError, 'empty identifier'):
+        with self.assertRaisesRegex(
+            ValidationError, 'disallowed|empty identifier',
+        ):
             self._build(name='!!!')
 
     def test_pure_underscore_name_rejected(self):
@@ -505,9 +514,13 @@ class TestRegionConfigNormalizableNameCountry(unittest.TestCase):
     def test_pure_punctuation_country_rejected(self):
         """Country strings feed translators' `sanitize_admin_name`
         path, which strips punctuation. `'!!!'` collapses to ''
-        there too, producing malformed output paths."""
+        there too, producing malformed output paths. Either the
+        whitelist or empty-identifier fallback rejects; match
+        both."""
         from pydantic import ValidationError
-        with self.assertRaisesRegex(ValidationError, 'empty identifier'):
+        with self.assertRaisesRegex(
+            ValidationError, 'disallowed|empty identifier',
+        ):
             self._build(country='!!!')
 
     def test_country_whitespace_trimmed(self):
@@ -578,21 +591,21 @@ class TestRegionConfigUniversalInvariants(unittest.TestCase):
         JSON reports, fixed-width records."""
         from pydantic import ValidationError
         with self.assertRaisesRegex(
-            ValidationError, 'non-printable',
+            ValidationError, 'disallowed',
         ):
             self._build(name='Kou\ntiala')
 
     def test_name_rejects_embedded_tab(self):
         from pydantic import ValidationError
         with self.assertRaisesRegex(
-            ValidationError, 'non-printable',
+            ValidationError, 'disallowed',
         ):
             self._build(name='Kou\ttiala')
 
     def test_country_rejects_embedded_newline(self):
         from pydantic import ValidationError
         with self.assertRaisesRegex(
-            ValidationError, 'non-printable',
+            ValidationError, 'disallowed',
         ):
             self._build(country='Mali\nWest')
 
@@ -600,7 +613,7 @@ class TestRegionConfigUniversalInvariants(unittest.TestCase):
         """Full ASCII control range \\x00-\\x1f + \\x7f."""
         from pydantic import ValidationError
         with self.assertRaisesRegex(
-            ValidationError, 'non-printable',
+            ValidationError, 'disallowed',
         ):
             self._build(country='Mali\x07West')  # bell
 
@@ -680,12 +693,14 @@ class TestGadmFilterValueUniversalInvariants(unittest.TestCase):
 
     def test_punctuation_only_filter_value_rejected(self):
         from pydantic import ValidationError
-        with self.assertRaisesRegex(ValidationError, 'empty identifier'):
+        with self.assertRaisesRegex(
+            ValidationError, 'disallowed|empty identifier',
+        ):
             self._build_gadm('!!!')
 
     def test_control_char_filter_value_rejected(self):
         from pydantic import ValidationError
-        with self.assertRaisesRegex(ValidationError, 'non-printable'):
+        with self.assertRaisesRegex(ValidationError, 'disallowed'):
             self._build_gadm('Koutiala\ntext')
 
     def test_surrounding_whitespace_stripped(self):
@@ -736,7 +751,7 @@ class TestGadmFilterFieldUniversalInvariants(unittest.TestCase):
 
     def test_control_char_filter_field_rejected(self):
         from pydantic import ValidationError
-        with self.assertRaisesRegex(ValidationError, 'non-printable'):
+        with self.assertRaisesRegex(ValidationError, 'disallowed'):
             self._build_with_filter_field('NAME\t2')
 
     def test_surrounding_whitespace_stripped(self):
@@ -780,7 +795,7 @@ class TestShapefilePathUniversalInvariants(unittest.TestCase):
 
     def test_control_char_shapefile_path_rejected(self):
         from pydantic import ValidationError
-        with self.assertRaisesRegex(ValidationError, 'non-printable'):
+        with self.assertRaisesRegex(ValidationError, 'disallowed'):
             self._build_with_shapefile('/path/\nfile.shp')
 
     def test_valid_shapefile_path_accepted(self):
@@ -839,7 +854,7 @@ class TestUnicodeHiddenCharsUniversalInvariants(unittest.TestCase):
         for char, label in self.HIDDEN_CHARS:
             with self.subTest(label=label):
                 with self.assertRaisesRegex(
-                    ValidationError, 'non-printable',
+                    ValidationError, 'disallowed',
                 ):
                     self._build(name=f'Kou{char}tiala')
 
@@ -848,7 +863,7 @@ class TestUnicodeHiddenCharsUniversalInvariants(unittest.TestCase):
         for char, label in self.HIDDEN_CHARS:
             with self.subTest(label=label):
                 with self.assertRaisesRegex(
-                    ValidationError, 'non-printable',
+                    ValidationError, 'disallowed',
                 ):
                     self._build(country=f'Ma{char}li')
 
@@ -858,7 +873,7 @@ class TestUnicodeHiddenCharsUniversalInvariants(unittest.TestCase):
         for char, label in self.HIDDEN_CHARS:
             with self.subTest(label=label):
                 with self.assertRaisesRegex(
-                    ValidationError, 'non-printable',
+                    ValidationError, 'disallowed',
                 ):
                     RegionConfig.model_validate({
                         'name': 'Koutiala',
@@ -877,7 +892,7 @@ class TestUnicodeHiddenCharsUniversalInvariants(unittest.TestCase):
         for char, label in self.HIDDEN_CHARS:
             with self.subTest(label=label):
                 with self.assertRaisesRegex(
-                    ValidationError, 'non-printable',
+                    ValidationError, 'disallowed',
                 ):
                     RegionConfig.model_validate({
                         'name': 'Koutiala',
@@ -1000,7 +1015,7 @@ class TestInvisibleCodePointsUniversalInvariants(unittest.TestCase):
         for char, label in self.INVISIBLE_CHARS:
             with self.subTest(label=label):
                 with self.assertRaisesRegex(
-                    ValidationError, 'invisible',
+                    ValidationError, 'disallowed',
                 ):
                     self._build(name=f'Kou{char}tiala')
 
@@ -1009,7 +1024,7 @@ class TestInvisibleCodePointsUniversalInvariants(unittest.TestCase):
         for char, label in self.INVISIBLE_CHARS:
             with self.subTest(label=label):
                 with self.assertRaisesRegex(
-                    ValidationError, 'invisible',
+                    ValidationError, 'disallowed',
                 ):
                     self._build(country=f'Ma{char}li')
 
@@ -1019,7 +1034,7 @@ class TestInvisibleCodePointsUniversalInvariants(unittest.TestCase):
         for char, label in self.INVISIBLE_CHARS:
             with self.subTest(label=label):
                 with self.assertRaisesRegex(
-                    ValidationError, 'invisible',
+                    ValidationError, 'disallowed',
                 ):
                     RegionConfig.model_validate({
                         'name': 'Koutiala',
@@ -1038,7 +1053,7 @@ class TestInvisibleCodePointsUniversalInvariants(unittest.TestCase):
         for char, label in self.INVISIBLE_CHARS:
             with self.subTest(label=label):
                 with self.assertRaisesRegex(
-                    ValidationError, 'invisible',
+                    ValidationError, 'disallowed',
                 ):
                     RegionConfig.model_validate({
                         'name': 'Koutiala',
@@ -1057,7 +1072,7 @@ class TestInvisibleCodePointsUniversalInvariants(unittest.TestCase):
         for char, label in self.INVISIBLE_CHARS:
             with self.subTest(label=label):
                 with self.assertRaisesRegex(
-                    ValidationError, 'invisible',
+                    ValidationError, 'disallowed',
                 ):
                     RegionConfig.model_validate({
                         'name': 'Koutiala',
