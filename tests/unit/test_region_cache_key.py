@@ -628,3 +628,80 @@ class TestRegionConfigUniversalInvariants(unittest.TestCase):
             ValidationError, 'ISO 3166',
         ):
             self._build(country_iso3='ML!')
+
+
+class TestGadmFilterValueUniversalInvariants(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-12 — symmetric expansion of the AC-AUDIT-10/11
+    validators to `BoundaryConfig.gadm_filter_value`, closing the
+    codex R11 universal gap.
+
+    GADM filter_value flows into `GADMSource._extract_bounds()`'s
+    `if filter_field and filter_value:` guard. Empty, whitespace,
+    or malformed strings are falsy (`'   '` is truthy but
+    normalizes to empty) — the guard skipped filtering, unioned
+    the entire shapefile, and returned a silently-widened
+    `"Full Region"` instead of failing fast.
+
+    Universal invariant (same as name / country): identifier must
+    strip non-empty, contain no control characters, normalize to
+    a non-empty identifier. `None` still allowed at the field
+    level (the model_validator rejects None only for
+    `source='gadm'` so non-GADM runs don't need the field)."""
+
+    @staticmethod
+    def _build_gadm(filter_value):
+        """GADM RegionConfig with explicit filter_value. Raises
+        `ValidationError` when filter_value fails the universal
+        invariants."""
+        from prismpy.config.schema import RegionConfig
+        return RegionConfig.model_validate({
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'gadm',
+                'gadm_level': 2,
+                'gadm_filter_field': 'NAME_2',
+                'gadm_filter_value': filter_value,
+            },
+        })
+
+    def test_empty_string_filter_value_rejected(self):
+        """Pre-AC-AUDIT-12: `gadm_filter_value=''` passed the
+        schema (`model_validator` only checks for None) and the
+        executor skipped filtering, returning a silently-widened
+        `Full Region`. Must now fail at validate time."""
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build_gadm('')
+
+    def test_whitespace_only_filter_value_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'empty identifier'):
+            self._build_gadm('   ')
+
+    def test_punctuation_only_filter_value_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'empty identifier'):
+            self._build_gadm('!!!')
+
+    def test_control_char_filter_value_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'control characters'):
+            self._build_gadm('Koutiala\ntext')
+
+    def test_surrounding_whitespace_stripped(self):
+        rc = self._build_gadm('  Koutiala  ')
+        self.assertEqual(rc.boundary.gadm_filter_value, 'Koutiala')
+
+    def test_valid_filter_value_accepted(self):
+        rc = self._build_gadm('Koutiala')
+        self.assertEqual(rc.boundary.gadm_filter_value, 'Koutiala')
+
+    def test_none_filter_value_still_rejected_for_gadm_source(self):
+        """The existing `validate_source_requirements` model
+        validator — AC-AUDIT-12 doesn't change it. None on a
+        non-GADM source remains legal."""
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(
+            ValidationError, 'gadm_filter_value required',
+        ):
+            self._build_gadm(None)

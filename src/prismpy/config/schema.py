@@ -98,6 +98,39 @@ class BoundaryConfig(BaseModel):
         description="Manual bounding box if source is 'manual'"
     )
 
+    @field_validator("gadm_filter_value", mode="before")
+    @classmethod
+    def _strip_and_validate_gadm_filter_value(cls, value):
+        """Same universal-invariant rules as `RegionConfig.name` /
+        `country` (V2-22b/P.2 AC-AUDIT-10/11), applied to the
+        GADM filter value. `None` stays `None` (the field is
+        optional at the schema level; the model validator below
+        rejects `None` only when `source == gadm`). A non-None
+        value must strip to non-empty, contain no control
+        characters, and normalize to a non-empty identifier —
+        otherwise `GADMSource._extract_bounds()` skips its
+        `if filter_field and filter_value:` guard and silently
+        returns the union of the whole shapefile as a
+        `"Full Region"`."""
+        if value is None:
+            return value
+        if not isinstance(value, str):
+            return value
+        stripped = value.strip()
+        if re.search(r'[\x00-\x1f\x7f]', stripped):
+            raise ValueError(
+                f"gadm_filter_value {value!r} contains control "
+                "characters; only printable characters are allowed"
+            )
+        from prismpy.utils.sanitization import normalize_region_name
+        if not normalize_region_name(stripped):
+            raise ValueError(
+                f"gadm_filter_value {value!r} normalizes to an "
+                "empty identifier; at least one alphanumeric "
+                "character required"
+            )
+        return stripped
+
     @model_validator(mode="after")
     def validate_source_requirements(self) -> "BoundaryConfig":
         if self.source == BoundarySource.GADM:
