@@ -7,7 +7,7 @@ and handle special characters in administrative names.
 
 import re
 import unicodedata
-from typing import Optional
+from typing import Any, Optional
 
 
 def remove_accents(text: str) -> str:
