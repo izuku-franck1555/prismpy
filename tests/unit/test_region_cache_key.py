@@ -705,3 +705,94 @@ class TestGadmFilterValueUniversalInvariants(unittest.TestCase):
             ValidationError, 'gadm_filter_value required',
         ):
             self._build_gadm(None)
+
+
+class TestGadmFilterFieldUniversalInvariants(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-13 — extend the universal-identifier
+    guard to `BoundaryConfig.gadm_filter_field` (the column name
+    in the GADM shapefile to filter on). Same downstream
+    truthiness check in `GADMSource._extract_bounds`; whitespace-
+    or control-bearing values bypass the `NAME_{level}` fallback
+    and surface as "Column '...' not found" at retrieve time
+    instead of validation-time."""
+
+    @staticmethod
+    def _build_with_filter_field(filter_field):
+        from prismpy.config.schema import RegionConfig
+        return RegionConfig.model_validate({
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'gadm',
+                'gadm_level': 2,
+                'gadm_filter_field': filter_field,
+                'gadm_filter_value': 'Koutiala',
+            },
+        })
+
+    def test_whitespace_only_filter_field_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'empty identifier'):
+            self._build_with_filter_field('   ')
+
+    def test_control_char_filter_field_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'control characters'):
+            self._build_with_filter_field('NAME\t2')
+
+    def test_surrounding_whitespace_stripped(self):
+        rc = self._build_with_filter_field('  NAME_2  ')
+        self.assertEqual(rc.boundary.gadm_filter_field, 'NAME_2')
+
+    def test_valid_filter_field_accepted(self):
+        rc = self._build_with_filter_field('NAME_2')
+        self.assertEqual(rc.boundary.gadm_filter_field, 'NAME_2')
+
+
+class TestShapefilePathUniversalInvariants(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-13 — empty-string / whitespace-only
+    `shapefile_path` inputs used to silently coerce to
+    `Path('.')` (the current working directory), which then
+    passed `Path.exists()` checks and was handed to
+    `geopandas.read_file`, surfacing only as a runtime
+    `DataSourceError`. Schema-level validation now rejects these
+    at model_validate."""
+
+    @staticmethod
+    def _build_with_shapefile(shapefile_path):
+        from prismpy.config.schema import RegionConfig
+        return RegionConfig.model_validate({
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'shapefile',
+                'shapefile_path': shapefile_path,
+            },
+        })
+
+    def test_empty_string_shapefile_path_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'empty or whitespace'):
+            self._build_with_shapefile('')
+
+    def test_whitespace_only_shapefile_path_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'empty or whitespace'):
+            self._build_with_shapefile('   ')
+
+    def test_control_char_shapefile_path_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'control characters'):
+            self._build_with_shapefile('/path/\nfile.shp')
+
+    def test_valid_shapefile_path_accepted(self):
+        from pathlib import Path
+        rc = self._build_with_shapefile('/some/path/boundaries.shp')
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('/some/path/boundaries.shp'),
+        )
+
+    def test_surrounding_whitespace_stripped(self):
+        from pathlib import Path
+        rc = self._build_with_shapefile('  /some/path/boundaries.shp  ')
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('/some/path/boundaries.shp'),
+        )

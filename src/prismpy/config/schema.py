@@ -98,20 +98,25 @@ class BoundaryConfig(BaseModel):
         description="Manual bounding box if source is 'manual'"
     )
 
-    @field_validator("gadm_filter_value", mode="before")
+    @field_validator(
+        "gadm_filter_value", "gadm_filter_field", mode="before",
+    )
     @classmethod
-    def _strip_and_validate_gadm_filter_value(cls, value):
-        """Same universal-invariant rules as `RegionConfig.name` /
-        `country` (V2-22b/P.2 AC-AUDIT-10/11), applied to the
-        GADM filter value. `None` stays `None` (the field is
-        optional at the schema level; the model validator below
-        rejects `None` only when `source == gadm`). A non-None
-        value must strip to non-empty, contain no control
-        characters, and normalize to a non-empty identifier —
-        otherwise `GADMSource._extract_bounds()` skips its
-        `if filter_field and filter_value:` guard and silently
-        returns the union of the whole shapefile as a
-        `"Full Region"`."""
+    def _strip_and_validate_gadm_identifier(cls, value):
+        """Universal-invariant rules for GADM identifier strings —
+        `gadm_filter_value` and `gadm_filter_field` both flow
+        through `if filter_field and filter_value:` guards in
+        `GADMSource._extract_bounds`, where a whitespace-only or
+        control-char-bearing string is truthy but semantically
+        broken. Same rules as `RegionConfig.name` / `country`
+        (V2-22b/P.2 AC-AUDIT-10/11).
+
+        `None` stays `None` — both fields are optional at schema
+        level, and `validate_source_requirements` handles the
+        source-specific None-required checks. Non-None values
+        strip surrounding whitespace, reject control characters,
+        and reject values that normalize to an empty identifier.
+        """
         if value is None:
             return value
         if not isinstance(value, str):
@@ -119,17 +124,50 @@ class BoundaryConfig(BaseModel):
         stripped = value.strip()
         if re.search(r'[\x00-\x1f\x7f]', stripped):
             raise ValueError(
-                f"gadm_filter_value {value!r} contains control "
+                f"GADM identifier {value!r} contains control "
                 "characters; only printable characters are allowed"
             )
         from prismpy.utils.sanitization import normalize_region_name
         if not normalize_region_name(stripped):
             raise ValueError(
-                f"gadm_filter_value {value!r} normalizes to an "
+                f"GADM identifier {value!r} normalizes to an "
                 "empty identifier; at least one alphanumeric "
                 "character required"
             )
         return stripped
+
+    @field_validator("shapefile_path", mode="before")
+    @classmethod
+    def _validate_shapefile_path(cls, value):
+        """Reject empty or whitespace-only path inputs before
+        Pydantic coerces them to `Path('.')` — the coercion
+        quietly turns `''` into the current working directory,
+        which then passes `Path.exists()` checks downstream and
+        is handed to `geopandas.read_file`, surfacing only as a
+        runtime DataSourceError instead of a validation error.
+
+        `None` stays `None` (field is optional; the model
+        validator requires the path only when
+        `source == shapefile`). `Path` objects pass through
+        untouched — only raw-string inputs go through the
+        strip/reject pass."""
+        if value is None:
+            return value
+        if isinstance(value, str):
+            stripped = value.strip()
+            if re.search(r'[\x00-\x1f\x7f]', stripped):
+                raise ValueError(
+                    f"shapefile_path {value!r} contains control "
+                    "characters; only printable characters are allowed"
+                )
+            if not stripped:
+                raise ValueError(
+                    f"shapefile_path {value!r} is empty or "
+                    "whitespace-only; provide a real path or "
+                    "omit the field entirely"
+                )
+            return stripped
+        return value
 
     @model_validator(mode="after")
     def validate_source_requirements(self) -> "BoundaryConfig":
