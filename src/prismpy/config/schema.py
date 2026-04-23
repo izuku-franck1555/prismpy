@@ -6,6 +6,7 @@ data-to-model translation framework, including region, crop, temporal,
 and platform-specific settings.
 """
 
+import re
 from datetime import date, timedelta
 from enum import Enum
 from pathlib import Path
@@ -129,20 +130,44 @@ class RegionConfig(BaseModel):
     @field_validator("country_iso3")
     @classmethod
     def validate_iso3(cls, v: str) -> str:
-        return v.upper()
+        """ISO 3166-1 alpha-3: exactly three uppercase ASCII letters.
+
+        Length-only validation (`min_length=3, max_length=3`) accepts
+        non-letter codes like `'ML2'` or `'ML!'`, which would flow
+        through every downstream consumer that treats the field as a
+        short identifier — file paths, logs, provenance records, and
+        the CRAFT country-code field. Reject anything outside the
+        alpha pattern so an invalid code fails at validate time."""
+        stripped = v.strip().upper() if isinstance(v, str) else v
+        if not isinstance(stripped, str) or not re.match(r'^[A-Z]{3}$', stripped):
+            raise ValueError(
+                f"country_iso3 must be exactly three alphabetic "
+                f"characters (ISO 3166-1 alpha-3); got {v!r}"
+            )
+        return stripped
 
     @field_validator("name", "country", mode="before")
     @classmethod
     def _strip_and_require_normalizable(cls, value):
-        """Enforce the invariant downstream cache-key / filename /
-        path consumers rely on: the field must normalize to a
-        non-empty identifier. `min_length=1` alone accepts
-        whitespace-only (`'   '`), punctuation-only (`'!!!'`), or
-        underscore-only (`'___'`) inputs that validate upstream
-        but collapse to an empty key when passed through
-        `normalize_region_name` / `sanitize_admin_name` — so two
-        different malformed inputs silently alias onto the same
-        cache path, lock file, or filename prefix.
+        """Enforce the universal invariants downstream consumers
+        rely on:
+
+        1. `min_length=1` alone accepts whitespace-only (`'   '`),
+           punctuation-only (`'!!!'`), or underscore-only (`'___'`)
+           inputs that validate upstream but collapse to an empty
+           key when passed through `normalize_region_name` /
+           `sanitize_admin_name`. Two different malformed inputs
+           silently alias onto the same cache path, lock file, or
+           filename prefix. REJECT those here.
+
+        2. Internal ASCII control characters (`\\x00-\\x1f`, `\\x7f`)
+           are never legitimate in a region name or country name;
+           they survive `normalize_region_name` by becoming a `_`
+           but corrupt any downstream consumer that writes the raw
+           value into a structured format (logs, JSON reports,
+           fixed-width records). REJECT them at schema time —
+           universal invariant, applies regardless of which
+           downstream consumer ultimately reads the value.
 
         `mode='before'` so the stripped value is stored (no UX
         regression on `'  Koutiala  '`). Import
@@ -152,6 +177,11 @@ class RegionConfig(BaseModel):
             # Let Pydantic's type validation handle non-strings.
             return value
         stripped = value.strip()
+        if re.search(r'[\x00-\x1f\x7f]', stripped):
+            raise ValueError(
+                f"{value!r} contains control characters; "
+                "only printable characters are allowed"
+            )
         from prismpy.utils.sanitization import normalize_region_name
         if not normalize_region_name(stripped):
             raise ValueError(

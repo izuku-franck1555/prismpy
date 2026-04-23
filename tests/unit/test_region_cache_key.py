@@ -537,3 +537,94 @@ class TestRegionConfigNormalizableNameCountry(unittest.TestCase):
                     ),
                 )
             )
+
+
+class TestRegionConfigUniversalInvariants(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-11 — schema-level rejection of values
+    that are pathological across every downstream consumer, not
+    only the cache-key path.
+
+    Scope boundary (from the sprint's stopping criterion): only
+    UNIVERSAL invariants live here. Consumer-specific format
+    requirements (CRAFT fixed-width column widths, DSSAT file
+    structure rules) belong at the writer layer, not the schema.
+    Codex R10's CRAFT-specific fixed-width concerns are deferred
+    to V2-22b/S (platform-translator correctness sprint); this
+    class covers only what's universal: embedded control
+    characters never legitimate in any identifier, ISO3 codes
+    must be three ASCII letters.
+    """
+
+    @staticmethod
+    def _build(**overrides):
+        from prismpy.config.schema import RegionConfig
+        payload = {
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'manual',
+                'manual_bounds': {
+                    'minx': -5.0, 'miny': 12.0,
+                    'maxx': -3.0, 'maxy': 14.0,
+                },
+            },
+        }
+        payload.update(overrides)
+        return RegionConfig.model_validate(payload)
+
+    def test_name_rejects_embedded_newline(self):
+        """Control chars inside the string survive
+        `normalize_region_name` (turn into `_`) but corrupt
+        structured outputs that write the raw name — log lines,
+        JSON reports, fixed-width records."""
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(
+            ValidationError, 'control characters',
+        ):
+            self._build(name='Kou\ntiala')
+
+    def test_name_rejects_embedded_tab(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(
+            ValidationError, 'control characters',
+        ):
+            self._build(name='Kou\ttiala')
+
+    def test_country_rejects_embedded_newline(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(
+            ValidationError, 'control characters',
+        ):
+            self._build(country='Mali\nWest')
+
+    def test_country_rejects_embedded_control_char(self):
+        """Full ASCII control range \\x00-\\x1f + \\x7f."""
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(
+            ValidationError, 'control characters',
+        ):
+            self._build(country='Mali\x07West')  # bell
+
+    def test_country_iso3_rejects_lowercase(self):
+        """`validate_iso3` used to just uppercase; now rejects
+        inputs that aren't exactly three ASCII letters. An
+        already-uppercase code still passes; a lowercase one
+        ALSO passes because the validator strips + uppercases
+        first, then validates. A genuinely invalid code (digits,
+        punctuation, length) is rejected."""
+        # lowercase still passes (upper-cased + pattern-checked).
+        rc = self._build(country_iso3='mli')
+        self.assertEqual(rc.country_iso3, 'MLI')
+
+    def test_country_iso3_rejects_digits(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(
+            ValidationError, 'ISO 3166',
+        ):
+            self._build(country_iso3='ML2')
+
+    def test_country_iso3_rejects_punctuation(self):
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(
+            ValidationError, 'ISO 3166',
+        ):
+            self._build(country_iso3='ML!')
