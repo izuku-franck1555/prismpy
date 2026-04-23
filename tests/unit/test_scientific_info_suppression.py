@@ -11,19 +11,25 @@ The third fix introduced a "delegated to the per-platform
 post-translate validator" copy which was honest but read as
 technical to non-developer personas — user flagged it.
 
-The current contract (P.1 persona copy, post codex round 2): file-
-based climate → one info record whose summary explains the
+The current contract (P.1 persona copy, post codex rounds 2+3):
+file-based climate → one info record whose summary explains the
 sampling in plain language ("random sample of 10 output files per
 variable"), points the reader at the per-variable records that
-follow, and tells them where to look if those records are missing
-("pipeline steps above" — unambiguously the Retrieve/Harmonize/
-Translate/Package cards, not some other part of the validation
-list). Crucially the fallback guidance does NOT attribute absent
-records to any single failure mode — `_validate_sarra_py_geotiffs`
-can emit zero range records on multiple paths (empty output dir,
-rasterio unavailable, uncaught translator exception), and the
-prior "translation didn't complete" phrasing would misdirect
-operators to the wrong stage.
+follow, and names BOTH domains where the failure might live:
+
+  1. The other post-translate messages IN THIS REPORT — for
+     validator-local failures (missing rasterio, unreadable
+     tiffs, empty climate output directory). These produce their
+     own info/warning records alongside `value_range_climate`.
+  2. The pipeline steps ABOVE (the processing page's
+     Retrieve/Harmonize/Translate/Package cards) — for upstream
+     failures where the pipeline never produced files for the
+     validator to sample.
+
+Codex R2 HIGH caught that attributing absence to "one of the
+pipeline steps above didn't finish" alone misdirected operators
+when the real failure was validator-local, so the copy now
+advertises both search surfaces.
 """
 
 import types
@@ -95,18 +101,96 @@ class TestClimateInfoLineDelegatesToPostTranslate(unittest.TestCase):
         self.assertIn('random sample of 10', summary)
         # (2) code identifier stays out of persona copy.
         self.assertNotIn('post_translate_range_sarra_py', summary)
-        # (3) disambiguating phrase for the "where to look on error"
-        # signal.
+        # (3) disambiguating phrase for the upstream-failure path.
         self.assertIn('pipeline steps above', summary)
         # (4) prior misleading phrasings must not regress.
         self.assertNotIn('not checked', summary.lower())
         self.assertNotIn('spot-checked', summary.lower())
         self.assertNotIn('delegated', summary.lower())
-        # (5) must not attribute absence to a specific step. "one of
-        # the pipeline steps" is the accurate, plural framing.
+        # (5) must not attribute absence to a single failure mode.
         self.assertNotIn("translation didn't complete", summary)
         self.assertNotIn("translation did not complete", summary)
-        self.assertIn('one of the pipeline steps', summary)
+        self.assertNotIn(
+            "one of the pipeline steps above didn't finish", summary,
+            "narrower didn't-finish phrasing was the codex-R2 HIGH — "
+            "must name BOTH validator-local AND pipeline-step search surfaces",
+        )
+        # (6) must name BOTH search surfaces (validator-local messages
+        # AND upstream pipeline steps) so codex-R2 HIGH stays fixed.
+        self.assertIn('post-translate messages', summary)
+
+    def test_absent_range_records_when_rasterio_missing(self):
+        """Codex self-check R2 HIGH regression — the validator-local
+        failure mode the R1 test didn't cover. `_validate_sarra_py_geotiffs`
+        has a try/except around its `import rasterio` that emits a
+        `post_translate_climate_sarra_py` info record ("rasterio not
+        available") and returns WITHOUT any `post_translate_range_sarra_py_*`
+        records. All pipeline steps finished, the translation produced
+        files, but the validator couldn't read them.
+
+        If the info-copy guidance said only "check the pipeline steps
+        above", a user hitting this environment issue would investigate
+        the wrong subsystem. The "post-translate messages in this
+        report" branch of the guidance is what covers this path.
+        """
+        import shutil
+        import sys
+        import tempfile
+        from pathlib import Path as _P
+        from unittest.mock import patch as _patch
+        from prismpy.validators.post_translate import (
+            _validate_sarra_py_geotiffs,
+            SARRA_PY_VAR_MAPPING,
+        )
+
+        tmpdir = _P(tempfile.mkdtemp(prefix='p1-rasterio-miss-'))
+        try:
+            # Create the climate tree with at least one tif per
+            # variable so the validator reaches the `import rasterio`
+            # branch (empty-dir case short-circuits earlier).
+            climate = tmpdir / 'data' / 'climate'
+            for subdir_name in SARRA_PY_VAR_MAPPING:
+                var_dir = climate / subdir_name
+                var_dir.mkdir(parents=True)
+                # Placeholder file — won't actually be read because
+                # the import fails before the read loop.
+                (var_dir / 'fake.tif').write_bytes(b'')
+
+            # Simulate `import rasterio` failing with ImportError.
+            import builtins
+            real_import = builtins.__import__
+
+            def _patched_import(name, *args, **kwargs):
+                if name == 'rasterio':
+                    raise ImportError('simulated missing rasterio')
+                return real_import(name, *args, **kwargs)
+
+            with _patch.object(builtins, '__import__', side_effect=_patched_import):
+                checks = _validate_sarra_py_geotiffs(tmpdir)
+
+            # No range records emitted.
+            range_records = [
+                c for c in checks
+                if c.get('check', '').startswith('post_translate_range_sarra_py_')
+            ]
+            self.assertEqual(
+                range_records, [],
+                f'expected no range records on rasterio-missing path, got: {range_records}',
+            )
+            # But an info record IS emitted explaining rasterio
+            # unavailability — this is the thing the info-copy
+            # guidance points the user at.
+            rasterio_info = [
+                c for c in checks
+                if c.get('check') == 'post_translate_climate_sarra_py'
+                and 'rasterio' in c.get('summary', '').lower()
+            ]
+            self.assertGreater(
+                len(rasterio_info), 0,
+                'expected a post_translate_climate_sarra_py info record mentioning rasterio',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_absent_range_records_can_come_from_post_translate_failure_paths(self):
         """Codex self-check HIGH regression — proves that absent
