@@ -26,8 +26,22 @@ _DEFAULT_IGNORABLE_CODE_POINTS = frozenset({
     0x061C,                                  # ARABIC LETTER MARK
     0x115F, 0x1160,                          # HANGUL JAMO FILLERS (Lo)
     0x17B4, 0x17B5,                          # KHMER VOWEL INHERENT AQ/AA
+    0x16FE4,                                 # KHITAN SMALL SCRIPT FILLER (Mn)
     0x3164,                                  # HANGUL FILLER (Lo)
     0xFFA0,                                  # HALFWIDTH HANGUL FILLER (Lo)
+})
+
+# Letter-Other (Lo) code points that render visually blank but
+# are NOT in Unicode's Default_Ignorable_Code_Point property —
+# Unicode classifies these as regular letters in their script
+# despite rendering as whitespace. The whitelist's `Lo` category
+# would otherwise accept them; this overlay rejects them
+# explicitly. Hand-maintained list (Unicode introduces new
+# script blocks periodically; this set captures the known
+# invisible Lo codepoints as of Unicode 17).
+_INVISIBLE_LO_CODEPOINTS = frozenset({
+    0x13441,  # EGYPTIAN HIEROGLYPH FULL BLANK (Unicode 5.2)
+    0x13442,  # EGYPTIAN HIEROGLYPH HALF BLANK (Unicode 5.2)
 })
 _DEFAULT_IGNORABLE_RANGES = (
     (0x180B, 0x180F),      # MONGOLIAN FREE VARIATION SELECTORS
@@ -73,14 +87,22 @@ def _is_identifier_char(c: str) -> bool:
     """True if `c` is acceptable in an identifier string.
 
     Positive-acceptance check: ONLY chars in the identifier-category
-    allowlist or the punctuation allowlist pass. A
-    `Default_Ignorable_Code_Point` overlay catches the handful of
-    invisible characters whose Unicode general category is Lo/Mn/Mc
-    (Hangul Jamo fillers, variation selectors, combining grapheme
-    joiner, Khmer inherent vowels) — the category check alone would
-    accept those.
+    allowlist or the punctuation allowlist pass. Two rejection
+    overlays catch invisibles whose Unicode general category would
+    otherwise let them through:
+
+    - `_is_default_ignorable(c)` — Hangul Jamo fillers, variation
+      selectors, combining grapheme joiner, Khmer inherent vowels,
+      Khitan Small Script Filler, SOFT HYPHEN, etc.
+    - `_INVISIBLE_LO_CODEPOINTS` — Letter-Other codepoints that
+      render visually blank despite their script-letter
+      classification (Egyptian Hieroglyph Full/Half Blank). These
+      aren't in Unicode's Default_Ignorable property so the
+      previous overlay misses them.
     """
     if _is_default_ignorable(c):
+        return False
+    if ord(c) in _INVISIBLE_LO_CODEPOINTS:
         return False
     if c in _IDENTIFIER_PUNCT:
         return True
@@ -387,14 +409,15 @@ class RegionConfig(BaseModel):
         from prismpy.utils.sanitization import normalize_region_name
         if not normalize_region_name(stripped):
             raise ValueError(
-                f"{value!r} normalizes to an empty identifier; "
-                "at least one alphanumeric ASCII character is "
-                "required (letters or digits, possibly separated "
-                "by spaces, hyphens, or underscores). The current "
-                "pipeline generates ASCII-only filenames for "
-                "cache keys, translator outputs, and lock paths; "
-                "non-Latin identifiers would collapse to an "
-                "empty cache key and silently collide"
+                f"{value!r} is not a Latin-script-compatible "
+                "identifier; region name / country must contain "
+                "at least one alphanumeric character (letters or "
+                "digits, possibly with accents or Latin-Extended "
+                "diacritics). Non-Latin scripts (Korean, Arabic, "
+                "Cyrillic, Devanagari, Chinese, etc.) require "
+                "upstream transliteration before reaching "
+                "RegionConfig — see PRISMWEB identifier policy "
+                "in prismpy/config/schema.py"
             )
         return stripped
 

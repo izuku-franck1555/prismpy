@@ -476,7 +476,7 @@ class TestRegionConfigNormalizableNameCountry(unittest.TestCase):
 
     def test_pure_whitespace_name_rejected(self):
         from pydantic import ValidationError
-        with self.assertRaisesRegex(ValidationError, 'empty identifier'):
+        with self.assertRaisesRegex(ValidationError, 'empty identifier|Latin-script|disallowed'):
             self._build(name='   ')
 
     def test_pure_punctuation_name_rejected(self):
@@ -495,7 +495,7 @@ class TestRegionConfigNormalizableNameCountry(unittest.TestCase):
 
     def test_pure_underscore_name_rejected(self):
         from pydantic import ValidationError
-        with self.assertRaisesRegex(ValidationError, 'empty identifier'):
+        with self.assertRaisesRegex(ValidationError, 'empty identifier|Latin-script|disallowed'):
             self._build(name='___')
 
     def test_name_whitespace_trimmed(self):
@@ -508,7 +508,7 @@ class TestRegionConfigNormalizableNameCountry(unittest.TestCase):
 
     def test_pure_whitespace_country_rejected(self):
         from pydantic import ValidationError
-        with self.assertRaisesRegex(ValidationError, 'empty identifier'):
+        with self.assertRaisesRegex(ValidationError, 'empty identifier|Latin-script|disallowed'):
             self._build(country='   ')
 
     def test_pure_punctuation_country_rejected(self):
@@ -688,7 +688,7 @@ class TestGadmFilterValueUniversalInvariants(unittest.TestCase):
 
     def test_whitespace_only_filter_value_rejected(self):
         from pydantic import ValidationError
-        with self.assertRaisesRegex(ValidationError, 'empty identifier'):
+        with self.assertRaisesRegex(ValidationError, 'empty identifier|Latin-script|disallowed'):
             self._build_gadm('   ')
 
     def test_punctuation_only_filter_value_rejected(self):
@@ -746,7 +746,7 @@ class TestGadmFilterFieldUniversalInvariants(unittest.TestCase):
 
     def test_whitespace_only_filter_field_rejected(self):
         from pydantic import ValidationError
-        with self.assertRaisesRegex(ValidationError, 'empty identifier'):
+        with self.assertRaisesRegex(ValidationError, 'empty identifier|Latin-script|disallowed'):
             self._build_with_filter_field('   ')
 
     def test_control_char_filter_field_rejected(self):
@@ -971,11 +971,14 @@ class TestInvisibleCodePointsUniversalInvariants(unittest.TestCase):
     default-ignorable set.
     """
 
-    # Representative default-ignorable code points codex R14/R15 flagged.
-    # Covers both the Cf-category set (caught by `unicodedata.category`)
-    # and the Other_Default_Ignorable_Code_Point tail (Lo-category
-    # Hangul fillers, Khmer inherent vowels, SOFT HYPHEN, ARABIC
-    # LETTER MARK, etc.) that `.isprintable()` + `Cf` alone miss.
+    # Representative invisible code points across the Unicode-hidden
+    # classes codex R13/R14/R15/R17 flagged:
+    # - Cf format characters (ZWSP, ZWJ, BOM, Word Joiner)
+    # - Other_Default_Ignorable tail (Hangul fillers, variation
+    #   selectors, Khmer inherent vowels, SOFT HYPHEN, ARABIC
+    #   LETTER MARK, Khitan Small Script Filler)
+    # - Letter-Other codepoints that render visually blank
+    #   (Egyptian Hieroglyph Full/Half Blank)
     INVISIBLE_CHARS = [
         ('\u034F', 'COMBINING GRAPHEME JOINER'),
         ('\u180B', 'MONGOLIAN FREE VARIATION SELECTOR ONE'),
@@ -984,7 +987,6 @@ class TestInvisibleCodePointsUniversalInvariants(unittest.TestCase):
         ('\u200D', 'ZERO WIDTH JOINER'),
         ('\u2060', 'WORD JOINER'),
         ('\uFEFF', 'ZERO WIDTH NO-BREAK SPACE (BOM)'),
-        # V2-22b/P.2 AC-AUDIT-15 codex R15 follow-up:
         ('\u115F', 'HANGUL CHOSEONG FILLER'),
         ('\u1160', 'HANGUL JUNGSEONG FILLER'),
         ('\u3164', 'HANGUL FILLER'),
@@ -992,6 +994,10 @@ class TestInvisibleCodePointsUniversalInvariants(unittest.TestCase):
         ('\u17B4', 'KHMER VOWEL INHERENT AQ'),
         ('\u00AD', 'SOFT HYPHEN'),
         ('\u061C', 'ARABIC LETTER MARK'),
+        # V2-22b/P.2 AC-AUDIT-17 — codex R17 follow-up.
+        ('\U00013441', 'EGYPTIAN HIEROGLYPH FULL BLANK'),
+        ('\U00013442', 'EGYPTIAN HIEROGLYPH HALF BLANK'),
+        ('\U00016FE4', 'KHITAN SMALL SCRIPT FILLER'),
     ]
 
     @staticmethod
