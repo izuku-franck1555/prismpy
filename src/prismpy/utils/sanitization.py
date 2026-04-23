@@ -7,7 +7,7 @@ and handle special characters in administrative names.
 
 import re
 import unicodedata
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 
 def remove_accents(text: str) -> str:
@@ -193,39 +193,51 @@ def normalize_region_name(name: str) -> str:
 
 
 def region_cache_key(region) -> str:
-    """Stable identifier for cache / lock / path construction.
+    """Cross-repo region identity contract.
 
-    Independent of the display name, so multiple unnamed-manual
-    projects that all carry the shared display name (e.g.,
-    "Unnamed study area") each get their own bbox-derived cache
-    instead of colliding on the shared key. GADM regions keep
-    the normalized-name key because admin names are already
-    unique identifiers.
+    Canonical identifier used on both sides of the prismpy/prismweb
+    boundary to answer "is this the same region?" — cache directories,
+    lock files, output paths (prismpy), and peer-match keys, ETA
+    sampling pools, concurrent-run banner triggers (prismweb) all
+    derive from this single helper. Display names (`region.name`)
+    are purely metadata and never participate in the identity.
 
     Routing:
-    - GADM / shapefile / missing boundary_source: fall through to
-      `normalize_region_name(region.name)` — the display name IS
-      the identity key.
-    - Manual: `manual_{miny}_{maxy}_{minx}_{maxx}` (4-decimal
-      precision, matches the prismweb peer-match key format).
+    - **Manual boundary**: bbox-derived key at 6-decimal precision
+      (~11 cm at the equator). Two unnamed-manual projects that
+      happen to share the default display name each get their own
+      cache based on their drawn bbox; two named manual projects at
+      the same bbox collide by design (legitimate cache reuse —
+      same underlying climate data).
+    - **GADM / shapefile / missing boundary source**: falls through
+      to `normalize_region_name(region.name)`. Admin names are
+      already unique identifiers, so the name IS the identity.
 
-    Accepts two shapes:
-    - `Region` (post-resolution): `region.boundary_source` + `region.bounds`
-      with `.minx/.miny/.maxx/.maxy`.
-    - `RegionConfig` (pre-resolution): `region.boundary.source` +
-      `region.boundary.manual_bounds` with the same bbox fields.
+    Accepts three input shapes, so callers on either side of the
+    boundary can pass what they have:
+    - `Region` (post-resolution dataclass) — `region.boundary_source`
+      on the object + `region.bounds.{minx,miny,maxx,maxy}`.
+    - `RegionConfig` (pre-resolution Pydantic) — `region.boundary.source`
+      enum + `region.boundary.manual_bounds.{minx,...,maxy}`.
+    - `Mapping` (JSON-parsed dict, as prismweb persists) —
+      `region["boundary"]["source"]` string + the same manual_bounds
+      dict shape. Prismweb's persisted `config.region` feeds through
+      this branch without adapter boilerplate.
+
+    Negative-zero canonicalization: Python formats `-0.0` as
+    `"-0.000000"` with `.6f`, which differs textually from
+    `"0.000000"` even though the values are mathematically equal.
+    For West African users (Ghana/Togo/Benin on the prime meridian)
+    and equatorial users, a bbox edge at exactly 0 can surface
+    `-0.0` from JS/GeoJSON serialization. Each component is
+    normalized with `_canon_zero` before formatting so both variants
+    produce the same key.
     """
     source_value = _region_boundary_source(region)
     if source_value == 'manual':
         bounds = _region_manual_bounds(region)
         if bounds is not None:
-            miny, maxy, minx, maxx = bounds
-            # Use 6-decimal precision (~11 cm at the equator) so
-            # nearby-but-distinct manual boxes can't silently alias
-            # onto the same cache/lock path. Earlier 4-decimal
-            # precision (~11 m) still aliased at pixel-level
-            # differences a user dragging a bbox could realistically
-            # produce.
+            miny, maxy, minx, maxx = (_canon_zero(v) for v in bounds)
             return (
                 f"manual_"
                 f"{miny:.6f}_{maxy:.6f}_"
@@ -234,45 +246,63 @@ def region_cache_key(region) -> str:
         # Malformed manual region — fall through to name-key so
         # caller isn't blocked. Validation upstream would reject
         # this before reaching cache paths.
-    return normalize_region_name(getattr(region, 'name', ''))
+    return normalize_region_name(_attr_or_key(region, 'name', '') or '')
+
+
+def _canon_zero(val: float) -> float:
+    """Canonicalize -0.0 → 0.0 so `.6f` formatting is stable."""
+    return 0.0 if val == 0 else float(val)
+
+
+def _attr_or_key(obj: Any, name: str, default: Any = None) -> Any:
+    """Read `name` off either an object (getattr) or a Mapping (dict)."""
+    if isinstance(obj, Mapping):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
 
 
 def _region_boundary_source(region) -> Optional[str]:
-    """Extract the boundary source as a string from either shape."""
-    # Post-resolution Region with optional `boundary_source`.
-    direct = getattr(region, 'boundary_source', None)
+    """Extract the boundary source as a string from any supported shape."""
+    # Post-resolution Region with optional `boundary_source` (direct),
+    # or a dict that was flattened at persist time.
+    direct = _attr_or_key(region, 'boundary_source', None)
     if direct:
-        return direct
-    # Pre-resolution RegionConfig with `boundary.source` enum.
-    boundary = getattr(region, 'boundary', None)
+        return direct if isinstance(direct, str) else str(direct)
+    # Pre-resolution RegionConfig with `boundary.source` enum, or
+    # prismweb's persisted dict with nested `boundary.source` string.
+    boundary = _attr_or_key(region, 'boundary', None)
     if boundary is None:
         return None
-    source = getattr(boundary, 'source', None)
+    source = _attr_or_key(boundary, 'source', None)
     if source is None:
         return None
+    # Enum → `.value`; string passes through; anything else stringifies.
     return source.value if hasattr(source, 'value') else str(source)
 
 
 def _region_manual_bounds(region) -> Optional[tuple]:
     """Return (miny, maxy, minx, maxx) floats for manual regions.
-    Handles both `RegionConfig.boundary.manual_bounds` and the
-    post-resolution `Region.bounds` BoundingBox."""
-    boundary = getattr(region, 'boundary', None)
+    Handles the Pydantic `RegionConfig.boundary.manual_bounds`, the
+    post-resolution `Region.bounds` BoundingBox, and the Mapping-
+    shaped equivalents used by prismweb's JSON-persisted config."""
     candidates = []
+    boundary = _attr_or_key(region, 'boundary', None)
     if boundary is not None:
-        manual = getattr(boundary, 'manual_bounds', None)
+        manual = _attr_or_key(boundary, 'manual_bounds', None)
         if manual is not None:
             candidates.append(manual)
-    # Post-resolution Region carries bounds directly; routing by
-    # boundary_source ensures we only fall here for manual regions.
-    bounds = getattr(region, 'bounds', None)
+    # Post-resolution Region / dict carries bounds directly; routing
+    # by boundary_source ensures we only fall here for manual regions.
+    bounds = _attr_or_key(region, 'bounds', None)
     if bounds is not None:
         candidates.append(bounds)
     for src in candidates:
         try:
             return (
-                float(src.miny), float(src.maxy),
-                float(src.minx), float(src.maxx),
+                float(_attr_or_key(src, 'miny')),
+                float(_attr_or_key(src, 'maxy')),
+                float(_attr_or_key(src, 'minx')),
+                float(_attr_or_key(src, 'maxx')),
             )
         except (AttributeError, TypeError, ValueError):
             continue

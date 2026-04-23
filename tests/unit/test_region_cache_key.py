@@ -191,3 +191,114 @@ class TestRegionCacheKeyFallbacks(unittest.TestCase):
         self.assertEqual(
             region_cache_key(r), normalize_region_name('Malformed'),
         )
+
+
+class TestRegionCacheKeyDictShape(unittest.TestCase):
+    """V2-22b/P.2 AC-A1.c — accept Mapping/dict inputs directly.
+
+    Prismweb persists `config.region` as JSON; the parsed form is a
+    plain dict, not a Pydantic / dataclass. The cross-repo contract
+    declares dict as a first-class input shape so prismweb's
+    delegator stays a one-liner."""
+
+    def test_dict_manual_keys_by_bbox(self):
+        d = {
+            'name': 'Unnamed study area',
+            'boundary': {
+                'source': 'manual',
+                'manual_bounds': {
+                    'minx': -5.0, 'miny': 12.0,
+                    'maxx': -3.0, 'maxy': 14.0,
+                },
+            },
+        }
+        key = region_cache_key(d)
+        self.assertTrue(key.startswith('manual_'))
+        self.assertIn('12.000000', key)
+
+    def test_dict_gadm_keys_by_name(self):
+        d = {'name': 'Boulemane', 'boundary': {'source': 'gadm'}}
+        self.assertEqual(
+            region_cache_key(d), normalize_region_name('Boulemane'),
+        )
+
+    def test_dict_same_bbox_matches_simplenamespace(self):
+        """A dict input and an object-shape input with identical
+        semantics MUST produce the same key — otherwise prismweb
+        and prismpy could compute different identities for the
+        same persisted region."""
+        ns = types.SimpleNamespace(
+            name='Unnamed study area',
+            boundary_source='manual',
+            bounds=types.SimpleNamespace(
+                miny=12.0, maxy=14.0, minx=-5.0, maxx=-3.0,
+            ),
+        )
+        d = {
+            'name': 'Unnamed study area',
+            'boundary': {
+                'source': 'manual',
+                'manual_bounds': {
+                    'minx': -5.0, 'miny': 12.0,
+                    'maxx': -3.0, 'maxy': 14.0,
+                },
+            },
+        }
+        self.assertEqual(region_cache_key(ns), region_cache_key(d))
+
+
+class TestRegionCacheKeyNegativeZero(unittest.TestCase):
+    """V2-22b/P.2 AC-A1.b — `-0.0` canonicalizes to `0.0`.
+
+    Python formats `-0.0` as `"-0.000000"` under `.6f`, which is
+    text-distinct from `"0.000000"` even though the values are
+    mathematically equal. Without this normalization, a user whose
+    bbox edge sits on the prime meridian (Ghana / Togo / Benin)
+    or the equator could produce two identical bboxes that compute
+    different cache keys depending on how their GIS stack
+    round-tripped the number through IEEE 754 and JSON."""
+
+    def test_minx_negative_zero_matches_positive_zero(self):
+        mk = lambda minx: {
+            'name': '',
+            'boundary': {
+                'source': 'manual',
+                'manual_bounds': {
+                    'minx': minx, 'miny': 0.0,
+                    'maxx': 1.0, 'maxy': 1.0,
+                },
+            },
+        }
+        self.assertEqual(
+            region_cache_key(mk(-0.0)), region_cache_key(mk(0.0)),
+        )
+
+    def test_all_four_components_canonicalize(self):
+        """All four bbox components must normalize independently —
+        a bbox with multiple coordinates at 0 (e.g., spanning the
+        equator/meridian intersection in the Gulf of Guinea) must
+        not depend on which ones happened to carry the sign bit."""
+        from prismpy.utils.sanitization import region_cache_key
+        nz = {
+            'name': '',
+            'boundary': {
+                'source': 'manual',
+                'manual_bounds': {
+                    'minx': -0.0, 'miny': -0.0,
+                    'maxx': -0.0, 'maxy': -0.0,
+                },
+            },
+        }
+        pz = {
+            'name': '',
+            'boundary': {
+                'source': 'manual',
+                'manual_bounds': {
+                    'minx': 0.0, 'miny': 0.0,
+                    'maxx': 0.0, 'maxy': 0.0,
+                },
+            },
+        }
+        self.assertEqual(region_cache_key(nz), region_cache_key(pz))
+        # And the canonical form never surfaces `-0`.
+        self.assertNotIn('-0', region_cache_key(nz))

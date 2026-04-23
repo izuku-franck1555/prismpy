@@ -88,3 +88,16 @@ Thumbs.db
 # Local configuration (user-specific paths)
 *_local.yaml
 *_local.json
+
+# Internal planning / contract / findings docs — local only, never
+# pushed. Symmetric with the prismweb .gitignore. These files carry
+# sprint scoping, deep-investigation findings, verification strategy,
+# and role-specific notes that belong to the harness, not the public
+# artifact.
+*-CONTRACT.md
+*-VERIFICATION-STRATEGY.md
+*-EXPERIENCE.md
+*-FINDINGS.md
+*-PLAN.md
+*-NOTES.md
+*-RETROSPECTIVE.md

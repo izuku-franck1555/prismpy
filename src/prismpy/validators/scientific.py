@@ -561,6 +561,14 @@ def _check_cross_variable_consistency(unified_data) -> Dict[str, Any]:
     # GeoTIFF-based climate (SARRA-Py): per-value consistency requires
     # opening thousands of raster files — too expensive for a validation
     # check. Report honestly as info with the limitation stated.
+    #
+    # NOTE(V2-22b/P.2): same emission pattern as value_range_climate
+    # above, but no delegated post-translate target exists today for
+    # cross-variable consistency. If a `post_translate_cross_variable_*`
+    # check ever lands, mirror the executor post-merge gate so this
+    # info escalates to a warning when the delegated records are
+    # missing — see prismpy/pipeline/executor.py around the
+    # `post_translate_range_sarra_py_` gate.
     if _is_file_based_climate(climate):
         return {
             "check": "cross_variable_consistency",
@@ -699,15 +707,18 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
             "result": "info",
             "summary": (
                 "Climate value ranges for SARRA-Py are computed "
-                "from a random sample of 10 output files per "
-                "variable. When available, the per-variable "
-                "ranges appear below."
+                "from 10 output files per variable: first, last, "
+                "and 8 interior files chosen by filename-digest "
+                "within evenly-spaced buckets. When available, "
+                "the per-variable ranges appear below."
             ),
             "manuscript_claim": "Section 2.5: value range verification (delegated)",
             "details": {
                 "data_format": "geotiff_per_day",
                 "delegated_to": "post_translate._validate_sarra_py_geotiffs",
-                "sample_policy": "random subset, 10 files per variable",
+                "sample_policy": (
+                    "stratified buckets, digest-steered interior"
+                ),
                 "coverage_kind": "delegated",
             },
         })
