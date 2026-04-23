@@ -123,25 +123,33 @@ def _is_identifier_char(c: str) -> bool:
     return False
 
 
+# Windows-forbidden filename characters. These are never valid
+# in a filesystem path on Windows (POSIX allows some of them but
+# quoting / shell escaping makes them operationally painful).
+# Rejecting at schema time promotes "Windows-invalid path" from
+# a runtime `DataSourceError` to a validation-time error.
+_PATH_FORBIDDEN_SYMBOLS = frozenset('*?"<>|')
+
+
 def _is_path_char(c: str) -> bool:
     """True if `c` is acceptable in a filesystem-path string.
 
     Path policy differs from the identifier policy: POSIX and
     Windows paths legitimately contain `+`, `[`, `]`, `:` (Windows
     drive), `\\` (Windows separator), `@`, `~`, `$`, etc. that
-    aren't identifier-safe. This helper rejects only truly invalid
-    path characters: control codes, format characters, invisibles,
-    and the Egyptian Hieroglyph Blanks + Khitan filler that
-    R17/R18 flagged as categorically unsafe anywhere.
-
-    The shapefile_path validator uses this helper instead of
-    `_is_identifier_char` so a path like `/tmp/v1+2/region.shp`
-    or `C:\\data\\region.shp` passes without tripping the
-    identifier punctuation allowlist.
+    aren't identifier-safe. This helper accepts those but rejects
+    characters that are categorically unusable in a filesystem
+    path — controls, invisibles, and the Windows-forbidden symbol
+    set (`< > : " / \\ | ? *`, minus the path separators which
+    we DO need). `:` is intentionally admitted so Windows drive
+    prefixes like `C:\\` validate; callers that want drive-letter-
+    only enforcement can layer a stricter policy on top.
     """
     if _is_default_ignorable(c):
         return False
     if ord(c) in _INVISIBLE_LO_CODEPOINTS:
+        return False
+    if c in _PATH_FORBIDDEN_SYMBOLS:
         return False
     cat = unicodedata.category(c)
     # Reject controls / format / line & paragraph separators.

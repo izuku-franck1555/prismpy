@@ -1023,6 +1023,76 @@ class TestShapefilePathPunctuationAcceptance(unittest.TestCase):
         )
 
 
+class TestShapefilePathWindowsForbiddenChars(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-18 codex R19 MEDIUM — Windows-forbidden
+    filename characters (`< > " | ? *`) are categorically unusable
+    in a filesystem path on Windows and operationally painful on
+    POSIX (shell quoting / globbing). Rejecting them at schema
+    promotes the failure from runtime DataSourceError to a
+    validation-time error. `:` and `/` / `\\` are NOT in the
+    forbidden set — `:` is needed for Windows drive prefixes
+    (`C:\\`) and the path separators are obviously required."""
+
+    @staticmethod
+    def _build_with_shapefile(shapefile_path):
+        from prismpy.config.schema import RegionConfig
+        return RegionConfig.model_validate({
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'shapefile',
+                'shapefile_path': shapefile_path,
+            },
+        })
+
+    def test_pipe_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build_with_shapefile('/tmp/bad|name.shp')
+
+    def test_question_mark_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build_with_shapefile('/tmp/bad?name.shp')
+
+    def test_star_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build_with_shapefile('/tmp/bad*name.shp')
+
+    def test_double_quote_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build_with_shapefile('/tmp/bad"name.shp')
+
+    def test_less_than_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build_with_shapefile('/tmp/bad<name.shp')
+
+    def test_greater_than_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._build_with_shapefile('/tmp/bad>name.shp')
+
+    def test_colon_still_accepted_for_drive_letter(self):
+        """`:` stays accepted so Windows drive prefixes validate
+        (`C:\\data\\region.shp`). Schema-level drive-letter-only
+        enforcement would over-constrain valid POSIX paths that
+        legitimately contain `:` in filenames."""
+        rc = self._build_with_shapefile(r'D:\data\region.shp')
+        self.assertIn(':', str(rc.boundary.shapefile_path))
+
+    def test_slash_and_backslash_still_accepted(self):
+        """Path separators are obviously required."""
+        from pathlib import Path
+        rc = self._build_with_shapefile('/posix/style/path.shp')
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('/posix/style/path.shp'),
+        )
+        rc = self._build_with_shapefile(r'C:\windows\style\path.shp')
+        self.assertIn('\\', str(rc.boundary.shapefile_path))
+
+
 class TestInvisibleCodePointsUniversalInvariants(unittest.TestCase):
     """V2-22b/P.2 AC-AUDIT-15 — Python's `str.isprintable()` alone
     doesn't catch default-ignorable Unicode code points that
