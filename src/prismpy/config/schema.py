@@ -122,9 +122,9 @@ class BoundaryConfig(BaseModel):
         if not isinstance(value, str):
             return value
         stripped = value.strip()
-        if re.search(r'[\x00-\x1f\x7f]', stripped):
+        if not stripped.isprintable():
             raise ValueError(
-                f"GADM identifier {value!r} contains control "
+                f"GADM identifier {value!r} contains non-printable "
                 "characters; only printable characters are allowed"
             )
         from prismpy.utils.sanitization import normalize_region_name
@@ -139,25 +139,27 @@ class BoundaryConfig(BaseModel):
     @field_validator("shapefile_path", mode="before")
     @classmethod
     def _validate_shapefile_path(cls, value):
-        """Reject empty or whitespace-only path inputs before
-        Pydantic coerces them to `Path('.')` — the coercion
-        quietly turns `''` into the current working directory,
-        which then passes `Path.exists()` checks downstream and
-        is handed to `geopandas.read_file`, surfacing only as a
+        """Reject empty, whitespace-only, or empty-path-sentinel
+        inputs before or after Pydantic's `Path` coercion. The
+        coercion quietly turns `''` and other empty-equivalents
+        into `Path('.')` (the current working directory), which
+        then passes `Path.exists()` checks downstream and is
+        handed to `geopandas.read_file`, surfacing only as a
         runtime DataSourceError instead of a validation error.
 
         `None` stays `None` (field is optional; the model
         validator requires the path only when
-        `source == shapefile`). `Path` objects pass through
-        untouched — only raw-string inputs go through the
-        strip/reject pass."""
+        `source == shapefile`). Both raw-string and PathLike
+        inputs run through the same strip + printable-char +
+        non-sentinel checks — AC-AUDIT-14 closed the typed
+        `Path('')` / `Path('.')` hole codex R13 identified."""
         if value is None:
             return value
         if isinstance(value, str):
             stripped = value.strip()
-            if re.search(r'[\x00-\x1f\x7f]', stripped):
+            if not stripped.isprintable():
                 raise ValueError(
-                    f"shapefile_path {value!r} contains control "
+                    f"shapefile_path {value!r} contains non-printable "
                     "characters; only printable characters are allowed"
                 )
             if not stripped:
@@ -166,7 +168,27 @@ class BoundaryConfig(BaseModel):
                     "whitespace-only; provide a real path or "
                     "omit the field entirely"
                 )
-            return stripped
+            value = stripped
+        # PathLike normalization: coerce to Path and reject the
+        # empty-sentinel (`Path('')` == `Path('.')`) that would
+        # otherwise pass Pydantic's type check and resolve to
+        # the current working directory at retrieve time.
+        try:
+            candidate = Path(value)
+        except (TypeError, ValueError):
+            return value  # let Pydantic's type validator reject
+        if candidate == Path('.') or str(candidate).strip() in ('', '.'):
+            raise ValueError(
+                f"shapefile_path {value!r} resolves to the current "
+                "working directory (`Path('.')`); provide an "
+                "explicit path to a shapefile"
+            )
+        if not str(candidate).isprintable():
+            raise ValueError(
+                f"shapefile_path {value!r} contains non-printable "
+                "characters; only printable characters are allowed"
+            )
+        return candidate
         return value
 
     @model_validator(mode="after")
@@ -248,9 +270,9 @@ class RegionConfig(BaseModel):
             # Let Pydantic's type validation handle non-strings.
             return value
         stripped = value.strip()
-        if re.search(r'[\x00-\x1f\x7f]', stripped):
+        if not stripped.isprintable():
             raise ValueError(
-                f"{value!r} contains control characters; "
+                f"{value!r} contains non-printable characters; "
                 "only printable characters are allowed"
             )
         from prismpy.utils.sanitization import normalize_region_name

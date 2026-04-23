@@ -578,21 +578,21 @@ class TestRegionConfigUniversalInvariants(unittest.TestCase):
         JSON reports, fixed-width records."""
         from pydantic import ValidationError
         with self.assertRaisesRegex(
-            ValidationError, 'control characters',
+            ValidationError, 'non-printable',
         ):
             self._build(name='Kou\ntiala')
 
     def test_name_rejects_embedded_tab(self):
         from pydantic import ValidationError
         with self.assertRaisesRegex(
-            ValidationError, 'control characters',
+            ValidationError, 'non-printable',
         ):
             self._build(name='Kou\ttiala')
 
     def test_country_rejects_embedded_newline(self):
         from pydantic import ValidationError
         with self.assertRaisesRegex(
-            ValidationError, 'control characters',
+            ValidationError, 'non-printable',
         ):
             self._build(country='Mali\nWest')
 
@@ -600,7 +600,7 @@ class TestRegionConfigUniversalInvariants(unittest.TestCase):
         """Full ASCII control range \\x00-\\x1f + \\x7f."""
         from pydantic import ValidationError
         with self.assertRaisesRegex(
-            ValidationError, 'control characters',
+            ValidationError, 'non-printable',
         ):
             self._build(country='Mali\x07West')  # bell
 
@@ -685,7 +685,7 @@ class TestGadmFilterValueUniversalInvariants(unittest.TestCase):
 
     def test_control_char_filter_value_rejected(self):
         from pydantic import ValidationError
-        with self.assertRaisesRegex(ValidationError, 'control characters'):
+        with self.assertRaisesRegex(ValidationError, 'non-printable'):
             self._build_gadm('Koutiala\ntext')
 
     def test_surrounding_whitespace_stripped(self):
@@ -736,7 +736,7 @@ class TestGadmFilterFieldUniversalInvariants(unittest.TestCase):
 
     def test_control_char_filter_field_rejected(self):
         from pydantic import ValidationError
-        with self.assertRaisesRegex(ValidationError, 'control characters'):
+        with self.assertRaisesRegex(ValidationError, 'non-printable'):
             self._build_with_filter_field('NAME\t2')
 
     def test_surrounding_whitespace_stripped(self):
@@ -780,7 +780,7 @@ class TestShapefilePathUniversalInvariants(unittest.TestCase):
 
     def test_control_char_shapefile_path_rejected(self):
         from pydantic import ValidationError
-        with self.assertRaisesRegex(ValidationError, 'control characters'):
+        with self.assertRaisesRegex(ValidationError, 'non-printable'):
             self._build_with_shapefile('/path/\nfile.shp')
 
     def test_valid_shapefile_path_accepted(self):
@@ -795,4 +795,143 @@ class TestShapefilePathUniversalInvariants(unittest.TestCase):
         rc = self._build_with_shapefile('  /some/path/boundaries.shp  ')
         self.assertEqual(
             rc.boundary.shapefile_path, Path('/some/path/boundaries.shp'),
+        )
+
+
+class TestUnicodeHiddenCharsUniversalInvariants(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-14 — Unicode non-ASCII hidden characters
+    (U+2028 LINE SEPARATOR, U+0085 NEXT LINE, U+200B ZERO WIDTH
+    SPACE, etc.) bypass ASCII-only control-character checks but
+    corrupt structured downstream consumers just as badly as ASCII
+    control characters. `str.isprintable()` is Unicode-aware and
+    catches the full set.
+
+    Covers all identifier fields the schema validates:
+    RegionConfig.name, RegionConfig.country,
+    BoundaryConfig.gadm_filter_value, .gadm_filter_field,
+    .shapefile_path."""
+
+    # Representative hidden-char samples per codex R13 empirical test.
+    HIDDEN_CHARS = [
+        ('\u2028', 'LINE SEPARATOR'),
+        ('\u0085', 'NEXT LINE'),
+        ('\u200b', 'ZERO WIDTH SPACE'),
+    ]
+
+    @staticmethod
+    def _build(**overrides):
+        from prismpy.config.schema import RegionConfig
+        payload = {
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'manual',
+                'manual_bounds': {
+                    'minx': -5.0, 'miny': 12.0,
+                    'maxx': -3.0, 'maxy': 14.0,
+                },
+            },
+        }
+        payload.update(overrides)
+        return RegionConfig.model_validate(payload)
+
+    def test_name_rejects_unicode_hidden_chars(self):
+        from pydantic import ValidationError
+        for char, label in self.HIDDEN_CHARS:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    ValidationError, 'non-printable',
+                ):
+                    self._build(name=f'Kou{char}tiala')
+
+    def test_country_rejects_unicode_hidden_chars(self):
+        from pydantic import ValidationError
+        for char, label in self.HIDDEN_CHARS:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    ValidationError, 'non-printable',
+                ):
+                    self._build(country=f'Ma{char}li')
+
+    def test_gadm_filter_value_rejects_unicode_hidden_chars(self):
+        from pydantic import ValidationError
+        from prismpy.config.schema import RegionConfig
+        for char, label in self.HIDDEN_CHARS:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    ValidationError, 'non-printable',
+                ):
+                    RegionConfig.model_validate({
+                        'name': 'Koutiala',
+                        'country': 'Mali', 'country_iso3': 'MLI',
+                        'boundary': {
+                            'source': 'gadm',
+                            'gadm_level': 2,
+                            'gadm_filter_field': 'NAME_2',
+                            'gadm_filter_value': f'Kou{char}tiala',
+                        },
+                    })
+
+    def test_shapefile_path_rejects_unicode_hidden_chars(self):
+        from pydantic import ValidationError
+        from prismpy.config.schema import RegionConfig
+        for char, label in self.HIDDEN_CHARS:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    ValidationError, 'non-printable',
+                ):
+                    RegionConfig.model_validate({
+                        'name': 'Koutiala',
+                        'country': 'Mali', 'country_iso3': 'MLI',
+                        'boundary': {
+                            'source': 'shapefile',
+                            'shapefile_path': f'/path{char}/file.shp',
+                        },
+                    })
+
+
+class TestShapefilePathLikeNormalization(unittest.TestCase):
+    """V2-22b/P.2 AC-AUDIT-14 — codex R13 MEDIUM. The earlier
+    `shapefile_path` validator only checked raw strings;
+    `Path('')` / `Path('.')` inputs bypassed the guard and
+    resolved to the current working directory. Now the validator
+    normalizes every input to `Path` and rejects the
+    empty-sentinel regardless of whether the caller passed a
+    string or a `Path` object."""
+
+    @staticmethod
+    def _build_with_shapefile(shapefile_path):
+        from prismpy.config.schema import RegionConfig
+        return RegionConfig.model_validate({
+            'name': 'Koutiala', 'country': 'Mali', 'country_iso3': 'MLI',
+            'boundary': {
+                'source': 'shapefile',
+                'shapefile_path': shapefile_path,
+            },
+        })
+
+    def test_path_empty_string_rejected(self):
+        """`Path('')` is a PathLike whose str-form is `'.'` — the
+        empty-sentinel. Must raise just like the string case."""
+        from pathlib import Path
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'current working'):
+            self._build_with_shapefile(Path(''))
+
+    def test_path_dot_rejected(self):
+        """`Path('.')` literally names the current working
+        directory — a pathological shapefile path that would
+        silently pass `Path.exists()` and reach
+        `geopandas.read_file`."""
+        from pathlib import Path
+        from pydantic import ValidationError
+        with self.assertRaisesRegex(ValidationError, 'current working'):
+            self._build_with_shapefile(Path('.'))
+
+    def test_path_legitimate_absolute_path_accepted(self):
+        from pathlib import Path
+        rc = self._build_with_shapefile(
+            Path('/some/absolute/path.shp'),
+        )
+        self.assertEqual(
+            rc.boundary.shapefile_path, Path('/some/absolute/path.shp'),
         )
