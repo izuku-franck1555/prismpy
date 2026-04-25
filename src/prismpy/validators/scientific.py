@@ -1123,7 +1123,23 @@ def _check_region_bounds(unified_data, config) -> Dict[str, Any]:
 
     # Check climate values against region-specific thresholds
     climate = unified_data.climate if unified_data and hasattr(unified_data, 'climate') else {}
-    violations = []
+    # V2-22c-PRE.1.7 — track per-cell violations alongside the existing
+    # diagnostic text-string list. Two parallel structures:
+    #
+    # * ``violation_texts``: human-readable strings (existing
+    #   diagnostic; capped at 10 in the emitted ``sample_violations``
+    #   per PRE.1.7 spec — text-string list is preserved at [:10]).
+    # * ``violation_records``: structured `(cell_id, variable, value,
+    #   bounds, unit)` tuples that drive the un-truncated
+    #   ``affected_cells`` list AND the ``violation_details`` flatten
+    #   used by PRE.1.8 ``cell_failed_check_details``.
+    #
+    # Without the structured records the cockpit's Layer 1
+    # `region_specific_bounds` failure-fill silently drops every cell
+    # because PRE.1.2's pivot reads `details.affected_cells` which
+    # would be empty.
+    violation_texts: List[str] = []
+    violation_records: List[Dict[str, Any]] = []
 
     if not _is_file_based_climate(climate):
         tmax_range = thresholds.get("tmax")
@@ -1137,36 +1153,62 @@ def _check_region_bounds(unified_data, config) -> Dict[str, Any]:
             for record in ts.records:
                 if tmax_range and hasattr(record, 'tmax') and record.tmax is not None:
                     if record.tmax < tmax_range[0] or record.tmax > tmax_range[1]:
-                        violations.append(
+                        violation_texts.append(
                             f"tmax={record.tmax:.1f} outside {region_name} "
                             f"range {tmax_range}"
                         )
+                        violation_records.append({
+                            "cell_id": cell_id, "variable": "tmax",
+                            "value": float(record.tmax), "unit": "°C",
+                            "bounds": list(tmax_range),
+                        })
                 if tmin_range and hasattr(record, 'tmin') and record.tmin is not None:
                     if record.tmin < tmin_range[0] or record.tmin > tmin_range[1]:
-                        violations.append(
+                        violation_texts.append(
                             f"tmin={record.tmin:.1f} outside {region_name} "
                             f"range {tmin_range}"
                         )
+                        violation_records.append({
+                            "cell_id": cell_id, "variable": "tmin",
+                            "value": float(record.tmin), "unit": "°C",
+                            "bounds": list(tmin_range),
+                        })
                 # Daily precipitation uses precip_daily_max (NOT
                 # precip_annual_mm which is an annual total)
                 if precip_daily_max and hasattr(record, 'precip') and record.precip is not None:
                     if record.precip > precip_daily_max:
-                        violations.append(
+                        violation_texts.append(
                             f"precip={record.precip:.1f} mm/day exceeds "
                             f"{region_name} daily max {precip_daily_max}"
                         )
+                        violation_records.append({
+                            "cell_id": cell_id, "variable": "precip",
+                            "value": float(record.precip),
+                            "unit": "mm/day",
+                            "bounds": [None, float(precip_daily_max)],
+                        })
                 if srad_range and hasattr(record, 'srad') and record.srad is not None:
                     if record.srad < srad_range[0] or record.srad > srad_range[1]:
-                        violations.append(
+                        violation_texts.append(
                             f"srad={record.srad:.1f} outside {region_name} "
                             f"range {srad_range}"
                         )
+                        violation_records.append({
+                            "cell_id": cell_id, "variable": "srad",
+                            "value": float(record.srad),
+                            "unit": "MJ/m²/d",
+                            "bounds": list(srad_range),
+                        })
 
-    n_violations = len(violations)
+    n_violations = len(violation_texts)
     if n_violations > 0:
         result = "warning"
     else:
         result = "pass"
+
+    # V2-22c-PRE.1.7 — un-truncated, deduplicated, sorted ASC for
+    # deterministic JSON diffs (evaluator §2 binding).
+    affected_cells_sorted = sorted({r["cell_id"] for r in violation_records})
 
     return {
         "check": "region_specific_bounds",
@@ -1185,6 +1227,18 @@ def _check_region_bounds(unified_data, config) -> Dict[str, Any]:
             "centroid_lon": round(center_lon, 4),
             "thresholds": thresholds,
             "n_violations": n_violations,
-            "sample_violations": violations[:10],
+            # V2-22c-PRE.1.7 — text-string sample stays capped at 10
+            # for human-readable diagnostic; the un-truncated cell-id
+            # list lives on `affected_cells` below. Structurally
+            # captured by tests/unit/test_scientific_un_truncation.py
+            # via the ALLOWED_TRUNCATED_KEYS allowlist.
+            "sample_violations": violation_texts[:10],
+            "affected_cells": affected_cells_sorted,
+            # V2-22c-PRE.1.8 — sorted by (cell_id, variable) for
+            # cockpit-cursor stability + reproducible JSON diffs.
+            "violation_details": sorted(
+                violation_records,
+                key=lambda r: (r["cell_id"], r["variable"]),
+            ),
         },
     }
