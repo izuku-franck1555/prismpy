@@ -2208,6 +2208,25 @@ class TranslationPipeline:
                     hwsd_soil = self._retrieve_hwsd_for_grid(grid, region)
                     if hwsd_soil:
                         soil_data = hwsd_soil
+                        # V2-22c-PRE.1.10 (D37) cascade-rank update —
+                        # HWSD ran as the iSDA fallback path. Each
+                        # HWSD-served cell's metadata bumps to
+                        # cascade_rank=2 + records the iSDA failure
+                        # in fallback_attempts. The cockpit drawer
+                        # reads this and renders "iSDA failed, HWSD
+                        # fallback used" verbatim per AC-14.3.
+                        for cell_id, profile in hwsd_soil.items():
+                            if not hasattr(profile, 'metadata'):
+                                continue
+                            if profile.metadata is None:
+                                profile.metadata = {}
+                            profile.metadata["cascade_rank"] = 2
+                            profile.metadata["fallback_attempts"] = [
+                                {
+                                    "source": "iSDA Africa",
+                                    "reason": "no_data_at_centroid",
+                                },
+                            ]
                         # V2-19 site #4: SOURCE_SELECTION falling back to HWSD
                         if self.provenance.enabled:
                             self.provenance.record_decision(
@@ -2243,10 +2262,35 @@ class TranslationPipeline:
                         artifact_id="soil",
                     )
 
+            # V2-22c-PRE.1.10 (D37) — backstop default cascade
+            # metadata for in-memory climate time series. Source
+            # loaders that haven't been ported yet emit ts objects
+            # without `metadata.cascade_rank`; the cell-summary
+            # read path defaults rank=1 if absent, but populating
+            # it here makes the schema explicit on the wire +
+            # gives the cockpit a uniform shape.
+            climate_data_for_unified = retrieved_data.get("climate")
+            if isinstance(climate_data_for_unified, dict):
+                for cell_id, ts in climate_data_for_unified.items():
+                    if not hasattr(ts, 'metadata'):
+                        continue
+                    if ts.metadata is None:
+                        ts.metadata = {}
+                    ts.metadata.setdefault(
+                        "source", getattr(ts, 'source', None),
+                    )
+                    ts.metadata.setdefault("cascade_rank", 1)
+                    ts.metadata.setdefault("fallback_attempts", [])
+                    # Version is best-effort — loaders that have
+                    # been ported populate it; others leave it
+                    # as None and the cockpit drawer renders
+                    # "version: unknown".
+                    ts.metadata.setdefault("version", None)
+
             unified_data = UnifiedData(
                 region=region,
                 grid=grid,
-                climate=retrieved_data.get("climate"),
+                climate=climate_data_for_unified,
                 soil=soil_data,
                 crop_params=retrieved_data.get("crop_params"),
                 crop_calendar=retrieved_data.get("crop_calendar"),

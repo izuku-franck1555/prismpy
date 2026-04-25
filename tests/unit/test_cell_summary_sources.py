@@ -265,3 +265,55 @@ class TestSourcesShapeAcrossCells:
         expected_keys = {"name", "version", "cascade_rank", "fallback_attempts"}
         assert set(sb["soil"].keys()) == expected_keys
         assert set(sb["climate"].keys()) == expected_keys
+
+
+class TestSourcesCascadeFallback:
+    """V2-22c-PRE.1.10 (D37) — when iSDA falls through and HWSD
+    serves the cell, the cockpit drawer reads cascade_rank=2 +
+    fallback_attempts=[{source: 'iSDA Africa', reason: ...}]
+    from the cell's `sources.soil` block. The orchestrator at
+    `executor.py` populates this metadata after the HWSD loader
+    returns, so source-loader defaults (cascade_rank=1) get
+    overridden for the fallback case.
+
+    This test exercises the read path against a profile whose
+    metadata simulates the orchestrator-populated fallback shape;
+    the orchestrator path itself is integration-tested at Gate B
+    via a real iSDA-fails-HWSD-succeeds run."""
+
+    def test_cascade_rank_2_with_populated_fallback_attempts(self):
+        pipeline = _make_pipeline()
+        # Profile served by HWSD after iSDA fell through.
+        soil = {0: _make_profile(
+            source="HWSD", version="v2.0",
+            cascade_rank=2,
+            fallback_attempts=[{
+                "source": "iSDA Africa",
+                "reason": "no_data_at_centroid",
+            }],
+        )}
+        unified = _make_unified(soil=soil, n_cells=1)
+        out = pipeline._build_cell_summary(unified)
+        sb = out["cells"][0]["sources"]["soil"]
+        assert sb["cascade_rank"] == 2
+        assert len(sb["fallback_attempts"]) == 1
+        assert sb["fallback_attempts"][0]["source"] == "iSDA Africa"
+        # Reason is a free-form string the cockpit renders verbatim;
+        # assert it's at least non-empty.
+        assert sb["fallback_attempts"][0]["reason"]
+
+    def test_cascade_rank_1_has_empty_fallback_attempts(self):
+        """Loader-default path: when cascade_rank=1 (primary
+        success), fallback_attempts is the empty list. Cockpit
+        renders "Source: iSDA Africa S3" without any fallback
+        annotation."""
+        pipeline = _make_pipeline()
+        soil = {0: _make_profile(
+            source="iSDA", version="S3", cascade_rank=1,
+            fallback_attempts=[],
+        )}
+        unified = _make_unified(soil=soil, n_cells=1)
+        out = pipeline._build_cell_summary(unified)
+        sb = out["cells"][0]["sources"]["soil"]
+        assert sb["cascade_rank"] == 1
+        assert sb["fallback_attempts"] == []

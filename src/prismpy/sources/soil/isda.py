@@ -360,6 +360,17 @@ class iSDASource(DataSource):
                 metadata={
                     "root_zone_depth": rzd,
                     "region": region.name,
+                    # V2-22c-PRE.1.10 (D37) — cascade-provenance
+                    # metadata fields. iSDA Africa S3 release; the
+                    # source loader populates `cascade_rank=1`
+                    # (primary success) by default. The cascade
+                    # orchestrator at executor.py overrides this
+                    # to rank=2 + fallback_attempts when iSDA
+                    # returned no profile and HWSD took over.
+                    "source": "iSDA Africa",
+                    "version": "S3",
+                    "cascade_rank": 1,
+                    "fallback_attempts": [],
                 },
             )
             profiles[i] = profile

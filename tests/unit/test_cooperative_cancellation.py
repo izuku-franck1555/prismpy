@@ -359,9 +359,11 @@ class TestCarveOutRegression:
         # Provenance-flush inside the translator-dispatch except handler
         # in _execute_translate: writes decision records, cancel-inert.
         # Line shifted from 2338 → 2346 (PRE.3.3 thread-through)
-        # → 2360 after V2-22c-PRE.4.1 added the REMEDIATION enum
-        # value + multi-line comment. Same try block, new line number.
-        ("src/prismpy/pipeline/executor.py", 2360),
+        # → 2360 (PRE.4.1 enum) → 2404 after V2-22c-PRE.1.10
+        # cascade orchestrator + climate metadata backstop added
+        # ~40 lines to `_execute_harmonize`. Same try block, new
+        # line number.
+        ("src/prismpy/pipeline/executor.py", 2404),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed
