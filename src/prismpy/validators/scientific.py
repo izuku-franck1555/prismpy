@@ -89,6 +89,7 @@ def run_scientific_validation(
     unified_data,
     config,
     enabled_platforms: Optional[List[str]] = None,
+    sarra_climate_per_cell: Optional[Dict[int, Dict[str, list]]] = None,
 ) -> Dict[str, Any]:
     """Run all 6 Tier 1 scientific validation checks.
 
@@ -96,6 +97,15 @@ def run_scientific_validation(
         unified_data: UnifiedData from the HARMONIZE stage
         config: ProjectConfig for temporal/spatial reference
         enabled_platforms: List of enabled platform names
+        sarra_climate_per_cell: V2-22c-PRE.2.4 (D14) — per-cell
+            sampled climate values for SARRA-Py file-based runs.
+            Shape: ``{cell_id: {var: [pixel_value, ...]}}``. When
+            provided, the value-range check synthesizes per-cell
+            ``value_range_<var>`` checks with `affected_cells`
+            lists; without it, file-based climate stays on the
+            delegated-info path. Populated by
+            :func:`prismpy.validators.post_translate.sample_sarra_py_per_cell`
+            in the validate stage when SARRA-Py is enabled.
 
     Returns:
         Dict with 'checks' list and 'overall_result' rollup
@@ -109,8 +119,12 @@ def run_scientific_validation(
     # Check 2: Cross-variable consistency
     checks.append(_check_cross_variable_consistency(unified_data))
 
-    # Check 3: Value range
-    checks.extend(_check_value_ranges(unified_data))
+    # Check 3: Value range — pass through the per-cell sampled
+    # values so the SARRA-Py file-based branch synthesizes per-cell
+    # checks (PRE.2.4).
+    checks.extend(_check_value_ranges(
+        unified_data, sarra_climate_per_cell=sarra_climate_per_cell,
+    ))
 
     # Check 4: Soil profile completeness
     for platform in enabled:
@@ -687,8 +701,19 @@ def _check_cross_variable_consistency(unified_data) -> Dict[str, Any]:
 # Check 3: Value range (universal physical bounds)
 # =============================================================================
 
-def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
-    """Check climate and soil values against universal physical bounds."""
+def _check_value_ranges(
+    unified_data,
+    sarra_climate_per_cell: Optional[Dict[int, Dict[str, list]]] = None,
+) -> List[Dict[str, Any]]:
+    """Check climate and soil values against universal physical bounds.
+
+    V2-22c-PRE.2.4 (D14) — when ``sarra_climate_per_cell`` is provided,
+    the file-based climate branch consumes those sampled values to
+    emit per-cell value-range checks (with `affected_cells` lists)
+    identical to the in-memory CRAFT/PYTHIA/ACEA shape. Without the
+    parameter, the file-based branch keeps emitting only the
+    delegated info record.
+    """
     checks = []
 
     # Climate value ranges
@@ -734,7 +759,60 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
                 "coverage_kind": "delegated",
             },
         })
-        climate_stats = {}  # empty → no per-variable climate checks emitted
+        # V2-22c-PRE.2.4 (D14) — when the caller supplied per-cell
+        # sampled values, populate climate_stats so the per-cell
+        # `value_range_<var>` checks emit with `affected_cells` lists
+        # identical to the CRAFT/PYTHIA/ACEA shape. The cockpit's
+        # Layer 1 fill rule reads these for SARRA-Py runs; without
+        # this branch the cockpit shows every SARRA-Py cell red
+        # because no per-cell value-range check produces a `pass`
+        # record (the universal-fail bug per V2-22c contract §1.1).
+        #
+        # The canonical var mapping is `rain` → SARRA's "rain"
+        # output, but CLIMATE_RANGES uses `rain` natively too.
+        # Each per-cell list is a sample across N file reads;
+        # min/max-aggregating per cell mirrors the per-cell-records
+        # path's range computation.
+        if sarra_climate_per_cell:
+            # SARRA_PY_VAR_MAPPING (post_translate.py) emits canonical
+            # vars `rain / tmax / tmin / srad`; scientific.py's
+            # CLIMATE_RANGES uses `precip` for the precipitation
+            # threshold. Translate the SARRA-Py-side `rain` → the
+            # canonical scientific.py `precip` when populating stats
+            # so the check_id ends up `value_range_precip` (matching
+            # the CRAFT/PYTHIA/ACEA shape — the cockpit drill-down
+            # treats SARRA-Py and the in-memory platforms identically
+            # at the check_id surface).
+            _sarra_to_canonical = {
+                "rain": "precip",
+                "tmax": "tmax",
+                "tmin": "tmin",
+                "srad": "srad",
+            }
+            for cell_id, var_bucket in sarra_climate_per_cell.items():
+                for sarra_var, vals in var_bucket.items():
+                    var = _sarra_to_canonical.get(sarra_var, sarra_var)
+                    if var not in CLIMATE_RANGES:
+                        continue
+                    if not vals:
+                        continue
+                    vmin, vmax, unit = CLIMATE_RANGES[var]
+                    if var not in climate_stats:
+                        climate_stats[var] = {
+                            "min": min(vals), "max": max(vals),
+                            "out_of_range": 0, "total": 0,
+                            "affected_cells": set(),
+                        }
+                    stats = climate_stats[var]
+                    stats["min"] = min(stats["min"], min(vals))
+                    stats["max"] = max(stats["max"], max(vals))
+                    stats["total"] += len(vals)
+                    for v in vals:
+                        if v < vmin or v > vmax:
+                            stats["out_of_range"] += 1
+                            stats["affected_cells"].add(cell_id)
+        # else: empty climate_stats → no per-variable climate checks
+        # emitted; the delegated info record above is the only output.
     else:
         for cell_id, ts in climate.items():
             if not hasattr(ts, 'records'):

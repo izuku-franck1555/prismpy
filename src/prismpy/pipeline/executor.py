@@ -2441,15 +2441,56 @@ class TranslationPipeline:
         # JSON report was a warning.)
         scientific_report = None
         post_translate_report = None
+        # V2-22c-PRE.2.1 + 2.3 + 2.4 — when SARRA-Py is enabled,
+        # sample per-cell climate values from the translated
+        # GeoTIFFs once at validate-stage entry. The sampled dict
+        # feeds (a) the value-range synthesis in
+        # ``run_scientific_validation`` and (b) the cell-summary
+        # ``has_climate`` computation in the packaging stage.
+        # Stash on ``unified_data.metadata`` so the packaging stage
+        # can read it without re-sampling.
+        sarra_climate_per_cell: Optional[Dict[int, Dict[str, list]]] = None
         if unified_data:
             try:
-                from prismpy.validators.scientific import run_scientific_validation
-
                 enabled_platforms = [
                     p.value for p in self.config.get_enabled_platforms()
                 ]
+                if (
+                    "sarra_py" in enabled_platforms
+                    and unified_data.grid is not None
+                    and getattr(unified_data.grid, 'cells', None)
+                ):
+                    base_dir_local = Path(self.config.output.base_dir)
+                    sarra_dir = base_dir_local / "sarra_py"
+                    if sarra_dir.is_dir():
+                        from prismpy.validators.post_translate import (
+                            sample_sarra_py_per_cell,
+                        )
+                        sarra_climate_per_cell = sample_sarra_py_per_cell(
+                            sarra_dir, unified_data.grid.cells,
+                        )
+                        if sarra_climate_per_cell:
+                            # Stash on metadata so the packaging
+                            # stage's _build_cell_summary call can
+                            # read it without re-sampling.
+                            if unified_data.metadata is None:
+                                unified_data.metadata = {}
+                            unified_data.metadata[
+                                "_sarra_climate_per_cell"
+                            ] = sarra_climate_per_cell
+            except Exception as e:
+                self.logger.warning(
+                    f"PRE.2 SARRA-Py sampling failed (continuing without "
+                    f"per-cell climate): {e}"
+                )
+                sarra_climate_per_cell = None
+
+            try:
+                from prismpy.validators.scientific import run_scientific_validation
+
                 scientific_report = run_scientific_validation(
-                    unified_data, self.config, enabled_platforms
+                    unified_data, self.config, enabled_platforms,
+                    sarra_climate_per_cell=sarra_climate_per_cell,
                 )
                 validation_summary["scientific"] = scientific_report
             except Exception as e:
@@ -2795,8 +2836,22 @@ class TranslationPipeline:
                                 if validate_result and validate_result.data
                                 else None
                             )
+                            # V2-22c-PRE.2.3 — when the validate stage
+                            # ran the SARRA-Py per-cell sampler, the
+                            # sampled values are stashed on
+                            # ``unified_data.metadata`` so packaging
+                            # can read them without re-sampling.
+                            _sarra_per_cell = None
+                            if (
+                                unified_data.metadata
+                                and isinstance(unified_data.metadata, dict)
+                            ):
+                                _sarra_per_cell = unified_data.metadata.get(
+                                    "_sarra_climate_per_cell",
+                                )
                             cell_summary = self._build_cell_summary(
                                 unified_data, _val_report_for_cells,
+                                sarra_climate_per_cell=_sarra_per_cell,
                             )
                             cs_path = platform_dir / "cell_summary.json"
                             with open(cs_path, "w", encoding="utf-8") as csf:
@@ -2898,6 +2953,7 @@ class TranslationPipeline:
         self,
         unified_data,
         validation_report: Optional[Dict[str, Any]] = None,
+        sarra_climate_per_cell: Optional[Dict[int, Dict[str, list]]] = None,
     ) -> Dict[str, Any]:
         """Build per-cell summary for the interactive map.
 
@@ -3032,6 +3088,43 @@ class TranslationPipeline:
                     ]
                 cell_data["n_days"] = len(ts.records)
                 cell_data["has_climate"] = True
+            elif (
+                sarra_climate_per_cell
+                and cid in sarra_climate_per_cell
+                and sarra_climate_per_cell[cid]
+            ):
+                # V2-22c-PRE.2.3 (D14) — SARRA-Py per-cell `has_climate`
+                # derives from sampled-values presence, not from
+                # `unified_data.climate` (which is path-dict shaped for
+                # SARRA-Py, so the existing `hasattr(ts, 'records')`
+                # check returns False for every cell — the universal-
+                # fail bug per V2-22c contract §1.1 sample run
+                # `766c6907-...`).
+                #
+                # Bucket shape: {var_canonical: [pixel_value_per_day]}.
+                # Treat as has_climate=True when at least one variable
+                # has at least one sampled value across the 4 mapped
+                # vars (rain / tmax / tmin / srad).
+                bucket = sarra_climate_per_cell[cid]
+                tmax_vals = bucket.get("tmax", [])
+                tmin_vals = bucket.get("tmin", [])
+                if tmax_vals:
+                    cell_data["tmax_range"] = [
+                        round(min(tmax_vals), 1),
+                        round(max(tmax_vals), 1),
+                    ]
+                if tmin_vals:
+                    cell_data["tmin_range"] = [
+                        round(min(tmin_vals), 1),
+                        round(max(tmin_vals), 1),
+                    ]
+                # Aggregate sample count across all 4 vars — matches
+                # the existing CRAFT/PYTHIA path where n_days is the
+                # number of records (here it's number of sampled
+                # pixel reads).
+                total_samples = sum(len(v) for v in bucket.values())
+                cell_data["n_days"] = total_samples
+                cell_data["has_climate"] = bool(total_samples > 0)
             else:
                 cell_data["has_climate"] = False
 
