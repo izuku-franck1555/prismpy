@@ -879,15 +879,19 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
                 "total_values": stats["total"],
                 # V2-22c-PRE.1.5 — per-(cell_id, layer_idx) tuples for
                 # each layer that violated this variable's range.
-                "affected_cells": soil_violations_by_var.get(var, []),
+                # Sorted by (cell_id, layer_idx) ASC for deterministic
+                # JSON diffs across runs (evaluator §2 binding).
+                "affected_cells": sorted(soil_violations_by_var.get(var, [])),
                 # V2-22c-PRE.1.8 — per-violation context for the cockpit
                 # drawer; flattened into top-level cell_failed_check_details
                 # by _build_cell_summary so consumers can render
                 # "Cell #N layer L — <var>=<value> outside [<lo>, <hi>]"
-                # without a second JSON join.
-                "violation_details": [
-                    d for d in soil_violation_details if d["variable"] == var
-                ],
+                # without a second JSON join. Sorted to match the
+                # affected_cells ordering for cockpit cursor stability.
+                "violation_details": sorted(
+                    [d for d in soil_violation_details if d["variable"] == var],
+                    key=lambda d: (d["cell_id"], d["layer_idx"]),
+                ),
             },
         })
 
@@ -911,13 +915,16 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
                 "total_layers": texture_total,
                 # V2-22c-PRE.1.4 — per-(cell_id, layer_idx) tuples for
                 # each layer where sand+clay+silt fell outside [95, 105].
-                "affected_cells": texture_violation_cells,
+                # Sorted ASC for deterministic JSON diffs (evaluator §2).
+                "affected_cells": sorted(texture_violation_cells),
                 # V2-22c-PRE.1.8 — same flatten-into-cell_failed_check_details
-                # rationale as the soil-quality family above.
-                "violation_details": [
-                    d for d in soil_violation_details
-                    if d["variable"] == "texture_sum"
-                ],
+                # rationale as the soil-quality family above. Sorted to
+                # match affected_cells ordering for cockpit cursor stability.
+                "violation_details": sorted(
+                    [d for d in soil_violation_details
+                     if d["variable"] == "texture_sum"],
+                    key=lambda d: (d["cell_id"], d["layer_idx"]),
+                ),
             },
         })
 

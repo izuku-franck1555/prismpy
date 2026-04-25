@@ -215,3 +215,65 @@ class TestSoilQualityFamilyAffectedCells:
             d["variable"] == "clay"
             for d in clay_check["details"]["violation_details"]
         )
+
+
+class TestDeterministicOrdering:
+    """Evaluator §2 binding: `affected_cells` ordering must be
+    deterministic — sorted by cell_id ASC for reproducible JSON
+    diffs across runs. Also covers the canonical naming
+    discipline: `value_range_soil_organic_carbon` (full word, NOT
+    `oc` shorthand) per §2 / V2-22d backlog item."""
+
+    def test_affected_cells_sorted_by_cell_id_ascending(self):
+        """Multiple violating cells inserted out-of-order; the
+        emitted list must come back in ascending cell_id order so
+        downstream JSON diffs and cockpit drill-down get
+        reproducible cursors."""
+        profiles = {}
+        # Insert in 5, 2, 8 order — non-monotonic on purpose.
+        for cell_id in (5, 2, 8):
+            profiles[cell_id] = SoilProfile(
+                profile_id=f"p{cell_id}", lat=0.5, lon=0.5, source="iSDA",
+                layers=[SoilLayer(
+                    depth_top=0, depth_bottom=0.2,
+                    sand=40, clay=120, silt=-60,
+                )],
+            )
+        unified = _make_unified(profiles)
+        checks = _check_value_ranges(unified)
+        clay_check = _by_check(checks, "value_range_soil_clay")
+        cell_ids_in_order = [t[0] for t in clay_check["details"]["affected_cells"]]
+        # Note: the inner-loop iteration order over `soil.items()`
+        # is dict-insertion order in Python 3.7+, so the natural
+        # output here is already monotonic. The assertion locks
+        # that property in so a future refactor (e.g., parallel
+        # workers, set-based dedupe) can't quietly break it.
+        assert cell_ids_in_order == sorted(cell_ids_in_order), (
+            "affected_cells must be sorted ASC by cell_id for "
+            "deterministic JSON diffs; got "
+            f"{cell_ids_in_order!r}."
+        )
+
+    def test_organic_carbon_uses_canonical_full_word_name(self):
+        """Evaluator §2 + V2-22d backlog discipline: the soil
+        organic-carbon check is `value_range_soil_organic_carbon`
+        (full word). The `oc` shorthand never reaches the validator
+        surface — if it did, the cockpit would drill-down to a
+        check_id that doesn't exist."""
+        profile = SoilProfile(
+            profile_id="p1", lat=0.5, lon=0.5, source="iSDA",
+            layers=[SoilLayer(
+                depth_top=0, depth_bottom=0.2,
+                sand=40, clay=30, silt=30,
+                organic_carbon=2.0,
+            )],
+        )
+        unified = _make_unified({1: profile})
+        checks = _check_value_ranges(unified)
+        check_ids = {c["check"] for c in checks}
+        assert "value_range_soil_organic_carbon" in check_ids
+        assert "value_range_soil_oc" not in check_ids, (
+            "shorthand `oc` is design-doc-only; never on the "
+            "validator surface. If it surfaces here a future "
+            "consumer drill-down would resolve to nothing."
+        )

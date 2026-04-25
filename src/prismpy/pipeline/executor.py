@@ -2864,17 +2864,24 @@ class TranslationPipeline:
                 # V2-22c-PRE.1.6 (D26) — emit per-cell soil texture class
                 # via the existing SoilProfile.surface_texture USDA-triangle
                 # classifier. Reuses the property at models/soil.py:150-154
-                # — no new classifier. Cockpit's Layer 2 chip strip + Veto
-                # #4 client-side preflight read this for the impute / override
-                # cross-class block. Elide the key when surface_texture is
-                # None (matches existing tmax_range elision pattern); the
-                # cockpit JS tolerates the missing key by design.
-                surface_texture = getattr(profile, 'surface_texture', None)
-                if surface_texture:
-                    cell_data["soil_class"] = surface_texture
+                # — no new classifier.
+                #
+                # Evaluator §2 / §12 numeric criterion: the key MUST exist
+                # on every cell, with `None` (JSON null) for the no-layers
+                # / DEFAULT_SOIL edge cases. The cockpit's Veto #4 client
+                # preflight reads `cellSummary.cells[X].soil_class` and
+                # depends on a deterministic null vs string — `undefined`
+                # from key elision would force the JS into a tri-state
+                # (string | null | undefined) and silently disable the
+                # cross-class block on no-soil cells.
+                cell_data["soil_class"] = getattr(profile, 'surface_texture', None)
             else:
                 cell_data["soil_source"] = "none"
                 cell_data["soil_default"] = False
+                # Same null-not-elide discipline when no profile exists at
+                # all — uniform consumer interface across all 3 paths
+                # (valid profile / empty layers / no profile).
+                cell_data["soil_class"] = None
 
             # Climate data (per-cell time series if available)
             ts = climate.get(cid)

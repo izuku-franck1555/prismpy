@@ -4,12 +4,26 @@ Covers ACs PRE.1.1 (cell_summary_version), PRE.1.6 (soil_class via existing
 SoilProfile.surface_texture), and is the home for PRE.1.2 (failed_checks
 structured shape) tests as those land in subsequent commits.
 
+Aligned with the evaluator's pre-committed Gate B criteria (`prismweb/.local/
+v2-22c-r5-evidence/evaluator/V2-22c-VERIFICATION-STRATEGY.md` §2 + §5 +
+PRE-CONTRACT.md §12 tightenings):
+
+* PRE.1.1 — string equality `"2.0"`, top-level placement, single emit
+  site (sibling-sweep grep against `prismpy/src/`).
+* PRE.1.6 — `soil_class` MUST exist on every cell. Valid profile → string.
+  Empty layers / no profile → JSON `null` (NOT key elision). Uniform
+  consumer interface so the cockpit Veto #4 preflight sees a deterministic
+  string-vs-null instead of a tri-state with `undefined`.
+
 The tests bypass TranslationPipeline.__init__ via __new__ — `_build_cell_summary`
 is a pure data-projection method that doesn't touch any instance state on
 self, so a synthetic instance is sufficient and avoids pulling in the
 ProjectConfig + ProvenanceTracker dependency chain that init requires.
 """
 from __future__ import annotations
+
+import re
+from pathlib import Path
 
 import pytest
 
@@ -19,6 +33,9 @@ from prismpy.models.soil import SoilLayer, SoilProfile
 from prismpy.models.climate import ClimateRecord, ClimateTimeSeries
 from prismpy.pipeline.executor import TranslationPipeline
 from prismpy.translators.base import UnifiedData
+
+
+_SRC_ROOT = Path(__file__).resolve().parents[2] / "src" / "prismpy"
 
 
 def _make_pipeline():
@@ -91,6 +108,55 @@ class TestCellSummaryVersion:
         for key in ("n_cells", "resolution", "cells"):
             assert key in out, f"top-level key {key!r} regressed"
 
+    def test_cell_summary_version_at_top_level_not_nested(self):
+        """Evaluator §12.1 numeric criterion — field MUST be at the
+        top level (sibling of `n_cells` / `resolution` / `cells`),
+        NOT nested inside `meta` or any sub-object. The cockpit
+        loader-fallback at `prismweb/core/views.py::_load_cell_summary`
+        reads the top-level key directly; a nested form would force
+        every consumer into the pre-PRE.1 synthesis branch."""
+        pipeline = _make_pipeline()
+        unified = UnifiedData(region=_make_region(), grid=_make_grid())
+        out = pipeline._build_cell_summary(unified)
+        # Top-level presence already covered above. Belt-and-braces:
+        # confirm the field is NOT shadowed inside any nested dict.
+        for nest_key in ("meta", "metadata", "header", "schema"):
+            nested = out.get(nest_key)
+            if isinstance(nested, dict):
+                assert "cell_summary_version" not in nested, (
+                    f"cell_summary_version leaked into nested {nest_key!r} "
+                    "object — must live at top level only."
+                )
+
+    def test_single_build_cell_summary_emit_site_in_src(self):
+        """Evaluator §12.1 sibling-sweep — only one site in
+        `prismpy/src/` should construct the cell-summary dict (the
+        canonical `_build_cell_summary` definition). A secondary
+        emit site = contract regression because it would diverge
+        from this method's schema discipline (e.g., a copy-paste
+        helper that forgets the new `cell_summary_version` /
+        `soil_class` fields).
+
+        Pattern matched: a `def _build_cell_summary` definition.
+        Module-level helpers and TranslationPipeline references in
+        tests / docs are NOT counted (they're not emit sites). The
+        method definition is canonical.
+        """
+        pat = re.compile(r"^\s*def\s+_build_cell_summary\b")
+        emit_sites = []
+        for py_file in _SRC_ROOT.rglob("*.py"):
+            for lineno, line in enumerate(
+                py_file.read_text().splitlines(), start=1,
+            ):
+                if pat.search(line):
+                    emit_sites.append((str(py_file), lineno))
+        assert len(emit_sites) == 1, (
+            f"Expected single _build_cell_summary definition in "
+            f"prismpy/src/; found {len(emit_sites)}: {emit_sites!r}. "
+            "Multiple sites would diverge on schema additions; "
+            "contract treats this as a regression."
+        )
+
 
 class TestSoilClassField:
     """V2-22c-PRE.1.6 (D26) — per-cell `soil_class` field via existing
@@ -110,9 +176,12 @@ class TestSoilClassField:
         assert "soil_class" in cell
         assert cell["soil_class"] == "Loamy Sand"
 
-    def test_soil_class_elided_when_layers_empty(self):
-        """Edge case from contract: empty profile → surface_texture
-        returns None → soil_class key absent (matches tmax_range elision)."""
+    def test_soil_class_is_null_when_layers_empty(self):
+        """Evaluator §2 numeric criterion — empty-profile edge surfaces
+        as `None` (JSON null), NOT elision. Cockpit Veto #4 preflight
+        depends on a deterministic string-or-null read; `undefined`
+        from key elision would silently disable the cross-class block
+        on no-soil cells."""
         pipeline = _make_pipeline()
         soil = {
             0: _make_soil_profile(
@@ -124,22 +193,50 @@ class TestSoilClassField:
         )
         out = pipeline._build_cell_summary(unified)
         cell = out["cells"][0]
-        assert "soil_class" not in cell, (
-            "empty layers list yields surface_texture=None; the "
-            "soil_class key must be elided so the cockpit JS renders "
-            "'No soil data' instead of 'soil_class=None'."
+        assert "soil_class" in cell, (
+            "soil_class key MUST exist on every cell per evaluator "
+            "§12 / §2 binding; elision broke the cockpit JS contract."
         )
+        assert cell["soil_class"] is None
 
-    def test_soil_class_elided_when_no_profile(self):
-        """No SoilProfile for this cell at all → no soil_class."""
+    def test_soil_class_is_null_when_no_profile(self):
+        """Same null-not-elide discipline when no SoilProfile exists
+        for the cell at all — uniform consumer interface across all
+        three paths (valid profile / empty layers / no profile)."""
         pipeline = _make_pipeline()
         unified = UnifiedData(
             region=_make_region(), grid=_make_grid(n_cells=1), soil={},
         )
         out = pipeline._build_cell_summary(unified)
         cell = out["cells"][0]
-        assert "soil_class" not in cell
+        assert "soil_class" in cell
+        assert cell["soil_class"] is None
         assert cell["soil_source"] == "none"
+
+    def test_soil_class_field_present_on_every_cell(self):
+        """Evaluator §2 binding: 'Field MUST exist on every cell
+        (even null).' This pins the schema invariant across mixed
+        cell populations — every cell, regardless of profile status,
+        carries the key."""
+        pipeline = _make_pipeline()
+        # Mixed: cell 0 has a valid profile, cell 1 has an empty
+        # profile (no layers), cell 2 has no profile at all.
+        soil = {
+            0: _make_soil_profile(profile_id="p0", sand=80.0, clay=10.0),
+            1: _make_soil_profile(
+                profile_id="p1", sand=10.0, clay=80.0, with_layers=False,
+            ),
+            # cell 2 absent from soil dict on purpose
+        }
+        unified = UnifiedData(
+            region=_make_region(), grid=_make_grid(n_cells=3), soil=soil,
+        )
+        out = pipeline._build_cell_summary(unified)
+        for cell in out["cells"]:
+            assert "soil_class" in cell, (
+                f"cell {cell['id']} missing soil_class — schema "
+                "invariant requires the key on every cell."
+            )
 
     def test_soil_class_distinct_classes_for_distinct_textures(self):
         """Sanity check on the classifier mapping — Sand vs Clay vs Loam
