@@ -198,6 +198,15 @@ _CATEGORY_MAP = {
     "soil_completeness_": "completeness",
     "format_compliance": "schema",
     "spatial_temporal_coverage": "coverage",
+    # V2-22c-PRE.1.9 codex P2 #3 — the per-cell coverage checks
+    # added by D36 must classify under "coverage" so the validation
+    # report's category rollup matches the cockpit's coverage chip
+    # rendering. Without these mappings the fallback category in
+    # _get_check_category puts them under "schema" → category drift
+    # vs. the cockpit's per-cell `failed_checks` pivot which labels
+    # them `coverage_per_cell`.
+    "coverage_climate_cells": "coverage",
+    "coverage_soil_cells": "coverage",
     "region_specific_bounds": "ranges",
     "post_translate_consistency_": "ranges",
     "post_translate_range_": "ranges",
@@ -469,6 +478,14 @@ def _check_temporal_completeness(unified_data, config) -> Dict[str, Any]:
             # is the strictest downstream consumer (§6.4 schema-bounds
             # discipline); `[:10]` was a UI-driven pre-cockpit optimization.
             "gap_details": {str(k): v for k, v in cell_gaps.items()},
+            # V2-22c-PRE codex P2 #1 — `_build_cell_summary` pivots
+            # per-cell `failed_checks` from `details.affected_cells`,
+            # not `gap_details`. Without this list a per-cell check
+            # with `result='fail'` or `'warning'` and `scope='per_cell'`
+            # would silently omit the `temporal_completeness` entry
+            # from every cell's `failed_checks` array. Sorted ASC for
+            # deterministic JSON diffs.
+            "affected_cells": sorted(cell_gaps.keys()),
         },
     }
 
@@ -1086,6 +1103,13 @@ def _check_soil_completeness(unified_data, platform: str) -> Dict[str, Any]:
             "sample_missing": {
                 str(k): v for k, v in missing_by_cell.items()
             },
+            # V2-22c-PRE codex P2 #2 — `_build_cell_summary` pivots
+            # per-cell `failed_checks` from `details.affected_cells`,
+            # not `sample_missing`. Without this list, incomplete
+            # soil cells never surface the `soil_completeness_<platform>`
+            # entry on their per-cell chip strip. Sorted ASC for
+            # deterministic JSON diffs.
+            "affected_cells": sorted(missing_by_cell.keys()),
         },
     }
 

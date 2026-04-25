@@ -526,3 +526,238 @@ class TestCellFailedCheckDetailsFlatten:
         out = pipeline._build_cell_summary(unified, report)
         check_ids = [e["check_id"] for e in out["cells"][0]["failed_checks"]]
         assert check_ids == sorted(check_ids)
+
+
+class TestTemporalCompletenessAffectedCells:
+    """V2-22c-PRE codex P2 #1 — `temporal_completeness` check
+    emits `details.affected_cells` (sorted ASC) so the per-cell
+    failed_checks pivot picks up cells with missing dates. Without
+    this list, gap cells would silently lose the `temporal_completeness`
+    chip on the cockpit Layer 2 chip strip."""
+
+    def test_temporal_completeness_emits_affected_cells_for_gaps(self):
+        from datetime import date
+        from types import SimpleNamespace
+        from prismpy.models.climate import ClimateRecord, ClimateTimeSeries
+        from prismpy.validators.scientific import _check_temporal_completeness
+
+        # Build a tiny climate dict: cell 0 has a 2-day gap; cell 1
+        # is complete. Expect affected_cells == [0].
+        climate = {
+            0: ClimateTimeSeries(
+                records=[
+                    ClimateRecord(
+                        date=date(2020, 1, d),
+                        tmax=25.0, tmin=15.0, precip=0.0, srad=20.0,
+                    )
+                    for d in range(1, 4)  # 3 days; expected 5 → gap
+                ],
+                location_id="0", lat=0.5, lon=0.5, source="test",
+            ),
+            1: ClimateTimeSeries(
+                records=[
+                    ClimateRecord(
+                        date=date(2020, 1, d),
+                        tmax=25.0, tmin=15.0, precip=0.0, srad=20.0,
+                    )
+                    for d in range(1, 6)  # 5 days; complete
+                ],
+                location_id="1", lat=0.5, lon=0.5, source="test",
+            ),
+        }
+        unified = UnifiedData(
+            region=_make_region(), climate=climate, soil={},
+        )
+        # `_check_temporal_completeness` reads
+        # `config.temporal.{start_year,spinup_years}` plus
+        # `config.crop.calendar` (passed to `temporal.get_climate_end_date`).
+        # Synth a minimal SimpleNamespace tree that satisfies the
+        # attribute path without booting the full ProjectConfig
+        # schema (which has many unrelated required fields).
+        from datetime import date as _date
+
+        class _FakeTemporal:
+            def __init__(self):
+                self.start_year = 2020
+                self.end_year = 2020
+                self.spinup_years = 0
+
+            def get_climate_end_date(self, crop_cal):
+                return _date(2020, 1, 5)
+
+        config = SimpleNamespace(
+            temporal=_FakeTemporal(),
+            crop=SimpleNamespace(calendar=None),
+        )
+        check = _check_temporal_completeness(unified, config)
+        assert "affected_cells" in check["details"]
+        assert 0 in check["details"]["affected_cells"]
+        assert check["details"]["affected_cells"] == sorted(
+            check["details"]["affected_cells"]
+        )
+
+
+class TestSoilCompletenessAffectedCells:
+    """V2-22c-PRE codex P2 #2 — `soil_completeness_<platform>` emits
+    `details.affected_cells` so the per-cell `failed_checks` pivot
+    surfaces incomplete-soil cells correctly. Without this list, the
+    pivot would skip the check (sample_missing dict doesn't drive
+    the pivot)."""
+
+    def test_soil_completeness_emits_affected_cells_for_incomplete(self):
+        from prismpy.validators.scientific import _check_soil_completeness
+
+        # Cell 0 has clay only; required props for craft include
+        # sand/clay/silt/organic_carbon/ph/bulk_density → 5 missing.
+        # Cell 1 is complete.
+        soil = {
+            0: SoilProfile(
+                profile_id="p0", lat=0.5, lon=0.5, source="iSDA",
+                layers=[SoilLayer(
+                    depth_top=0, depth_bottom=0.2,
+                    sand=40, clay=30, silt=30,
+                    # organic_carbon, ph, bulk_density absent
+                )],
+            ),
+            1: SoilProfile(
+                profile_id="p1", lat=0.5, lon=0.5, source="iSDA",
+                layers=[SoilLayer(
+                    depth_top=0, depth_bottom=0.2,
+                    sand=40, clay=30, silt=30,
+                    organic_carbon=2.0, ph=6.5, bulk_density=1.4,
+                )],
+            ),
+        }
+        unified = UnifiedData(
+            region=_make_region(), soil=soil, climate={},
+        )
+        check = _check_soil_completeness(unified, "craft")
+        assert "affected_cells" in check["details"]
+        # Cell 0 missing properties → in affected_cells.
+        assert 0 in check["details"]["affected_cells"]
+        # Cell 1 complete → NOT in affected_cells.
+        assert 1 not in check["details"]["affected_cells"]
+        assert check["details"]["affected_cells"] == sorted(
+            check["details"]["affected_cells"]
+        )
+
+
+class TestCoverageCategoryMapping:
+    """V2-22c-PRE codex P2 #3 — `coverage_climate_cells` and
+    `coverage_soil_cells` (D36) classify under category 'coverage'
+    in the validation report's category rollup. Without the mapping
+    they fall through to the schema fallback and the cockpit's
+    coverage-chip rendering disagrees with the validator's category
+    summary."""
+
+    def test_coverage_climate_cells_classified_as_coverage(self):
+        from prismpy.validators.scientific import _get_check_category
+        assert _get_check_category("coverage_climate_cells") == "coverage"
+
+    def test_coverage_soil_cells_classified_as_coverage(self):
+        from prismpy.validators.scientific import _get_check_category
+        assert _get_check_category("coverage_soil_cells") == "coverage"
+
+
+class TestValidationReportEnvelopeExtraction:
+    """V2-22c-PRE codex P1 #1 — `_build_cell_summary` accepts the
+    nested scientific report (the dict with `checks: [...]`), NOT the
+    validation_summary envelope (`{'scientific': {...}, 'post_translate':
+    {...}}`). The fix at the executor's package-stage call site
+    extracts `validate_result.data['scientific']` before passing in.
+
+    This test pins the read contract: `_build_cell_summary` reads
+    `validation_report.get('checks', [])` directly. If a future
+    refactor passes the envelope, the per-cell pivot returns empty
+    arrays for every cell and the cockpit rendering goes silently
+    blank. The fix at executor.py:3024-3027 extracts the nested
+    report; the unit test below exercises the call signature
+    contract."""
+
+    def test_passing_envelope_yields_empty_failed_checks(self):
+        """Negative regression: when the WRONG shape (the envelope)
+        is passed, `_build_cell_summary` reads `checks` from the
+        envelope (which is absent) and emits empty arrays. The
+        executor-side fix extracts `data['scientific']` so the
+        method receives the right shape; this test confirms the
+        envelope-vs-report distinction matters at the read site."""
+        pipeline = _make_pipeline()
+        unified = UnifiedData(region=_make_region(), grid=_make_grid(n_cells=1))
+        envelope = {
+            "scientific": {
+                "validation_version": "2.0",
+                "checks": [{
+                    "check": "value_range_tmax",
+                    "scope": "per_record",
+                    "result": "fail",
+                    "details": {"affected_cells": [0]},
+                }],
+            },
+            "post_translate": {"checks": []},
+        }
+        # Passing the envelope (wrong shape) yields empty failed_checks.
+        out = pipeline._build_cell_summary(unified, envelope)
+        assert out["cells"][0]["failed_checks"] == [], (
+            "envelope as `validation_report` produces empty failed_checks "
+            "— this is the codex P1 #1 bug; the executor's package "
+            "stage must extract `data['scientific']` before passing in"
+        )
+        # Passing the nested report (correct shape) yields populated.
+        out = pipeline._build_cell_summary(unified, envelope["scientific"])
+        assert len(out["cells"][0]["failed_checks"]) == 1
+        assert out["cells"][0]["failed_checks"][0]["check_id"] == "value_range_tmax"
+
+
+class TestProjectConfigRemediationSpec:
+    """V2-22c-PRE codex P1 #2 — `ProjectConfig` carries an optional
+    `remediation_spec: Dict[str, Any]` field. Without this, Pydantic
+    v2's model_validate drops the extra input on real cockpit
+    submissions and the REMEDIATION stage's getattr-from-config
+    silently returns None → server-side Veto #4 enforcement never
+    fires on any real run."""
+
+    def test_remediation_spec_field_present_with_default_none(self):
+        from prismpy.config.schema import ProjectConfig
+        # Field exists on the model.
+        assert "remediation_spec" in ProjectConfig.model_fields
+        # Default is None — original runs and retries are no-op.
+        field = ProjectConfig.model_fields["remediation_spec"]
+        assert field.default is None
+
+    def test_remediation_spec_survives_validation(self):
+        from prismpy.config.schema import ProjectConfig
+        spec = {
+            "imputations": [
+                {"cell_id": 4, "method": "idw"},
+            ],
+            "exclusions": {"cells": [], "days": []},
+        }
+        cfg = ProjectConfig.model_validate({
+            "project": {"name": "t", "version": "1"},
+            "region": {
+                "name": "t", "country": "t", "country_iso3": "TST",
+                "boundary": {
+                    "source": "gadm", "gadm_level": 2,
+                    "gadm_filter_field": "NAME_2",
+                    "gadm_filter_value": "T",
+                },
+            },
+            "crop": {
+                "name": "maize", "name_short": "MZ",
+                "calendar": {
+                    "planting_doy": 90, "maturity_doy": 270,
+                    "source": "wizard", "reference": "",
+                },
+            },
+            "temporal": {
+                "start_year": 2020, "end_year": 2020,
+                "spinup_years": 0,
+            },
+            "remediation_spec": spec,
+        })
+        assert cfg.remediation_spec == spec, (
+            "remediation_spec was dropped by Pydantic — codex P1 #2 "
+            "regression. The field MUST be declared on ProjectConfig "
+            "so cockpit-bulk-fix re-runs reach the Veto #4 "
+            "enforcement instead of taking the no-op branch."
+        )

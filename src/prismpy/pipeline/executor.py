@@ -2645,13 +2645,32 @@ class TranslationPipeline:
                 enabled_platforms = [
                     p.value for p in self.config.get_enabled_platforms()
                 ]
+                # V2-22c-PRE codex P2 #4 — gate the sampler on
+                # SARRA-Py translation SUCCESS, not just enabled.
+                # When SARRA-Py is enabled but its translation failed,
+                # `base_dir/sarra_py` may still exist and contain
+                # stale or partial GeoTIFFs from a previous successful
+                # run. Reading those would feed false-positive per-cell
+                # climate values into validation + the cockpit's
+                # `has_climate` rendering. R6-class regression risk.
+                # Source the directory from the actual translation
+                # result so a failed run can't shadow the sampler.
+                sarra_translation_result = (
+                    translation_results.get('sarra_py')
+                    if isinstance(translation_results, dict)
+                    else None
+                )
                 if (
                     "sarra_py" in enabled_platforms
                     and unified_data.grid is not None
                     and getattr(unified_data.grid, 'cells', None)
+                    and sarra_translation_result is not None
+                    and getattr(sarra_translation_result, 'success', False)
                 ):
-                    base_dir_local = Path(self.config.output.base_dir)
-                    sarra_dir = base_dir_local / "sarra_py"
+                    sarra_dir = Path(getattr(
+                        sarra_translation_result, 'output_dir',
+                        Path(self.config.output.base_dir) / 'sarra_py',
+                    ))
                     if sarra_dir.is_dir():
                         from prismpy.validators.post_translate import (
                             sample_sarra_py_per_cell,
@@ -3021,9 +3040,24 @@ class TranslationPipeline:
                     # context into the top-level `cell_failed_check_details`.
                     if unified_data and hasattr(unified_data, 'grid') and unified_data.grid:
                         try:
-                            _val_report_for_cells = (
+                            # V2-22c-PRE codex P1 #1 — `validate_result.data`
+                            # is the validation_summary envelope
+                            # (`{'scientific': {...}, 'post_translate': {...}}`),
+                            # NOT the raw report. `_build_cell_summary` reads
+                            # `validation_report.get('checks', [])` so passing
+                            # the envelope produces empty `failed_checks` even
+                            # when the scientific report has failing checks.
+                            # Extract the merged scientific report (the
+                            # validate stage merges post_translate's per-cell
+                            # checks into this) so the pivot fires correctly.
+                            _val_data = (
                                 validate_result.data
                                 if validate_result and validate_result.data
+                                else None
+                            )
+                            _val_report_for_cells = (
+                                _val_data.get('scientific')
+                                if isinstance(_val_data, dict)
                                 else None
                             )
                             # V2-22c-PRE.2.3 — when the validate stage

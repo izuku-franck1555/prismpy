@@ -1921,6 +1921,30 @@ class ProjectConfig(BaseModel):
         description="Validation configuration"
     )
 
+    # V2-22c-PRE.4.2 (D32) — remediation spec submitted by the
+    # cockpit's bulk-fix re-run path. Optional dict so original
+    # runs and retries default to None and the REMEDIATION stage
+    # takes its no-op path. Cockpit-derived re-runs carry a
+    # structured payload (`exclusions`, `imputations`,
+    # `substitutions`, `overrides`) that `_execute_remediation`
+    # iterates through with Veto #4 server enforcement.
+    #
+    # Pydantic v2 default behavior is to drop extra inputs when
+    # the field isn't declared on the model — without this
+    # declaration, a real cockpit submission would silently lose
+    # `remediation_spec` during config validation and
+    # `getattr(self.config, 'remediation_spec', None)` in the
+    # remediation handler would always see None. Codex P1 #2.
+    remediation_spec: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Optional remediation spec from cockpit-bulk-fix re-runs "
+            "(V2-22c-PRE.4.2 / D32). Original runs and retries leave "
+            "this as None; cockpit-derived re-runs carry the structured "
+            "payload that _execute_remediation iterates."
+        ),
+    )
+
     # Generic parameters (platform agnostic)
     management: Optional[ManagementConfig] = Field(
         default=None,
