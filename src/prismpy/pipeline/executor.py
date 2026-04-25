@@ -2783,9 +2783,21 @@ class TranslationPipeline:
                     # V2-21 C-group: generate cell_summary.json for the
                     # interactive map. Per-cell metadata enables Leaflet
                     # to color cells by validation status + show tooltips.
+                    # V2-22c-PRE.1.2 / 1.8 — thread the validation_report
+                    # through so _build_cell_summary can pivot the
+                    # per-check `affected_cells` lists into per-cell
+                    # `failed_checks` arrays + flatten the per-violation
+                    # context into the top-level `cell_failed_check_details`.
                     if unified_data and hasattr(unified_data, 'grid') and unified_data.grid:
                         try:
-                            cell_summary = self._build_cell_summary(unified_data)
+                            _val_report_for_cells = (
+                                validate_result.data
+                                if validate_result and validate_result.data
+                                else None
+                            )
+                            cell_summary = self._build_cell_summary(
+                                unified_data, _val_report_for_cells,
+                            )
                             cs_path = platform_dir / "cell_summary.json"
                             with open(cs_path, "w", encoding="utf-8") as csf:
                                 _json.dump(cell_summary, csf, indent=2,
@@ -2825,7 +2837,68 @@ class TranslationPipeline:
             duration_seconds=duration,
         )
 
-    def _build_cell_summary(self, unified_data) -> Dict[str, Any]:
+    # V2-22c-PRE.1.2 (D34) — per-prefix → category mapping for the
+    # per-cell `failed_checks` pivot. Keys are check_id prefixes;
+    # values are the cockpit's left-rail dimension-toggle category
+    # enum. Tuple-of-pairs preserves match order (longest-prefix-first
+    # discipline isn't needed today since the prefixes don't nest, but
+    # the ordered shape is robust to future additions).
+    #
+    # The cockpit's left-rail dimension toggle (D21) reads `category`
+    # to project per-dimension status; bare `check_id` strings would
+    # require the cockpit to recompute the prefix→category mapping
+    # client-side, duplicating the schema discipline. Per §6.4
+    # schema-bounds-match-strictest-downstream-consumer, the
+    # validator-side projection is canonical.
+    _CATEGORY_FROM_PREFIX = (
+        ("value_range_", "value_range"),
+        ("cross_variable_consistency", "cross_variable"),
+        ("temporal_completeness", "temporal"),
+        ("soil_completeness_", "soil_completeness"),
+        ("region_specific_bounds", "region_specific_bounds"),
+        ("coverage_climate_cells", "coverage_per_cell"),
+        ("coverage_soil_cells", "coverage_per_cell"),
+    )
+
+    # Scopes that the validator emits with per-cell semantics. Region-
+    # level checks (`format_compliance`, `spatial_temporal_coverage`,
+    # `region_specific_bounds` when scope=global) carry scope='global'
+    # and are excluded from the per-cell pivot — the cockpit's
+    # Region-Level Status Banner consumes them via validation_report
+    # directly per Appendix H two-zone rendering.
+    _PER_CELL_SCOPES = frozenset({"per_cell", "per_record", "per_layer"})
+
+    @classmethod
+    def _category_for_check_id(cls, check_id: str) -> Optional[str]:
+        """Return the per-cell dimension-toggle category for a
+        check_id, or None if the check is not per-cell-scoped."""
+        for prefix, category in cls._CATEGORY_FROM_PREFIX:
+            if check_id.startswith(prefix):
+                return category
+        return None
+
+    @staticmethod
+    def _affected_cell_ids(affected) -> set:
+        """Coerce a heterogeneous `details.affected_cells` list into a
+        flat set of cell_ids. PRE.1.4/1.5 emit `(cell_id, layer_idx)`
+        tuples; PRE.1.7 emits bare cell_ids; the per-cell pivot is
+        cell-id only, so layer_idx is discarded here. Duck-typed so a
+        future check that emits a different tuple shape still surfaces
+        the cell_id correctly."""
+        out = set()
+        for entry in affected or []:
+            if isinstance(entry, (list, tuple)):
+                if len(entry) >= 1:
+                    out.add(entry[0])
+            else:
+                out.add(entry)
+        return out
+
+    def _build_cell_summary(
+        self,
+        unified_data,
+        validation_report: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Build per-cell summary for the interactive map.
 
         Gathers validation-relevant metadata per grid cell:
@@ -2833,9 +2906,21 @@ class TranslationPipeline:
         - Soil source from SoilProfile.source
         - Climate ranges from per-cell time series (if available)
         - Validation status derived from soil source + data availability
+        - V2-22c-PRE.1.2: per-cell `failed_checks` array pivoted from
+          ``validation_report.checks`` (when provided)
+        - V2-22c-PRE.1.8: top-level `cell_failed_check_details` array
+          flattened from ``validation_report.checks[i].details.
+          violation_details`` (when provided)
+
+        ``validation_report`` is optional so callers that don't have a
+        post-validate report (legacy CLI smoke, mid-pipeline previews,
+        unit tests bypassing __init__) still get a well-formed dict.
+        When omitted, every cell carries `failed_checks: []` and the
+        top-level `cell_failed_check_details` list is empty.
 
         Returns:
-            Dict with 'cells' list + 'resolution' + 'n_cells'
+            Dict with 'cells' list + 'resolution' + 'n_cells' +
+            'cell_summary_version' + 'cell_failed_check_details'
         """
         grid = unified_data.grid
         soil = unified_data.soil or {}
@@ -2848,6 +2933,12 @@ class TranslationPipeline:
                 "id": cid,
                 "lat": round(cell.lat, 6),
                 "lon": round(cell.lon, 6),
+                # V2-22c-PRE.1.2 — initialize empty list per evaluator
+                # §12.2 binding: cells with no failures emit
+                # `failed_checks: []` (empty list, NOT absent key).
+                # The pivot below appends entries for every per-cell-
+                # scoped check this cell shows up on.
+                "failed_checks": [],
             }
 
             # Soil source
@@ -2921,6 +3012,94 @@ class TranslationPipeline:
 
             cells.append(cell_data)
 
+        # V2-22c-PRE.1.2 (D34) — pivot per-check `affected_cells` lists
+        # into per-cell `failed_checks` structured arrays. Each entry on
+        # a cell is a 3-key object {check_id, result, category}
+        # (evaluator §12.2 Pydantic-style binding). Region-scoped
+        # checks (scope='global') are excluded from the per-cell pivot
+        # — they live in the banner per Appendix H.
+        #
+        # V2-22c-PRE.1.8 (D35) — flatten per-violation context into the
+        # top-level `cell_failed_check_details` array. Each entry
+        # carries the full (cell_id, check_id, result, layer_idx,
+        # variable, value, unit, bounds) tuple the cockpit drawer
+        # renders directly.
+        cell_failed_check_details: List[Dict[str, Any]] = []
+        cells_by_id = {c["id"]: c for c in cells}
+        if isinstance(validation_report, dict):
+            for check in validation_report.get("checks", []) or []:
+                result = check.get("result")
+                if result not in ("fail", "warning"):
+                    continue
+                if check.get("scope") not in self._PER_CELL_SCOPES:
+                    continue
+                check_id = check.get("check")
+                if not isinstance(check_id, str):
+                    continue
+                category = self._category_for_check_id(check_id)
+                if category is None:
+                    # Per-cell-scoped check whose check_id doesn't
+                    # match a known prefix — skip rather than emit a
+                    # category=None entry that would fail the
+                    # downstream Pydantic-style validation. Surfaces
+                    # as a sibling-sweep finding at evaluator §12.2.
+                    continue
+                details = check.get("details") or {}
+                affected_ids = self._affected_cell_ids(
+                    details.get("affected_cells"),
+                )
+                entry_template = {
+                    "check_id": check_id,
+                    "result": result,
+                    "category": category,
+                }
+                for cell_id in affected_ids:
+                    cell = cells_by_id.get(cell_id)
+                    if cell is None:
+                        # affected_cells lists a cell_id that the grid
+                        # doesn't know about — defensive skip; the
+                        # validator should never emit IDs outside the
+                        # grid, but a stale validation_report against
+                        # a re-built grid (PRE.3 exclude_cells path)
+                        # could surface this.
+                        continue
+                    cell["failed_checks"].append(dict(entry_template))
+
+                # PRE.1.8 flatten — per-violation detail rows.
+                for vd in details.get("violation_details", []) or []:
+                    if not isinstance(vd, dict):
+                        continue
+                    cell_id = vd.get("cell_id")
+                    if cell_id is None or cell_id not in cells_by_id:
+                        continue
+                    cell_failed_check_details.append({
+                        "cell_id": cell_id,
+                        "check_id": check_id,
+                        "result": result,
+                        "category": category,
+                        "layer_idx": vd.get("layer_idx"),
+                        "variable": vd.get("variable"),
+                        "value": vd.get("value"),
+                        "unit": vd.get("unit"),
+                        "bounds": vd.get("bounds"),
+                    })
+
+        # Stable ordering for both the per-cell `failed_checks` arrays
+        # and the top-level `cell_failed_check_details` list — sorted
+        # by (check_id, result) so reproducible JSON diffs survive
+        # any future change in validator iteration order. Evaluator §2
+        # binding for cockpit-cursor stability.
+        for cell in cells:
+            cell["failed_checks"].sort(
+                key=lambda e: (e["check_id"], e["result"]),
+            )
+        cell_failed_check_details.sort(
+            key=lambda e: (
+                e["cell_id"], e["check_id"],
+                e.get("layer_idx") if e.get("layer_idx") is not None else -1,
+            ),
+        )
+
         return {
             # V2-22c-PRE.1.1 (D5/D7) — `cell_summary_version: "2.0"` matches
             # the existing `validation_version: "2.0"` precedent at
@@ -2933,6 +3112,10 @@ class TranslationPipeline:
             "n_cells": len(cells),
             "resolution": getattr(grid, 'resolution', '5arcmin'),
             "cells": cells,
+            # V2-22c-PRE.1.8 — top-level array; cockpit drawer reads
+            # this directly so a single read renders the full
+            # violation context without joining back to cells.
+            "cell_failed_check_details": cell_failed_check_details,
         }
 
     def execute(

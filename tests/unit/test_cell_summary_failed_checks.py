@@ -257,3 +257,272 @@ class TestSoilClassField:
         )
         assert classes[0] == "Sand"
         assert classes[1] == "Clay"
+
+
+def _validation_report(*checks):
+    """Wrap a list of synthetic check dicts in the validation_report
+    envelope shape (`{validation_version, checks: [...]}`). Tests
+    inject these straight into `_build_cell_summary` to exercise
+    the PRE.1.2 / PRE.1.8 pivot without spinning up the full
+    validate stage."""
+    return {"validation_version": "2.0", "checks": list(checks)}
+
+
+class TestFailedChecksEmptyByDefault:
+    """V2-22c-PRE.1.2 evaluator §12.2 binding — cells with no
+    failures emit `failed_checks: []` (empty list, NOT absent key).
+    Without the empty-list guarantee, a cockpit JS that uses
+    `cell.failed_checks.length === 0` for the pass-state branch
+    breaks on cells that never had a chance to fail."""
+
+    def test_no_validation_report_yields_empty_failed_checks_per_cell(self):
+        pipeline = _make_pipeline()
+        unified = UnifiedData(region=_make_region(), grid=_make_grid())
+        out = pipeline._build_cell_summary(unified)
+        for cell in out["cells"]:
+            assert cell["failed_checks"] == [], (
+                f"cell {cell['id']} expected failed_checks=[]; "
+                f"got {cell['failed_checks']!r}"
+            )
+
+    def test_no_validation_report_yields_empty_top_level_details(self):
+        pipeline = _make_pipeline()
+        unified = UnifiedData(region=_make_region(), grid=_make_grid())
+        out = pipeline._build_cell_summary(unified)
+        assert out["cell_failed_check_details"] == []
+
+    def test_passing_check_does_not_pivot_into_failed_checks(self):
+        """A `result='pass'` check must NOT appear on any cell — only
+        fail / warning land in failed_checks."""
+        pipeline = _make_pipeline()
+        unified = UnifiedData(region=_make_region(), grid=_make_grid())
+        report = _validation_report({
+            "check": "value_range_tmax",
+            "scope": "per_record",
+            "result": "pass",
+            "details": {"affected_cells": [0, 1]},
+        })
+        out = pipeline._build_cell_summary(unified, report)
+        for cell in out["cells"]:
+            assert cell["failed_checks"] == []
+
+
+class TestFailedChecksStructuredShape:
+    """V2-22c-PRE.1.2 evaluator §12.2 — every entry has the exact
+    3-key shape `{check_id, result, category}`. No extras, no
+    missing, no bare check_id strings."""
+
+    def test_per_cell_check_pivots_into_failed_checks(self):
+        pipeline = _make_pipeline()
+        unified = UnifiedData(region=_make_region(), grid=_make_grid(n_cells=2))
+        report = _validation_report({
+            "check": "value_range_tmax",
+            "scope": "per_record",
+            "result": "fail",
+            "details": {"affected_cells": [0]},
+        })
+        out = pipeline._build_cell_summary(unified, report)
+        assert len(out["cells"][0]["failed_checks"]) == 1
+        assert out["cells"][1]["failed_checks"] == []
+
+    def test_failed_check_entry_has_exactly_three_keys(self):
+        pipeline = _make_pipeline()
+        unified = UnifiedData(region=_make_region(), grid=_make_grid(n_cells=1))
+        report = _validation_report({
+            "check": "temporal_completeness",
+            "scope": "per_cell",
+            "result": "warning",
+            "details": {"affected_cells": [0]},
+        })
+        out = pipeline._build_cell_summary(unified, report)
+        entry = out["cells"][0]["failed_checks"][0]
+        assert set(entry.keys()) == {"check_id", "result", "category"}, (
+            f"entry must have exactly 3 keys; got {set(entry.keys())!r}"
+        )
+        assert entry["check_id"] == "temporal_completeness"
+        assert entry["result"] == "warning"
+        assert entry["category"] == "temporal"
+
+    def test_result_only_fail_or_warning(self):
+        """Evaluator §12.2 — `result ∈ {"fail", "warning"}` literal.
+        The pivot's pre-filter excludes `pass` and `info`."""
+        pipeline = _make_pipeline()
+        unified = UnifiedData(region=_make_region(), grid=_make_grid(n_cells=1))
+        report = _validation_report(
+            {
+                "check": "value_range_tmax",
+                "scope": "per_record",
+                "result": "info",
+                "details": {"affected_cells": [0]},
+            },
+            {
+                "check": "value_range_tmin",
+                "scope": "per_record",
+                "result": "fail",
+                "details": {"affected_cells": [0]},
+            },
+        )
+        out = pipeline._build_cell_summary(unified, report)
+        entries = out["cells"][0]["failed_checks"]
+        assert len(entries) == 1
+        assert entries[0]["check_id"] == "value_range_tmin"
+        assert entries[0]["result"] == "fail"
+
+
+class TestFailedChecksRegionScopeExcluded:
+    """V2-22c-PRE.1.2 evaluator §12.2 — region-scoped checks
+    (scope='global') MUST NOT appear in per-cell failed_checks.
+    They live in the banner per Appendix H two-zone rendering;
+    leaking them into per-cell would double-render the same
+    failure on every cell."""
+
+    def test_global_scope_check_excluded_from_per_cell_pivot(self):
+        pipeline = _make_pipeline()
+        unified = UnifiedData(region=_make_region(), grid=_make_grid(n_cells=1))
+        report = _validation_report(
+            {
+                "check": "format_compliance",
+                "scope": "global",
+                "result": "fail",
+                "details": {"affected_cells": [0]},
+            },
+            {
+                "check": "spatial_temporal_coverage",
+                "scope": "global",
+                "result": "warning",
+                "details": {"affected_cells": [0]},
+            },
+        )
+        out = pipeline._build_cell_summary(unified, report)
+        assert out["cells"][0]["failed_checks"] == [], (
+            "global-scope checks leaked into per-cell failed_checks; "
+            "Appendix H two-zone rendering is broken — banner + map "
+            "would render the same failure twice."
+        )
+
+    def test_unknown_check_id_prefix_does_not_pivot(self):
+        """A per-cell-scoped check whose check_id doesn't match a
+        known `_CATEGORY_FROM_PREFIX` prefix is skipped. Surfaces
+        as a sibling-sweep finding at evaluator §12.2 — the
+        validator should never emit such a check_id."""
+        pipeline = _make_pipeline()
+        unified = UnifiedData(region=_make_region(), grid=_make_grid(n_cells=1))
+        report = _validation_report({
+            "check": "future_unknown_check_id_xyz",
+            "scope": "per_cell",
+            "result": "fail",
+            "details": {"affected_cells": [0]},
+        })
+        out = pipeline._build_cell_summary(unified, report)
+        assert out["cells"][0]["failed_checks"] == []
+
+
+class TestFailedChecksTupleAffectedCells:
+    """PRE.1.4/1.5 emit `(cell_id, layer_idx)` tuples; PRE.1.7 emits
+    bare cell_ids; the pivot must duck-type-extract the cell_id from
+    either shape."""
+
+    def test_tuple_affected_cells_extract_cell_id(self):
+        pipeline = _make_pipeline()
+        unified = UnifiedData(region=_make_region(), grid=_make_grid(n_cells=2))
+        report = _validation_report({
+            "check": "value_range_soil_clay",
+            "scope": "per_layer",
+            "result": "warning",
+            "details": {"affected_cells": [(0, 0), (1, 2)]},
+        })
+        out = pipeline._build_cell_summary(unified, report)
+        assert len(out["cells"][0]["failed_checks"]) == 1
+        assert len(out["cells"][1]["failed_checks"]) == 1
+
+
+class TestCellFailedCheckDetailsFlatten:
+    """V2-22c-PRE.1.8 (D35) — top-level `cell_failed_check_details`
+    array carries per-violation context (cell, check_id, result,
+    category, layer_idx, variable, value, unit, bounds). Cockpit
+    drawer reads this directly without joining back to cells."""
+
+    def test_violation_details_flattened_into_top_level(self):
+        pipeline = _make_pipeline()
+        unified = UnifiedData(region=_make_region(), grid=_make_grid(n_cells=1))
+        report = _validation_report({
+            "check": "value_range_soil_clay",
+            "scope": "per_layer",
+            "result": "warning",
+            "details": {
+                "affected_cells": [(0, 2)],
+                "violation_details": [{
+                    "cell_id": 0, "layer_idx": 2,
+                    "variable": "clay", "value": 89.0,
+                    "unit": "%", "bounds": [0, 100],
+                }],
+            },
+        })
+        out = pipeline._build_cell_summary(unified, report)
+        details = out["cell_failed_check_details"]
+        assert len(details) == 1
+        d = details[0]
+        assert d["cell_id"] == 0
+        assert d["check_id"] == "value_range_soil_clay"
+        assert d["result"] == "warning"
+        assert d["category"] == "value_range"
+        assert d["layer_idx"] == 2
+        assert d["variable"] == "clay"
+        assert d["value"] == pytest.approx(89.0)
+        assert d["unit"] == "%"
+        assert d["bounds"] == [0, 100]
+
+    def test_violation_details_sorted_by_cell_then_check_then_layer(self):
+        pipeline = _make_pipeline()
+        unified = UnifiedData(region=_make_region(), grid=_make_grid(n_cells=3))
+        report = _validation_report(
+            {
+                "check": "value_range_soil_clay",
+                "scope": "per_layer",
+                "result": "warning",
+                "details": {
+                    "affected_cells": [(2, 0), (0, 0), (1, 0)],
+                    "violation_details": [
+                        {"cell_id": 2, "layer_idx": 0, "variable": "clay",
+                         "value": 89.0, "unit": "%", "bounds": [0, 100]},
+                        {"cell_id": 0, "layer_idx": 0, "variable": "clay",
+                         "value": 88.0, "unit": "%", "bounds": [0, 100]},
+                        {"cell_id": 1, "layer_idx": 0, "variable": "clay",
+                         "value": 92.0, "unit": "%", "bounds": [0, 100]},
+                    ],
+                },
+            },
+        )
+        out = pipeline._build_cell_summary(unified, report)
+        details = out["cell_failed_check_details"]
+        cell_order = [d["cell_id"] for d in details]
+        assert cell_order == sorted(cell_order)
+
+    def test_per_cell_failed_checks_sorted_within_cell(self):
+        """Within a single cell, multiple failed checks are sorted by
+        (check_id, result) so cockpit chip rendering is stable."""
+        pipeline = _make_pipeline()
+        unified = UnifiedData(region=_make_region(), grid=_make_grid(n_cells=1))
+        report = _validation_report(
+            {
+                "check": "temporal_completeness",
+                "scope": "per_cell",
+                "result": "warning",
+                "details": {"affected_cells": [0]},
+            },
+            {
+                "check": "value_range_tmax",
+                "scope": "per_record",
+                "result": "fail",
+                "details": {"affected_cells": [0]},
+            },
+            {
+                "check": "cross_variable_consistency",
+                "scope": "per_record",
+                "result": "warning",
+                "details": {"affected_cells": [0]},
+            },
+        )
+        out = pipeline._build_cell_summary(unified, report)
+        check_ids = [e["check_id"] for e in out["cells"][0]["failed_checks"]]
+        assert check_ids == sorted(check_ids)
