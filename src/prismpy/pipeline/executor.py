@@ -2974,8 +2974,49 @@ class TranslationPipeline:
                 # (valid profile / empty layers / no profile).
                 cell_data["soil_class"] = None
 
+            # V2-22c-PRE.1.10 (D37) — per-cell cascade-provenance
+            # projection. Reads each source's metadata field and emits
+            # the cockpit-consumable shape under `cell.sources.{climate,
+            # soil}.{name, version, cascade_rank, fallback_attempts}`.
+            #
+            # Source loaders + cascade orchestrator populate these
+            # metadata keys; this read path defaults to `cascade_rank=1`
+            # and `fallback_attempts=[]` when the orchestrator hasn't
+            # threaded through (e.g., legacy fixtures, mid-pipeline
+            # previews). The cockpit drawer (AC-14.3) renders the
+            # cascade as "Climate: AgERA5 v2.0 (rank 1 of 2 — iSDA
+            # failed, HWSD fallback used)" — needs all four fields
+            # available, with deterministic defaults so the rank-1
+            # primary-success case still surfaces a sensible string.
+            #
+            # Per D37 contract: the field is elided per cascade-class
+            # when no source emitted profile/ts for the cell — the
+            # cell's missing-data state is surfaced via PRE.1.9
+            # coverage checks, not via a half-populated `sources`.
+            sources_block: Dict[str, Any] = {}
+            if profile is not None and hasattr(profile, 'source'):
+                meta = getattr(profile, 'metadata', None) or {}
+                sources_block["soil"] = {
+                    "name": meta.get("source", profile.source),
+                    "version": meta.get("version"),
+                    "cascade_rank": meta.get("cascade_rank", 1),
+                    "fallback_attempts": meta.get("fallback_attempts", []),
+                }
+
             # Climate data (per-cell time series if available)
             ts = climate.get(cid)
+            if ts and hasattr(ts, 'metadata'):
+                ts_meta = ts.metadata or {}
+                sources_block["climate"] = {
+                    "name": ts_meta.get("source", getattr(ts, 'source', None)),
+                    "version": ts_meta.get("version"),
+                    "cascade_rank": ts_meta.get("cascade_rank", 1),
+                    "fallback_attempts": ts_meta.get("fallback_attempts", []),
+                }
+            if sources_block:
+                cell_data["sources"] = sources_block
+
+            # Climate data (per-cell time series if available)
             if ts and hasattr(ts, 'records') and ts.records:
                 tmax_vals = [r.tmax for r in ts.records if r.tmax is not None]
                 tmin_vals = [r.tmin for r in ts.records if r.tmin is not None]
