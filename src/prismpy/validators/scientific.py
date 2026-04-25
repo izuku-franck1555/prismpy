@@ -443,7 +443,10 @@ def _check_temporal_completeness(unified_data, config) -> Dict[str, Any]:
             "n_cells": len(climate),
             "completeness_pct": round(completeness * 100, 2),
             "cells_with_gaps": len(cell_gaps),
-            "gap_details": {str(k): v for k, v in list(cell_gaps.items())[:10]},
+            # V2-22c-PRE.1.3 — un-truncated. Cockpit's per-cell drill-down
+            # is the strictest downstream consumer (§6.4 schema-bounds
+            # discipline); `[:10]` was a UI-driven pre-cockpit optimization.
+            "gap_details": {str(k): v for k, v in cell_gaps.items()},
         },
     }
 
@@ -665,7 +668,8 @@ def _check_cross_variable_consistency(unified_data) -> Dict[str, Any]:
         "details": {
             "total_records": total_records,
             "violations": violations,
-            "affected_cells": list(affected_cells)[:20],
+            # V2-22c-PRE.1.3 — un-truncated for cockpit drill-down.
+            "affected_cells": list(affected_cells),
             "n_affected_cells": len(affected_cells),
         },
     }
@@ -773,7 +777,8 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
                 "observed_max": round(stats["max"], 2),
                 "out_of_range_count": n_oor,
                 "total_values": stats["total"],
-                "affected_cells": list(stats["affected_cells"])[:10],
+                # V2-22c-PRE.1.3 — un-truncated for cockpit drill-down.
+                "affected_cells": list(stats["affected_cells"]),
             },
         })
 
@@ -930,8 +935,9 @@ def _check_soil_completeness(unified_data, platform: str) -> Dict[str, Any]:
             "n_complete": n_complete,
             "n_incomplete": n_incomplete,
             "n_total": n_total,
+            # V2-22c-PRE.1.3 — un-truncated for cockpit drill-down.
             "sample_missing": {
-                str(k): v for k, v in list(missing_by_cell.items())[:5]
+                str(k): v for k, v in missing_by_cell.items()
             },
         },
     }

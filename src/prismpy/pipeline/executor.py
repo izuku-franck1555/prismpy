@@ -2861,6 +2861,17 @@ class TranslationPipeline:
                     else False
                 )
                 cell_data["soil_default"] = is_default
+                # V2-22c-PRE.1.6 (D26) — emit per-cell soil texture class
+                # via the existing SoilProfile.surface_texture USDA-triangle
+                # classifier. Reuses the property at models/soil.py:150-154
+                # — no new classifier. Cockpit's Layer 2 chip strip + Veto
+                # #4 client-side preflight read this for the impute / override
+                # cross-class block. Elide the key when surface_texture is
+                # None (matches existing tmax_range elision pattern); the
+                # cockpit JS tolerates the missing key by design.
+                surface_texture = getattr(profile, 'surface_texture', None)
+                if surface_texture:
+                    cell_data["soil_class"] = surface_texture
             else:
                 cell_data["soil_source"] = "none"
                 cell_data["soil_default"] = False
@@ -2904,6 +2915,14 @@ class TranslationPipeline:
             cells.append(cell_data)
 
         return {
+            # V2-22c-PRE.1.1 (D5/D7) — `cell_summary_version: "2.0"` matches
+            # the existing `validation_version: "2.0"` precedent at
+            # validators/scientific.py:155 and `post_translate_version: "1.0"`
+            # at validators/post_translate.py:114. The cockpit's loader-
+            # fallback at prismweb/core/views.py:_load_cell_summary uses this
+            # field to detect pre-PRE.1 fixtures and synthesize the empty
+            # `failed_checks: []` shape per V2-22c contract D11/D19.
+            "cell_summary_version": "2.0",
             "n_cells": len(cells),
             "resolution": getattr(grid, 'resolution', '5arcmin'),
             "cells": cells,

@@ -474,8 +474,9 @@ def _check_date_continuity(
             "n_gaps": len(gaps),
             "n_duplicates": len(duplicates),
             "n_out_of_order": out_of_order,
-            "sample_gaps": gaps[:5],
-            "sample_duplicates": duplicates[:5],
+            # V2-22c-PRE.1.3 — un-truncated for cockpit per-cell drill-down.
+            "sample_gaps": gaps,
+            "sample_duplicates": duplicates,
         },
     }
 
