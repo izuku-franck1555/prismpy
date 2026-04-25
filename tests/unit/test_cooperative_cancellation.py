@@ -355,7 +355,11 @@ class TestCarveOutRegression:
         ("src/prismpy/pipeline/executor.py", 496),
         # Provenance-flush inside the translator-dispatch except handler
         # in _execute_translate: writes decision records, cancel-inert.
-        ("src/prismpy/pipeline/executor.py", 2338),
+        # Line shifted from 2338 → 2346 after V2-22c-PRE.3.3 thread-
+        # through added the `exclude_cells=` kwarg + comment block to
+        # the `SpatialGrid.from_bounds(...)` call inside
+        # `_execute_retrieve`. Same try block, new line number.
+        ("src/prismpy/pipeline/executor.py", 2346),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed

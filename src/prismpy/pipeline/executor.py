@@ -2075,10 +2075,18 @@ class TranslationPipeline:
                 # Always use 5-arcmin grid for maximum boundary precision.
                 # Platforms that need coarser grids (ACEA=30arcmin) handle
                 # the mapping internally (e.g., _compute_30arcmin_cell_ids).
+                # V2-22c-PRE.3.3 (D15) — thread the operator's
+                # `region.exclude_cells` through to the SpatialGrid
+                # factory. Translators iterate `grid.cells` directly
+                # so the prune propagates without per-translator
+                # edits per the §6.4 schema-bounds discipline.
                 grid = SpatialGrid.from_bounds(
                     region.bounds,
                     resolution="5arcmin",
                     clip_geometry=clip_geometry,
+                    exclude_cells=getattr(
+                        self.config.region, 'exclude_cells', None,
+                    ),
                 )
                 self.logger.info(f"Created grid with {grid.n_cells} cells")
 

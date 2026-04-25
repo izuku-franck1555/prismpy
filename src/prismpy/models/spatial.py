@@ -188,6 +188,7 @@ class SpatialGrid:
         bounds: BoundingBox,
         resolution: Literal["5arcmin", "30arcmin"] = "5arcmin",
         clip_geometry: Optional[Any] = None,
+        exclude_cells: Optional[List[int]] = None,
     ) -> "SpatialGrid":
         """Create a grid from a bounding box, optionally clipped to a polygon.
 
@@ -196,6 +197,12 @@ class SpatialGrid:
             resolution: Grid resolution
             clip_geometry: Optional shapely geometry or GeoDataFrame to clip points.
                           Only points inside this geometry will be included.
+            exclude_cells: Optional list of cell IDs to drop from the
+                grid (V2-22c-PRE.3.2 / D15). Filter applies INSIDE
+                the inner construction loop so the excluded cells
+                never enter the cells list — translators that
+                iterate `grid.cells` automatically inherit the
+                pruning, no per-translator edit required.
 
         Returns:
             SpatialGrid with cells covering the bounding box (or clipped to geometry)
@@ -230,6 +237,14 @@ class SpatialGrid:
                 # If geometry processing fails, fall back to bounding box
                 geometry_union = None
 
+        # V2-22c-PRE.3.2 (D15) — set lookup is O(1) per cell;
+        # construction-time filter avoids materializing the
+        # excluded cells then dropping them. Per §6.4
+        # schema-bounds-match-strictest-downstream-consumer, the
+        # filter lives at the factory locus so every translator
+        # iterating `grid.cells` automatically inherits the prune.
+        exclude_set = set(exclude_cells) if exclude_cells else set()
+
         cells = []
         for row in range(row_min, row_max + 1):
             for col in range(col_min, col_max + 1):
@@ -243,6 +258,10 @@ class SpatialGrid:
                         continue  # Skip points outside the polygon
 
                 cell_id = compute_id(row, col)
+                if cell_id in exclude_set:
+                    # V2-22c-PRE.3.2 (D15) — cell explicitly
+                    # excluded (e.g., post-remediation re-run).
+                    continue
                 cells.append(GridCell(
                     cell_id=cell_id,
                     lat=lat,

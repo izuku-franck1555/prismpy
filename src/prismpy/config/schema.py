@@ -488,6 +488,62 @@ class RegionConfig(BaseModel):
         default_factory=BoundaryConfig,
         description="Boundary extraction configuration"
     )
+    # V2-22c-PRE.3.1 (D10/D15) — list of cell IDs to drop from the
+    # grid at construction time. Used by V2-22c remediation re-runs
+    # for the bulk-fix Exclude class (D8): the cockpit submits a new
+    # PipelineRun derived from the prior config with `exclude_cells`
+    # set to the user-selected cell IDs. Default empty so original
+    # runs and retries pass an empty list.
+    exclude_cells: List[int] = Field(
+        default_factory=list,
+        description=(
+            "List of cell IDs to drop from the grid at construction "
+            "time. Used by V2-22c remediation re-runs (D8 bulk-fix "
+            "Exclude class). Default empty; original runs pass [] "
+            "and the grid is unmodified."
+        ),
+    )
+
+    @field_validator("exclude_cells", mode="before")
+    @classmethod
+    def validate_exclude_cells(cls, v) -> List[int]:
+        """Cell IDs are non-negative integers per the SpatialGrid
+        compute_id contract. Reject negative ints, strings, or
+        non-int entries with a clear ValidationError so an
+        operator-side typo surfaces at submission time, not at
+        grid-construction time deep inside the pipeline.
+
+        Uses ``mode='before'`` so we inspect the raw entries before
+        Pydantic 2's aggressive type coercion. Without that,
+        ``"3"`` would coerce silently to ``3`` and ``True`` to
+        ``1``, both of which would pass our validator unhelpfully.
+        """
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            raise ValueError(
+                f"exclude_cells must be a list; got {type(v).__name__}"
+            )
+        for cell_id in v:
+            if isinstance(cell_id, bool):
+                # Python bools are subclasses of int — reject
+                # explicitly so True/False can't slip through.
+                raise ValueError(
+                    f"exclude_cells entries must be ints, not bool: "
+                    f"{cell_id!r}"
+                )
+            if not isinstance(cell_id, int):
+                raise ValueError(
+                    f"exclude_cells entries must be ints; got "
+                    f"{type(cell_id).__name__} {cell_id!r}"
+                )
+            if cell_id < 0:
+                raise ValueError(
+                    f"exclude_cells entries must be non-negative "
+                    f"(SpatialGrid.compute_id contract); got "
+                    f"{cell_id!r}"
+                )
+        return v
 
     @field_validator("country_iso3")
     @classmethod
