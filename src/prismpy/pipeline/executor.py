@@ -3342,13 +3342,52 @@ class TranslationPipeline:
                         round(min(tmin_vals), 1),
                         round(max(tmin_vals), 1),
                     ]
-                # Aggregate sample count across all 4 vars — matches
-                # the existing CRAFT/PYTHIA path where n_days is the
-                # number of records (here it's number of sampled
-                # pixel reads).
-                total_samples = sum(len(v) for v in bucket.values())
-                cell_data["n_days"] = total_samples
-                cell_data["has_climate"] = bool(total_samples > 0)
+                # V2-22c-PRE codex Gate B P2 #2 — `n_days` is per-cell
+                # day count, NOT a sum across variables. The prior
+                # ``sum(len(v) for v in bucket.values())`` form added
+                # rain + tmax + tmin + srad sample counts together
+                # (e.g., 10 files × 4 vars = 40), inflating the
+                # cockpit-rendered temporal coverage by 4×. Take the
+                # max across variables — each variable's sample list
+                # spans the same N stratified files, so all four
+                # buckets have the same length on a healthy run; max
+                # is the canonical day count even if one variable
+                # was partially missing. Falls back to 0 when every
+                # bucket is empty (the has_climate check below
+                # downgrades to False in that case anyway).
+                per_variable_lengths = [
+                    len(vals) for vals in bucket.values() if vals
+                ]
+                cell_data["n_days"] = (
+                    max(per_variable_lengths) if per_variable_lengths else 0
+                )
+                cell_data["has_climate"] = cell_data["n_days"] > 0
+
+                # V2-22c-PRE codex Gate B P2 #1 — preserve SARRA-Py
+                # climate source provenance. The earlier sources_block
+                # population reads `climate.get(cid)` which is always
+                # None for SARRA-Py because `unified_data.climate` is
+                # the path-dict shape (`{rainfall_dir, agera5_dir}`).
+                # Without this branch the cell has `has_climate=True`
+                # but no `sources.climate` block — Dr. Kofi's audit
+                # trail in the cockpit drawer renders "Climate: unknown"
+                # for every SARRA-Py cell.
+                #
+                # Composite name reflects the two-source SARRA-Py
+                # path (TAMSAT for rainfall + AgERA5 for temperature
+                # + solar). The variable-keyed schema (separate
+                # sub-blocks per var) is V2-22d backlog #12 per the
+                # evaluator strategy doc §4 stance; PRE keeps the
+                # flat composite for v1.
+                if cell_data["has_climate"]:
+                    if "sources" not in cell_data:
+                        cell_data["sources"] = {}
+                    cell_data["sources"]["climate"] = {
+                        "name": "TAMSAT + AgERA5",
+                        "version": None,
+                        "cascade_rank": 1,
+                        "fallback_attempts": [],
+                    }
             else:
                 cell_data["has_climate"] = False
 

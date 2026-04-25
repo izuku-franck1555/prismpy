@@ -306,6 +306,15 @@ class TestCellSummaryHasClimateFromSampledValues:
         assert cell["has_climate"] is True
         assert cell["tmax_range"] == [25.0, 27.0]
         assert cell["tmin_range"] == [10.0, 11.0]
+        # V2-22c-PRE codex Gate B P2 #2 — `n_days` is the per-cell
+        # day count derived from the longest variable's sample list,
+        # NOT a sum across variables. tmax has 3 samples + tmin has
+        # 2 → expected n_days = max(3, 2) = 3 (pre-fix this was
+        # 5 = 3 + 2).
+        assert cell["n_days"] == 3, (
+            f"n_days inflation regression: got {cell['n_days']}, "
+            "expected max-across-variables = 3."
+        )
 
     def test_has_climate_false_when_no_sampled_values_for_cell(self):
         from prismpy.models.region import Region, BoundingBox
@@ -432,3 +441,178 @@ class TestSarraPyValueRangeSynthesis:
                 f"value_range_{canonical_var} missing from SARRA-Py "
                 "per-cell synthesis"
             )
+
+
+class TestSarraPyClimateSourceProvenance:
+    """V2-22c-PRE codex Gate B P2 #1 — every SARRA-Py cell with
+    `has_climate=True` must carry a populated `sources.climate`
+    block. The pre-fix path-dict shape of `unified_data.climate`
+    (`{rainfall_dir, agera5_dir}`) caused `climate.get(cid)` to
+    always return None, leaving SARRA-Py cells with no climate
+    provenance even when the sampled-values branch marked them
+    `has_climate=True`. Dr. Kofi's audit trail in the cockpit
+    drawer would have rendered "Climate: unknown" for every
+    SARRA-Py cell."""
+
+    def test_sarra_py_cell_has_climate_source_block(self):
+        from prismpy.models.region import Region, BoundingBox
+        from prismpy.models.spatial import GridCell, SpatialGrid
+        from prismpy.pipeline.executor import TranslationPipeline
+        from prismpy.translators.base import UnifiedData
+
+        pipeline = TranslationPipeline.__new__(TranslationPipeline)
+        cells = [GridCell(cell_id=0, lat=14.0, lon=0.0,
+                          row=0, col=0, resolution="5arcmin")]
+        unified = UnifiedData(
+            region=Region(
+                name="t", country="t", country_iso3="TST",
+                bounds=BoundingBox(minx=0, miny=14, maxx=1, maxy=15),
+            ),
+            grid=SpatialGrid(
+                bounds=BoundingBox(minx=0, miny=14, maxx=1, maxy=15),
+                resolution="5arcmin", cells=cells,
+            ),
+            climate={"rainfall_dir": "/tmp/x"},  # path-dict shape
+            soil={},
+        )
+        out = pipeline._build_cell_summary(
+            unified,
+            sarra_climate_per_cell={0: {"tmax": [25.0], "rain": [5.0]}},
+        )
+        cell = out["cells"][0]
+        # has_climate must be True so we know the SARRA-Py branch fired.
+        assert cell["has_climate"] is True
+        # sources.climate present with the four canonical fields.
+        assert "sources" in cell
+        assert "climate" in cell["sources"]
+        sb = cell["sources"]["climate"]
+        # Composite name reflects the SARRA-Py two-source pattern
+        # (TAMSAT for rainfall + AgERA5 for temperature/solar).
+        assert sb["name"] == "TAMSAT + AgERA5"
+        assert sb["cascade_rank"] == 1
+        assert sb["fallback_attempts"] == []
+
+    def test_sarra_py_cell_without_climate_has_no_climate_source(self):
+        """Backstop — when `has_climate=False` (no sampled values),
+        sources.climate is NOT spuriously populated. Keeps the
+        D37 elision rule intact."""
+        from prismpy.models.region import Region, BoundingBox
+        from prismpy.models.spatial import GridCell, SpatialGrid
+        from prismpy.pipeline.executor import TranslationPipeline
+        from prismpy.translators.base import UnifiedData
+
+        pipeline = TranslationPipeline.__new__(TranslationPipeline)
+        cells = [GridCell(cell_id=0, lat=14.0, lon=0.0,
+                          row=0, col=0, resolution="5arcmin")]
+        unified = UnifiedData(
+            region=Region(
+                name="t", country="t", country_iso3="TST",
+                bounds=BoundingBox(minx=0, miny=14, maxx=1, maxy=15),
+            ),
+            grid=SpatialGrid(
+                bounds=BoundingBox(minx=0, miny=14, maxx=1, maxy=15),
+                resolution="5arcmin", cells=cells,
+            ),
+            climate={"rainfall_dir": "/tmp/x"},
+            soil={},
+        )
+        # Empty sampler dict → no sampled values → has_climate=False.
+        out = pipeline._build_cell_summary(
+            unified, sarra_climate_per_cell={},
+        )
+        cell = out["cells"][0]
+        assert cell["has_climate"] is False
+        # sources block either absent or has no climate sub-block —
+        # both are acceptable per D37 elision (no soil + no climate
+        # → entire sources block elided).
+        if "sources" in cell:
+            assert "climate" not in cell["sources"]
+
+
+class TestSarraPyNDaysNotInflated:
+    """V2-22c-PRE codex Gate B P2 #2 — `n_days` is per-cell day
+    count, not a sum across variables. The pre-fix
+    ``sum(len(v) for v in bucket.values())`` form would report
+    `n_days=40` for a 10-file × 4-var sample, inflating the
+    cockpit's temporal-coverage display by 4×."""
+
+    def test_n_days_uses_max_across_variables(self):
+        from prismpy.models.region import Region, BoundingBox
+        from prismpy.models.spatial import GridCell, SpatialGrid
+        from prismpy.pipeline.executor import TranslationPipeline
+        from prismpy.translators.base import UnifiedData
+
+        pipeline = TranslationPipeline.__new__(TranslationPipeline)
+        cells = [GridCell(cell_id=0, lat=14.0, lon=0.0,
+                          row=0, col=0, resolution="5arcmin")]
+        unified = UnifiedData(
+            region=Region(
+                name="t", country="t", country_iso3="TST",
+                bounds=BoundingBox(minx=0, miny=14, maxx=1, maxy=15),
+            ),
+            grid=SpatialGrid(
+                bounds=BoundingBox(minx=0, miny=14, maxx=1, maxy=15),
+                resolution="5arcmin", cells=cells,
+            ),
+            climate={"rainfall_dir": "/tmp/x"},
+            soil={},
+        )
+        # 10 sampled days per variable across 4 variables.
+        # Pre-fix: n_days = 40 (sum). Post-fix: n_days = 10 (max).
+        sarra_per_cell = {
+            0: {
+                "rain": [5.0] * 10,
+                "tmax": [25.0] * 10,
+                "tmin": [10.0] * 10,
+                "srad": [20.0] * 10,
+            },
+        }
+        out = pipeline._build_cell_summary(
+            unified, sarra_climate_per_cell=sarra_per_cell,
+        )
+        cell = out["cells"][0]
+        assert cell["n_days"] == 10, (
+            f"n_days inflation regression — got {cell['n_days']}, "
+            "expected 10 (max across variables). The pre-fix form "
+            "would have summed 4 vars × 10 samples = 40."
+        )
+
+    def test_n_days_handles_uneven_variable_lengths(self):
+        """When variables have different sample lengths (one
+        partially missing), the canonical day count is the
+        longest list's length, NOT the sum."""
+        from prismpy.models.region import Region, BoundingBox
+        from prismpy.models.spatial import GridCell, SpatialGrid
+        from prismpy.pipeline.executor import TranslationPipeline
+        from prismpy.translators.base import UnifiedData
+
+        pipeline = TranslationPipeline.__new__(TranslationPipeline)
+        cells = [GridCell(cell_id=0, lat=14.0, lon=0.0,
+                          row=0, col=0, resolution="5arcmin")]
+        unified = UnifiedData(
+            region=Region(
+                name="t", country="t", country_iso3="TST",
+                bounds=BoundingBox(minx=0, miny=14, maxx=1, maxy=15),
+            ),
+            grid=SpatialGrid(
+                bounds=BoundingBox(minx=0, miny=14, maxx=1, maxy=15),
+                resolution="5arcmin", cells=cells,
+            ),
+            climate={"rainfall_dir": "/tmp/x"},
+            soil={},
+        )
+        # tmax has 8 days; tmin has 10; rain has 10; srad has 7.
+        # Max = 10 (the day count for the most-complete variable).
+        sarra_per_cell = {
+            0: {
+                "rain": [5.0] * 10,
+                "tmax": [25.0] * 8,
+                "tmin": [10.0] * 10,
+                "srad": [20.0] * 7,
+            },
+        }
+        out = pipeline._build_cell_summary(
+            unified, sarra_climate_per_cell=sarra_per_cell,
+        )
+        cell = out["cells"][0]
+        assert cell["n_days"] == 10
