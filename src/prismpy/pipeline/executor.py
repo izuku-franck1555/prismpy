@@ -38,11 +38,25 @@ class PipelineStage(str, Enum):
     RETRIEVE = "retrieve"
     HARMONIZE = "harmonize"
     TRANSLATE = "translate"
+    # V2-22c-PRE.4.1 (D25) — REMEDIATION runs between TRANSLATE and
+    # VALIDATE so post-remediation validation is honest. Most runs
+    # (originals, retries) take the no-op path inside
+    # _execute_remediation; only re-runs derived from a cockpit
+    # bulk-fix submission carry a remediation_spec to apply.
+    REMEDIATION = "remediation"
     VALIDATE = "validate"
     PACKAGE = "package"
 
 
 from prismpy.sources.climate._cancel import PipelineCancelled, raise_if_cancelled
+# V2-22c-PRE.4 — RemediationBlocked is the structured exception for
+# Veto #4 server enforcement. Imported at module level so the narrow
+# `except RemediationBlocked` catch in `execute()` (evaluator §12.5
+# binding) sees the symbol without a per-stage local import. The
+# remediation helpers (`_veto_4_tier`, `_block_message`) stay local
+# to `_execute_remediation` to keep import overhead off the cancel
+# fast path.
+from prismpy.pipeline._remediation import RemediationBlocked
 
 
 def _extract_run_id(callback) -> Optional[str]:
@@ -2374,6 +2388,130 @@ class TranslationPipeline:
 
         return results
 
+    def _execute_remediation(
+        self,
+        translation_results: Dict[str, "TranslationResult"],
+        unified_data,
+    ) -> StageResult:
+        """V2-22c-PRE.4.2 — apply ``remediation_spec`` from config to
+        translation outputs.
+
+        No-op when ``self.config`` does not carry a
+        ``remediation_spec`` (most runs: originals, retries). Only
+        remediation re-runs (where the prismweb layer wrote
+        ``remediation_spec`` into ``PipelineRun.remediation_spec`` and
+        threaded it into the prismpy config) perform work.
+
+        PRE.4 ships scaffolding + Veto #4 server enforcement (D29
+        Layer 2). The full applier for impute / substitute / override
+        classes is V2-22c R5 builder work; this method only enforces
+        the structural invariants and stubs the day-level exclusion
+        / substitution / override paths with deferred-to-R5 warnings.
+
+        Critical: the ``if tier == 'block': raise`` clause runs
+        UNCONDITIONALLY before any ``veto_4_acknowledged`` flag check
+        per evaluator §12.4 — adversarial bypass with
+        ``veto_4_acknowledged: true`` for a BLOCK case CANNOT defeat
+        server enforcement. Tests #5/#6/#7/#10 in the 10-test matrix
+        guard this invariant.
+        """
+        from prismpy.pipeline._remediation import (
+            RemediationBlocked,
+            _veto_4_tier,
+            _block_message,
+        )
+
+        start_time = datetime.now()
+
+        spec = getattr(self.config, 'remediation_spec', None)
+        if spec is None or not isinstance(spec, dict):
+            # No-op path — most common case (originals, retries).
+            return StageResult(
+                stage=PipelineStage.REMEDIATION,
+                success=True,
+                data={},
+                errors=[],
+                warnings=[],
+                duration_seconds=(datetime.now() - start_time).total_seconds(),
+            )
+
+        errors: List[str] = []
+        warnings: List[str] = []
+
+        # Day-level exclusion stub — full implementation R5. Cell-
+        # level exclusions are already handled at PRE.3
+        # ``SpatialGrid.from_bounds`` via ``RegionConfig.exclude_cells``;
+        # this branch covers the day-level slice within the spec.
+        exclusions = spec.get('exclusions', {}) or {}
+        excluded_days = exclusions.get('days', []) or []
+        if excluded_days:
+            warnings.append(
+                f"day-level exclusion of {len(excluded_days)} days "
+                "deferred to R5"
+            )
+
+        # Veto #4 server enforcement on the imputations array (D29
+        # Layer 2 + D33 conservative thresholds). This is the
+        # load-bearing audit-locus per the contract.
+        imputations = spec.get('imputations', []) or []
+        for imp in imputations:
+            tier, block_reason = _veto_4_tier(imp, unified_data)
+
+            # BLOCK is non-acknowledgeable per D33 — adversarial
+            # bypass via veto_4_acknowledged: true MUST NOT defeat
+            # server enforcement. Tests #5/#6/#7 catch the regression
+            # where a refactor inverts this clause and the
+            # acknowledgment check.
+            if tier == 'block':
+                raise RemediationBlocked(
+                    cell_id=imp.get('cell_id'),
+                    reason=block_reason,
+                    message=_block_message(imp, block_reason),
+                )
+
+            # WARN is acknowledgeable per D33 — user-acknowledgment
+            # trail honored. Test #4 covers the unacknowledged WARN
+            # path; test #3 covers the acknowledged WARN pass-through.
+            if tier == 'warn' and not imp.get('veto_4_acknowledged', False):
+                raise RemediationBlocked(
+                    cell_id=imp.get('cell_id'),
+                    reason=RemediationBlocked.REASON_WARN_UNACKED,
+                    message=(
+                        f"Imputation crosses some soil-class boundaries "
+                        f"(cell={imp.get('cell_id')}); user did not "
+                        f"acknowledge Veto #4 client-side; server blocks "
+                        f"per D29 Layer 2."
+                    ),
+                )
+            # silent OR (warn + acknowledged): allow through.
+
+        # Substitutions + overrides scaffolding only — full applier R5.
+        substitutions = spec.get('substitutions', []) or []
+        if substitutions:
+            warnings.append(
+                f"{len(substitutions)} substitutions deferred to R5"
+            )
+        overrides = spec.get('overrides', []) or []
+        if overrides:
+            warnings.append(f"{len(overrides)} overrides deferred to R5")
+
+        return StageResult(
+            stage=PipelineStage.REMEDIATION,
+            success=True,
+            data={
+                'spec_applied_summary': {
+                    'exclusions_cells': len(exclusions.get('cells', []) or []),
+                    'exclusions_days': len(excluded_days),
+                    'imputations_validated': len(imputations),
+                    'substitutions_deferred': len(substitutions),
+                    'overrides_deferred': len(overrides),
+                },
+            },
+            errors=errors,
+            warnings=warnings,
+            duration_seconds=(datetime.now() - start_time).total_seconds(),
+        )
+
     def _execute_validate(
         self,
         translation_results: Dict[str, TranslationResult],
@@ -3379,6 +3517,50 @@ class TranslationPipeline:
                     )
                     stage_results["translate"] = result
                     _notify_complete("translate", result)
+
+            # Stage 3.5: REMEDIATION (V2-22c-PRE.4 / D25)
+            # Runs between TRANSLATE and VALIDATE so post-remediation
+            # validation is honest (the user sees validation against
+            # the corrected outputs, not the originals). Most runs
+            # take the no-op path inside _execute_remediation; only
+            # cockpit-bulk-fix re-runs carry a remediation_spec.
+            #
+            # Evaluator §12.5 binding — narrow ``except RemediationBlocked``
+            # catch (NOT bare ``except Exception``). A broad catch
+            # would swallow the structured `reason` payload and erase
+            # the cockpit's AC-9.3 BLOCK copy specificity. Test
+            # `tests/unit/test_remediation_stage.py` AST-walks this
+            # block to assert the narrow shape.
+            if PipelineStage.REMEDIATION in stages:
+                _check_cancel_before_stage("remediation")
+                _notify_start("remediation", "Applying corrections")
+                harmonize_data_rem = stage_results.get(
+                    "harmonize",
+                    StageResult(
+                        stage=PipelineStage.HARMONIZE,
+                        success=True, data=None,
+                    ),
+                ).data
+                try:
+                    result = self._execute_remediation(
+                        translation_results, harmonize_data_rem,
+                    )
+                except RemediationBlocked as block:
+                    # Failure does NOT short-circuit the pipeline —
+                    # VALIDATE still runs against the (un-remediated)
+                    # outputs so the user sees post-failure state
+                    # honestly. Cockpit reads
+                    # `stage_results['remediation'].errors[0]` and
+                    # renders the BLOCK reason verbatim.
+                    result = StageResult(
+                        stage=PipelineStage.REMEDIATION,
+                        success=False,
+                        errors=[str(block)],
+                        warnings=[],
+                        duration_seconds=0.0,
+                    )
+                stage_results["remediation"] = result
+                _notify_complete("remediation", result)
 
             # Stage 4: VALIDATE
             if PipelineStage.VALIDATE in stages and translation_results:
