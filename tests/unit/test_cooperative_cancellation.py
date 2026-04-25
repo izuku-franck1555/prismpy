@@ -352,10 +352,18 @@ class TestCarveOutRegression:
         ("src/prismpy/translators/craft/translator.py", 1692),
         # pygadm fallback inside _execute_retrieve: local pygadm import
         # + pygadm.Names/Items calls; no HTTP, cancel-inert.
-        ("src/prismpy/pipeline/executor.py", 496),
+        # Line shifted from 496 → 510 after V2-22c-PRE.4.1 added the
+        # REMEDIATION enum value + multi-line comment to the
+        # PipelineStage class definition.
+        ("src/prismpy/pipeline/executor.py", 510),
         # Provenance-flush inside the translator-dispatch except handler
         # in _execute_translate: writes decision records, cancel-inert.
-        ("src/prismpy/pipeline/executor.py", 2338),
+        # Line shifted from 2338 → 2346 (PRE.3.3 thread-through)
+        # → 2360 (PRE.4.1 enum) → 2404 after V2-22c-PRE.1.10
+        # cascade orchestrator + climate metadata backstop added
+        # ~40 lines to `_execute_harmonize`. Same try block, new
+        # line number.
+        ("src/prismpy/pipeline/executor.py", 2404),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed
@@ -765,11 +773,20 @@ class TestBroadExceptCarveOutEscape:
         [
             ("retrieve", "executor.stage.harmonize"),
             ("harmonize", "executor.stage.translate"),
-            ("translate", "executor.stage.validate"),
+            # V2-22c-PRE.4.3 — REMEDIATION inserts between TRANSLATE
+            # and VALIDATE, so the cancel-check that used to fire at
+            # the top of validate now fires at the top of
+            # remediation. The validate→package transition stays as
+            # before; same for the earlier transitions.
+            ("translate", "executor.stage.remediation"),
+            ("remediation", "executor.stage.validate"),
             ("validate", "executor.stage.package"),
         ],
-        ids=["retrieve→harmonize", "harmonize→translate",
-             "translate→validate", "validate→package"],
+        ids=[
+            "retrieve→harmonize", "harmonize→translate",
+            "translate→remediation", "remediation→validate",
+            "validate→package",
+        ],
     )
     def test_f6_inter_stage_cancel_fires_at_stage_top(
         self, monkeypatch: pytest.MonkeyPatch,
@@ -865,6 +882,20 @@ class TestBroadExceptCarveOutEscape:
             }
         monkeypatch.setattr(
             TranslationPipeline, "_execute_translate", fake_translate,
+        )
+
+        # V2-22c-PRE.4.1 — REMEDIATION fake. The stage runs between
+        # TRANSLATE and VALIDATE; needs a fake that returns a
+        # success StageResult so the test reaches VALIDATE.
+        def fake_remediation(self, translation_results, unified_data=None):
+            stages_ran.append("remediation")
+            if arm_after_stage == "remediation":
+                cancel_armed["flag"] = True
+            return StageResult(
+                stage=PipelineStage.REMEDIATION, success=True, data={},
+            )
+        monkeypatch.setattr(
+            TranslationPipeline, "_execute_remediation", fake_remediation,
         )
 
         def fake_validate(self, translation_results, unified_data=None):

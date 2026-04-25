@@ -466,7 +466,18 @@ class HWSDSource(DataSource):
             source=self.NAME,
             layers=[layer],
             total_depth=0.2,
-            metadata={"hwsd_smu_id": props.get("HWSD2_SMU_ID") or props.get("ID")},
+            metadata={
+                "hwsd_smu_id": props.get("HWSD2_SMU_ID") or props.get("ID"),
+                # V2-22c-PRE.1.10 (D37) — cascade-provenance defaults.
+                # Loader-side cascade_rank=1 means "this loader
+                # produced the profile"; the cascade orchestrator at
+                # executor.py overrides to rank=2 + fallback_attempts
+                # when HWSD ran as the iSDA fallback path.
+                "source": "HWSD",
+                "version": "v2.0",
+                "cascade_rank": 1,
+                "fallback_attempts": [],
+            },
         )
 
     def _create_profile_from_dict(
@@ -503,7 +514,13 @@ class HWSDSource(DataSource):
             source=self.NAME,
             layers=[layer],
             total_depth=0.2,
-            metadata={},
+            metadata={
+                # V2-22c-PRE.1.10 (D37) — cascade defaults.
+                "source": "HWSD",
+                "version": "v2.0",
+                "cascade_rank": 1,
+                "fallback_attempts": [],
+            },
         )
 
     def _create_default_profile(
@@ -532,7 +549,16 @@ class HWSDSource(DataSource):
             source=f"{self.NAME}_default",
             layers=[layer],
             total_depth=0.2,
-            metadata={"is_default": True},
+            metadata={
+                "is_default": True,
+                # V2-22c-PRE.1.10 (D37) — DEFAULT fallback within
+                # HWSD's own loader; the source-name suffix
+                # `_default` flags the fallback to the cockpit.
+                "source": "HWSD_default",
+                "version": "v2.0",
+                "cascade_rank": 1,
+                "fallback_attempts": [],
+            },
         )
 
     def _calculate_statistics(

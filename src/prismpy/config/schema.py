@@ -488,6 +488,62 @@ class RegionConfig(BaseModel):
         default_factory=BoundaryConfig,
         description="Boundary extraction configuration"
     )
+    # V2-22c-PRE.3.1 (D10/D15) — list of cell IDs to drop from the
+    # grid at construction time. Used by V2-22c remediation re-runs
+    # for the bulk-fix Exclude class (D8): the cockpit submits a new
+    # PipelineRun derived from the prior config with `exclude_cells`
+    # set to the user-selected cell IDs. Default empty so original
+    # runs and retries pass an empty list.
+    exclude_cells: List[int] = Field(
+        default_factory=list,
+        description=(
+            "List of cell IDs to drop from the grid at construction "
+            "time. Used by V2-22c remediation re-runs (D8 bulk-fix "
+            "Exclude class). Default empty; original runs pass [] "
+            "and the grid is unmodified."
+        ),
+    )
+
+    @field_validator("exclude_cells", mode="before")
+    @classmethod
+    def validate_exclude_cells(cls, v) -> List[int]:
+        """Cell IDs are non-negative integers per the SpatialGrid
+        compute_id contract. Reject negative ints, strings, or
+        non-int entries with a clear ValidationError so an
+        operator-side typo surfaces at submission time, not at
+        grid-construction time deep inside the pipeline.
+
+        Uses ``mode='before'`` so we inspect the raw entries before
+        Pydantic 2's aggressive type coercion. Without that,
+        ``"3"`` would coerce silently to ``3`` and ``True`` to
+        ``1``, both of which would pass our validator unhelpfully.
+        """
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            raise ValueError(
+                f"exclude_cells must be a list; got {type(v).__name__}"
+            )
+        for cell_id in v:
+            if isinstance(cell_id, bool):
+                # Python bools are subclasses of int — reject
+                # explicitly so True/False can't slip through.
+                raise ValueError(
+                    f"exclude_cells entries must be ints, not bool: "
+                    f"{cell_id!r}"
+                )
+            if not isinstance(cell_id, int):
+                raise ValueError(
+                    f"exclude_cells entries must be ints; got "
+                    f"{type(cell_id).__name__} {cell_id!r}"
+                )
+            if cell_id < 0:
+                raise ValueError(
+                    f"exclude_cells entries must be non-negative "
+                    f"(SpatialGrid.compute_id contract); got "
+                    f"{cell_id!r}"
+                )
+        return v
 
     @field_validator("country_iso3")
     @classmethod
@@ -1863,6 +1919,30 @@ class ProjectConfig(BaseModel):
     validation: ValidationConfig = Field(
         default_factory=ValidationConfig,
         description="Validation configuration"
+    )
+
+    # V2-22c-PRE.4.2 (D32) — remediation spec submitted by the
+    # cockpit's bulk-fix re-run path. Optional dict so original
+    # runs and retries default to None and the REMEDIATION stage
+    # takes its no-op path. Cockpit-derived re-runs carry a
+    # structured payload (`exclusions`, `imputations`,
+    # `substitutions`, `overrides`) that `_execute_remediation`
+    # iterates through with Veto #4 server enforcement.
+    #
+    # Pydantic v2 default behavior is to drop extra inputs when
+    # the field isn't declared on the model — without this
+    # declaration, a real cockpit submission would silently lose
+    # `remediation_spec` during config validation and
+    # `getattr(self.config, 'remediation_spec', None)` in the
+    # remediation handler would always see None. Codex P1 #2.
+    remediation_spec: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Optional remediation spec from cockpit-bulk-fix re-runs "
+            "(V2-22c-PRE.4.2 / D32). Original runs and retries leave "
+            "this as None; cockpit-derived re-runs carry the structured "
+            "payload that _execute_remediation iterates."
+        ),
     )
 
     # Generic parameters (platform agnostic)

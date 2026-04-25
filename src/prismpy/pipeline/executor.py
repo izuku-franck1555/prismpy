@@ -38,11 +38,25 @@ class PipelineStage(str, Enum):
     RETRIEVE = "retrieve"
     HARMONIZE = "harmonize"
     TRANSLATE = "translate"
+    # V2-22c-PRE.4.1 (D25) — REMEDIATION runs between TRANSLATE and
+    # VALIDATE so post-remediation validation is honest. Most runs
+    # (originals, retries) take the no-op path inside
+    # _execute_remediation; only re-runs derived from a cockpit
+    # bulk-fix submission carry a remediation_spec to apply.
+    REMEDIATION = "remediation"
     VALIDATE = "validate"
     PACKAGE = "package"
 
 
 from prismpy.sources.climate._cancel import PipelineCancelled, raise_if_cancelled
+# V2-22c-PRE.4 — RemediationBlocked is the structured exception for
+# Veto #4 server enforcement. Imported at module level so the narrow
+# `except RemediationBlocked` catch in `execute()` (evaluator §12.5
+# binding) sees the symbol without a per-stage local import. The
+# remediation helpers (`_veto_4_tier`, `_block_message`) stay local
+# to `_execute_remediation` to keep import overhead off the cancel
+# fast path.
+from prismpy.pipeline._remediation import RemediationBlocked
 
 
 def _extract_run_id(callback) -> Optional[str]:
@@ -2075,10 +2089,18 @@ class TranslationPipeline:
                 # Always use 5-arcmin grid for maximum boundary precision.
                 # Platforms that need coarser grids (ACEA=30arcmin) handle
                 # the mapping internally (e.g., _compute_30arcmin_cell_ids).
+                # V2-22c-PRE.3.3 (D15) — thread the operator's
+                # `region.exclude_cells` through to the SpatialGrid
+                # factory. Translators iterate `grid.cells` directly
+                # so the prune propagates without per-translator
+                # edits per the §6.4 schema-bounds discipline.
                 grid = SpatialGrid.from_bounds(
                     region.bounds,
                     resolution="5arcmin",
                     clip_geometry=clip_geometry,
+                    exclude_cells=getattr(
+                        self.config.region, 'exclude_cells', None,
+                    ),
                 )
                 self.logger.info(f"Created grid with {grid.n_cells} cells")
 
@@ -2186,6 +2208,25 @@ class TranslationPipeline:
                     hwsd_soil = self._retrieve_hwsd_for_grid(grid, region)
                     if hwsd_soil:
                         soil_data = hwsd_soil
+                        # V2-22c-PRE.1.10 (D37) cascade-rank update —
+                        # HWSD ran as the iSDA fallback path. Each
+                        # HWSD-served cell's metadata bumps to
+                        # cascade_rank=2 + records the iSDA failure
+                        # in fallback_attempts. The cockpit drawer
+                        # reads this and renders "iSDA failed, HWSD
+                        # fallback used" verbatim per AC-14.3.
+                        for cell_id, profile in hwsd_soil.items():
+                            if not hasattr(profile, 'metadata'):
+                                continue
+                            if profile.metadata is None:
+                                profile.metadata = {}
+                            profile.metadata["cascade_rank"] = 2
+                            profile.metadata["fallback_attempts"] = [
+                                {
+                                    "source": "iSDA Africa",
+                                    "reason": "no_data_at_centroid",
+                                },
+                            ]
                         # V2-19 site #4: SOURCE_SELECTION falling back to HWSD
                         if self.provenance.enabled:
                             self.provenance.record_decision(
@@ -2221,10 +2262,35 @@ class TranslationPipeline:
                         artifact_id="soil",
                     )
 
+            # V2-22c-PRE.1.10 (D37) — backstop default cascade
+            # metadata for in-memory climate time series. Source
+            # loaders that haven't been ported yet emit ts objects
+            # without `metadata.cascade_rank`; the cell-summary
+            # read path defaults rank=1 if absent, but populating
+            # it here makes the schema explicit on the wire +
+            # gives the cockpit a uniform shape.
+            climate_data_for_unified = retrieved_data.get("climate")
+            if isinstance(climate_data_for_unified, dict):
+                for cell_id, ts in climate_data_for_unified.items():
+                    if not hasattr(ts, 'metadata'):
+                        continue
+                    if ts.metadata is None:
+                        ts.metadata = {}
+                    ts.metadata.setdefault(
+                        "source", getattr(ts, 'source', None),
+                    )
+                    ts.metadata.setdefault("cascade_rank", 1)
+                    ts.metadata.setdefault("fallback_attempts", [])
+                    # Version is best-effort — loaders that have
+                    # been ported populate it; others leave it
+                    # as None and the cockpit drawer renders
+                    # "version: unknown".
+                    ts.metadata.setdefault("version", None)
+
             unified_data = UnifiedData(
                 region=region,
                 grid=grid,
-                climate=retrieved_data.get("climate"),
+                climate=climate_data_for_unified,
                 soil=soil_data,
                 crop_params=retrieved_data.get("crop_params"),
                 crop_calendar=retrieved_data.get("crop_calendar"),
@@ -2366,6 +2432,130 @@ class TranslationPipeline:
 
         return results
 
+    def _execute_remediation(
+        self,
+        translation_results: Dict[str, "TranslationResult"],
+        unified_data,
+    ) -> StageResult:
+        """V2-22c-PRE.4.2 — apply ``remediation_spec`` from config to
+        translation outputs.
+
+        No-op when ``self.config`` does not carry a
+        ``remediation_spec`` (most runs: originals, retries). Only
+        remediation re-runs (where the prismweb layer wrote
+        ``remediation_spec`` into ``PipelineRun.remediation_spec`` and
+        threaded it into the prismpy config) perform work.
+
+        PRE.4 ships scaffolding + Veto #4 server enforcement (D29
+        Layer 2). The full applier for impute / substitute / override
+        classes is V2-22c R5 builder work; this method only enforces
+        the structural invariants and stubs the day-level exclusion
+        / substitution / override paths with deferred-to-R5 warnings.
+
+        Critical: the ``if tier == 'block': raise`` clause runs
+        UNCONDITIONALLY before any ``veto_4_acknowledged`` flag check
+        per evaluator §12.4 — adversarial bypass with
+        ``veto_4_acknowledged: true`` for a BLOCK case CANNOT defeat
+        server enforcement. Tests #5/#6/#7/#10 in the 10-test matrix
+        guard this invariant.
+        """
+        from prismpy.pipeline._remediation import (
+            RemediationBlocked,
+            _veto_4_tier,
+            _block_message,
+        )
+
+        start_time = datetime.now()
+
+        spec = getattr(self.config, 'remediation_spec', None)
+        if spec is None or not isinstance(spec, dict):
+            # No-op path — most common case (originals, retries).
+            return StageResult(
+                stage=PipelineStage.REMEDIATION,
+                success=True,
+                data={},
+                errors=[],
+                warnings=[],
+                duration_seconds=(datetime.now() - start_time).total_seconds(),
+            )
+
+        errors: List[str] = []
+        warnings: List[str] = []
+
+        # Day-level exclusion stub — full implementation R5. Cell-
+        # level exclusions are already handled at PRE.3
+        # ``SpatialGrid.from_bounds`` via ``RegionConfig.exclude_cells``;
+        # this branch covers the day-level slice within the spec.
+        exclusions = spec.get('exclusions', {}) or {}
+        excluded_days = exclusions.get('days', []) or []
+        if excluded_days:
+            warnings.append(
+                f"day-level exclusion of {len(excluded_days)} days "
+                "deferred to R5"
+            )
+
+        # Veto #4 server enforcement on the imputations array (D29
+        # Layer 2 + D33 conservative thresholds). This is the
+        # load-bearing audit-locus per the contract.
+        imputations = spec.get('imputations', []) or []
+        for imp in imputations:
+            tier, block_reason = _veto_4_tier(imp, unified_data)
+
+            # BLOCK is non-acknowledgeable per D33 — adversarial
+            # bypass via veto_4_acknowledged: true MUST NOT defeat
+            # server enforcement. Tests #5/#6/#7 catch the regression
+            # where a refactor inverts this clause and the
+            # acknowledgment check.
+            if tier == 'block':
+                raise RemediationBlocked(
+                    cell_id=imp.get('cell_id'),
+                    reason=block_reason,
+                    message=_block_message(imp, block_reason),
+                )
+
+            # WARN is acknowledgeable per D33 — user-acknowledgment
+            # trail honored. Test #4 covers the unacknowledged WARN
+            # path; test #3 covers the acknowledged WARN pass-through.
+            if tier == 'warn' and not imp.get('veto_4_acknowledged', False):
+                raise RemediationBlocked(
+                    cell_id=imp.get('cell_id'),
+                    reason=RemediationBlocked.REASON_WARN_UNACKED,
+                    message=(
+                        f"Imputation crosses some soil-class boundaries "
+                        f"(cell={imp.get('cell_id')}); user did not "
+                        f"acknowledge Veto #4 client-side; server blocks "
+                        f"per D29 Layer 2."
+                    ),
+                )
+            # silent OR (warn + acknowledged): allow through.
+
+        # Substitutions + overrides scaffolding only — full applier R5.
+        substitutions = spec.get('substitutions', []) or []
+        if substitutions:
+            warnings.append(
+                f"{len(substitutions)} substitutions deferred to R5"
+            )
+        overrides = spec.get('overrides', []) or []
+        if overrides:
+            warnings.append(f"{len(overrides)} overrides deferred to R5")
+
+        return StageResult(
+            stage=PipelineStage.REMEDIATION,
+            success=True,
+            data={
+                'spec_applied_summary': {
+                    'exclusions_cells': len(exclusions.get('cells', []) or []),
+                    'exclusions_days': len(excluded_days),
+                    'imputations_validated': len(imputations),
+                    'substitutions_deferred': len(substitutions),
+                    'overrides_deferred': len(overrides),
+                },
+            },
+            errors=errors,
+            warnings=warnings,
+            duration_seconds=(datetime.now() - start_time).total_seconds(),
+        )
+
     def _execute_validate(
         self,
         translation_results: Dict[str, TranslationResult],
@@ -2441,15 +2631,75 @@ class TranslationPipeline:
         # JSON report was a warning.)
         scientific_report = None
         post_translate_report = None
+        # V2-22c-PRE.2.1 + 2.3 + 2.4 — when SARRA-Py is enabled,
+        # sample per-cell climate values from the translated
+        # GeoTIFFs once at validate-stage entry. The sampled dict
+        # feeds (a) the value-range synthesis in
+        # ``run_scientific_validation`` and (b) the cell-summary
+        # ``has_climate`` computation in the packaging stage.
+        # Stash on ``unified_data.metadata`` so the packaging stage
+        # can read it without re-sampling.
+        sarra_climate_per_cell: Optional[Dict[int, Dict[str, list]]] = None
         if unified_data:
             try:
-                from prismpy.validators.scientific import run_scientific_validation
-
                 enabled_platforms = [
                     p.value for p in self.config.get_enabled_platforms()
                 ]
+                # V2-22c-PRE codex P2 #4 — gate the sampler on
+                # SARRA-Py translation SUCCESS, not just enabled.
+                # When SARRA-Py is enabled but its translation failed,
+                # `base_dir/sarra_py` may still exist and contain
+                # stale or partial GeoTIFFs from a previous successful
+                # run. Reading those would feed false-positive per-cell
+                # climate values into validation + the cockpit's
+                # `has_climate` rendering. R6-class regression risk.
+                # Source the directory from the actual translation
+                # result so a failed run can't shadow the sampler.
+                sarra_translation_result = (
+                    translation_results.get('sarra_py')
+                    if isinstance(translation_results, dict)
+                    else None
+                )
+                if (
+                    "sarra_py" in enabled_platforms
+                    and unified_data.grid is not None
+                    and getattr(unified_data.grid, 'cells', None)
+                    and sarra_translation_result is not None
+                    and getattr(sarra_translation_result, 'success', False)
+                ):
+                    sarra_dir = Path(getattr(
+                        sarra_translation_result, 'output_dir',
+                        Path(self.config.output.base_dir) / 'sarra_py',
+                    ))
+                    if sarra_dir.is_dir():
+                        from prismpy.validators.post_translate import (
+                            sample_sarra_py_per_cell,
+                        )
+                        sarra_climate_per_cell = sample_sarra_py_per_cell(
+                            sarra_dir, unified_data.grid.cells,
+                        )
+                        if sarra_climate_per_cell:
+                            # Stash on metadata so the packaging
+                            # stage's _build_cell_summary call can
+                            # read it without re-sampling.
+                            if unified_data.metadata is None:
+                                unified_data.metadata = {}
+                            unified_data.metadata[
+                                "_sarra_climate_per_cell"
+                            ] = sarra_climate_per_cell
+            except Exception as e:
+                self.logger.warning(
+                    f"PRE.2 SARRA-Py sampling failed (continuing without "
+                    f"per-cell climate): {e}"
+                )
+                sarra_climate_per_cell = None
+
+            try:
+                from prismpy.validators.scientific import run_scientific_validation
+
                 scientific_report = run_scientific_validation(
-                    unified_data, self.config, enabled_platforms
+                    unified_data, self.config, enabled_platforms,
+                    sarra_climate_per_cell=sarra_climate_per_cell,
                 )
                 validation_summary["scientific"] = scientific_report
             except Exception as e:
@@ -2783,9 +3033,50 @@ class TranslationPipeline:
                     # V2-21 C-group: generate cell_summary.json for the
                     # interactive map. Per-cell metadata enables Leaflet
                     # to color cells by validation status + show tooltips.
+                    # V2-22c-PRE.1.2 / 1.8 — thread the validation_report
+                    # through so _build_cell_summary can pivot the
+                    # per-check `affected_cells` lists into per-cell
+                    # `failed_checks` arrays + flatten the per-violation
+                    # context into the top-level `cell_failed_check_details`.
                     if unified_data and hasattr(unified_data, 'grid') and unified_data.grid:
                         try:
-                            cell_summary = self._build_cell_summary(unified_data)
+                            # V2-22c-PRE codex P1 #1 — `validate_result.data`
+                            # is the validation_summary envelope
+                            # (`{'scientific': {...}, 'post_translate': {...}}`),
+                            # NOT the raw report. `_build_cell_summary` reads
+                            # `validation_report.get('checks', [])` so passing
+                            # the envelope produces empty `failed_checks` even
+                            # when the scientific report has failing checks.
+                            # Extract the merged scientific report (the
+                            # validate stage merges post_translate's per-cell
+                            # checks into this) so the pivot fires correctly.
+                            _val_data = (
+                                validate_result.data
+                                if validate_result and validate_result.data
+                                else None
+                            )
+                            _val_report_for_cells = (
+                                _val_data.get('scientific')
+                                if isinstance(_val_data, dict)
+                                else None
+                            )
+                            # V2-22c-PRE.2.3 — when the validate stage
+                            # ran the SARRA-Py per-cell sampler, the
+                            # sampled values are stashed on
+                            # ``unified_data.metadata`` so packaging
+                            # can read them without re-sampling.
+                            _sarra_per_cell = None
+                            if (
+                                unified_data.metadata
+                                and isinstance(unified_data.metadata, dict)
+                            ):
+                                _sarra_per_cell = unified_data.metadata.get(
+                                    "_sarra_climate_per_cell",
+                                )
+                            cell_summary = self._build_cell_summary(
+                                unified_data, _val_report_for_cells,
+                                sarra_climate_per_cell=_sarra_per_cell,
+                            )
                             cs_path = platform_dir / "cell_summary.json"
                             with open(cs_path, "w", encoding="utf-8") as csf:
                                 _json.dump(cell_summary, csf, indent=2,
@@ -2825,7 +3116,69 @@ class TranslationPipeline:
             duration_seconds=duration,
         )
 
-    def _build_cell_summary(self, unified_data) -> Dict[str, Any]:
+    # V2-22c-PRE.1.2 (D34) — per-prefix → category mapping for the
+    # per-cell `failed_checks` pivot. Keys are check_id prefixes;
+    # values are the cockpit's left-rail dimension-toggle category
+    # enum. Tuple-of-pairs preserves match order (longest-prefix-first
+    # discipline isn't needed today since the prefixes don't nest, but
+    # the ordered shape is robust to future additions).
+    #
+    # The cockpit's left-rail dimension toggle (D21) reads `category`
+    # to project per-dimension status; bare `check_id` strings would
+    # require the cockpit to recompute the prefix→category mapping
+    # client-side, duplicating the schema discipline. Per §6.4
+    # schema-bounds-match-strictest-downstream-consumer, the
+    # validator-side projection is canonical.
+    _CATEGORY_FROM_PREFIX = (
+        ("value_range_", "value_range"),
+        ("cross_variable_consistency", "cross_variable"),
+        ("temporal_completeness", "temporal"),
+        ("soil_completeness_", "soil_completeness"),
+        ("region_specific_bounds", "region_specific_bounds"),
+        ("coverage_climate_cells", "coverage_per_cell"),
+        ("coverage_soil_cells", "coverage_per_cell"),
+    )
+
+    # Scopes that the validator emits with per-cell semantics. Region-
+    # level checks (`format_compliance`, `spatial_temporal_coverage`,
+    # `region_specific_bounds` when scope=global) carry scope='global'
+    # and are excluded from the per-cell pivot — the cockpit's
+    # Region-Level Status Banner consumes them via validation_report
+    # directly per Appendix H two-zone rendering.
+    _PER_CELL_SCOPES = frozenset({"per_cell", "per_record", "per_layer"})
+
+    @classmethod
+    def _category_for_check_id(cls, check_id: str) -> Optional[str]:
+        """Return the per-cell dimension-toggle category for a
+        check_id, or None if the check is not per-cell-scoped."""
+        for prefix, category in cls._CATEGORY_FROM_PREFIX:
+            if check_id.startswith(prefix):
+                return category
+        return None
+
+    @staticmethod
+    def _affected_cell_ids(affected) -> set:
+        """Coerce a heterogeneous `details.affected_cells` list into a
+        flat set of cell_ids. PRE.1.4/1.5 emit `(cell_id, layer_idx)`
+        tuples; PRE.1.7 emits bare cell_ids; the per-cell pivot is
+        cell-id only, so layer_idx is discarded here. Duck-typed so a
+        future check that emits a different tuple shape still surfaces
+        the cell_id correctly."""
+        out = set()
+        for entry in affected or []:
+            if isinstance(entry, (list, tuple)):
+                if len(entry) >= 1:
+                    out.add(entry[0])
+            else:
+                out.add(entry)
+        return out
+
+    def _build_cell_summary(
+        self,
+        unified_data,
+        validation_report: Optional[Dict[str, Any]] = None,
+        sarra_climate_per_cell: Optional[Dict[int, Dict[str, list]]] = None,
+    ) -> Dict[str, Any]:
         """Build per-cell summary for the interactive map.
 
         Gathers validation-relevant metadata per grid cell:
@@ -2833,9 +3186,21 @@ class TranslationPipeline:
         - Soil source from SoilProfile.source
         - Climate ranges from per-cell time series (if available)
         - Validation status derived from soil source + data availability
+        - V2-22c-PRE.1.2: per-cell `failed_checks` array pivoted from
+          ``validation_report.checks`` (when provided)
+        - V2-22c-PRE.1.8: top-level `cell_failed_check_details` array
+          flattened from ``validation_report.checks[i].details.
+          violation_details`` (when provided)
+
+        ``validation_report`` is optional so callers that don't have a
+        post-validate report (legacy CLI smoke, mid-pipeline previews,
+        unit tests bypassing __init__) still get a well-formed dict.
+        When omitted, every cell carries `failed_checks: []` and the
+        top-level `cell_failed_check_details` list is empty.
 
         Returns:
-            Dict with 'cells' list + 'resolution' + 'n_cells'
+            Dict with 'cells' list + 'resolution' + 'n_cells' +
+            'cell_summary_version' + 'cell_failed_check_details'
         """
         grid = unified_data.grid
         soil = unified_data.soil or {}
@@ -2848,6 +3213,12 @@ class TranslationPipeline:
                 "id": cid,
                 "lat": round(cell.lat, 6),
                 "lon": round(cell.lon, 6),
+                # V2-22c-PRE.1.2 — initialize empty list per evaluator
+                # §12.2 binding: cells with no failures emit
+                # `failed_checks: []` (empty list, NOT absent key).
+                # The pivot below appends entries for every per-cell-
+                # scoped check this cell shows up on.
+                "failed_checks": [],
             }
 
             # Soil source
@@ -2861,12 +3232,71 @@ class TranslationPipeline:
                     else False
                 )
                 cell_data["soil_default"] = is_default
+                # V2-22c-PRE.1.6 (D26) — emit per-cell soil texture class
+                # via the existing SoilProfile.surface_texture USDA-triangle
+                # classifier. Reuses the property at models/soil.py:150-154
+                # — no new classifier.
+                #
+                # Evaluator §2 / §12 numeric criterion: the key MUST exist
+                # on every cell, with `None` (JSON null) for the no-layers
+                # / DEFAULT_SOIL edge cases. The cockpit's Veto #4 client
+                # preflight reads `cellSummary.cells[X].soil_class` and
+                # depends on a deterministic null vs string — `undefined`
+                # from key elision would force the JS into a tri-state
+                # (string | null | undefined) and silently disable the
+                # cross-class block on no-soil cells.
+                cell_data["soil_class"] = getattr(profile, 'surface_texture', None)
             else:
                 cell_data["soil_source"] = "none"
                 cell_data["soil_default"] = False
+                # Same null-not-elide discipline when no profile exists at
+                # all — uniform consumer interface across all 3 paths
+                # (valid profile / empty layers / no profile).
+                cell_data["soil_class"] = None
+
+            # V2-22c-PRE.1.10 (D37) — per-cell cascade-provenance
+            # projection. Reads each source's metadata field and emits
+            # the cockpit-consumable shape under `cell.sources.{climate,
+            # soil}.{name, version, cascade_rank, fallback_attempts}`.
+            #
+            # Source loaders + cascade orchestrator populate these
+            # metadata keys; this read path defaults to `cascade_rank=1`
+            # and `fallback_attempts=[]` when the orchestrator hasn't
+            # threaded through (e.g., legacy fixtures, mid-pipeline
+            # previews). The cockpit drawer (AC-14.3) renders the
+            # cascade as "Climate: AgERA5 v2.0 (rank 1 of 2 — iSDA
+            # failed, HWSD fallback used)" — needs all four fields
+            # available, with deterministic defaults so the rank-1
+            # primary-success case still surfaces a sensible string.
+            #
+            # Per D37 contract: the field is elided per cascade-class
+            # when no source emitted profile/ts for the cell — the
+            # cell's missing-data state is surfaced via PRE.1.9
+            # coverage checks, not via a half-populated `sources`.
+            sources_block: Dict[str, Any] = {}
+            if profile is not None and hasattr(profile, 'source'):
+                meta = getattr(profile, 'metadata', None) or {}
+                sources_block["soil"] = {
+                    "name": meta.get("source", profile.source),
+                    "version": meta.get("version"),
+                    "cascade_rank": meta.get("cascade_rank", 1),
+                    "fallback_attempts": meta.get("fallback_attempts", []),
+                }
 
             # Climate data (per-cell time series if available)
             ts = climate.get(cid)
+            if ts and hasattr(ts, 'metadata'):
+                ts_meta = ts.metadata or {}
+                sources_block["climate"] = {
+                    "name": ts_meta.get("source", getattr(ts, 'source', None)),
+                    "version": ts_meta.get("version"),
+                    "cascade_rank": ts_meta.get("cascade_rank", 1),
+                    "fallback_attempts": ts_meta.get("fallback_attempts", []),
+                }
+            if sources_block:
+                cell_data["sources"] = sources_block
+
+            # Climate data (per-cell time series if available)
             if ts and hasattr(ts, 'records') and ts.records:
                 tmax_vals = [r.tmax for r in ts.records if r.tmax is not None]
                 tmin_vals = [r.tmin for r in ts.records if r.tmin is not None]
@@ -2882,6 +3312,82 @@ class TranslationPipeline:
                     ]
                 cell_data["n_days"] = len(ts.records)
                 cell_data["has_climate"] = True
+            elif (
+                sarra_climate_per_cell
+                and cid in sarra_climate_per_cell
+                and sarra_climate_per_cell[cid]
+            ):
+                # V2-22c-PRE.2.3 (D14) — SARRA-Py per-cell `has_climate`
+                # derives from sampled-values presence, not from
+                # `unified_data.climate` (which is path-dict shaped for
+                # SARRA-Py, so the existing `hasattr(ts, 'records')`
+                # check returns False for every cell — the universal-
+                # fail bug per V2-22c contract §1.1 sample run
+                # `766c6907-...`).
+                #
+                # Bucket shape: {var_canonical: [pixel_value_per_day]}.
+                # Treat as has_climate=True when at least one variable
+                # has at least one sampled value across the 4 mapped
+                # vars (rain / tmax / tmin / srad).
+                bucket = sarra_climate_per_cell[cid]
+                tmax_vals = bucket.get("tmax", [])
+                tmin_vals = bucket.get("tmin", [])
+                if tmax_vals:
+                    cell_data["tmax_range"] = [
+                        round(min(tmax_vals), 1),
+                        round(max(tmax_vals), 1),
+                    ]
+                if tmin_vals:
+                    cell_data["tmin_range"] = [
+                        round(min(tmin_vals), 1),
+                        round(max(tmin_vals), 1),
+                    ]
+                # V2-22c-PRE codex Gate B P2 #2 — `n_days` is per-cell
+                # day count, NOT a sum across variables. The prior
+                # ``sum(len(v) for v in bucket.values())`` form added
+                # rain + tmax + tmin + srad sample counts together
+                # (e.g., 10 files × 4 vars = 40), inflating the
+                # cockpit-rendered temporal coverage by 4×. Take the
+                # max across variables — each variable's sample list
+                # spans the same N stratified files, so all four
+                # buckets have the same length on a healthy run; max
+                # is the canonical day count even if one variable
+                # was partially missing. Falls back to 0 when every
+                # bucket is empty (the has_climate check below
+                # downgrades to False in that case anyway).
+                per_variable_lengths = [
+                    len(vals) for vals in bucket.values() if vals
+                ]
+                cell_data["n_days"] = (
+                    max(per_variable_lengths) if per_variable_lengths else 0
+                )
+                cell_data["has_climate"] = cell_data["n_days"] > 0
+
+                # V2-22c-PRE codex Gate B P2 #1 — preserve SARRA-Py
+                # climate source provenance. The earlier sources_block
+                # population reads `climate.get(cid)` which is always
+                # None for SARRA-Py because `unified_data.climate` is
+                # the path-dict shape (`{rainfall_dir, agera5_dir}`).
+                # Without this branch the cell has `has_climate=True`
+                # but no `sources.climate` block — Dr. Kofi's audit
+                # trail in the cockpit drawer renders "Climate: unknown"
+                # for every SARRA-Py cell.
+                #
+                # Composite name reflects the two-source SARRA-Py
+                # path (TAMSAT for rainfall + AgERA5 for temperature
+                # + solar). The variable-keyed schema (separate
+                # sub-blocks per var) is V2-22d backlog #12 per the
+                # evaluator strategy doc §4 stance; PRE keeps the
+                # flat composite for v1.
+                if cell_data["has_climate"]:
+                    if "sources" not in cell_data:
+                        cell_data["sources"] = {}
+                    cell_data["sources"]["climate"] = {
+                        "name": "TAMSAT + AgERA5",
+                        "version": None,
+                        "cascade_rank": 1,
+                        "fallback_attempts": [],
+                    }
             else:
                 cell_data["has_climate"] = False
 
@@ -2903,10 +3409,110 @@ class TranslationPipeline:
 
             cells.append(cell_data)
 
+        # V2-22c-PRE.1.2 (D34) — pivot per-check `affected_cells` lists
+        # into per-cell `failed_checks` structured arrays. Each entry on
+        # a cell is a 3-key object {check_id, result, category}
+        # (evaluator §12.2 Pydantic-style binding). Region-scoped
+        # checks (scope='global') are excluded from the per-cell pivot
+        # — they live in the banner per Appendix H.
+        #
+        # V2-22c-PRE.1.8 (D35) — flatten per-violation context into the
+        # top-level `cell_failed_check_details` array. Each entry
+        # carries the full (cell_id, check_id, result, layer_idx,
+        # variable, value, unit, bounds) tuple the cockpit drawer
+        # renders directly.
+        cell_failed_check_details: List[Dict[str, Any]] = []
+        cells_by_id = {c["id"]: c for c in cells}
+        if isinstance(validation_report, dict):
+            for check in validation_report.get("checks", []) or []:
+                result = check.get("result")
+                if result not in ("fail", "warning"):
+                    continue
+                if check.get("scope") not in self._PER_CELL_SCOPES:
+                    continue
+                check_id = check.get("check")
+                if not isinstance(check_id, str):
+                    continue
+                category = self._category_for_check_id(check_id)
+                if category is None:
+                    # Per-cell-scoped check whose check_id doesn't
+                    # match a known prefix — skip rather than emit a
+                    # category=None entry that would fail the
+                    # downstream Pydantic-style validation. Surfaces
+                    # as a sibling-sweep finding at evaluator §12.2.
+                    continue
+                details = check.get("details") or {}
+                affected_ids = self._affected_cell_ids(
+                    details.get("affected_cells"),
+                )
+                entry_template = {
+                    "check_id": check_id,
+                    "result": result,
+                    "category": category,
+                }
+                for cell_id in affected_ids:
+                    cell = cells_by_id.get(cell_id)
+                    if cell is None:
+                        # affected_cells lists a cell_id that the grid
+                        # doesn't know about — defensive skip; the
+                        # validator should never emit IDs outside the
+                        # grid, but a stale validation_report against
+                        # a re-built grid (PRE.3 exclude_cells path)
+                        # could surface this.
+                        continue
+                    cell["failed_checks"].append(dict(entry_template))
+
+                # PRE.1.8 flatten — per-violation detail rows.
+                for vd in details.get("violation_details", []) or []:
+                    if not isinstance(vd, dict):
+                        continue
+                    cell_id = vd.get("cell_id")
+                    if cell_id is None or cell_id not in cells_by_id:
+                        continue
+                    cell_failed_check_details.append({
+                        "cell_id": cell_id,
+                        "check_id": check_id,
+                        "result": result,
+                        "category": category,
+                        "layer_idx": vd.get("layer_idx"),
+                        "variable": vd.get("variable"),
+                        "value": vd.get("value"),
+                        "unit": vd.get("unit"),
+                        "bounds": vd.get("bounds"),
+                    })
+
+        # Stable ordering for both the per-cell `failed_checks` arrays
+        # and the top-level `cell_failed_check_details` list — sorted
+        # by (check_id, result) so reproducible JSON diffs survive
+        # any future change in validator iteration order. Evaluator §2
+        # binding for cockpit-cursor stability.
+        for cell in cells:
+            cell["failed_checks"].sort(
+                key=lambda e: (e["check_id"], e["result"]),
+            )
+        cell_failed_check_details.sort(
+            key=lambda e: (
+                e["cell_id"], e["check_id"],
+                e.get("layer_idx") if e.get("layer_idx") is not None else -1,
+            ),
+        )
+
         return {
+            # V2-22c-PRE.1.1 (D5/D7) — `cell_summary_version: "2.0"` matches
+            # the existing `validation_version: "2.0"` precedent at
+            # validators/scientific.py:155 and `post_translate_version: "1.0"`
+            # at validators/post_translate.py:114. The cockpit's loader-
+            # fallback at prismweb/core/views.py:_load_cell_summary uses this
+            # field to detect pre-PRE.1 fixtures and synthesize the empty
+            # `failed_checks: []` shape per V2-22c contract D11/D19.
+            "cell_summary_version": "2.0",
             "n_cells": len(cells),
             "resolution": getattr(grid, 'resolution', '5arcmin'),
             "cells": cells,
+            # V2-22c-PRE.1.8 — top-level array; cockpit drawer reads
+            # this directly so a single read renders the full
+            # violation context without joining back to cells.
+            "cell_failed_check_details": cell_failed_check_details,
         }
 
     def execute(
@@ -3028,6 +3634,50 @@ class TranslationPipeline:
                     )
                     stage_results["translate"] = result
                     _notify_complete("translate", result)
+
+            # Stage 3.5: REMEDIATION (V2-22c-PRE.4 / D25)
+            # Runs between TRANSLATE and VALIDATE so post-remediation
+            # validation is honest (the user sees validation against
+            # the corrected outputs, not the originals). Most runs
+            # take the no-op path inside _execute_remediation; only
+            # cockpit-bulk-fix re-runs carry a remediation_spec.
+            #
+            # Evaluator §12.5 binding — narrow ``except RemediationBlocked``
+            # catch (NOT bare ``except Exception``). A broad catch
+            # would swallow the structured `reason` payload and erase
+            # the cockpit's AC-9.3 BLOCK copy specificity. Test
+            # `tests/unit/test_remediation_stage.py` AST-walks this
+            # block to assert the narrow shape.
+            if PipelineStage.REMEDIATION in stages:
+                _check_cancel_before_stage("remediation")
+                _notify_start("remediation", "Applying corrections")
+                harmonize_data_rem = stage_results.get(
+                    "harmonize",
+                    StageResult(
+                        stage=PipelineStage.HARMONIZE,
+                        success=True, data=None,
+                    ),
+                ).data
+                try:
+                    result = self._execute_remediation(
+                        translation_results, harmonize_data_rem,
+                    )
+                except RemediationBlocked as block:
+                    # Failure does NOT short-circuit the pipeline —
+                    # VALIDATE still runs against the (un-remediated)
+                    # outputs so the user sees post-failure state
+                    # honestly. Cockpit reads
+                    # `stage_results['remediation'].errors[0]` and
+                    # renders the BLOCK reason verbatim.
+                    result = StageResult(
+                        stage=PipelineStage.REMEDIATION,
+                        success=False,
+                        errors=[str(block)],
+                        warnings=[],
+                        duration_seconds=0.0,
+                    )
+                stage_results["remediation"] = result
+                _notify_complete("remediation", result)
 
             # Stage 4: VALIDATE
             if PipelineStage.VALIDATE in stages and translation_results:

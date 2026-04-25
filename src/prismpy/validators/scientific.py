@@ -89,6 +89,7 @@ def run_scientific_validation(
     unified_data,
     config,
     enabled_platforms: Optional[List[str]] = None,
+    sarra_climate_per_cell: Optional[Dict[int, Dict[str, list]]] = None,
 ) -> Dict[str, Any]:
     """Run all 6 Tier 1 scientific validation checks.
 
@@ -96,6 +97,15 @@ def run_scientific_validation(
         unified_data: UnifiedData from the HARMONIZE stage
         config: ProjectConfig for temporal/spatial reference
         enabled_platforms: List of enabled platform names
+        sarra_climate_per_cell: V2-22c-PRE.2.4 (D14) — per-cell
+            sampled climate values for SARRA-Py file-based runs.
+            Shape: ``{cell_id: {var: [pixel_value, ...]}}``. When
+            provided, the value-range check synthesizes per-cell
+            ``value_range_<var>`` checks with `affected_cells`
+            lists; without it, file-based climate stays on the
+            delegated-info path. Populated by
+            :func:`prismpy.validators.post_translate.sample_sarra_py_per_cell`
+            in the validate stage when SARRA-Py is enabled.
 
     Returns:
         Dict with 'checks' list and 'overall_result' rollup
@@ -109,8 +119,12 @@ def run_scientific_validation(
     # Check 2: Cross-variable consistency
     checks.append(_check_cross_variable_consistency(unified_data))
 
-    # Check 3: Value range
-    checks.extend(_check_value_ranges(unified_data))
+    # Check 3: Value range — pass through the per-cell sampled
+    # values so the SARRA-Py file-based branch synthesizes per-cell
+    # checks (PRE.2.4).
+    checks.extend(_check_value_ranges(
+        unified_data, sarra_climate_per_cell=sarra_climate_per_cell,
+    ))
 
     # Check 4: Soil profile completeness
     for platform in enabled:
@@ -128,6 +142,14 @@ def run_scientific_validation(
 
     # Check 6: Spatial/temporal coverage
     checks.append(_check_coverage(unified_data, config))
+
+    # V2-22c-PRE.1.9 (D36) — per-cell coverage checks. SEPARATE from
+    # the existing global `spatial_temporal_coverage` (kept above);
+    # these emit per-cell `affected_cells` lists that PRE.1.2's
+    # failed_checks pivot reads. Cockpit's Layer 1 fill rule + Layer
+    # 3 dimension toggle (Coverage) depend on these.
+    checks.append(_check_coverage_climate_cells(unified_data))
+    checks.append(_check_coverage_soil_cells(unified_data))
 
     # Check 7: Region-specific bounds (V2-20)
     checks.append(_check_region_bounds(unified_data, config))
@@ -176,6 +198,15 @@ _CATEGORY_MAP = {
     "soil_completeness_": "completeness",
     "format_compliance": "schema",
     "spatial_temporal_coverage": "coverage",
+    # V2-22c-PRE.1.9 codex P2 #3 — the per-cell coverage checks
+    # added by D36 must classify under "coverage" so the validation
+    # report's category rollup matches the cockpit's coverage chip
+    # rendering. Without these mappings the fallback category in
+    # _get_check_category puts them under "schema" → category drift
+    # vs. the cockpit's per-cell `failed_checks` pivot which labels
+    # them `coverage_per_cell`.
+    "coverage_climate_cells": "coverage",
+    "coverage_soil_cells": "coverage",
     "region_specific_bounds": "ranges",
     "post_translate_consistency_": "ranges",
     "post_translate_range_": "ranges",
@@ -443,7 +474,18 @@ def _check_temporal_completeness(unified_data, config) -> Dict[str, Any]:
             "n_cells": len(climate),
             "completeness_pct": round(completeness * 100, 2),
             "cells_with_gaps": len(cell_gaps),
-            "gap_details": {str(k): v for k, v in list(cell_gaps.items())[:10]},
+            # V2-22c-PRE.1.3 — un-truncated. Cockpit's per-cell drill-down
+            # is the strictest downstream consumer (§6.4 schema-bounds
+            # discipline); `[:10]` was a UI-driven pre-cockpit optimization.
+            "gap_details": {str(k): v for k, v in cell_gaps.items()},
+            # V2-22c-PRE codex P2 #1 — `_build_cell_summary` pivots
+            # per-cell `failed_checks` from `details.affected_cells`,
+            # not `gap_details`. Without this list a per-cell check
+            # with `result='fail'` or `'warning'` and `scope='per_cell'`
+            # would silently omit the `temporal_completeness` entry
+            # from every cell's `failed_checks` array. Sorted ASC for
+            # deterministic JSON diffs.
+            "affected_cells": sorted(cell_gaps.keys()),
         },
     }
 
@@ -665,7 +707,8 @@ def _check_cross_variable_consistency(unified_data) -> Dict[str, Any]:
         "details": {
             "total_records": total_records,
             "violations": violations,
-            "affected_cells": list(affected_cells)[:20],
+            # V2-22c-PRE.1.3 — un-truncated for cockpit drill-down.
+            "affected_cells": list(affected_cells),
             "n_affected_cells": len(affected_cells),
         },
     }
@@ -675,8 +718,19 @@ def _check_cross_variable_consistency(unified_data) -> Dict[str, Any]:
 # Check 3: Value range (universal physical bounds)
 # =============================================================================
 
-def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
-    """Check climate and soil values against universal physical bounds."""
+def _check_value_ranges(
+    unified_data,
+    sarra_climate_per_cell: Optional[Dict[int, Dict[str, list]]] = None,
+) -> List[Dict[str, Any]]:
+    """Check climate and soil values against universal physical bounds.
+
+    V2-22c-PRE.2.4 (D14) — when ``sarra_climate_per_cell`` is provided,
+    the file-based climate branch consumes those sampled values to
+    emit per-cell value-range checks (with `affected_cells` lists)
+    identical to the in-memory CRAFT/PYTHIA/ACEA shape. Without the
+    parameter, the file-based branch keeps emitting only the
+    delegated info record.
+    """
     checks = []
 
     # Climate value ranges
@@ -722,7 +776,60 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
                 "coverage_kind": "delegated",
             },
         })
-        climate_stats = {}  # empty → no per-variable climate checks emitted
+        # V2-22c-PRE.2.4 (D14) — when the caller supplied per-cell
+        # sampled values, populate climate_stats so the per-cell
+        # `value_range_<var>` checks emit with `affected_cells` lists
+        # identical to the CRAFT/PYTHIA/ACEA shape. The cockpit's
+        # Layer 1 fill rule reads these for SARRA-Py runs; without
+        # this branch the cockpit shows every SARRA-Py cell red
+        # because no per-cell value-range check produces a `pass`
+        # record (the universal-fail bug per V2-22c contract §1.1).
+        #
+        # The canonical var mapping is `rain` → SARRA's "rain"
+        # output, but CLIMATE_RANGES uses `rain` natively too.
+        # Each per-cell list is a sample across N file reads;
+        # min/max-aggregating per cell mirrors the per-cell-records
+        # path's range computation.
+        if sarra_climate_per_cell:
+            # SARRA_PY_VAR_MAPPING (post_translate.py) emits canonical
+            # vars `rain / tmax / tmin / srad`; scientific.py's
+            # CLIMATE_RANGES uses `precip` for the precipitation
+            # threshold. Translate the SARRA-Py-side `rain` → the
+            # canonical scientific.py `precip` when populating stats
+            # so the check_id ends up `value_range_precip` (matching
+            # the CRAFT/PYTHIA/ACEA shape — the cockpit drill-down
+            # treats SARRA-Py and the in-memory platforms identically
+            # at the check_id surface).
+            _sarra_to_canonical = {
+                "rain": "precip",
+                "tmax": "tmax",
+                "tmin": "tmin",
+                "srad": "srad",
+            }
+            for cell_id, var_bucket in sarra_climate_per_cell.items():
+                for sarra_var, vals in var_bucket.items():
+                    var = _sarra_to_canonical.get(sarra_var, sarra_var)
+                    if var not in CLIMATE_RANGES:
+                        continue
+                    if not vals:
+                        continue
+                    vmin, vmax, unit = CLIMATE_RANGES[var]
+                    if var not in climate_stats:
+                        climate_stats[var] = {
+                            "min": min(vals), "max": max(vals),
+                            "out_of_range": 0, "total": 0,
+                            "affected_cells": set(),
+                        }
+                    stats = climate_stats[var]
+                    stats["min"] = min(stats["min"], min(vals))
+                    stats["max"] = max(stats["max"], max(vals))
+                    stats["total"] += len(vals)
+                    for v in vals:
+                        if v < vmin or v > vmax:
+                            stats["out_of_range"] += 1
+                            stats["affected_cells"].add(cell_id)
+        # else: empty climate_stats → no per-variable climate checks
+        # emitted; the delegated info record above is the only output.
     else:
         for cell_id, ts in climate.items():
             if not hasattr(ts, 'records'):
@@ -773,7 +880,8 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
                 "observed_max": round(stats["max"], 2),
                 "out_of_range_count": n_oor,
                 "total_values": stats["total"],
-                "affected_cells": list(stats["affected_cells"])[:10],
+                # V2-22c-PRE.1.3 — un-truncated for cockpit drill-down.
+                "affected_cells": list(stats["affected_cells"]),
             },
         })
 
@@ -782,11 +890,25 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
     soil_stats = {}
     texture_violations = 0
     texture_total = 0
+    # V2-22c-PRE.1.4 / 1.5 — track per-(cell_id, layer_idx) violations
+    # alongside the existing aggregate counters so the validator emits a
+    # cockpit-consumable `affected_cells` list per check. Net-new
+    # collection logic; the validator never recorded the failed cell IDs
+    # before V2-22c. ``soil_violations_by_var[var]`` is the list per
+    # soil variable; ``texture_violation_cells`` is the list for the
+    # composite texture-sum check; ``soil_violation_details`` is the
+    # downstream-feed payload for PRE.1.8 ``cell_failed_check_details``
+    # flattening (each entry carries the cell + layer + value + bounds
+    # context the cockpit drawer needs to render the violation row
+    # directly without a second JSON load).
+    soil_violations_by_var: Dict[str, List[Tuple[int, int]]] = {}
+    texture_violation_cells: List[Tuple[int, int]] = []
+    soil_violation_details: List[Dict[str, Any]] = []
 
     for cell_id, profile in soil.items():
         if not hasattr(profile, 'layers'):
             continue
-        for layer in profile.layers:
+        for layer_idx, layer in enumerate(profile.layers):
             for var, (vmin, vmax, unit) in SOIL_RANGES.items():
                 val = getattr(layer, var, None)
                 if val is None:
@@ -802,6 +924,17 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
                 stats["total"] += 1
                 if val < vmin or val > vmax:
                     stats["out_of_range"] += 1
+                    soil_violations_by_var.setdefault(var, []).append(
+                        (cell_id, layer_idx),
+                    )
+                    soil_violation_details.append({
+                        "cell_id": cell_id,
+                        "layer_idx": layer_idx,
+                        "variable": var,
+                        "value": float(val),
+                        "unit": unit,
+                        "bounds": [vmin, vmax],
+                    })
 
             # Texture fraction check (sand + clay + silt ≈ 100)
             sand = getattr(layer, 'sand', None)
@@ -812,6 +945,15 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
                 texture_sum = sand + clay + silt
                 if texture_sum < 95 or texture_sum > 105:
                     texture_violations += 1
+                    texture_violation_cells.append((cell_id, layer_idx))
+                    soil_violation_details.append({
+                        "cell_id": cell_id,
+                        "layer_idx": layer_idx,
+                        "variable": "texture_sum",
+                        "value": float(texture_sum),
+                        "unit": "%",
+                        "bounds": [95, 105],
+                    })
 
     for var, (vmin, vmax, unit) in SOIL_RANGES.items():
         stats = soil_stats.get(var)
@@ -838,6 +980,21 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
                 "observed_max": round(stats["max"], 3),
                 "out_of_range_count": n_oor,
                 "total_values": stats["total"],
+                # V2-22c-PRE.1.5 — per-(cell_id, layer_idx) tuples for
+                # each layer that violated this variable's range.
+                # Sorted by (cell_id, layer_idx) ASC for deterministic
+                # JSON diffs across runs (evaluator §2 binding).
+                "affected_cells": sorted(soil_violations_by_var.get(var, [])),
+                # V2-22c-PRE.1.8 — per-violation context for the cockpit
+                # drawer; flattened into top-level cell_failed_check_details
+                # by _build_cell_summary so consumers can render
+                # "Cell #N layer L — <var>=<value> outside [<lo>, <hi>]"
+                # without a second JSON join. Sorted to match the
+                # affected_cells ordering for cockpit cursor stability.
+                "violation_details": sorted(
+                    [d for d in soil_violation_details if d["variable"] == var],
+                    key=lambda d: (d["cell_id"], d["layer_idx"]),
+                ),
             },
         })
 
@@ -859,6 +1016,18 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
                 "expected_range": [95, 105],
                 "violations": texture_violations,
                 "total_layers": texture_total,
+                # V2-22c-PRE.1.4 — per-(cell_id, layer_idx) tuples for
+                # each layer where sand+clay+silt fell outside [95, 105].
+                # Sorted ASC for deterministic JSON diffs (evaluator §2).
+                "affected_cells": sorted(texture_violation_cells),
+                # V2-22c-PRE.1.8 — same flatten-into-cell_failed_check_details
+                # rationale as the soil-quality family above. Sorted to
+                # match affected_cells ordering for cockpit cursor stability.
+                "violation_details": sorted(
+                    [d for d in soil_violation_details
+                     if d["variable"] == "texture_sum"],
+                    key=lambda d: (d["cell_id"], d["layer_idx"]),
+                ),
             },
         })
 
@@ -930,9 +1099,17 @@ def _check_soil_completeness(unified_data, platform: str) -> Dict[str, Any]:
             "n_complete": n_complete,
             "n_incomplete": n_incomplete,
             "n_total": n_total,
+            # V2-22c-PRE.1.3 — un-truncated for cockpit drill-down.
             "sample_missing": {
-                str(k): v for k, v in list(missing_by_cell.items())[:5]
+                str(k): v for k, v in missing_by_cell.items()
             },
+            # V2-22c-PRE codex P2 #2 — `_build_cell_summary` pivots
+            # per-cell `failed_checks` from `details.affected_cells`,
+            # not `sample_missing`. Without this list, incomplete
+            # soil cells never surface the `soil_completeness_<platform>`
+            # entry on their per-cell chip strip. Sorted ASC for
+            # deterministic JSON diffs.
+            "affected_cells": sorted(missing_by_cell.keys()),
         },
     }
 
@@ -1006,6 +1183,183 @@ def _check_coverage(unified_data, config) -> Dict[str, Any]:
 
 
 # =============================================================================
+# Check 6b: Per-cell coverage (V2-22c-PRE.1.9 / D36)
+# =============================================================================
+
+def _check_coverage_climate_cells(unified_data) -> Dict[str, Any]:
+    """V2-22c-PRE.1.9 (D36) — per-cell climate coverage check.
+
+    Cells where the unified climate data has no entry, OR has an
+    entry whose ``records`` is empty, count as missing. Emits
+    ``scope='per_cell'`` so PRE.1.2's failed_checks pivot picks it
+    up under the ``coverage_per_cell`` category.
+
+    SARRA-Py file-based climate path: emits ``info`` with a
+    delegation note rather than ``fail``. Per-cell coverage for
+    SARRA-Py is V2-22d backlog (#11) — PRE.2.4 ships per-cell
+    climate sampling but the coverage synthesis defers. The
+    ``info`` result lets the cockpit Coverage chip render
+    "delegated" instead of red.
+    """
+    grid = (
+        unified_data.grid
+        if unified_data and hasattr(unified_data, 'grid')
+        else None
+    )
+    if grid is None or not getattr(grid, 'cells', None):
+        return {
+            "check": "coverage_climate_cells",
+            "scope": "per_cell",
+            "result": "info",
+            "summary": "Per-cell climate coverage skipped: no grid available",
+            "manuscript_claim": "Section 2.5: per-cell coverage check",
+            "details": {"affected_cells": [], "n_missing": 0, "n_total": 0},
+        }
+    climate = (
+        unified_data.climate
+        if unified_data and hasattr(unified_data, 'climate')
+        else {}
+    )
+    if _is_file_based_climate(climate):
+        return {
+            "check": "coverage_climate_cells",
+            "scope": "per_cell",
+            "result": "info",
+            "summary": (
+                "File-based climate (SARRA-Py) — per-cell coverage "
+                "delegated to PRE.2 sampling (V2-22d backlog)"
+            ),
+            "manuscript_claim": "Section 2.5: per-cell coverage check",
+            "details": {
+                "delegated_to": "PRE.2 sampling",
+                "affected_cells": [],
+                "n_missing": 0,
+                "n_total": grid.n_cells,
+            },
+        }
+
+    grid_ids = {c.cell_id for c in grid.cells}
+    missing = set()
+    if isinstance(climate, dict):
+        for cid in grid_ids:
+            ts = climate.get(cid)
+            if ts is None:
+                missing.add(cid)
+                continue
+            records = getattr(ts, 'records', None)
+            if records is None or len(records) == 0:
+                missing.add(cid)
+    else:
+        # Non-dict climate that isn't file-based: treat as missing.
+        missing = set(grid_ids)
+
+    affected_cells = sorted(missing)
+    n_missing = len(affected_cells)
+    n_total = len(grid_ids)
+    result = "fail" if n_missing > 0 else "pass"
+    return {
+        "check": "coverage_climate_cells",
+        "scope": "per_cell",
+        "result": result,
+        "summary": (
+            f"{n_total - n_missing}/{n_total} cells covered by climate data"
+            + (f" — {n_missing} cells missing" if n_missing else "")
+        ),
+        "manuscript_claim": "Section 2.5: per-cell coverage check",
+        "details": {
+            "n_total": n_total,
+            "n_missing": n_missing,
+            "affected_cells": affected_cells,
+            # PRE.1.8 — per-violation context. Coverage failures
+            # don't carry a value/unit/bounds tuple (the failure is
+            # absence-of-data, not out-of-range), so those fields
+            # are null. Cockpit drawer renders "no climate data"
+            # for these rows.
+            "violation_details": [
+                {
+                    "cell_id": cid, "layer_idx": None,
+                    "variable": "climate", "value": None,
+                    "unit": None, "bounds": None,
+                }
+                for cid in affected_cells
+            ],
+        },
+    }
+
+
+def _check_coverage_soil_cells(unified_data) -> Dict[str, Any]:
+    """V2-22c-PRE.1.9 (D36) — per-cell soil coverage check. Same
+    shape as ``_check_coverage_climate_cells`` but reads
+    ``unified_data.soil``. SoilProfile cells where the profile is
+    None OR ``layers`` is empty count as missing.
+
+    No file-based asymmetry here — soil is always per-cell across
+    all four platforms today.
+    """
+    grid = (
+        unified_data.grid
+        if unified_data and hasattr(unified_data, 'grid')
+        else None
+    )
+    if grid is None or not getattr(grid, 'cells', None):
+        return {
+            "check": "coverage_soil_cells",
+            "scope": "per_cell",
+            "result": "info",
+            "summary": "Per-cell soil coverage skipped: no grid available",
+            "manuscript_claim": "Section 2.5: per-cell coverage check",
+            "details": {"affected_cells": [], "n_missing": 0, "n_total": 0},
+        }
+    soil = (
+        unified_data.soil
+        if unified_data and hasattr(unified_data, 'soil')
+        else {}
+    )
+
+    grid_ids = {c.cell_id for c in grid.cells}
+    missing = set()
+    if isinstance(soil, dict):
+        for cid in grid_ids:
+            profile = soil.get(cid)
+            if profile is None:
+                missing.add(cid)
+                continue
+            layers = getattr(profile, 'layers', None)
+            if layers is None or len(layers) == 0:
+                missing.add(cid)
+    else:
+        missing = set(grid_ids)
+
+    affected_cells = sorted(missing)
+    n_missing = len(affected_cells)
+    n_total = len(grid_ids)
+    result = "fail" if n_missing > 0 else "pass"
+    return {
+        "check": "coverage_soil_cells",
+        "scope": "per_cell",
+        "result": result,
+        "summary": (
+            f"{n_total - n_missing}/{n_total} cells covered by soil data"
+            + (f" — {n_missing} cells missing" if n_missing else "")
+        ),
+        "manuscript_claim": "Section 2.5: per-cell coverage check",
+        "details": {
+            "n_total": n_total,
+            "n_missing": n_missing,
+            "affected_cells": affected_cells,
+            "violation_details": [
+                {
+                    "cell_id": cid, "layer_idx": None,
+                    "variable": "soil", "value": None,
+                    "unit": None, "bounds": None,
+                }
+                for cid in affected_cells
+            ],
+        },
+    }
+
+
+# =============================================================================
 # Check 7: Region-specific bounds (V2-20)
 # =============================================================================
 
@@ -1056,7 +1410,23 @@ def _check_region_bounds(unified_data, config) -> Dict[str, Any]:
 
     # Check climate values against region-specific thresholds
     climate = unified_data.climate if unified_data and hasattr(unified_data, 'climate') else {}
-    violations = []
+    # V2-22c-PRE.1.7 — track per-cell violations alongside the existing
+    # diagnostic text-string list. Two parallel structures:
+    #
+    # * ``violation_texts``: human-readable strings (existing
+    #   diagnostic; capped at 10 in the emitted ``sample_violations``
+    #   per PRE.1.7 spec — text-string list is preserved at [:10]).
+    # * ``violation_records``: structured `(cell_id, variable, value,
+    #   bounds, unit)` tuples that drive the un-truncated
+    #   ``affected_cells`` list AND the ``violation_details`` flatten
+    #   used by PRE.1.8 ``cell_failed_check_details``.
+    #
+    # Without the structured records the cockpit's Layer 1
+    # `region_specific_bounds` failure-fill silently drops every cell
+    # because PRE.1.2's pivot reads `details.affected_cells` which
+    # would be empty.
+    violation_texts: List[str] = []
+    violation_records: List[Dict[str, Any]] = []
 
     if not _is_file_based_climate(climate):
         tmax_range = thresholds.get("tmax")
@@ -1070,36 +1440,62 @@ def _check_region_bounds(unified_data, config) -> Dict[str, Any]:
             for record in ts.records:
                 if tmax_range and hasattr(record, 'tmax') and record.tmax is not None:
                     if record.tmax < tmax_range[0] or record.tmax > tmax_range[1]:
-                        violations.append(
+                        violation_texts.append(
                             f"tmax={record.tmax:.1f} outside {region_name} "
                             f"range {tmax_range}"
                         )
+                        violation_records.append({
+                            "cell_id": cell_id, "variable": "tmax",
+                            "value": float(record.tmax), "unit": "°C",
+                            "bounds": list(tmax_range),
+                        })
                 if tmin_range and hasattr(record, 'tmin') and record.tmin is not None:
                     if record.tmin < tmin_range[0] or record.tmin > tmin_range[1]:
-                        violations.append(
+                        violation_texts.append(
                             f"tmin={record.tmin:.1f} outside {region_name} "
                             f"range {tmin_range}"
                         )
+                        violation_records.append({
+                            "cell_id": cell_id, "variable": "tmin",
+                            "value": float(record.tmin), "unit": "°C",
+                            "bounds": list(tmin_range),
+                        })
                 # Daily precipitation uses precip_daily_max (NOT
                 # precip_annual_mm which is an annual total)
                 if precip_daily_max and hasattr(record, 'precip') and record.precip is not None:
                     if record.precip > precip_daily_max:
-                        violations.append(
+                        violation_texts.append(
                             f"precip={record.precip:.1f} mm/day exceeds "
                             f"{region_name} daily max {precip_daily_max}"
                         )
+                        violation_records.append({
+                            "cell_id": cell_id, "variable": "precip",
+                            "value": float(record.precip),
+                            "unit": "mm/day",
+                            "bounds": [None, float(precip_daily_max)],
+                        })
                 if srad_range and hasattr(record, 'srad') and record.srad is not None:
                     if record.srad < srad_range[0] or record.srad > srad_range[1]:
-                        violations.append(
+                        violation_texts.append(
                             f"srad={record.srad:.1f} outside {region_name} "
                             f"range {srad_range}"
                         )
+                        violation_records.append({
+                            "cell_id": cell_id, "variable": "srad",
+                            "value": float(record.srad),
+                            "unit": "MJ/m²/d",
+                            "bounds": list(srad_range),
+                        })
 
-    n_violations = len(violations)
+    n_violations = len(violation_texts)
     if n_violations > 0:
         result = "warning"
     else:
         result = "pass"
+
+    # V2-22c-PRE.1.7 — un-truncated, deduplicated, sorted ASC for
+    # deterministic JSON diffs (evaluator §2 binding).
+    affected_cells_sorted = sorted({r["cell_id"] for r in violation_records})
 
     return {
         "check": "region_specific_bounds",
@@ -1118,6 +1514,18 @@ def _check_region_bounds(unified_data, config) -> Dict[str, Any]:
             "centroid_lon": round(center_lon, 4),
             "thresholds": thresholds,
             "n_violations": n_violations,
-            "sample_violations": violations[:10],
+            # V2-22c-PRE.1.7 — text-string sample stays capped at 10
+            # for human-readable diagnostic; the un-truncated cell-id
+            # list lives on `affected_cells` below. Structurally
+            # captured by tests/unit/test_scientific_un_truncation.py
+            # via the ALLOWED_TRUNCATED_KEYS allowlist.
+            "sample_violations": violation_texts[:10],
+            "affected_cells": affected_cells_sorted,
+            # V2-22c-PRE.1.8 — sorted by (cell_id, variable) for
+            # cockpit-cursor stability + reproducible JSON diffs.
+            "violation_details": sorted(
+                violation_records,
+                key=lambda r: (r["cell_id"], r["variable"]),
+            ),
         },
     }

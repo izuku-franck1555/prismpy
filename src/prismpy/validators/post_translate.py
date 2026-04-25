@@ -474,8 +474,9 @@ def _check_date_continuity(
             "n_gaps": len(gaps),
             "n_duplicates": len(duplicates),
             "n_out_of_order": out_of_order,
-            "sample_gaps": gaps[:5],
-            "sample_duplicates": duplicates[:5],
+            # V2-22c-PRE.1.3 — un-truncated for cockpit per-cell drill-down.
+            "sample_gaps": gaps,
+            "sample_duplicates": duplicates,
         },
     }
 
@@ -574,6 +575,128 @@ SARRA_PY_VAR_MAPPING = {
     "2m_temperature_24_hour_minimum": ("tmin", "noop", 0.0),  # already °C
     "solar_radiation_flux_daily": ("srad", "mul", 1e-3),  # kJ/m²/d → MJ/m²/d
 }
+
+
+def sample_sarra_py_per_cell(
+    platform_dir: Path,
+    grid_cells: List[Any],
+) -> Dict[int, Dict[str, List[float]]]:
+    """V2-22c-PRE.2.1 (D17 amortized-open binding) — per-cell windowed
+    sampling of SARRA-Py climate GeoTIFFs.
+
+    The cockpit needs per-cell climate values to render Layer 1 fill
+    colors and the per-cell value-range checks for SARRA-Py runs.
+    The existing :func:`_validate_sarra_py_geotiffs` reads ALL pixels
+    per file; that doesn't yield per-cell attribution. This helper
+    samples one pixel per cell per file using a 1×1 raster window
+    centered on the cell's lat/lon.
+
+    **Loop nesting is load-bearing per D17**::
+
+        for tif in sample_files:
+            with rasterio.open(tif) as src:
+                for cell in cells:
+                    window = ...
+                    val = src.read(1, window=window)[0, 0]
+
+    The 50ms file-open cost amortizes across N cells when nested
+    correctly. Reverse nesting (cells outer, files inner) would
+    open each file N times; at 5k cells × 10 sample files that's
+    ~50k file opens × 50ms = ~42 minutes per variable, vs ~250ms
+    here. The structural test in
+    ``tests/unit/test_sarra_py_per_cell_sampling.py`` AST-walks
+    this function and asserts the OUTER loop iterates
+    ``sample_files`` and the INNER loop iterates ``cells`` —
+    refactor that swaps them fails the test, per evaluator §12.3.
+
+    Args:
+        platform_dir: SARRA-Py output directory (contains
+            ``data/climate/<var_subdir>/*.tif``).
+        grid_cells: list of GridCell-like objects with ``cell_id``,
+            ``lat``, ``lon`` attributes. Iteration order doesn't
+            matter — the result dict is keyed by cell_id.
+
+    Returns:
+        ``{cell_id: {canonical_var: [pixel_value_per_sampled_day,
+        ...]}}``. Canonical var is one of ``"rain"``, ``"tmax"``,
+        ``"tmin"``, ``"srad"`` per ``SARRA_PY_VAR_MAPPING``. Empty
+        dict when no readable GeoTIFFs are present (cockpit
+        ``has_climate`` check then falls back to False, surfacing
+        via PRE.1.9 ``coverage_climate_cells`` for SARRA-Py runs in
+        a future V2-22d backlog item — not in PRE scope).
+    """
+    try:
+        import rasterio
+        import numpy as np
+    except ImportError:
+        return {}
+
+    climate_base = platform_dir / "data" / "climate"
+    per_cell: Dict[int, Dict[str, List[float]]] = {}
+
+    for subdir_name, (var, op, operand) in SARRA_PY_VAR_MAPPING.items():
+        var_dir = climate_base / subdir_name
+        if not var_dir.is_dir():
+            continue
+        tifs = sorted(var_dir.glob("*.tif"))
+        if not tifs:
+            continue
+        # PRE.2.2 — reuse the existing 10-file stratified hybrid
+        # sample. NOT a new selection algorithm; identical to
+        # _validate_sarra_py_geotiffs at :626-629.
+        if len(tifs) <= 10:
+            sample_files = tifs
+        else:
+            sample_files = _stratified_hybrid_sample(tifs)
+
+        # D17 amortized-open binding — OUTER `sample_files`,
+        # INNER `grid_cells`. Reverse nesting is REJECTED by the
+        # AST structural test.
+        for tif_path in sample_files:
+            try:
+                with rasterio.open(tif_path) as src:
+                    transform = src.transform
+                    nodata = src.nodata
+                    width, height = src.width, src.height
+                    for cell in grid_cells:
+                        # window-from-centroid: convert (lat, lon)
+                        # → (row, col) via the inverse affine, then
+                        # take a 1×1 window. `~transform` gives
+                        # the pixel-from-world transform.
+                        col_f, row_f = ~transform * (cell.lon, cell.lat)
+                        col = int(col_f)
+                        row = int(row_f)
+                        if not (0 <= row < height and 0 <= col < width):
+                            continue
+                        try:
+                            window = rasterio.windows.Window(col, row, 1, 1)
+                            arr = src.read(1, window=window)
+                        except Exception:
+                            continue
+                        if arr is None or arr.size == 0:
+                            continue
+                        val = float(arr[0, 0])
+                        if nodata is not None and val == nodata:
+                            continue
+                        if not np.isfinite(val):
+                            continue
+                        # Apply the unit transform from
+                        # SARRA_PY_VAR_MAPPING (e.g., kJ/m²/d →
+                        # MJ/m²/d for srad).
+                        if op == "add":
+                            val = val + operand
+                        elif op == "mul":
+                            val = val * operand
+                        cell_bucket = per_cell.setdefault(cell.cell_id, {})
+                        cell_bucket.setdefault(var, []).append(val)
+            except Exception as e:
+                logger.debug(
+                    f"PRE.2.1 sample skip — could not process "
+                    f"{tif_path.name}: {e}"
+                )
+                continue
+
+    return per_cell
 
 
 def _validate_sarra_py_geotiffs(
