@@ -129,6 +129,14 @@ def run_scientific_validation(
     # Check 6: Spatial/temporal coverage
     checks.append(_check_coverage(unified_data, config))
 
+    # V2-22c-PRE.1.9 (D36) — per-cell coverage checks. SEPARATE from
+    # the existing global `spatial_temporal_coverage` (kept above);
+    # these emit per-cell `affected_cells` lists that PRE.1.2's
+    # failed_checks pivot reads. Cockpit's Layer 1 fill rule + Layer
+    # 3 dimension toggle (Coverage) depend on these.
+    checks.append(_check_coverage_climate_cells(unified_data))
+    checks.append(_check_coverage_soil_cells(unified_data))
+
     # Check 7: Region-specific bounds (V2-20)
     checks.append(_check_region_bounds(unified_data, config))
 
@@ -1068,6 +1076,183 @@ def _check_coverage(unified_data, config) -> Dict[str, Any]:
             "temporal_start": start_year,
             "temporal_end": end_year,
             "issues": issues,
+        },
+    }
+
+
+# =============================================================================
+# Check 6b: Per-cell coverage (V2-22c-PRE.1.9 / D36)
+# =============================================================================
+
+def _check_coverage_climate_cells(unified_data) -> Dict[str, Any]:
+    """V2-22c-PRE.1.9 (D36) — per-cell climate coverage check.
+
+    Cells where the unified climate data has no entry, OR has an
+    entry whose ``records`` is empty, count as missing. Emits
+    ``scope='per_cell'`` so PRE.1.2's failed_checks pivot picks it
+    up under the ``coverage_per_cell`` category.
+
+    SARRA-Py file-based climate path: emits ``info`` with a
+    delegation note rather than ``fail``. Per-cell coverage for
+    SARRA-Py is V2-22d backlog (#11) — PRE.2.4 ships per-cell
+    climate sampling but the coverage synthesis defers. The
+    ``info`` result lets the cockpit Coverage chip render
+    "delegated" instead of red.
+    """
+    grid = (
+        unified_data.grid
+        if unified_data and hasattr(unified_data, 'grid')
+        else None
+    )
+    if grid is None or not getattr(grid, 'cells', None):
+        return {
+            "check": "coverage_climate_cells",
+            "scope": "per_cell",
+            "result": "info",
+            "summary": "Per-cell climate coverage skipped: no grid available",
+            "manuscript_claim": "Section 2.5: per-cell coverage check",
+            "details": {"affected_cells": [], "n_missing": 0, "n_total": 0},
+        }
+    climate = (
+        unified_data.climate
+        if unified_data and hasattr(unified_data, 'climate')
+        else {}
+    )
+    if _is_file_based_climate(climate):
+        return {
+            "check": "coverage_climate_cells",
+            "scope": "per_cell",
+            "result": "info",
+            "summary": (
+                "File-based climate (SARRA-Py) — per-cell coverage "
+                "delegated to PRE.2 sampling (V2-22d backlog)"
+            ),
+            "manuscript_claim": "Section 2.5: per-cell coverage check",
+            "details": {
+                "delegated_to": "PRE.2 sampling",
+                "affected_cells": [],
+                "n_missing": 0,
+                "n_total": grid.n_cells,
+            },
+        }
+
+    grid_ids = {c.cell_id for c in grid.cells}
+    missing = set()
+    if isinstance(climate, dict):
+        for cid in grid_ids:
+            ts = climate.get(cid)
+            if ts is None:
+                missing.add(cid)
+                continue
+            records = getattr(ts, 'records', None)
+            if records is None or len(records) == 0:
+                missing.add(cid)
+    else:
+        # Non-dict climate that isn't file-based: treat as missing.
+        missing = set(grid_ids)
+
+    affected_cells = sorted(missing)
+    n_missing = len(affected_cells)
+    n_total = len(grid_ids)
+    result = "fail" if n_missing > 0 else "pass"
+    return {
+        "check": "coverage_climate_cells",
+        "scope": "per_cell",
+        "result": result,
+        "summary": (
+            f"{n_total - n_missing}/{n_total} cells covered by climate data"
+            + (f" — {n_missing} cells missing" if n_missing else "")
+        ),
+        "manuscript_claim": "Section 2.5: per-cell coverage check",
+        "details": {
+            "n_total": n_total,
+            "n_missing": n_missing,
+            "affected_cells": affected_cells,
+            # PRE.1.8 — per-violation context. Coverage failures
+            # don't carry a value/unit/bounds tuple (the failure is
+            # absence-of-data, not out-of-range), so those fields
+            # are null. Cockpit drawer renders "no climate data"
+            # for these rows.
+            "violation_details": [
+                {
+                    "cell_id": cid, "layer_idx": None,
+                    "variable": "climate", "value": None,
+                    "unit": None, "bounds": None,
+                }
+                for cid in affected_cells
+            ],
+        },
+    }
+
+
+def _check_coverage_soil_cells(unified_data) -> Dict[str, Any]:
+    """V2-22c-PRE.1.9 (D36) — per-cell soil coverage check. Same
+    shape as ``_check_coverage_climate_cells`` but reads
+    ``unified_data.soil``. SoilProfile cells where the profile is
+    None OR ``layers`` is empty count as missing.
+
+    No file-based asymmetry here — soil is always per-cell across
+    all four platforms today.
+    """
+    grid = (
+        unified_data.grid
+        if unified_data and hasattr(unified_data, 'grid')
+        else None
+    )
+    if grid is None or not getattr(grid, 'cells', None):
+        return {
+            "check": "coverage_soil_cells",
+            "scope": "per_cell",
+            "result": "info",
+            "summary": "Per-cell soil coverage skipped: no grid available",
+            "manuscript_claim": "Section 2.5: per-cell coverage check",
+            "details": {"affected_cells": [], "n_missing": 0, "n_total": 0},
+        }
+    soil = (
+        unified_data.soil
+        if unified_data and hasattr(unified_data, 'soil')
+        else {}
+    )
+
+    grid_ids = {c.cell_id for c in grid.cells}
+    missing = set()
+    if isinstance(soil, dict):
+        for cid in grid_ids:
+            profile = soil.get(cid)
+            if profile is None:
+                missing.add(cid)
+                continue
+            layers = getattr(profile, 'layers', None)
+            if layers is None or len(layers) == 0:
+                missing.add(cid)
+    else:
+        missing = set(grid_ids)
+
+    affected_cells = sorted(missing)
+    n_missing = len(affected_cells)
+    n_total = len(grid_ids)
+    result = "fail" if n_missing > 0 else "pass"
+    return {
+        "check": "coverage_soil_cells",
+        "scope": "per_cell",
+        "result": result,
+        "summary": (
+            f"{n_total - n_missing}/{n_total} cells covered by soil data"
+            + (f" — {n_missing} cells missing" if n_missing else "")
+        ),
+        "manuscript_claim": "Section 2.5: per-cell coverage check",
+        "details": {
+            "n_total": n_total,
+            "n_missing": n_missing,
+            "affected_cells": affected_cells,
+            "violation_details": [
+                {
+                    "cell_id": cid, "layer_idx": None,
+                    "variable": "soil", "value": None,
+                    "unit": None, "bounds": None,
+                }
+                for cid in affected_cells
+            ],
         },
     }
 
