@@ -145,3 +145,39 @@ class TestAllowedTruncationOnSampleViolations:
             "the emission site moved (refactor — re-anchor the "
             "structural test on the new location)."
         )
+
+    def test_sample_violations_truncation_is_single_site(self):
+        """Evaluator R5 Gate B addition — the
+        ``ALLOWED_TRUNCATED_KEYS = {"sample_violations"}`` allowlist
+        permits truncation at exactly ONE site (scientific.py:1498
+        per PRE.1.7). A SECOND occurrence represents a discipline
+        drift — text-string truncation is a localized diagnostic
+        exception, not a pattern to copy. This test catches a
+        future "consistency" refactor that bulk-adds ``[:N]`` to
+        other text-list keys (e.g., a copy-paste at a sibling
+        check that thinks it's matching the PRE.1.7 pattern).
+
+        Scope: both validator files. The expected count is 1 — if
+        a future PRE adds a second deliberate diagnostic-text cap
+        elsewhere, that's a contract change that should be
+        evaluated explicitly (update this expected count + extend
+        the rationale comment), not absorbed silently.
+        """
+        matches = []
+        for path in (SCIENTIFIC_PY, POST_TRANSLATE_PY):
+            tree = ast.parse(path.read_text())
+            for key, value_node in _walk_dict_values(tree):
+                if key == "sample_violations" and _is_constant_slice(value_node):
+                    matches.append((path.name, value_node.lineno))
+        assert len(matches) == 1, (
+            f"PRE.1.7 ALLOWED_TRUNCATED_KEYS allowlist expects "
+            f"exactly one sample_violations[:N] site across the "
+            f"validator files; found {len(matches)}: {matches!r}. "
+            "If this is a deliberate addition, extend the "
+            "ALLOWED_TRUNCATED_KEYS rationale + bump the expected "
+            "count + document the new diagnostic-text discipline. "
+            "If accidental (e.g., a 'consistency' refactor that "
+            "copy-pasted the cap), un-truncate and route the "
+            "structural list to a parallel `affected_cells` field "
+            "per the PRE.1.7 dual-track pattern."
+        )
