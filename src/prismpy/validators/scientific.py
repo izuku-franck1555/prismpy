@@ -787,11 +787,25 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
     soil_stats = {}
     texture_violations = 0
     texture_total = 0
+    # V2-22c-PRE.1.4 / 1.5 — track per-(cell_id, layer_idx) violations
+    # alongside the existing aggregate counters so the validator emits a
+    # cockpit-consumable `affected_cells` list per check. Net-new
+    # collection logic; the validator never recorded the failed cell IDs
+    # before V2-22c. ``soil_violations_by_var[var]`` is the list per
+    # soil variable; ``texture_violation_cells`` is the list for the
+    # composite texture-sum check; ``soil_violation_details`` is the
+    # downstream-feed payload for PRE.1.8 ``cell_failed_check_details``
+    # flattening (each entry carries the cell + layer + value + bounds
+    # context the cockpit drawer needs to render the violation row
+    # directly without a second JSON load).
+    soil_violations_by_var: Dict[str, List[Tuple[int, int]]] = {}
+    texture_violation_cells: List[Tuple[int, int]] = []
+    soil_violation_details: List[Dict[str, Any]] = []
 
     for cell_id, profile in soil.items():
         if not hasattr(profile, 'layers'):
             continue
-        for layer in profile.layers:
+        for layer_idx, layer in enumerate(profile.layers):
             for var, (vmin, vmax, unit) in SOIL_RANGES.items():
                 val = getattr(layer, var, None)
                 if val is None:
@@ -807,6 +821,17 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
                 stats["total"] += 1
                 if val < vmin or val > vmax:
                     stats["out_of_range"] += 1
+                    soil_violations_by_var.setdefault(var, []).append(
+                        (cell_id, layer_idx),
+                    )
+                    soil_violation_details.append({
+                        "cell_id": cell_id,
+                        "layer_idx": layer_idx,
+                        "variable": var,
+                        "value": float(val),
+                        "unit": unit,
+                        "bounds": [vmin, vmax],
+                    })
 
             # Texture fraction check (sand + clay + silt ≈ 100)
             sand = getattr(layer, 'sand', None)
@@ -817,6 +842,15 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
                 texture_sum = sand + clay + silt
                 if texture_sum < 95 or texture_sum > 105:
                     texture_violations += 1
+                    texture_violation_cells.append((cell_id, layer_idx))
+                    soil_violation_details.append({
+                        "cell_id": cell_id,
+                        "layer_idx": layer_idx,
+                        "variable": "texture_sum",
+                        "value": float(texture_sum),
+                        "unit": "%",
+                        "bounds": [95, 105],
+                    })
 
     for var, (vmin, vmax, unit) in SOIL_RANGES.items():
         stats = soil_stats.get(var)
@@ -843,6 +877,17 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
                 "observed_max": round(stats["max"], 3),
                 "out_of_range_count": n_oor,
                 "total_values": stats["total"],
+                # V2-22c-PRE.1.5 — per-(cell_id, layer_idx) tuples for
+                # each layer that violated this variable's range.
+                "affected_cells": soil_violations_by_var.get(var, []),
+                # V2-22c-PRE.1.8 — per-violation context for the cockpit
+                # drawer; flattened into top-level cell_failed_check_details
+                # by _build_cell_summary so consumers can render
+                # "Cell #N layer L — <var>=<value> outside [<lo>, <hi>]"
+                # without a second JSON join.
+                "violation_details": [
+                    d for d in soil_violation_details if d["variable"] == var
+                ],
             },
         })
 
@@ -864,6 +909,15 @@ def _check_value_ranges(unified_data) -> List[Dict[str, Any]]:
                 "expected_range": [95, 105],
                 "violations": texture_violations,
                 "total_layers": texture_total,
+                # V2-22c-PRE.1.4 — per-(cell_id, layer_idx) tuples for
+                # each layer where sand+clay+silt fell outside [95, 105].
+                "affected_cells": texture_violation_cells,
+                # V2-22c-PRE.1.8 — same flatten-into-cell_failed_check_details
+                # rationale as the soil-quality family above.
+                "violation_details": [
+                    d for d in soil_violation_details
+                    if d["variable"] == "texture_sum"
+                ],
             },
         })
 
