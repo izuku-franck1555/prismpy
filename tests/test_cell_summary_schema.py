@@ -160,19 +160,121 @@ class TestCrossFieldInvariants:
             })
         assert "complete" in str(excinfo.value).lower()
 
-    def test_unavailable_with_failed_checks_is_rejected(self):
-        """Invariant 3 — data_availability='unavailable' with
-        non-empty failed_checks must reject. The validator
-        cannot fail what it did not run; this combination
-        names a producer-pipeline bug at the schema layer."""
+    def test_climate_unavailable_rejects_climate_check_fail(self):
+        """Invariant 3 (per-axis) — a cell with climate
+        unavailable cannot carry a climate check in
+        failed_checks. The category discriminator is the
+        explicit `category` field on the failed_check entry."""
         with pytest.raises(ValidationError) as excinfo:
             CellSummary.model_validate({
                 "data_availability": "unavailable",
                 "unavailable_reason": "climate",
-                "failed_checks": [{"check_id": "value_range_tmax",
-                                   "result": "fail"}],
+                "failed_checks": [{
+                    "check_id": "value_range_tmax",
+                    "result": "fail",
+                    "category": "climate",
+                }],
             })
-        assert "failed_checks" in str(excinfo.value)
+        assert "climate" in str(excinfo.value).lower()
+
+    def test_soil_unavailable_rejects_soil_check_fail(self):
+        """Mirror — soil unavailable cannot carry a soil
+        check in failed_checks."""
+        with pytest.raises(ValidationError) as excinfo:
+            CellSummary.model_validate({
+                "data_availability": "unavailable",
+                "unavailable_reason": "soil",
+                "failed_checks": [{
+                    "check_id": "value_range_soil_pH",
+                    "result": "fail",
+                    "category": "soil",
+                }],
+            })
+        assert "soil" in str(excinfo.value).lower()
+
+    def test_full_unavailability_rejects_any_failed_checks(self):
+        """When BOTH axes are unavailable, neither climate nor
+        soil checks could have run — failed_checks must be
+        empty regardless of which axis the entry references."""
+        for category in ("climate", "soil"):
+            with pytest.raises(ValidationError):
+                CellSummary.model_validate({
+                    "data_availability": "unavailable",
+                    "unavailable_reason": "climate_and_soil",
+                    "failed_checks": [{
+                        "check_id": (
+                            "value_range_tmax" if category == "climate"
+                            else "value_range_soil_pH"
+                        ),
+                        "result": "fail",
+                        "category": category,
+                    }],
+                })
+
+    def test_climate_unavailable_accepts_soil_check_fail(self):
+        """The mixed-availability accept path — climate
+        unavailable + a legitimate soil check fail loads
+        cleanly. The validator did run on the available soil
+        axis, so the fail entry is honest information."""
+        loaded = CellSummary.model_validate({
+            "data_availability": "unavailable",
+            "unavailable_reason": "climate",
+            "failed_checks": [{
+                "check_id": "value_range_soil_pH",
+                "result": "fail",
+                "category": "soil",
+            }],
+        })
+        assert loaded.data_availability == "unavailable"
+        assert len(loaded.failed_checks) == 1
+        assert loaded.failed_checks[0]["category"] == "soil"
+
+    def test_soil_unavailable_accepts_climate_check_fail(self):
+        """Mirror — soil unavailable + climate fail loads
+        cleanly."""
+        loaded = CellSummary.model_validate({
+            "data_availability": "unavailable",
+            "unavailable_reason": "soil",
+            "failed_checks": [{
+                "check_id": "value_range_tmax",
+                "result": "fail",
+                "category": "climate",
+            }],
+        })
+        assert loaded.data_availability == "unavailable"
+        assert loaded.failed_checks[0]["category"] == "climate"
+
+    def test_per_axis_falls_back_to_name_prefix_when_category_absent(self):
+        """Legacy records that pre-date the explicit `category`
+        field must still be enforced via the check-id name
+        prefix. ``value_range_tmax`` matches the climate
+        taxonomy without an explicit category."""
+        with pytest.raises(ValidationError):
+            CellSummary.model_validate({
+                "data_availability": "unavailable",
+                "unavailable_reason": "climate",
+                "failed_checks": [{
+                    "check_id": "value_range_tmax",
+                    "result": "fail",
+                    # No `category` field — legacy shape.
+                }],
+            })
+
+    def test_per_axis_ignores_uncategorised_checks(self):
+        """Coverage / post-translate / region-scope checks that
+        carry neither a climate nor a soil category fall
+        outside the invariant — they operate at a different
+        scope and are not bound by the per-cell axis split."""
+        loaded = CellSummary.model_validate({
+            "data_availability": "unavailable",
+            "unavailable_reason": "climate",
+            "failed_checks": [{
+                "check_id": "coverage_climate_cells",
+                "result": "fail",
+                # No category, name does not match either prefix.
+            }],
+        })
+        assert len(loaded.failed_checks) == 1
 
 
 class TestVersionConstants:
