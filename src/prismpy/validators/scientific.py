@@ -447,7 +447,7 @@ def _check_temporal_completeness(unified_data, config) -> Dict[str, Any]:
         return _unavailable(
             check_id="temporal_completeness",
             scope="global",
-            cause="climate_data_missing",
+            cause="no_climate_fetch",
             details={
                 "expected_days": expected_days_with_spinup,
                 "actual_cells": 0,
@@ -642,17 +642,70 @@ def _is_file_based_climate(climate: Dict) -> bool:
 
 _UNAVAILABLE_RESULT: str = "unavailable"
 
+# Canonical cause vocabulary aligned with crop-modeling-specialist's §2
+# pack. The strings appear verbatim in ``details.cause`` on every
+# unavailable record; downstream consumers (banner copy, Methods-tab
+# audit, Dr. Kofi grep) match against these literals. Renaming any of
+# them is a contract change — bump ``validation_version`` if you do.
+UNAVAILABLE_CAUSES: tuple[str, ...] = (
+    "no_climate_fetch",
+    "no_soil_match",
+    "soil_cascade_exhausted",
+    "no_climate_and_soil_fetch",
+    "no_translated_output",
+)
 _UNAVAILABLE_CAUSE_LABELS: Dict[str, str] = {
-    "climate_data_missing": "climate data unavailable",
-    "soil_data_missing": "soil data unavailable",
-    "climate_and_soil_missing": "climate and soil data unavailable",
+    "no_climate_fetch": "climate data was not fetched",
+    "no_soil_match": "soil cascade returned no profile",
+    "soil_cascade_exhausted": "soil cascade exhausted (iSDA → HWSD all empty)",
+    "no_climate_and_soil_fetch": "neither climate nor soil data was fetched",
+    "no_translated_output": "platform translation produced no output for this cell",
 }
+
+
+# Canonical iteration constants for the Tier 1 climate / soil checks.
+# crop-modeling-specialist's §2 pack §3 calls for these as the source
+# of truth — production code uses them at the sibling-sweep callsites
+# AND test code uses them for DRY assertions. Adding a new check here
+# automatically propagates to both.
+CLIMATE_TIER1_CHECKS: tuple[str, ...] = (
+    "temporal_completeness",
+    "cross_variable_consistency",
+    "value_range_climate",
+    "value_range_tmax",
+    "value_range_tmin",
+    "value_range_precip",
+    "value_range_srad",
+    "value_range_rh",
+    "value_range_wind",
+    "coverage_climate_cells",
+    "region_specific_bounds",
+)
+SOIL_CHECKS_ALL: tuple[str, ...] = (
+    "value_range_soil",
+    "value_range_soil_sand",
+    "value_range_soil_clay",
+    "value_range_soil_silt",
+    "value_range_soil_organic_carbon",
+    "value_range_soil_ph",
+    "value_range_soil_bulk_density",
+    "value_range_texture_sum",
+    "coverage_soil_cells",
+    # Platform-specific completeness check_ids follow the
+    # ``soil_completeness_<platform>`` pattern; explicit listing here
+    # for the four platforms in PLATFORM_SOIL_REQUIREMENTS.
+    "soil_completeness_craft",
+    "soil_completeness_pythia",
+    "soil_completeness_acea",
+    "soil_completeness_sarra_py",
+)
 
 
 def _unavailable(
     check_id: str,
     scope: str,
     cause: str,
+    cell_id: Optional[Any] = None,
     *,
     summary: Optional[str] = None,
     manuscript_claim: Optional[str] = None,
@@ -663,27 +716,28 @@ def _unavailable(
     that has no input data.
 
     Args:
-        check_id: The validator's stable check id (e.g., ``temporal_completeness``,
-            ``value_range_soil_sand``). Same value the validator would
-            emit on a successful run, so the cockpit's check-id pivot
-            still binds.
+        check_id: The validator's stable check id (e.g.,
+            ``temporal_completeness``, ``value_range_soil_sand``).
+            Same value the validator would emit on a successful run,
+            so the cockpit's check-id pivot still binds.
         scope: ``per_cell`` / ``per_record`` / ``per_layer`` / ``global``
             — same vocabulary as a normal record. Per-cell scopes carry
             an empty ``affected_cells`` list when the axis is fully
             unavailable region-wide.
-        cause: Discriminator key into ``_UNAVAILABLE_CAUSE_LABELS`` —
-            one of ``climate_data_missing`` / ``soil_data_missing`` /
-            ``climate_and_soil_missing``. Selects the human-readable
-            label woven into the default summary and recorded on
-            ``details.cause`` for downstream consumers.
+        cause: Discriminator string from ``UNAVAILABLE_CAUSES``. Selects
+            the human-readable label woven into the default summary
+            and the audit-grep marker on ``details.cause``.
+        cell_id: Optional per-cell id. When set, ``details.cell_id``
+            carries the value so the consumer can match the record
+            to a single cell rather than scanning ``affected_cells``.
+            The crop-modeling-specialist §2 pack signature pinned
+            this position; it stays optional for axis-level callers.
         summary: Optional override of the default summary. Pass when
             the validator wants to add nuance (e.g., "and the
             file-based delegate also could not run") without losing
             the unavailable framing.
         manuscript_claim: Optional override of the default manuscript
-            claim. Defaults to "Section 2.5: <check> (ICASA MISDAT
-            documented)" so a non-developer reviewer of the JSON
-            sees the standards lineage at a glance.
+            claim.
         details: Optional extra details to merge after ``cause``. The
             helper always sets ``details.cause`` and
             ``details.icasa_misdat=True``; caller-supplied keys
@@ -702,20 +756,20 @@ def _unavailable(
         cockpit category passed flag) treat it as a non-fail signal
         that nonetheless does not promote to ``pass``.
     """
-    label = _UNAVAILABLE_CAUSE_LABELS.get(cause, "input data unavailable")
-    default_summary = (
-        f"Validator did not run — {label}; recorded via the ICASA "
-        f"MISDAT convention so downstream consumers can route the "
-        f"affected cells to the documented-unavailable path rather "
-        f"than imputing values."
-    )
+    label = _UNAVAILABLE_CAUSE_LABELS.get(cause, "input data was not available")
+    default_summary = "Data not available; validation skipped."
     default_manuscript = (
-        f"Section 2.5: {check_id} (ICASA MISDAT documented)"
+        f"Cell data was not available at fetch time. Validation was "
+        f"not performed for {check_id}. Per ICASA MISDAT convention, "
+        f"missing-data cells are reported as unavailable, distinct "
+        f"from validation failures. ({label})"
     )
     merged_details: Dict[str, Any] = {
         "cause": cause,
         "icasa_misdat": True,
     }
+    if cell_id is not None:
+        merged_details["cell_id"] = cell_id
     if details:
         for k, v in details.items():
             if k not in merged_details:
@@ -788,7 +842,7 @@ def _check_cross_variable_consistency(unified_data) -> Dict[str, Any]:
         return _unavailable(
             check_id="cross_variable_consistency",
             scope="per_record",
-            cause="climate_data_missing",
+            cause="no_climate_fetch",
         )
 
     # GeoTIFF-based climate (SARRA-Py): per-value consistency requires
@@ -941,7 +995,7 @@ def _check_value_ranges(
         checks.append(_unavailable(
             check_id="value_range_climate",
             scope="per_record",
-            cause="climate_data_missing",
+            cause="no_climate_fetch",
         ))
 
     # GeoTIFF-based climate (SARRA-Py today; ACEA once it activates
@@ -1102,7 +1156,7 @@ def _check_value_ranges(
         checks.append(_unavailable(
             check_id="value_range_soil",
             scope="per_layer",
-            cause="soil_data_missing",
+            cause="no_soil_match",
         ))
         return checks
     soil_stats = {}
@@ -1279,7 +1333,7 @@ def _check_soil_completeness(unified_data, platform: str) -> Dict[str, Any]:
         return _unavailable(
             check_id=f"soil_completeness_{platform}",
             scope="per_cell",
-            cause="soil_data_missing",
+            cause="no_soil_match",
             details={
                 "platform": platform,
                 "required_properties": required,
@@ -1372,7 +1426,7 @@ def _check_coverage(unified_data, config) -> Dict[str, Any]:
 
     # G7 §2 — when BOTH axes are unavailable the coverage check has
     # nothing meaningful to compare. Short-circuit with the
-    # ``climate_and_soil_missing`` cause so the banner copy can lift
+    # ``no_climate_and_soil_fetch`` cause so the banner copy can lift
     # the unified-unavailable narrative without parsing per-axis
     # records. When only one axis is missing, the existing "covers
     # X/N cells" issue rendering still works on the available axis,
@@ -1381,7 +1435,7 @@ def _check_coverage(unified_data, config) -> Dict[str, Any]:
         return _unavailable(
             check_id="spatial_temporal_coverage",
             scope="global",
-            cause="climate_and_soil_missing",
+            cause="no_climate_and_soil_fetch",
             details={
                 "grid_cells": n_cells,
                 "climate_cells": 0,
@@ -1492,7 +1546,7 @@ def _check_coverage_climate_cells(unified_data) -> Dict[str, Any]:
         return _unavailable(
             check_id="coverage_climate_cells",
             scope="per_cell",
-            cause="climate_data_missing",
+            cause="no_climate_fetch",
             details={
                 "n_total": grid.n_cells,
                 "n_missing": 0,
@@ -1600,7 +1654,7 @@ def _check_coverage_soil_cells(unified_data) -> Dict[str, Any]:
         return _unavailable(
             check_id="coverage_soil_cells",
             scope="per_cell",
-            cause="soil_data_missing",
+            cause="no_soil_match",
             details={
                 "n_total": grid.n_cells,
                 "n_missing": 0,
@@ -1708,7 +1762,7 @@ def _check_region_bounds(unified_data, config) -> Dict[str, Any]:
         return _unavailable(
             check_id="region_specific_bounds",
             scope="global",
-            cause="climate_data_missing",
+            cause="no_climate_fetch",
             details={
                 "centroid_lat": round(center_lat, 4),
                 "centroid_lon": round(center_lon, 4),

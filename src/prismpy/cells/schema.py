@@ -24,9 +24,21 @@ can trust the discriminator without re-checking each callsite.
 
 Backward compatibility (§1.4):
 
-* **v2.1 reader, v2.0 record**: the new fields default
-  ("complete", None, "2.0"), so older records load cleanly
-  with the implicit pre-v2.1 assumption preserved.
+* **v2.1 reader, v2.0 record**: ``data_availability`` defaults to
+  ``"complete"`` and ``unavailable_reason`` to ``None`` so older
+  records load cleanly with the implicit pre-v2.1 assumption
+  preserved. ``cell_summary_version`` defaults to
+  ``CELL_SUMMARY_VERSION_LATEST`` (currently ``"2.1"``) — the
+  consumer's effective contract is "this record was read by a
+  v2.1 reader", so the field promotes when absent. A producer
+  that intentionally stamps ``"2.0"`` reads back as ``"2.0"``
+  (the round-trip case is pinned at
+  ``test_v20_explicit_version_stays_v20``); only the
+  *missing-field* path defaults to latest. Codex Gate B
+  flagged this default-to-latest as a MEDIUM consumer-confusion
+  risk vs the original "2.0" docstring claim — this revised
+  prose makes the design explicit so the next reader does not
+  rediscover the surprise.
 * **v2.0 reader, v2.1 record**: requires the v2.0 reader's
   Pydantic models to accept ``extra="ignore"`` so the new
   fields silently drop. The current dict-based v2.0 readers

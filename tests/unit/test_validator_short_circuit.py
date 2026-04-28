@@ -46,6 +46,9 @@ from prismpy.models.spatial import GridCell, SpatialGrid
 from prismpy.pipeline.executor import TranslationPipeline
 from prismpy.translators.base import UnifiedData
 from prismpy.validators.scientific import (
+    CLIMATE_TIER1_CHECKS,
+    SOIL_CHECKS_ALL,
+    UNAVAILABLE_CAUSES,
     _UNAVAILABLE_RESULT,
     _check_coverage,
     _check_coverage_climate_cells,
@@ -152,7 +155,7 @@ class TestUnavailableHelperShape:
         rec = _unavailable(
             check_id="value_range_climate",
             scope="per_record",
-            cause="climate_data_missing",
+            cause="no_climate_fetch",
         )
         assert set(rec.keys()) == {
             "check", "scope", "result", "summary",
@@ -160,30 +163,36 @@ class TestUnavailableHelperShape:
         }
 
     def test_result_is_literal_unavailable(self):
-        rec = _unavailable("temporal_completeness", "global", "climate_data_missing")
+        rec = _unavailable("temporal_completeness", "global", "no_climate_fetch")
         assert rec["result"] == _UNAVAILABLE_RESULT == "unavailable"
 
     def test_check_field_passes_through(self):
-        rec = _unavailable("foo_bar", "per_cell", "climate_data_missing")
+        rec = _unavailable("foo_bar", "per_cell", "no_climate_fetch")
         assert rec["check"] == "foo_bar"
 
     def test_details_carry_cause_and_icasa_marker(self):
         """Dr. Kofi's audit trail — every unavailable record must
         carry the explicit MISDAT marker so a grep finds them
         without parsing summaries."""
-        rec = _unavailable("temporal_completeness", "global", "climate_data_missing")
-        assert rec["details"]["cause"] == "climate_data_missing"
+        rec = _unavailable("temporal_completeness", "global", "no_climate_fetch")
+        assert rec["details"]["cause"] == "no_climate_fetch"
         assert rec["details"]["icasa_misdat"] is True
 
-    def test_default_summary_mentions_icasa(self):
-        rec = _unavailable("temporal_completeness", "global", "climate_data_missing")
-        assert "ICASA MISDAT" in rec["summary"]
+    def test_default_summary_terse_per_spec(self):
+        """The crop-specialist §2 pack pinned the summary to the
+        terse "Data not available; validation skipped." copy —
+        less prose than the verbose default we shipped at 391eb5a.
+        The persona-friendly framing lives on the longer
+        manuscript_claim; the summary stays scan-friendly for
+        cockpit chip text."""
+        rec = _unavailable("temporal_completeness", "global", "no_climate_fetch")
+        assert rec["summary"] == "Data not available; validation skipped."
 
     def test_caller_summary_overrides_default(self):
         rec = _unavailable(
             check_id="x",
             scope="global",
-            cause="climate_data_missing",
+            cause="no_climate_fetch",
             summary="custom",
         )
         assert rec["summary"] == "custom"
@@ -192,10 +201,10 @@ class TestUnavailableHelperShape:
         rec = _unavailable(
             check_id="x",
             scope="global",
-            cause="climate_data_missing",
+            cause="no_climate_fetch",
             details={"extra_key": "extra_value"},
         )
-        assert rec["details"]["cause"] == "climate_data_missing"
+        assert rec["details"]["cause"] == "no_climate_fetch"
         assert rec["details"]["icasa_misdat"] is True
         assert rec["details"]["extra_key"] == "extra_value"
 
@@ -204,19 +213,27 @@ class TestUnavailableHelperShape:
         records whose key is absent (treated as ``None`` → empty
         iter). The helper sets the empty-list default so consumers
         can iterate without a None-guard."""
-        rec = _unavailable("temporal_completeness", "per_cell", "climate_data_missing")
+        rec = _unavailable("temporal_completeness", "per_cell", "no_climate_fetch")
         assert rec["details"]["affected_cells"] == []
 
     def test_affected_cells_caller_can_supply(self):
         rec = _unavailable(
-            check_id="x", scope="per_cell", cause="soil_data_missing",
+            check_id="x", scope="per_cell", cause="no_soil_match",
             affected_cells=[1, 2, 3],
         )
         assert rec["details"]["affected_cells"] == [1, 2, 3]
 
     def test_default_manuscript_claim_includes_misdat_marker(self):
-        rec = _unavailable("foo", "global", "climate_data_missing")
-        assert "ICASA MISDAT documented" in rec["manuscript_claim"]
+        """Crop-specialist §2 pack DRY assertion — every default
+        manuscript_claim must mention ICASA MISDAT and the explicit
+        "Validation was not performed" framing so Dr. Kofi's audit
+        grep finds the standards lineage without parsing summaries.
+        The check_id appears verbatim so the audit row reads
+        "Validation was not performed for <check_id>"."""
+        rec = _unavailable("foo", "global", "no_climate_fetch")
+        assert "ICASA MISDAT" in rec["manuscript_claim"]
+        assert "Validation was not performed" in rec["manuscript_claim"]
+        assert "foo" in rec["manuscript_claim"]
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +298,7 @@ class TestTemporalCompletenessShortCircuit:
         unified = _make_unified(n_cells=2, climate={}, soil={0: _make_profile()})
         check = _check_temporal_completeness(unified, _make_config())
         assert check["result"] == "unavailable"
-        assert check["details"]["cause"] == "climate_data_missing"
+        assert check["details"]["cause"] == "no_climate_fetch"
         assert check["details"]["icasa_misdat"] is True
 
     def test_with_climate_runs_normally(self):
@@ -324,7 +341,7 @@ class TestValueRangesShortCircuit:
         ]
         assert len(climate_checks) == 1
         assert climate_checks[0]["result"] == "unavailable"
-        assert climate_checks[0]["details"]["cause"] == "climate_data_missing"
+        assert climate_checks[0]["details"]["cause"] == "no_climate_fetch"
 
     def test_no_soil_emits_soil_axis_unavailable(self):
         climate = {0: _make_ts(n_records=2)}
@@ -333,7 +350,7 @@ class TestValueRangesShortCircuit:
         soil_checks = [c for c in checks if c["check"] == "value_range_soil"]
         assert len(soil_checks) == 1
         assert soil_checks[0]["result"] == "unavailable"
-        assert soil_checks[0]["details"]["cause"] == "soil_data_missing"
+        assert soil_checks[0]["details"]["cause"] == "no_soil_match"
 
     def test_neither_axis_emits_both_unavailable(self):
         unified = _make_unified(climate={}, soil={})
@@ -377,7 +394,7 @@ class TestSoilCompletenessShortCircuit:
         unified = _make_unified(soil={})
         check = _check_soil_completeness(unified, "pythia")
         assert check["result"] == "unavailable"
-        assert check["details"]["cause"] == "soil_data_missing"
+        assert check["details"]["cause"] == "no_soil_match"
         # The platform context is preserved for the Methods-tab
         # reader who needs to know which platform short-circuited.
         assert check["details"]["platform"] == "pythia"
@@ -399,7 +416,7 @@ class TestCoverageGlobalShortCircuit:
         unified = _make_unified(climate={}, soil={})
         check = _check_coverage(unified, _make_config())
         assert check["result"] == "unavailable"
-        assert check["details"]["cause"] == "climate_and_soil_missing"
+        assert check["details"]["cause"] == "no_climate_and_soil_fetch"
 
     def test_climate_only_missing_runs_normally(self):
         soil = {0: _make_profile(), 1: _make_profile(profile_id="p1")}
@@ -458,7 +475,7 @@ class TestRegionBoundsShortCircuit:
         )
         check = _check_region_bounds(unified, _make_config())
         assert check["result"] == "unavailable"
-        assert check["details"]["cause"] == "climate_data_missing"
+        assert check["details"]["cause"] == "no_climate_fetch"
 
 
 # ---------------------------------------------------------------------------
@@ -643,3 +660,128 @@ class TestPipelineArithmetic:
         cell = out["cells"][0]
         assert cell["data_availability"] == "complete"
         assert cell["unavailable_reason"] is None
+
+
+# ---------------------------------------------------------------------------
+# §2.7 — Iteration-constant integrity (crop-specialist §2 pack §3)
+# ---------------------------------------------------------------------------
+
+
+class TestIterationConstants:
+    """``CLIMATE_TIER1_CHECKS`` and ``SOIL_CHECKS_ALL`` are the
+    canonical iteration sets called for in crop-modeling-specialist's
+    §2 pack §3. Production sibling-sweeps and DRY tests both bind
+    against them; if a check_id is added or renamed, updating the
+    constant propagates the change to every consumer in lockstep."""
+
+    def test_climate_tier1_includes_axis_aggregator(self):
+        """The axis-level aggregator id ``value_range_climate`` is
+        the record short-circuited at axis-fully-unavailable; it
+        must be in the iteration set."""
+        assert "value_range_climate" in CLIMATE_TIER1_CHECKS
+
+    def test_climate_tier1_includes_temporal_completeness(self):
+        assert "temporal_completeness" in CLIMATE_TIER1_CHECKS
+
+    def test_climate_tier1_includes_cross_variable_consistency(self):
+        assert "cross_variable_consistency" in CLIMATE_TIER1_CHECKS
+
+    def test_climate_tier1_includes_per_variable_value_ranges(self):
+        for var in ("tmax", "tmin", "precip", "srad", "rh", "wind"):
+            assert f"value_range_{var}" in CLIMATE_TIER1_CHECKS, var
+
+    def test_climate_tier1_includes_coverage(self):
+        assert "coverage_climate_cells" in CLIMATE_TIER1_CHECKS
+
+    def test_climate_tier1_includes_region_bounds(self):
+        assert "region_specific_bounds" in CLIMATE_TIER1_CHECKS
+
+    def test_soil_checks_includes_axis_aggregator(self):
+        assert "value_range_soil" in SOIL_CHECKS_ALL
+
+    def test_soil_checks_includes_per_variable_value_ranges(self):
+        for var in ("sand", "clay", "silt", "organic_carbon", "ph", "bulk_density"):
+            assert f"value_range_soil_{var}" in SOIL_CHECKS_ALL, var
+
+    def test_soil_checks_includes_texture_sum(self):
+        assert "value_range_texture_sum" in SOIL_CHECKS_ALL
+
+    def test_soil_checks_includes_coverage(self):
+        assert "coverage_soil_cells" in SOIL_CHECKS_ALL
+
+    def test_soil_checks_includes_per_platform_completeness(self):
+        for platform in ("craft", "pythia", "acea", "sarra_py"):
+            assert f"soil_completeness_{platform}" in SOIL_CHECKS_ALL, platform
+
+    def test_unavailable_causes_constant_matches_canonical_vocabulary(self):
+        """The crop-specialist §2 pack canonical cause vocabulary —
+        renaming any of these is a contract change."""
+        assert "no_climate_fetch" in UNAVAILABLE_CAUSES
+        assert "no_soil_match" in UNAVAILABLE_CAUSES
+        assert "soil_cascade_exhausted" in UNAVAILABLE_CAUSES
+        assert "no_climate_and_soil_fetch" in UNAVAILABLE_CAUSES
+        assert "no_translated_output" in UNAVAILABLE_CAUSES
+
+
+class TestUnavailableHelperCellIdHandling:
+    """The crop-specialist §2 pack signature added an optional
+    ``cell_id`` parameter so per-cell short-circuit records can
+    pin the cell context on ``details.cell_id``. Axis-level
+    callers omit it and the field stays out of details."""
+
+    def test_cell_id_attached_to_details_when_supplied(self):
+        rec = _unavailable(
+            check_id="value_range_tmax",
+            scope="per_cell",
+            cause="no_climate_fetch",
+            cell_id=42,
+        )
+        assert rec["details"]["cell_id"] == 42
+
+    def test_cell_id_absent_when_caller_omits(self):
+        """Axis-level callers (e.g., ``_check_temporal_completeness``
+        emitting one global record) must NOT carry a synthetic
+        cell_id on details — the field's absence is the discriminator
+        between per-cell and axis-level records."""
+        rec = _unavailable(
+            check_id="temporal_completeness",
+            scope="global",
+            cause="no_climate_fetch",
+        )
+        assert "cell_id" not in rec["details"]
+
+
+class TestCanonicalCauseVocabularyAtCallsites:
+    """Crop-specialist §2 pack §1 — every short-circuit emits the
+    canonical cause string, not the prior ``climate_data_missing`` /
+    ``soil_data_missing`` / ``climate_and_soil_missing`` placeholders.
+    Tests pin the rename so a future regression to the placeholder
+    vocabulary is caught."""
+
+    def test_temporal_completeness_uses_canonical_cause(self):
+        unified = _make_unified(climate={})
+        check = _check_temporal_completeness(unified, _make_config())
+        assert check["details"]["cause"] == "no_climate_fetch"
+
+    def test_value_range_climate_uses_canonical_cause(self):
+        unified = _make_unified(climate={})
+        checks = _check_value_ranges(unified)
+        record = next(c for c in checks if c["check"] == "value_range_climate")
+        assert record["details"]["cause"] == "no_climate_fetch"
+
+    def test_value_range_soil_uses_canonical_cause(self):
+        climate = {0: _make_ts(n_records=1)}
+        unified = _make_unified(climate=climate, soil={})
+        checks = _check_value_ranges(unified)
+        record = next(c for c in checks if c["check"] == "value_range_soil")
+        assert record["details"]["cause"] == "no_soil_match"
+
+    def test_soil_completeness_uses_canonical_cause(self):
+        unified = _make_unified(soil={})
+        check = _check_soil_completeness(unified, "pythia")
+        assert check["details"]["cause"] == "no_soil_match"
+
+    def test_coverage_global_both_axes_uses_canonical_cause(self):
+        unified = _make_unified(climate={}, soil={})
+        check = _check_coverage(unified, _make_config())
+        assert check["details"]["cause"] == "no_climate_and_soil_fetch"
