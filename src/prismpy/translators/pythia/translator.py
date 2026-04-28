@@ -155,6 +155,16 @@ class PythiaTranslator(PythiaTranslatorBase):
             if climate_data:
                 weather_files = self._generate_weather_files(climate_data)
                 output_files.extend(weather_files)
+                # F13 — surface per-cell climate back onto the shared
+                # UnifiedData so the cell-summary writer, per-cell
+                # coverage validators, and the manifest's len(climate)
+                # reader observe the actual climate-loaded state. The
+                # download path returns one ClimateTimeSeries per grid
+                # cell keyed by cell.cell_id; without this surfacing
+                # the placeholder at -1 stays as the only entry and
+                # every real cell ends up has_climate=False even
+                # though .WTH files exist on disk.
+                self._surface_per_cell_climate(data, climate_data)
             else:
                 warnings.append("No climate data available - weather files not generated")
 

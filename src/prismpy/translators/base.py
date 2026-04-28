@@ -267,6 +267,51 @@ class BaseTranslator(ABC):
                 f"{len(result.errors)} errors"
             )
 
+    def _surface_per_cell_climate(
+        self,
+        data: UnifiedData,
+        climate_by_cell_id: Optional[Dict[int, ClimateTimeSeries]],
+    ) -> None:
+        """Surface translator-downloaded per-cell climate back onto the
+        shared ``UnifiedData.climate`` dict so downstream readers see the
+        actual loaded state instead of the harmonize-stage placeholder.
+
+        The retrieve stage emits ``{-1: ClimateTimeSeries(source="placeholder")}``
+        for platforms that self-download weather at translate time
+        (CRAFT / PYTHIA / ACEA). Without this surfacing, the cell-summary
+        builder, the per-cell coverage validators, and the manifest's
+        ``len(climate)`` reader all see the placeholder and report every
+        real cell as unavailable — even when the translator successfully
+        wrote per-cell weather files to disk.
+
+        ``climate_by_cell_id`` keys are 5-arcmin grid cell IDs (the same
+        ``cell.cell_id`` the cell-summary builder iterates). Negative
+        keys (sentinel placeholders, scratch IDs) are skipped so the
+        surfaced state stays clean. The placeholder entry at ``-1`` is
+        dropped after the merge so the validator's per-cell loop does
+        not double-count it.
+
+        Mutates ``data.climate`` in place; safe to call multiple times
+        (later calls overwrite earlier entries for the same cell, which
+        matches the in-process re-translate semantics).
+        """
+        if not climate_by_cell_id or not isinstance(data.climate, dict):
+            return
+        real = {
+            cid: ts
+            for cid, ts in climate_by_cell_id.items()
+            if cid >= 0
+            and hasattr(ts, "records")
+            and ts.records
+        }
+        if not real:
+            return
+        data.climate.update(real)
+        # Drop the harmonize-stage sentinel placeholder so downstream
+        # consumers (validators, cell-summary writer) do not iterate
+        # the synthetic ``-1`` cell alongside the real grid IDs.
+        data.climate.pop(-1, None)
+
 
 class SarraPyTranslatorBase(BaseTranslator):
     """Base class for SARRA-Py translator with platform-specific constants."""

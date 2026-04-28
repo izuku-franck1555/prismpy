@@ -448,6 +448,30 @@ class AceaTranslator(AceaTranslatorBase):
                 )
                 output_files.extend(climate_files)
 
+                # F13 — surface per-5-arcmin-cell climate onto the
+                # shared UnifiedData so the cell-summary writer and
+                # per-cell coverage validators observe the actual
+                # climate-loaded state. ACEA downloads at 30-arcmin
+                # NASA POWER native resolution, so multiple 5-arcmin
+                # grid cells share the same downloaded ClimateTimeSeries
+                # — fan out tile→cells via the same arithmetic
+                # ``_compute_30arcmin_cell_ids`` uses (`row * COLS + col`)
+                # so the surfaced state matches what the validator's
+                # per-cell loop expects.
+                if data.grid and data.grid.cells:
+                    res_30arcmin = 30 / 60
+                    per_cell_climate: Dict[int, ClimateTimeSeries] = {}
+                    for cell in data.grid.cells:
+                        row = int((90 - cell.lat) / res_30arcmin)
+                        col = int((cell.lon + 180) / res_30arcmin)
+                        row = max(0, min(row, self.GRID_ROWS_30ARCMIN - 1))
+                        col = max(0, min(col, self.GRID_COLS_30ARCMIN - 1))
+                        tile_id = row * self.GRID_COLS_30ARCMIN + col
+                        ts = climate_data.get(tile_id)
+                        if ts is not None:
+                            per_cell_climate[cell.cell_id] = ts
+                    self._surface_per_cell_climate(data, per_cell_climate)
+
             # 2. Generate soil data (ACEA-compatible NetCDF)
             # ACEA requires soil data in NetCDF format (HWSD_soil_data_on_cropland_v2.3.nc)
             # We generate this from HWSD to make packages work on any ACEA installation
