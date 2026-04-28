@@ -245,57 +245,94 @@ class TestCraftTranslatorSurfacing(unittest.TestCase):
 
 
 class TestAceaTranslatorSurfacing(unittest.TestCase):
-    """ACEA downloads at 30-arcmin NASA POWER native resolution;
-    multiple 5-arcmin grid cells share the same ClimateTimeSeries.
-    The translator fans out tile→cells before calling the helper
-    so the surfaced state is keyed by 5-arcmin cell IDs (matching
-    the cell-summary writer's iteration). The fan-out arithmetic
-    mirrors ``_compute_30arcmin_cell_ids`` so tile assignment stays
-    consistent across the translator."""
+    """ACEA downloads at 30-arcmin NASA POWER native resolution but
+    ``_download_climate_30arcmin`` already maps the per-tile downloads
+    back to 5-arcmin ``cell.cell_id`` keys via its trailing fan-out
+    loop (``acea/translator.py`` post-download lines). The translator's
+    F13 surfacing call therefore passes the already-5-arcmin-keyed
+    dict straight to ``_surface_per_cell_climate``.
 
-    def test_30arcmin_to_5arcmin_fanout(self):
-        """A single downloaded 30-arcmin tile covers all 5-arcmin
-        grid cells whose centroid maps to that tile. Each gets a
-        reference to the same ClimateTimeSeries."""
+    An earlier draft fanned out a second time through 30-arcmin
+    tile_ids and silently produced an empty result — codex Gate B
+    caught that with the fixture-masks-bug pattern (the test was
+    tile-keyed too, so it matched the bug). The fixture below uses
+    5-arcmin ``cell.cell_id`` keys so a regression that re-introduces
+    the extra fanout fails this test instead of passing falsely."""
+
+    def test_5arcmin_keyed_climate_surfaces_directly(self):
+        """The translator's downloaded climate dict is already keyed
+        by 5-arcmin ``cell.cell_id`` (per the post-download fanout
+        in ``_download_climate_30arcmin``). Passing it straight to
+        the helper merges every entry and drops the sentinel."""
         from prismpy.translators.acea.translator import AceaTranslator
 
         translator = AceaTranslator.__new__(AceaTranslator)
-
-        # All three 5-arcmin grid cells fall in the same 30-arcmin
-        # tile (centred near lat=0.5, lon=0.5).
         data = _make_unified_with_placeholder(n_cells=3)
 
-        # Compute the tile id for the first cell using the same
-        # arithmetic the translator applies.
-        res = 30 / 60
-        cell0 = data.grid.cells[0]
-        row = int((90 - cell0.lat) / res)
-        col = int((cell0.lon + 180) / res)
-        tile_id = row * AceaTranslator.GRID_COLS_30ARCMIN + col
+        # Multiple 5-arcmin cells may share the same ts reference
+        # (when they map to the same 30-arcmin tile pre-fanout); a
+        # shared ts is the canonical post-fanout shape. Build that
+        # shape with a single ts shared across all three cells.
+        shared_ts = _make_ts(location_id=0, source="NASA POWER")
+        downloaded_5arcmin = {
+            cell.cell_id: shared_ts for cell in data.grid.cells
+        }
 
-        # Mock the downloaded climate keyed by the tile id.
-        downloaded_by_tile = {tile_id: _make_ts(location_id=tile_id, source="NASA POWER")}
+        translator._surface_per_cell_climate(data, downloaded_5arcmin)
 
-        # Fan out manually as the translator does inline.
-        per_cell = {}
-        for cell in data.grid.cells:
-            r = int((90 - cell.lat) / res)
-            c = int((cell.lon + 180) / res)
-            r = max(0, min(r, AceaTranslator.GRID_ROWS_30ARCMIN - 1))
-            c = max(0, min(c, AceaTranslator.GRID_COLS_30ARCMIN - 1))
-            tid = r * AceaTranslator.GRID_COLS_30ARCMIN + c
-            ts = downloaded_by_tile.get(tid)
-            if ts is not None:
-                per_cell[cell.cell_id] = ts
-
-        translator._surface_per_cell_climate(data, per_cell)
-
-        # All three 5-arcmin cells now point at the same downloaded
-        # tile's ClimateTimeSeries.
         for cell in data.grid.cells:
             self.assertIn(cell.cell_id, data.climate)
-            self.assertIs(data.climate[cell.cell_id], downloaded_by_tile[tile_id])
+            self.assertIs(data.climate[cell.cell_id], shared_ts)
         self.assertNotIn(-1, data.climate)
+
+
+class TestSurfaceHelperEdgeCases(unittest.TestCase):
+    """Defense-in-depth coverage for branches the helper guards
+    against — empty placeholder dict, value missing the ``records``
+    attribute. Codex Gate B CHECK 4 catch on F13 review."""
+
+    def setUp(self):
+        from prismpy.translators.pythia.translator import PythiaTranslator
+        self._translator = PythiaTranslator.__new__(PythiaTranslator)
+
+    def test_empty_climate_dict_still_merges_real_entries(self):
+        """When ``data.climate`` is an empty dict (no placeholder),
+        the helper still merges real entries onto it — the dict is
+        the canonical container regardless of whether harmonize
+        seeded a sentinel."""
+        data = UnifiedData(
+            region=Region(
+                name="t", country="t", country_iso3="TST",
+                bounds=BoundingBox(minx=0, miny=0, maxx=1, maxy=1),
+            ),
+            grid=_make_grid(2),
+            climate={},
+            soil={},
+        )
+        self._translator._surface_per_cell_climate(data, {
+            0: _make_ts(location_id=0),
+            1: _make_ts(location_id=1),
+        })
+        self.assertEqual(set(data.climate.keys()), {0, 1})
+
+    def test_value_without_records_attr_is_filtered(self):
+        """A ts-shaped object missing the ``records`` attribute
+        (a partially-deserialised payload, a SimpleNamespace stub)
+        must be filtered out — the helper's guard
+        ``hasattr(ts, "records") and ts.records`` catches both
+        absent-attr and empty-records cases without raising."""
+        data = _make_unified_with_placeholder(n_cells=2)
+        # SimpleNamespace stub with no records attribute at all.
+        from types import SimpleNamespace
+        bad_ts = SimpleNamespace(location_id=0, source="bad")
+        good_ts = _make_ts(location_id=1)
+        self._translator._surface_per_cell_climate(data, {
+            0: bad_ts,
+            1: good_ts,
+        })
+        # Only the good ts surfaces; the bad stub is filtered out.
+        self.assertNotIn(0, data.climate)
+        self.assertIn(1, data.climate)
 
 
 if __name__ == "__main__":

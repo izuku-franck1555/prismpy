@@ -291,6 +291,18 @@ class BaseTranslator(ABC):
         dropped after the merge so the validator's per-cell loop does
         not double-count it.
 
+        Helper-side filter: ``ts.records`` truthy (at least one
+        record) is the minimum bar for a real entry. CRAFT applies a
+        stricter pre-filter (``len(ts.records) > 1``) before passing
+        in, so a single-record entry never reaches the helper from
+        that translator. PYTHIA / ACEA pass their downloaded dicts
+        directly, so any non-empty records list surfaces. ACEA in
+        particular relies on
+        ``_download_climate_30arcmin`` having ALREADY mapped the
+        per-tile downloads back to ``cell.cell_id`` keys before the
+        surfacing call — re-fanning out via tile_ids would
+        double-map and produce an empty result.
+
         Mutates ``data.climate`` in place; safe to call multiple times
         (later calls overwrite earlier entries for the same cell, which
         matches the in-process re-translate semantics).
