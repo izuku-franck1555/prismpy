@@ -441,47 +441,58 @@ def _check_temporal_completeness(
 ) -> Dict[str, Any]:
     """Check that climate data covers the full requested period.
 
-    The expected per-cell range matches each translator's actual
-    fetch contract — verified empirically by re-grepping the
-    download sites:
+    The expected per-cell range matches each cell's actual fetched
+    range, derived per-cell from the records' first date. Pre-F20
+    the validator hard-coded ``expected_days_with_spinup`` for
+    every per-cell-records cell, which silently halved reported
+    completeness on PYTHIA + CRAFT projects when ``spinup_years
+    > 0``. The first attempted fix (``"acea" in enabled_platforms``)
+    miscalculated multi-platform default-target runs because each
+    translator's behavior is conditional, not unconditional:
 
-    * **PYTHIA** ``pythia/translator.py:1987`` and **CRAFT**
-      ``craft/translator.py:1395`` both fetch from
-      ``f"{start_year}-01-01"`` — the warmup period is handled by
-      the model internally, same precedent as the SARRA-Py
-      file-based branch (see comment at the file-based fallback
-      below). For these platforms the validator's per-cell
-      expectation must be ``expected_days_no_spinup``; using the
-      with-spinup denominator silently halves the reported
-      completeness on any project with ``spinup_years > 0`` and
-      breaks Aminata's "is my package complete?" trust check.
-    * **ACEA** ``acea/translator.py:410-413`` fetches from
-      ``date(start_year - spinup, 1, 1)`` — the warmup period is
-      pre-fetched and lives in the per-cell records. For ACEA
-      the expectation must be ``expected_days_with_spinup``;
-      using the no-spinup denominator would over-claim
-      completeness (n_actual > expected) and silently mask
-      genuine gap detection.
+    * **PYTHIA** ``pythia/translator.py:1984-1987`` fetches from
+      ``f"{start_year}-01-01"`` BY DEFAULT, but
+      ``platform_config.pythia.climate_start_date`` overrides
+      that start when set.
+    * **CRAFT** ``craft/translator.py:1393-1395`` fetches from
+      ``f"{start_year}-01-01"`` (default; no override path).
+    * **ACEA** ``acea/translator.py:404,413`` fetches from
+      ``date(start_year - spinup, 1, 1)`` ONLY when
+      ``n_climate < n_cells`` (conditional download). When earlier
+      translators in a multi-platform run have already populated
+      ``data.climate`` via ``_surface_per_cell_climate``, ACEA's
+      gate trips false and it uses the preloaded no-spinup
+      records as-is.
     * **SARRA-Py** file-based (delegated below) keeps the
-      no-spinup expectation — model handles warmup internally,
-      same as PYTHIA + CRAFT.
+      no-spinup expectation — model handles warmup internally.
 
-    The whether-ACEA-should-fetch-pre-spinup-data domain question
-    (DSSAT vs CSM vs AquaCropOS warmup-state-generation
-    conventions) is deferred to a future sprint with crop-
-    modeling-specialist time; this check matches the validator
-    to what each translator currently does, not to a chosen-
-    canonical-fetch-contract.
+    The data-driven discriminator below sidesteps all these
+    conditional paths: each cell's actual ``min(records.date)``
+    decides whether it carries the spinup window. Cells that
+    start before ``expected_start_no_spinup`` get the
+    ``expected_days_with_spinup`` denominator; the rest get the
+    no-spinup denominator. Multi-platform-safe by construction.
+
+    The trade-off: the validator measures density within each
+    cell's fetched range rather than verifying the fetch range
+    matches the config-requested period. The "translator fetched
+    only part of the requested range" failure mode is no longer
+    surfaced by this check — but it was already silently broken
+    by ACEA's conditional gate even pre-F20, so this is an
+    honesty improvement, not a regression. A dedicated
+    ``cell_climate_range_match_config`` check could re-introduce
+    the missing capability in a future sprint.
 
     Args:
         unified_data: UnifiedData container (climate dict + region).
         config: ProjectConfig for temporal bounds + crop calendar.
-        enabled_platforms: List of enabled platform names. When
-            ``"acea"`` is among them the per-cell expectation
-            includes the spinup window; otherwise it does not.
-            ``None`` (back-compat default) maps to the
-            no-spinup expectation, matching the empirically-most-
-            common PYTHIA + CRAFT path.
+        enabled_platforms: List of enabled platform names.
+            Used informationally for the unavailable-record
+            ``expected_days`` field when no per-cell records exist
+            to data-drive from. NOT load-bearing for the active
+            per-cell path under the data-driven discriminator;
+            retained for back-compat with callers (e.g., the
+            executor at ``pipeline/executor.py:2700``).
     """
     start_year = config.temporal.start_year
     end_year = config.temporal.end_year
@@ -494,14 +505,16 @@ def _check_temporal_completeness(
     expected_days_with_spinup = (expected_end - expected_start_with_spinup).days + 1
     expected_days_no_spinup = (expected_end - expected_start_no_spinup).days + 1
 
-    # Pick the per-cell expectation that matches the active
-    # translator's actual fetch range. ACEA pre-fetches the
-    # spinup window into per-cell records; PYTHIA + CRAFT do not.
+    # ``enabled_platforms`` is informational on the unavailable
+    # path (no records to inspect). If ACEA is enabled the
+    # would-be expectation includes the spinup window; otherwise
+    # the no-spinup expectation matches the dominant PYTHIA +
+    # CRAFT + SARRA-Py reality.
     enabled = enabled_platforms or []
-    if "acea" in enabled:
-        expected_per_cell = expected_days_with_spinup
-    else:
-        expected_per_cell = expected_days_no_spinup
+    fallback_expected_days = (
+        expected_days_with_spinup if "acea" in enabled
+        else expected_days_no_spinup
+    )
 
     # Count actual days per cell
     climate = unified_data.climate if unified_data and hasattr(unified_data, 'climate') else {}
@@ -517,7 +530,7 @@ def _check_temporal_completeness(
             scope="global",
             cause="no_climate_fetch",
             details={
-                "expected_days": expected_per_cell,
+                "expected_days": fallback_expected_days,
                 "actual_cells": 0,
             },
         )
@@ -526,6 +539,8 @@ def _check_temporal_completeness(
     total_present = 0
     total_expected = 0
     cells_with_records = 0
+    n_with_spinup_cells = 0
+    n_no_spinup_cells = 0
 
     for cell_id, ts in climate.items():
         if not hasattr(ts, 'records'):
@@ -533,11 +548,34 @@ def _check_temporal_completeness(
         cells_with_records += 1
         actual_dates = {r.date for r in ts.records if hasattr(r, 'date')}
         n_actual = len(actual_dates)
+        # Per-cell discriminator: cells whose first record predates
+        # the no-spinup start were fetched WITH spinup (ACEA-style);
+        # the rest carry only the configured period (PYTHIA / CRAFT
+        # / SARRA-Py / preloaded-climate-pass-through). Robust to
+        # every conditional translator path enumerated in the
+        # docstring above.
+        if actual_dates and min(actual_dates) < expected_start_no_spinup:
+            expected_per_cell = expected_days_with_spinup
+            n_with_spinup_cells += 1
+        else:
+            expected_per_cell = expected_days_no_spinup
+            n_no_spinup_cells += 1
         n_missing = expected_per_cell - n_actual
         total_present += n_actual
         total_expected += expected_per_cell
         if n_missing > 0:
             cell_gaps[cell_id] = n_missing
+
+    # Modal expectation across cells — surfaced to consumers via
+    # ``details.expected_days_per_cell``. For single-platform runs
+    # (the common case) every cell shares the same expectation, so
+    # the modal is exact. For mixed runs the modal is the
+    # dominant one; per-cell granularity lives in the per-cell
+    # gap accounting and ``affected_cells`` list below.
+    if n_with_spinup_cells > n_no_spinup_cells:
+        modal_expected_per_cell = expected_days_with_spinup
+    else:
+        modal_expected_per_cell = expected_days_no_spinup
 
     # If no cells have per-day records but climate dict has file-based
     # data (SARRA-Py: rainfall_file_count, agera5_variables), count
@@ -571,7 +609,7 @@ def _check_temporal_completeness(
         ),
         "manuscript_claim": "Section 2.5: completeness check",
         "details": {
-            "expected_days_per_cell": expected_per_cell,
+            "expected_days_per_cell": modal_expected_per_cell,
             "n_cells": len(climate),
             "completeness_pct": round(completeness * 100, 2),
             "cells_with_gaps": len(cell_gaps),

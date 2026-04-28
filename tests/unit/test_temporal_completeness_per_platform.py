@@ -1,37 +1,49 @@
-"""F20 — temporal completeness denominator per active translator.
+"""F20 — temporal completeness denominator picked per-cell.
 
-The validator's per-cell expectation must match each translator's
-actual fetch range. Pre-F20 the per-cell-records branch hard-coded
-``expected_days_with_spinup``, which is correct only for ACEA's
-fetch contract (``acea/translator.py:410-413``); PYTHIA's
-(``pythia/translator.py:1987``) and CRAFT's
-(``craft/translator.py:1395``) fetch from ``start_year-01-01``
-without subtracting spinup, same precedent as SARRA-Py file-based
-which already used ``expected_days_no_spinup``.
+The validator's per-cell expectation matches each cell's actual
+fetched range, derived from the records' ``min(date)``. Pre-F20
+the validator hard-coded ``expected_days_with_spinup`` for every
+per-cell-records cell, silently halving reported completeness on
+PYTHIA + CRAFT projects with ``spinup_years > 0``. The first
+attempted fix (``"acea" in enabled_platforms``) miscalculated
+multi-platform default-target runs because each translator's
+fetch is conditional, not unconditional:
+
+* PYTHIA's start has a ``platform_config.pythia.climate_start_date``
+  override path (``pythia/translator.py:1984-1987``).
+* ACEA only fetches the spinup window when ``n_climate <
+  n_cells`` (``acea/translator.py:404``); when CRAFT/PYTHIA have
+  already surfaced no-spinup records, ACEA's gate trips false.
+
+The data-driven discriminator below sidesteps every conditional
+path: each cell's actual ``min(records.date)`` decides whether it
+carries the spinup window. Cells starting before the no-spinup
+date get the with-spinup denominator; the rest get the no-spinup
+denominator. Multi-platform-safe by construction.
 
 The pre-F13 placeholder sentinel ``{-1: ts(source="placeholder")}``
-masked the gap because the placeholder generated full-period fake
-records. Post-F13 the helper surfaces the actual translator-fetched
-dates onto ``unified_data.climate``; the validator's
-silently-wrong denominator then reported 50% completeness on
-2-year + spinup=2 PYTHIA / CRAFT projects (the user-evidence
-fixture). Aminata's symptom on the all-cells-red Maize Tigania
-West run was the writer-faithful surface of this denominator
-mismatch.
+masked the original denominator gap because the placeholder
+generated full-period fake records. Post-F13 the helper surfaces
+the actual translator-fetched dates onto ``unified_data.climate``;
+the validator's silently-wrong denominator then reported 50%
+completeness on 2-year + spinup=2 PYTHIA / CRAFT projects (the
+user-evidence fixture: ``f7706669`` Maize Tigania West +
+``c3cad31b`` Maize Bamboutos). Aminata's all-cells-red symptom
+was the writer-faithful surface of this denominator mismatch.
 
 Persona-walk anchored in the assertions:
 
 * **Aminata (DSSAT MISDAT)** — completeness must be honest about
-  what the translator fetched. PYTHIA cells with full-period
+  what each cell actually carries. PYTHIA cells with full-period
   records report 100% complete on the user's ``f7706669`` run,
   not the previously-reported 50%.
 * **Moussa (stakeholder)** — the 50% completeness number leaked
   into stakeholder slides while the package was actually
   complete; honest framing matters for trust.
-* **Dr. Kofi (audit)** — the per-platform expectation lives in
-  the validator's docstring + ``enabled_platforms`` parameter;
-  audit-grep can trace which expectation applied per project
-  type.
+* **Dr. Kofi (audit)** — the per-cell expectation derivation
+  lives in the validator's docstring; audit-grep can trace
+  which discriminator applied to which cell from
+  ``details.affected_cells`` plus the per-cell record range.
 * **Ibrahim (mobile)** — Region Health card binds against the
   honest completeness metric.
 """
@@ -137,24 +149,28 @@ def _make_config(*, start_year: int, end_year: int, spinup_years: int):
 
 class TestPythiaCraftNoSpinupExpectation:
     """PYTHIA + CRAFT translators fetch from ``start_year-01-01``
-    (no spinup subtraction). The validator must use the matching
-    no-spinup expectation; otherwise a project with ``spinup>0``
-    silently reports halved completeness on data that is in fact
-    fully fetched.
+    (no spinup subtraction). Cells with records starting at
+    ``start_year-01-01`` are picked up by the data-driven
+    discriminator's no-spinup branch; otherwise a project with
+    ``spinup>0`` silently reports halved completeness on data
+    that is in fact fully fetched.
 
     Empirical anchor: the user's ``f7706669`` Maize Tigania West
     run (start=2022, end=2023, spinup=2). Translator fetched
     730 days/cell across 4 cells = 2920 actual; pre-F20
     validator expected 1461 days/cell (with spinup) × 4 = 5844;
-    reported 50.0% completeness. Post-F20 validator expects 730
-    × 4 = 2920; reports 100% completeness."""
+    reported 50.0% completeness. Post-F20 validator picks no-
+    spinup per-cell because each cell's ``min(date)`` is
+    ``2022-01-01`` (not ``< expected_start_no_spinup``); reports
+    100% completeness."""
 
     def test_pythia_full_fetch_reports_100pct(self):
         """2-year config + spinup=2; cells have records for the
         full no-spinup range (2022-01-01 .. 2023-12-31 = 730
-        days). With ``enabled_platforms=['pythia']`` the
-        validator must use ``expected_days_no_spinup`` and
-        report 100% completeness, not 50%."""
+        days). The data-driven discriminator picks the no-spinup
+        denominator per-cell because every cell's ``min(date)``
+        is exactly ``expected_start_no_spinup`` (NOT less than).
+        Validator reports 100% completeness, not 50%."""
         start = _date(2022, 1, 1)
         end_inc = _date(2023, 12, 31)
         climate = {
@@ -221,23 +237,23 @@ class TestPythiaCraftNoSpinupExpectation:
 
 class TestAceaWithSpinupExpectation:
     """ACEA's translator fetches from ``date(start_year-spinup,
-    1, 1)``; the validator's expectation must match. A blanket
-    ``expected_days_no_spinup`` switch (the rejected one-line fix
-    that triggered F20's SCOPE CONCERN) would make ACEA cells
-    over-claim completeness because actual_days > expected_days
-    when the warmup period is fetched.
-
-    The asymmetric expectation preserves ACEA's correctness
-    without changing translator behavior. The domain question of
-    whether ACEA *should* pre-fetch the warmup window is a
-    crop-modeling-specialist call deferred to a follow-on
-    sprint."""
+    1, 1)`` — but only when ``n_climate < n_cells`` is true at
+    ``acea/translator.py:404``. Cells whose records actually
+    carry the spinup window are picked up by the data-driven
+    discriminator's with-spinup branch (``min(date) <
+    expected_start_no_spinup``). Cells with preloaded no-spinup
+    records (e.g., earlier translators surfaced into
+    ``data.climate`` first) get the no-spinup expectation
+    instead — honestly reporting density within whatever was
+    actually loaded."""
 
     def test_acea_full_fetch_with_spinup_reports_100pct(self):
         """2-year config + spinup=2 + cells have records for the
         full WITH-spinup range (2020-01-01 .. 2023-12-31 = 1461
-        days). With ``enabled_platforms=['acea']`` validator must
-        use ``expected_days_with_spinup`` and report 100%."""
+        days). The data-driven discriminator picks with-spinup
+        per-cell because every cell's ``min(date)`` is
+        ``2020-01-01`` (< ``expected_start_no_spinup`` of
+        ``2022-01-01``). Validator reports 100% completeness."""
         start = _date(2020, 1, 1)  # 2022 - spinup=2
         end_inc = _date(2023, 12, 31)
         climate = {
@@ -256,15 +272,31 @@ class TestAceaWithSpinupExpectation:
         # 2020 leap + 2021 + 2022 + 2023 = 366 + 365 + 365 + 365 = 1461
         assert "5844/5844" in check["summary"]
 
-    def test_acea_no_spinup_data_reports_partial(self):
-        """If ACEA's translator fetched ONLY the no-spinup range
-        (730 days) when the validator expected the full
-        with-spinup range (1461), the gap shows up as 50%
-        completeness — exactly inverting the user's
-        pre-F20 symptom on PYTHIA + CRAFT. This pins that ACEA
-        retains the with-spinup expectation regardless of the
-        no-spinup default."""
-        start = _date(2022, 1, 1)  # only the requested period
+
+class TestMultiPlatformDataDrivenDiscriminator:
+    """Q1 HIGH regression pins from F20 codex Gate B. Pre-Path-X
+    the per-cell expectation was driven by ``"acea" in
+    enabled_platforms``, which silently miscalculated the
+    multi-platform default-target case: when ``targets`` defaults
+    to all four platforms, CRAFT/PYTHIA run before ACEA and
+    surface no-spinup records; ACEA's spinup-fetch gate
+    (``acea/translator.py:404``: ``if n_climate < n_cells``)
+    trips false because ``data.climate`` is already populated;
+    yet ``"acea" in enabled`` still picked the with-spinup
+    denominator → false 50% completeness.
+
+    The data-driven per-cell discriminator inspects each cell's
+    actual ``min(records.date)`` and matches the expectation to
+    the data, not to the platform list — multi-platform-safe by
+    construction."""
+
+    def test_multi_platform_default_target_no_false_partial(self):
+        """All four platforms enabled; CRAFT/PYTHIA fetched first
+        and surfaced no-spinup records; ACEA inherits them via
+        the conditional-fetch gate. Validator must report 100%
+        complete (not pre-Path-X 50%) because each cell's actual
+        range is densely covered by its own records."""
+        start = _date(2022, 1, 1)
         end_inc = _date(2023, 12, 31)
         climate = {
             i: _make_ts_for_range(start, end_inc, cell_id=i)
@@ -274,11 +306,78 @@ class TestAceaWithSpinupExpectation:
         check = _check_temporal_completeness(
             _make_unified(climate=climate),
             config,
-            enabled_platforms=["acea"],
+            enabled_platforms=["sarra_py", "craft", "pythia", "acea"],
         )
-        # 730 / 1461 ≈ 49.97% → fail
-        assert check["result"] == "fail"
-        assert check["details"]["completeness_pct"] < 50.5
+        # Pre-Path-X: 730×4 / 1461×4 = 50%. Post-Path-X: 100%.
+        assert check["result"] == "pass"
+        assert check["details"]["completeness_pct"] == 100.0
+        assert "2920/2920" in check["summary"]
+        # The pre-fix 5844 denominator must NOT appear; that was
+        # the symptom of the platform-membership miscalculation.
+        assert "5844" not in check["summary"]
+
+    def test_per_cell_mixed_range_picks_expectation_per_cell(self):
+        """Mixed per-cell ranges in the same ``unified_data.climate``:
+        cell 0 carries the full with-spinup window; cell 1 carries
+        only the no-spinup window. The data-driven discriminator
+        applies the matching expectation per-cell — both report
+        100% complete because each is densely covered for its
+        OWN range."""
+        # Cell 0: ACEA-style — 2020-01-01 to 2023-12-31 = 1461 days
+        # Cell 1: PYTHIA-style — 2022-01-01 to 2023-12-31 = 730 days
+        climate = {
+            0: _make_ts_for_range(
+                _date(2020, 1, 1), _date(2023, 12, 31), cell_id=0,
+            ),
+            1: _make_ts_for_range(
+                _date(2022, 1, 1), _date(2023, 12, 31), cell_id=1,
+            ),
+        }
+        config = _make_config(start_year=2022, end_year=2023, spinup_years=2)
+        check = _check_temporal_completeness(
+            _make_unified(climate=climate, n_cells=2),
+            config,
+            enabled_platforms=["acea", "pythia"],
+        )
+        # Cell 0: 1461 actual / 1461 expected (with-spinup)
+        # Cell 1: 730 actual / 730 expected (no-spinup)
+        # Total: 2191 / 2191 = 100%
+        assert check["result"] == "pass"
+        assert check["details"]["completeness_pct"] == 100.0
+        assert "2191/2191" in check["summary"]
+        # No cell appears in the gap accounting (everything is
+        # 100% within its own range).
+        assert check["details"]["cells_with_gaps"] == 0
+
+    def test_modal_expected_days_per_cell_reports_dominant(self):
+        """``details.expected_days_per_cell`` reports the modal
+        expectation across cells. With 3 with-spinup cells + 1
+        no-spinup cell, the modal is the with-spinup
+        denominator. Single-platform runs (the common case)
+        keep this exact; mixed runs surface the dominant one."""
+        climate = {
+            0: _make_ts_for_range(
+                _date(2020, 1, 1), _date(2023, 12, 31), cell_id=0,
+            ),
+            1: _make_ts_for_range(
+                _date(2020, 1, 1), _date(2023, 12, 31), cell_id=1,
+            ),
+            2: _make_ts_for_range(
+                _date(2020, 1, 1), _date(2023, 12, 31), cell_id=2,
+            ),
+            3: _make_ts_for_range(
+                _date(2022, 1, 1), _date(2023, 12, 31), cell_id=3,
+            ),
+        }
+        config = _make_config(start_year=2022, end_year=2023, spinup_years=2)
+        check = _check_temporal_completeness(
+            _make_unified(climate=climate),
+            config,
+            enabled_platforms=["acea", "pythia"],
+        )
+        # 3 cells with 1461 expected + 1 cell with 730 expected
+        # → modal is with-spinup (1461). Most-common; not mean.
+        assert check["details"]["expected_days_per_cell"] == 1461
 
 
 class TestExpectedDaysPerCellMetadataMatchesContract:
