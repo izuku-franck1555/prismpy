@@ -535,19 +535,31 @@ class PythiaTranslator(PythiaTranslatorBase):
 
         # V2-19 B0 finding #4: TAV is an unweighted arithmetic mean over
         # all records in the series — no seasonal or monthly weighting.
+        # F15 (2026-04-28): the human-readable ``description`` field
+        # surfaces in the Methods tab via the provenance reader.
+        # The earlier "PYTHIA TAV: unweighted arithmetic mean of daily
+        # mean temperatures" wording leaked the CLI parameter name +
+        # statistical method into a researcher-facing surface (durable
+        # lesson #7 CLI-artifact-leak). Plain-language phrasing now
+        # describes the user-visible meaning ("what this number does
+        # for the simulation"); the technical method stays in the
+        # rationale field below where Dr. Kofi's audit grep finds it.
         if self.provenance:
             self.provenance.record_decision(
                 decision_type=DecisionType.AGGREGATION_METHOD,
                 description=(
-                    "PYTHIA TAV: unweighted arithmetic mean of daily "
-                    "mean temperatures"
+                    "Average annual temperature used for soil thermal "
+                    "layer calibration"
                 ),
                 rationale=(
-                    "np.mean(tmeans) treats every day equally. A year "
-                    "with more days in the cool dry season is weighted "
-                    "identically to a year with more warm wet days. "
-                    "DSSAT TAV expects 'annual average temperature' and "
-                    "this matches the traditional unweighted definition."
+                    "Computed as the unweighted arithmetic mean of "
+                    "daily mean temperatures across the climate series "
+                    "(``np.mean(tmeans)``). Every day weighs equally — "
+                    "a year with more cool-dry-season days reads as the "
+                    "same TAV as a year with more warm-wet-season days. "
+                    "DSSAT's TAV parameter expects 'annual average "
+                    "temperature' and this matches the traditional "
+                    "unweighted definition."
                 ),
                 alternatives=[
                     "Monthly average then average-of-averages (more stable)",
