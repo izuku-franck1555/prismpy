@@ -130,7 +130,9 @@ def run_scientific_validation(
     enabled = enabled_platforms or []
 
     # Check 1: Temporal completeness
-    checks.append(_check_temporal_completeness(unified_data, config))
+    checks.append(_check_temporal_completeness(
+        unified_data, config, enabled_platforms=enabled,
+    ))
 
     # Check 2: Cross-variable consistency
     checks.append(_check_cross_variable_consistency(unified_data))
@@ -433,23 +435,73 @@ def _compute_summary_stats(unified_data, config) -> Dict[str, Any]:
 # Check 1: Temporal completeness
 # =============================================================================
 
-def _check_temporal_completeness(unified_data, config) -> Dict[str, Any]:
-    """Check that climate data covers the full requested period."""
+def _check_temporal_completeness(
+    unified_data, config,
+    enabled_platforms: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Check that climate data covers the full requested period.
+
+    The expected per-cell range matches each translator's actual
+    fetch contract — verified empirically by re-grepping the
+    download sites:
+
+    * **PYTHIA** ``pythia/translator.py:1987`` and **CRAFT**
+      ``craft/translator.py:1395`` both fetch from
+      ``f"{start_year}-01-01"`` — the warmup period is handled by
+      the model internally, same precedent as the SARRA-Py
+      file-based branch (see comment at the file-based fallback
+      below). For these platforms the validator's per-cell
+      expectation must be ``expected_days_no_spinup``; using the
+      with-spinup denominator silently halves the reported
+      completeness on any project with ``spinup_years > 0`` and
+      breaks Aminata's "is my package complete?" trust check.
+    * **ACEA** ``acea/translator.py:410-413`` fetches from
+      ``date(start_year - spinup, 1, 1)`` — the warmup period is
+      pre-fetched and lives in the per-cell records. For ACEA
+      the expectation must be ``expected_days_with_spinup``;
+      using the no-spinup denominator would over-claim
+      completeness (n_actual > expected) and silently mask
+      genuine gap detection.
+    * **SARRA-Py** file-based (delegated below) keeps the
+      no-spinup expectation — model handles warmup internally,
+      same as PYTHIA + CRAFT.
+
+    The whether-ACEA-should-fetch-pre-spinup-data domain question
+    (DSSAT vs CSM vs AquaCropOS warmup-state-generation
+    conventions) is deferred to a future sprint with crop-
+    modeling-specialist time; this check matches the validator
+    to what each translator currently does, not to a chosen-
+    canonical-fetch-contract.
+
+    Args:
+        unified_data: UnifiedData container (climate dict + region).
+        config: ProjectConfig for temporal bounds + crop calendar.
+        enabled_platforms: List of enabled platform names. When
+            ``"acea"`` is among them the per-cell expectation
+            includes the spinup window; otherwise it does not.
+            ``None`` (back-compat default) maps to the
+            no-spinup expectation, matching the empirically-most-
+            common PYTHIA + CRAFT path.
+    """
     start_year = config.temporal.start_year
     end_year = config.temporal.end_year
     spinup = config.temporal.spinup_years
 
-    # For per-cell time series (CRAFT/PYTHIA/ACEA), expected range
-    # includes spinup. For file-based data (SARRA-Py), the actual
-    # download covers start_year to end_year WITHOUT spinup — the
-    # spinup period is handled by the model internally. We compute
-    # both ranges and use the appropriate one per data path.
     expected_start_with_spinup = date(start_year - spinup, 1, 1)
     expected_start_no_spinup = date(start_year, 1, 1)
     crop_cal = config.crop.calendar if config.crop else None
     expected_end = config.temporal.get_climate_end_date(crop_cal)
     expected_days_with_spinup = (expected_end - expected_start_with_spinup).days + 1
     expected_days_no_spinup = (expected_end - expected_start_no_spinup).days + 1
+
+    # Pick the per-cell expectation that matches the active
+    # translator's actual fetch range. ACEA pre-fetches the
+    # spinup window into per-cell records; PYTHIA + CRAFT do not.
+    enabled = enabled_platforms or []
+    if "acea" in enabled:
+        expected_per_cell = expected_days_with_spinup
+    else:
+        expected_per_cell = expected_days_no_spinup
 
     # Count actual days per cell
     climate = unified_data.climate if unified_data and hasattr(unified_data, 'climate') else {}
@@ -465,7 +517,7 @@ def _check_temporal_completeness(unified_data, config) -> Dict[str, Any]:
             scope="global",
             cause="no_climate_fetch",
             details={
-                "expected_days": expected_days_with_spinup,
+                "expected_days": expected_per_cell,
                 "actual_cells": 0,
             },
         )
@@ -481,18 +533,17 @@ def _check_temporal_completeness(unified_data, config) -> Dict[str, Any]:
         cells_with_records += 1
         actual_dates = {r.date for r in ts.records if hasattr(r, 'date')}
         n_actual = len(actual_dates)
-        n_missing = expected_days_with_spinup - n_actual
+        n_missing = expected_per_cell - n_actual
         total_present += n_actual
-        total_expected += expected_days_with_spinup
+        total_expected += expected_per_cell
         if n_missing > 0:
             cell_gaps[cell_id] = n_missing
 
     # If no cells have per-day records but climate dict has file-based
     # data (SARRA-Py: rainfall_file_count, agera5_variables), count
-    # GeoTIFF files per variable as the completeness metric.
-    # D3 FIX: file-based check uses NON-SPINUP expected days.
-    # SARRA-Py downloads data for the actual period only; spinup
-    # is handled by the model internally.
+    # GeoTIFF files per variable as the completeness metric. SARRA-Py
+    # downloads data for the actual period only; spinup is handled by
+    # the model internally — same precedent as PYTHIA + CRAFT above.
     if cells_with_records == 0 and climate:
         return _check_temporal_completeness_file_based(
             climate, expected_days_no_spinup
@@ -520,7 +571,7 @@ def _check_temporal_completeness(unified_data, config) -> Dict[str, Any]:
         ),
         "manuscript_claim": "Section 2.5: completeness check",
         "details": {
-            "expected_days_per_cell": expected_days_with_spinup,
+            "expected_days_per_cell": expected_per_cell,
             "n_cells": len(climate),
             "completeness_pct": round(completeness * 100, 2),
             "cells_with_gaps": len(cell_gaps),
