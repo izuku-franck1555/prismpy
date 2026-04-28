@@ -78,6 +78,35 @@ def _make_soil_profile(*, profile_id: str, sand: float, clay: float,
     )
 
 
+def _make_full_unified(n_cells: int = 2):
+    """G7 §2 — construct a unified-data fixture where every cell has
+    BOTH climate records and a soil profile. The §2 per-axis pivot
+    filter drops failed-check entries from cells whose
+    ``data_availability == "unavailable"``; tests that exercise the
+    pivot under normal operation need ``complete`` cells so the
+    filter does not mask the pivot behaviour they actually want to
+    verify. Tests that specifically test the §2 short-circuit
+    construct their own stripped-down fixtures inline."""
+    from datetime import date as _date
+    grid = _make_grid(n_cells=n_cells)
+    climate = {}
+    soil = {}
+    for cid in range(n_cells):
+        climate[cid] = ClimateTimeSeries(
+            location_id=cid, lat=0.5, lon=0.5, source="TEST",
+            records=[ClimateRecord(
+                date=_date(2015, 1, 1), tmax=30.0, tmin=20.0,
+                precip=2.0, srad=20.0,
+            )],
+        )
+        soil[cid] = _make_soil_profile(
+            profile_id=f"p{cid}", sand=40.0, clay=30.0,
+        )
+    return UnifiedData(
+        region=_make_region(), grid=grid, climate=climate, soil=soil,
+    )
+
+
 class TestCellSummaryVersion:
     """V2-22c-PRE.1.1 (D5/D7) — cell_summary_version field on the
     top-level dict returned by _build_cell_summary."""
@@ -93,11 +122,17 @@ class TestCellSummaryVersion:
             "branch even on post-PRE.1 fixtures."
         )
 
-    def test_cell_summary_version_value_is_2_0(self):
+    def test_cell_summary_version_value_is_2_1(self):
+        """G7 §2 — version bumped to "2.1" once the executor populates
+        the new ``data_availability`` / ``unavailable_reason`` fields
+        and short-circuits the per-cell pivot per axis. The previous
+        "2.0" pin remains a valid input shape for the schema (round-
+        trip compat is covered in tests/test_cell_summary_schema.py),
+        but the producer side now stamps the latest version."""
         pipeline = _make_pipeline()
         unified = UnifiedData(region=_make_region(), grid=_make_grid())
         out = pipeline._build_cell_summary(unified)
-        assert out["cell_summary_version"] == "2.0"
+        assert out["cell_summary_version"] == "2.1"
 
     def test_cell_summary_version_present_alongside_existing_top_level_keys(self):
         """Regression guard — the new field must not displace existing
@@ -314,7 +349,13 @@ class TestFailedChecksStructuredShape:
 
     def test_per_cell_check_pivots_into_failed_checks(self):
         pipeline = _make_pipeline()
-        unified = UnifiedData(region=_make_region(), grid=_make_grid(n_cells=2))
+        # G7 §2 — full-availability fixture so the pivot's per-axis
+        # filter does not drop the climate-axis ``value_range_tmax``
+        # entry. The original bare-grid construction left every cell
+        # at ``data_availability="unavailable"`` with reason
+        # ``climate_and_soil``, so the §1 invariant 3 filter would
+        # silently drop the test's expected entry.
+        unified = _make_full_unified(n_cells=2)
         report = _validation_report({
             "check": "value_range_tmax",
             "scope": "per_record",
@@ -327,7 +368,7 @@ class TestFailedChecksStructuredShape:
 
     def test_failed_check_entry_has_exactly_three_keys(self):
         pipeline = _make_pipeline()
-        unified = UnifiedData(region=_make_region(), grid=_make_grid(n_cells=1))
+        unified = _make_full_unified(n_cells=1)
         report = _validation_report({
             "check": "temporal_completeness",
             "scope": "per_cell",
@@ -347,7 +388,7 @@ class TestFailedChecksStructuredShape:
         """Evaluator §12.2 — `result ∈ {"fail", "warning"}` literal.
         The pivot's pre-filter excludes `pass` and `info`."""
         pipeline = _make_pipeline()
-        unified = UnifiedData(region=_make_region(), grid=_make_grid(n_cells=1))
+        unified = _make_full_unified(n_cells=1)
         report = _validation_report(
             {
                 "check": "value_range_tmax",
@@ -424,7 +465,7 @@ class TestFailedChecksTupleAffectedCells:
 
     def test_tuple_affected_cells_extract_cell_id(self):
         pipeline = _make_pipeline()
-        unified = UnifiedData(region=_make_region(), grid=_make_grid(n_cells=2))
+        unified = _make_full_unified(n_cells=2)
         report = _validation_report({
             "check": "value_range_soil_clay",
             "scope": "per_layer",
@@ -502,7 +543,7 @@ class TestCellFailedCheckDetailsFlatten:
         """Within a single cell, multiple failed checks are sorted by
         (check_id, result) so cockpit chip rendering is stable."""
         pipeline = _make_pipeline()
-        unified = UnifiedData(region=_make_region(), grid=_make_grid(n_cells=1))
+        unified = _make_full_unified(n_cells=1)
         report = _validation_report(
             {
                 "check": "temporal_completeness",
@@ -682,7 +723,10 @@ class TestValidationReportEnvelopeExtraction:
         method receives the right shape; this test confirms the
         envelope-vs-report distinction matters at the read site."""
         pipeline = _make_pipeline()
-        unified = UnifiedData(region=_make_region(), grid=_make_grid(n_cells=1))
+        # G7 §2 — full-availability so the §1 invariant 3 filter
+        # does not preempt the envelope-shape regression we are
+        # testing here.
+        unified = _make_full_unified(n_cells=1)
         envelope = {
             "scientific": {
                 "validation_version": "2.0",

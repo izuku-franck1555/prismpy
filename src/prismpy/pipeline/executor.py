@@ -3139,6 +3139,68 @@ class TranslationPipeline:
         ("coverage_soil_cells", "coverage_per_cell"),
     )
 
+    # G7 §2 — per-cell-pivot axis classification. The cockpit's
+    # internal category enum (above) is finer-grained than the
+    # ``data_availability`` per-axis split — the schema's per-axis
+    # invariant 3 only knows about "climate" and "soil". Mapping the
+    # cockpit categories back to those axes lets the pivot drop
+    # check entries that would otherwise violate the invariant on
+    # mixed-availability cells (climate-available + soil-unavailable
+    # or vice versa). Entries in the "neither axis" set fall outside
+    # the per-axis predicate — coverage-per-cell entries that don't
+    # carry an explicit climate/soil affiliation in their check_id
+    # are intentionally NOT axis-specific (they describe absence
+    # without a substrate dimension), so they bypass the filter.
+    _CLIMATE_CHECK_IDS: frozenset = frozenset({
+        "temporal_completeness",
+        "cross_variable_consistency",
+        "coverage_climate_cells",
+        "region_specific_bounds",
+        "value_range_climate",
+    })
+    _CLIMATE_VALUE_RANGE_VARS: frozenset = frozenset({
+        "tmax", "tmin", "precip", "srad", "rh", "wind",
+    })
+    _SOIL_CHECK_IDS: frozenset = frozenset({
+        "coverage_soil_cells",
+        "value_range_soil",
+        "value_range_texture_sum",
+    })
+
+    @classmethod
+    def _axis_for_check_id(cls, check_id: str) -> Optional[str]:
+        """Return ``"climate"`` / ``"soil"`` / ``None`` for a check id,
+        mirroring the schema's ``_failed_check_category`` taxonomy so
+        the per-cell pivot can honour §1 invariant 3 without
+        depending on the schema module at the executor boundary
+        (the schema is imported lazily by callers; the executor
+        owns the per-cell shape and must enforce the invariant
+        itself before the dict reaches the schema reader).
+
+        Climate axis: temporal completeness, cross-variable
+        consistency, climate-coverage, region-specific bounds, and
+        every ``value_range_<var>`` whose ``var`` is in the climate
+        taxonomy.
+
+        Soil axis: soil-completeness, soil-coverage, soil value
+        ranges (including ``value_range_texture_sum``).
+        """
+        if not isinstance(check_id, str):
+            return None
+        if check_id in cls._CLIMATE_CHECK_IDS:
+            return "climate"
+        if check_id in cls._SOIL_CHECK_IDS:
+            return "soil"
+        if check_id.startswith("soil_completeness_"):
+            return "soil"
+        if check_id.startswith("value_range_"):
+            suffix = check_id[len("value_range_"):]
+            if suffix in cls._CLIMATE_VALUE_RANGE_VARS:
+                return "climate"
+            if suffix == "texture_sum" or suffix.startswith("soil_"):
+                return "soil"
+        return None
+
     # Scopes that the validator emits with per-cell semantics. Region-
     # level checks (`format_compliance`, `spatial_temporal_coverage`,
     # `region_specific_bounds` when scope=global) carry scope='global'
@@ -3391,6 +3453,39 @@ class TranslationPipeline:
             else:
                 cell_data["has_climate"] = False
 
+            # G7 §2 — derive ``has_soil`` alongside the existing
+            # ``has_climate`` flag so the per-axis predicate has a
+            # symmetric signal. ``has_soil`` is True when the cell
+            # carries a soil profile with at least one layer; the
+            # "no_soil" cell branch above (where ``soil_source ==
+            # "none"``) corresponds to ``has_soil = False``.
+            cell_data["has_soil"] = (
+                profile is not None
+                and bool(getattr(profile, "layers", None))
+            )
+
+            # G7 §2 — derive the v2.1 ``data_availability`` and
+            # ``unavailable_reason`` discriminators from the
+            # has_climate / has_soil flags. The schema's three
+            # cross-field invariants bind against these fields, so
+            # any inconsistency (e.g., setting unavailable without a
+            # reason) crashes downstream readers — keeping the
+            # derivation in one place limits the blast radius.
+            climate_present = bool(cell_data.get("has_climate"))
+            soil_present = bool(cell_data.get("has_soil"))
+            if climate_present and soil_present:
+                cell_data["data_availability"] = "complete"
+                cell_data["unavailable_reason"] = None
+            elif not climate_present and not soil_present:
+                cell_data["data_availability"] = "unavailable"
+                cell_data["unavailable_reason"] = "climate_and_soil"
+            elif not climate_present:
+                cell_data["data_availability"] = "unavailable"
+                cell_data["unavailable_reason"] = "climate"
+            else:
+                cell_data["data_availability"] = "unavailable"
+                cell_data["unavailable_reason"] = "soil"
+
             # Validation status: pass / warning / fail
             warnings = []
             if cell_data.get("soil_default"):
@@ -3445,6 +3540,14 @@ class TranslationPipeline:
                 affected_ids = self._affected_cell_ids(
                     details.get("affected_cells"),
                 )
+                # G7 §2 — classify the entry by axis (climate / soil
+                # / None) so the per-cell loop can drop entries that
+                # would land on a cell whose corresponding axis is
+                # unavailable. The schema's §1 invariant 3 rejects
+                # any record where an unavailable-axis fail entry
+                # leaks through; filtering here keeps the executor's
+                # output round-trippable through ``CellSummary``.
+                axis = self._axis_for_check_id(check_id)
                 entry_template = {
                     "check_id": check_id,
                     "result": result,
@@ -3460,6 +3563,23 @@ class TranslationPipeline:
                         # a re-built grid (PRE.3 exclude_cells path)
                         # could surface this.
                         continue
+                    if axis is not None:
+                        # G7 §2 — drop the entry when the cell's
+                        # corresponding axis is unavailable. Mixed-
+                        # availability cells legitimately keep fails
+                        # on the AVAILABLE axis (climate-only fail on
+                        # a soil-unavailable cell stays); only the
+                        # unavailable-axis check_ids are filtered.
+                        reason = cell.get("unavailable_reason")
+                        if (
+                            cell.get("data_availability") == "unavailable"
+                            and reason is not None
+                            and (
+                                reason == axis
+                                or reason == "climate_and_soil"
+                            )
+                        ):
+                            continue
                     cell["failed_checks"].append(dict(entry_template))
 
                 # PRE.1.8 flatten — per-violation detail rows.
@@ -3498,14 +3618,15 @@ class TranslationPipeline:
         )
 
         return {
-            # V2-22c-PRE.1.1 (D5/D7) — `cell_summary_version: "2.0"` matches
-            # the existing `validation_version: "2.0"` precedent at
-            # validators/scientific.py:155 and `post_translate_version: "1.0"`
-            # at validators/post_translate.py:114. The cockpit's loader-
-            # fallback at prismweb/core/views.py:_load_cell_summary uses this
-            # field to detect pre-PRE.1 fixtures and synthesize the empty
-            # `failed_checks: []` shape per V2-22c contract D11/D19.
-            "cell_summary_version": "2.0",
+            # G7 §2 — bumped to "2.1" once the executor populates the
+            # v2.1 ``data_availability`` / ``unavailable_reason``
+            # fields on every cell and short-circuits the per-cell
+            # pivot per axis. Older fixtures without the v2.1 fields
+            # still load via the schema's defaults
+            # (``data_availability="complete"``, ``unavailable_reason=None``)
+            # — see ``prismpy.cells.schema`` for the round-trip
+            # discipline.
+            "cell_summary_version": "2.1",
             "n_cells": len(cells),
             "resolution": getattr(grid, 'resolution', '5arcmin'),
             "cells": cells,
