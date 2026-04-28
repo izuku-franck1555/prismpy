@@ -239,13 +239,41 @@ class TestPivotIntegration:
     integration via `_build_cell_summary`."""
 
     def test_coverage_check_ids_pivot_into_failed_checks(self):
-        """Synthesize a validation_report with both new check_ids;
-        the cell summary's per-cell `failed_checks` must include
-        them under category `coverage_per_cell`."""
+        """Synthesize a validation_report with both new check_ids; the
+        cell summary's per-cell `failed_checks` must include them
+        under category `coverage_per_cell` for cells whose axis was
+        AVAILABLE — the partial-coverage case where the per-cell
+        validator legitimately catches a missing cell while the
+        sibling axis ran cleanly. G7 §2 added the per-axis filter so
+        cells whose own axis is unavailable do NOT also receive the
+        coverage_<axis>_cells fail entry (the cell's
+        ``data_availability='unavailable'`` already encodes the
+        absence — the per-cell entry would be redundant and would
+        violate §1 invariant 3)."""
         from prismpy.pipeline.executor import TranslationPipeline
 
         pipeline = TranslationPipeline.__new__(TranslationPipeline)
-        unified = _make_unified(grid_n=2)
+        # Cell 0: full availability (climate + soil present).
+        # Cell 1: full availability too. Both cells have
+        # data_availability='complete'. The synthetic fail records
+        # below mark cells as missing, which would normally only
+        # happen for partial-coverage cells; we force the records
+        # to exercise the pivot loop in isolation, with the §2
+        # filter NOT firing (because both cells are 'complete').
+        climate = {
+            i: _make_ts([_make_record()], cell_id=i) for i in range(2)
+        }
+        soil = {
+            i: SoilProfile(
+                profile_id=f"p{i}", lat=0.5, lon=0.5, source="iSDA",
+                layers=[SoilLayer(
+                    depth_top=0.0, depth_bottom=0.2,
+                    sand=40.0, clay=30.0,
+                )],
+            )
+            for i in range(2)
+        }
+        unified = _make_unified(grid_n=2, climate=climate, soil=soil)
         report = {
             "validation_version": "2.0",
             "checks": [
@@ -281,3 +309,54 @@ class TestPivotIntegration:
             e["check_id"] == "coverage_soil_cells"
             for e in out["cells"][1]["failed_checks"]
         )
+
+    def test_unavailable_axis_filters_per_axis_pivot_entry(self):
+        """G7 §2 — the per-axis filter drops a climate fail entry
+        from a cell whose own climate axis is unavailable. Without
+        the filter the schema's §1 invariant 3 would reject the
+        record on read.
+
+        Cell 0: no climate, has soil → unavailable_reason='climate'.
+        Cell 1: has climate, no soil → unavailable_reason='soil'.
+        Validation report reports a climate fail on cell 0 and a
+        soil fail on cell 1 (the partial-coverage shape). Both
+        cells should END UP with empty failed_checks because the
+        unavailable axis's entry is dropped on each side."""
+        from prismpy.pipeline.executor import TranslationPipeline
+
+        pipeline = TranslationPipeline.__new__(TranslationPipeline)
+        climate = {1: _make_ts([_make_record()], cell_id=1)}
+        soil = {0: SoilProfile(
+            profile_id="p0", lat=0.5, lon=0.5, source="iSDA",
+            layers=[SoilLayer(
+                depth_top=0.0, depth_bottom=0.2,
+                sand=40.0, clay=30.0,
+            )],
+        )}
+        unified = _make_unified(grid_n=2, climate=climate, soil=soil)
+        report = {
+            "validation_version": "2.1",
+            "checks": [
+                {
+                    "check": "coverage_climate_cells",
+                    "scope": "per_cell",
+                    "result": "fail",
+                    "details": {"affected_cells": [0]},
+                },
+                {
+                    "check": "coverage_soil_cells",
+                    "scope": "per_cell",
+                    "result": "fail",
+                    "details": {"affected_cells": [1]},
+                },
+            ],
+        }
+        out = pipeline._build_cell_summary(unified, report)
+        # Cell 0 had climate unavailable → climate fail filtered.
+        assert out["cells"][0]["failed_checks"] == []
+        assert out["cells"][0]["data_availability"] == "unavailable"
+        assert out["cells"][0]["unavailable_reason"] == "climate"
+        # Cell 1 had soil unavailable → soil fail filtered.
+        assert out["cells"][1]["failed_checks"] == []
+        assert out["cells"][1]["data_availability"] == "unavailable"
+        assert out["cells"][1]["unavailable_reason"] == "soil"

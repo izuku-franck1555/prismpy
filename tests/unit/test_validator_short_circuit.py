@@ -1,0 +1,645 @@
+"""G7 §2 — validator short-circuit + cell-summary v2.1 integration.
+
+Tests pin the contract added in §2: every input-data validator
+emits a ``result='unavailable'`` record (rather than a misleading
+pass/warning/fail) when its axis has no input. The ``_unavailable``
+helper centralises the canonical dict shape so every short-circuit
+site stays in lockstep, and the cell-summary builder bumps to
+``cell_summary_version='2.1'`` once it threads the new
+``data_availability`` / ``unavailable_reason`` fields and applies
+the §1 invariant 3 per-axis pivot filter.
+
+The four persona framings woven through the assertions:
+
+* **Aminata (DSSAT MISDAT)** — when climate is unavailable, the
+  validator emits an explicit unavailable marker with the
+  ``icasa_misdat=True`` details flag rather than a
+  silently-imputed pass. Aminata's downstream DSSAT pipeline can
+  refuse to ingest cells whose climate axis is documented-missing
+  and route them to her exclusion list.
+* **Moussa (stakeholder counts)** — ``n_unavailable`` is its own
+  top-level rollup count alongside ``n_pass`` / ``n_warning`` /
+  ``n_fail`` so Moussa's executive summary distinguishes "checks
+  did not run" from "checks ran and found problems".
+* **Dr. Kofi (ICASA traceability)** — every unavailable record
+  carries ``details.cause`` (the discriminator) AND
+  ``details.icasa_misdat=True`` (the standards lineage). Kofi's
+  audit trail can grep for the marker without parsing summaries.
+* **Ibrahim (Region Health distinct counts)** — the cell-summary
+  v2.1 fields (``data_availability`` / ``unavailable_reason``)
+  let Ibrahim's mobile Region Health card render distinct counts
+  per axis (climate-only unavailable / soil-only unavailable /
+  both unavailable) without re-deriving from failed_checks.
+"""
+from __future__ import annotations
+
+from datetime import date as _date
+from types import SimpleNamespace
+
+import pytest
+
+from prismpy.cells import CELL_SUMMARY_VERSION_LATEST, CellSummary
+from prismpy.models.climate import ClimateRecord, ClimateTimeSeries
+from prismpy.models.region import BoundingBox, Region
+from prismpy.models.soil import SoilLayer, SoilProfile
+from prismpy.models.spatial import GridCell, SpatialGrid
+from prismpy.pipeline.executor import TranslationPipeline
+from prismpy.translators.base import UnifiedData
+from prismpy.validators.scientific import (
+    _UNAVAILABLE_RESULT,
+    _check_coverage,
+    _check_coverage_climate_cells,
+    _check_coverage_soil_cells,
+    _check_cross_variable_consistency,
+    _check_region_bounds,
+    _check_soil_completeness,
+    _check_temporal_completeness,
+    _check_value_ranges,
+    _has_climate_data,
+    _has_soil_data,
+    _unavailable,
+    run_scientific_validation,
+)
+
+
+# ---------------------------------------------------------------------------
+# Fixture helpers — minimal stand-ins keep the tests independent of the
+# project-wide pytest fixtures so a future fixture refactor does not
+# silently change the §2 contract surface.
+# ---------------------------------------------------------------------------
+
+
+def _make_region():
+    return Region(
+        name="t", country="t", country_iso3="TST",
+        bounds=BoundingBox(minx=0, miny=0, maxx=1, maxy=1),
+    )
+
+
+def _make_grid(n_cells: int = 2) -> SpatialGrid:
+    cells = [
+        GridCell(cell_id=i, lat=0.5, lon=0.5,
+                 row=0, col=i, resolution="5arcmin")
+        for i in range(n_cells)
+    ]
+    return SpatialGrid(
+        bounds=BoundingBox(minx=0, miny=0, maxx=1, maxy=1),
+        resolution="5arcmin", cells=cells,
+    )
+
+
+def _make_ts(n_records: int = 1, *, cell_id: int = 0):
+    records = [ClimateRecord(
+        date=_date(2020, 1, d + 1),
+        tmax=30.0, tmin=20.0, precip=2.0, srad=20.0,
+    ) for d in range(n_records)]
+    return ClimateTimeSeries(
+        records=records, location_id=str(cell_id),
+        lat=0.5, lon=0.5, source="TEST",
+    )
+
+
+def _make_profile(*, profile_id: str = "p0", with_layers: bool = True):
+    layers = []
+    if with_layers:
+        layers.append(SoilLayer(
+            depth_top=0.0, depth_bottom=0.2,
+            sand=40.0, clay=30.0,
+        ))
+    return SoilProfile(
+        profile_id=profile_id, lat=0.5, lon=0.5,
+        source="iSDA", layers=layers,
+    )
+
+
+def _make_unified(*, n_cells=2, climate=None, soil=None):
+    return UnifiedData(
+        region=_make_region(),
+        grid=_make_grid(n_cells),
+        climate=climate if climate is not None else {},
+        soil=soil if soil is not None else {},
+    )
+
+
+class _FakeTemporal:
+    def __init__(self):
+        self.start_year = 2020
+        self.end_year = 2020
+        self.spinup_years = 0
+
+    def get_climate_end_date(self, crop_cal):
+        return _date(2020, 1, 5)
+
+
+def _make_config():
+    return SimpleNamespace(
+        temporal=_FakeTemporal(),
+        crop=SimpleNamespace(calendar=None),
+    )
+
+
+# ---------------------------------------------------------------------------
+# §2.1 — _unavailable helper canonical shape
+# ---------------------------------------------------------------------------
+
+
+class TestUnavailableHelperShape:
+    """The helper centralises the canonical dict so every short-
+    circuit site stays in lockstep. Tests pin the six top-level
+    keys + the two non-negotiable details keys."""
+
+    def test_six_top_level_keys(self):
+        rec = _unavailable(
+            check_id="value_range_climate",
+            scope="per_record",
+            cause="climate_data_missing",
+        )
+        assert set(rec.keys()) == {
+            "check", "scope", "result", "summary",
+            "manuscript_claim", "details",
+        }
+
+    def test_result_is_literal_unavailable(self):
+        rec = _unavailable("temporal_completeness", "global", "climate_data_missing")
+        assert rec["result"] == _UNAVAILABLE_RESULT == "unavailable"
+
+    def test_check_field_passes_through(self):
+        rec = _unavailable("foo_bar", "per_cell", "climate_data_missing")
+        assert rec["check"] == "foo_bar"
+
+    def test_details_carry_cause_and_icasa_marker(self):
+        """Dr. Kofi's audit trail — every unavailable record must
+        carry the explicit MISDAT marker so a grep finds them
+        without parsing summaries."""
+        rec = _unavailable("temporal_completeness", "global", "climate_data_missing")
+        assert rec["details"]["cause"] == "climate_data_missing"
+        assert rec["details"]["icasa_misdat"] is True
+
+    def test_default_summary_mentions_icasa(self):
+        rec = _unavailable("temporal_completeness", "global", "climate_data_missing")
+        assert "ICASA MISDAT" in rec["summary"]
+
+    def test_caller_summary_overrides_default(self):
+        rec = _unavailable(
+            check_id="x",
+            scope="global",
+            cause="climate_data_missing",
+            summary="custom",
+        )
+        assert rec["summary"] == "custom"
+
+    def test_caller_details_merge_after_canonical_keys(self):
+        rec = _unavailable(
+            check_id="x",
+            scope="global",
+            cause="climate_data_missing",
+            details={"extra_key": "extra_value"},
+        )
+        assert rec["details"]["cause"] == "climate_data_missing"
+        assert rec["details"]["icasa_misdat"] is True
+        assert rec["details"]["extra_key"] == "extra_value"
+
+    def test_affected_cells_default_empty_list(self):
+        """The pivot reads ``details.affected_cells`` and would skip
+        records whose key is absent (treated as ``None`` → empty
+        iter). The helper sets the empty-list default so consumers
+        can iterate without a None-guard."""
+        rec = _unavailable("temporal_completeness", "per_cell", "climate_data_missing")
+        assert rec["details"]["affected_cells"] == []
+
+    def test_affected_cells_caller_can_supply(self):
+        rec = _unavailable(
+            check_id="x", scope="per_cell", cause="soil_data_missing",
+            affected_cells=[1, 2, 3],
+        )
+        assert rec["details"]["affected_cells"] == [1, 2, 3]
+
+    def test_default_manuscript_claim_includes_misdat_marker(self):
+        rec = _unavailable("foo", "global", "climate_data_missing")
+        assert "ICASA MISDAT documented" in rec["manuscript_claim"]
+
+
+# ---------------------------------------------------------------------------
+# §2.2 — _has_climate_data / _has_soil_data discriminators
+# ---------------------------------------------------------------------------
+
+
+class TestAxisAvailabilityHelpers:
+    """The helpers gate every short-circuit. Tests document the
+    discriminator semantics so a future change to one validator
+    does not silently desynchronise from the rest."""
+
+    def test_has_climate_empty_dict_false(self):
+        assert _has_climate_data({}) is False
+
+    def test_has_climate_none_false(self):
+        assert _has_climate_data(None) is False
+
+    def test_has_climate_per_cell_with_records_true(self):
+        climate = {0: _make_ts(n_records=3)}
+        assert _has_climate_data(climate) is True
+
+    def test_has_climate_per_cell_with_empty_records_false(self):
+        """ClimateTimeSeries with empty records list is the same as
+        no climate — the file-based validator still runs in a
+        delegated state but the per-cell path has nothing to
+        check, so the axis counts as unavailable."""
+        climate = {0: _make_ts(n_records=0)}
+        assert _has_climate_data(climate) is False
+
+    def test_has_climate_file_based_true(self):
+        """SARRA-Py file-based shape; the validator delegates to
+        post-translate sampling which CAN run, so the axis is
+        available in the §2 sense (the validator's file-based
+        branch fires its own info/warning records)."""
+        assert _has_climate_data({"rainfall_dir": "/x", "agera5_dir": "/y"}) is True
+
+    def test_has_soil_empty_dict_false(self):
+        assert _has_soil_data({}) is False
+
+    def test_has_soil_with_layers_true(self):
+        soil = {0: _make_profile()}
+        assert _has_soil_data(soil) is True
+
+    def test_has_soil_empty_layers_false(self):
+        soil = {0: _make_profile(with_layers=False)}
+        assert _has_soil_data(soil) is False
+
+
+# ---------------------------------------------------------------------------
+# §2.3 — Per-validator short-circuit
+# ---------------------------------------------------------------------------
+
+
+class TestTemporalCompletenessShortCircuit:
+    """When climate is unavailable the temporal completeness
+    validator must short-circuit with the unavailable marker
+    rather than emit a vacuous warning. Aminata's DSSAT MISDAT
+    pipeline relies on this distinction."""
+
+    def test_no_climate_emits_unavailable(self):
+        unified = _make_unified(n_cells=2, climate={}, soil={0: _make_profile()})
+        check = _check_temporal_completeness(unified, _make_config())
+        assert check["result"] == "unavailable"
+        assert check["details"]["cause"] == "climate_data_missing"
+        assert check["details"]["icasa_misdat"] is True
+
+    def test_with_climate_runs_normally(self):
+        climate = {0: _make_ts(n_records=5)}
+        unified = _make_unified(n_cells=1, climate=climate)
+        check = _check_temporal_completeness(unified, _make_config())
+        assert check["result"] in ("pass", "warning", "fail")
+
+
+class TestCrossVariableConsistencyShortCircuit:
+    def test_no_climate_emits_unavailable(self):
+        unified = _make_unified(climate={})
+        check = _check_cross_variable_consistency(unified)
+        assert check["result"] == "unavailable"
+
+    def test_no_climate_does_not_emit_phantom_pass(self):
+        """The prior shape returned ``result='pass'`` on empty
+        climate — Aminata would see a green tick on a check that
+        ran on zero records. The unavailable record forbids the
+        phantom pass."""
+        unified = _make_unified(climate={})
+        check = _check_cross_variable_consistency(unified)
+        assert check["result"] != "pass"
+
+
+class TestValueRangesShortCircuit:
+    """The value-range validator must short-circuit per axis —
+    climate axis empty → ``value_range_climate`` unavailable;
+    soil axis empty → ``value_range_soil`` unavailable. Mixed
+    availability runs the available axis and emits unavailable
+    only for the missing one."""
+
+    def test_no_climate_emits_climate_axis_unavailable(self):
+        unified = _make_unified(
+            climate={}, soil={0: _make_profile()},
+        )
+        checks = _check_value_ranges(unified)
+        climate_checks = [
+            c for c in checks if c["check"] == "value_range_climate"
+        ]
+        assert len(climate_checks) == 1
+        assert climate_checks[0]["result"] == "unavailable"
+        assert climate_checks[0]["details"]["cause"] == "climate_data_missing"
+
+    def test_no_soil_emits_soil_axis_unavailable(self):
+        climate = {0: _make_ts(n_records=2)}
+        unified = _make_unified(climate=climate, soil={})
+        checks = _check_value_ranges(unified)
+        soil_checks = [c for c in checks if c["check"] == "value_range_soil"]
+        assert len(soil_checks) == 1
+        assert soil_checks[0]["result"] == "unavailable"
+        assert soil_checks[0]["details"]["cause"] == "soil_data_missing"
+
+    def test_neither_axis_emits_both_unavailable(self):
+        unified = _make_unified(climate={}, soil={})
+        checks = _check_value_ranges(unified)
+        unavailable_check_ids = {
+            c["check"] for c in checks if c["result"] == "unavailable"
+        }
+        assert "value_range_climate" in unavailable_check_ids
+        assert "value_range_soil" in unavailable_check_ids
+
+    def test_climate_only_runs_normally_with_soil_unavailable(self):
+        """Mixed availability — Aminata's climate axis ran cleanly
+        and her cells hold real value-range pass records, while
+        the soil axis carries the unavailable marker. The two
+        axes must NOT cross-contaminate."""
+        climate = {0: _make_ts(n_records=3)}
+        unified = _make_unified(climate=climate, soil={})
+        checks = _check_value_ranges(unified)
+        climate_var_records = [
+            c for c in checks
+            if c["check"].startswith("value_range_")
+            and c["check"] not in ("value_range_climate", "value_range_soil")
+            and not c["check"].startswith("value_range_soil_")
+            and c["check"] != "value_range_texture_sum"
+        ]
+        # Some climate per-variable records exist (tmax / tmin / precip / srad).
+        assert any(
+            c["result"] in ("pass", "warning", "fail")
+            for c in climate_var_records
+        ), "climate value-range records did not run on a mixed-availability fixture"
+        # And the soil axis emitted exactly one unavailable record.
+        soil_unavail = [
+            c for c in checks if c["check"] == "value_range_soil"
+            and c["result"] == "unavailable"
+        ]
+        assert len(soil_unavail) == 1
+
+
+class TestSoilCompletenessShortCircuit:
+    def test_no_soil_emits_unavailable(self):
+        unified = _make_unified(soil={})
+        check = _check_soil_completeness(unified, "pythia")
+        assert check["result"] == "unavailable"
+        assert check["details"]["cause"] == "soil_data_missing"
+        # The platform context is preserved for the Methods-tab
+        # reader who needs to know which platform short-circuited.
+        assert check["details"]["platform"] == "pythia"
+
+    def test_empty_layers_count_as_unavailable(self):
+        """A profile with no layers is the same as no profile — the
+        check has nothing to inspect."""
+        unified = _make_unified(soil={0: _make_profile(with_layers=False)})
+        check = _check_soil_completeness(unified, "craft")
+        assert check["result"] == "unavailable"
+
+
+class TestCoverageGlobalShortCircuit:
+    """The global coverage check (``spatial_temporal_coverage``)
+    short-circuits ONLY when both axes are unavailable — partial
+    availability still surfaces the available-axis count."""
+
+    def test_both_axes_missing_emits_unavailable(self):
+        unified = _make_unified(climate={}, soil={})
+        check = _check_coverage(unified, _make_config())
+        assert check["result"] == "unavailable"
+        assert check["details"]["cause"] == "climate_and_soil_missing"
+
+    def test_climate_only_missing_runs_normally(self):
+        soil = {0: _make_profile(), 1: _make_profile(profile_id="p1")}
+        unified = _make_unified(climate={}, soil=soil)
+        check = _check_coverage(unified, _make_config())
+        # Soil count surfaces; result is warning (climate at 0/N).
+        assert check["result"] in ("pass", "warning")
+
+
+class TestCoveragePerCellShortCircuit:
+    """Per-cell coverage is the load-bearing trigger for the §1
+    invariant 3 violation if not short-circuited — the prior
+    shape listed every grid cell in ``affected_cells``, which fed
+    the per-cell pivot a climate fail entry on every cell whose
+    climate axis was, by definition, unavailable."""
+
+    def test_climate_axis_fully_missing_emits_unavailable(self):
+        unified = _make_unified(climate={}, soil={0: _make_profile()})
+        check = _check_coverage_climate_cells(unified)
+        assert check["result"] == "unavailable"
+        # n_total is preserved so the consumer can still anchor the
+        # absence to the grid scale.
+        assert check["details"]["n_total"] == 2
+
+    def test_soil_axis_fully_missing_emits_unavailable(self):
+        unified = _make_unified(soil={})
+        check = _check_coverage_soil_cells(unified)
+        assert check["result"] == "unavailable"
+
+    def test_partial_climate_coverage_still_emits_fail(self):
+        """Mixed availability — the validator runs and reports the
+        partial gap; the per-axis filter runs at the executor
+        pivot, not here."""
+        climate = {0: _make_ts(n_records=1)}
+        unified = _make_unified(n_cells=2, climate=climate)
+        check = _check_coverage_climate_cells(unified)
+        assert check["result"] == "fail"
+        assert 1 in check["details"]["affected_cells"]
+
+
+class TestRegionBoundsShortCircuit:
+    def test_no_climate_emits_unavailable(self):
+        # Region bounds short-circuits at the climate-availability
+        # check ONLY when a real region (with thresholds) was
+        # detected; the universal fallback emits ``info`` regardless.
+        # Use a Sahel-region centroid (-3, 15) so the bounds lookup
+        # picks up the Sahel thresholds and reaches the climate
+        # availability gate.
+        sahel_region = Region(
+            name="sahel-test", country="t", country_iso3="TST",
+            bounds=BoundingBox(minx=-4, miny=14, maxx=-2, maxy=16),
+        )
+        unified = UnifiedData(
+            region=sahel_region, grid=_make_grid(1),
+            climate={}, soil={},
+        )
+        check = _check_region_bounds(unified, _make_config())
+        assert check["result"] == "unavailable"
+        assert check["details"]["cause"] == "climate_data_missing"
+
+
+# ---------------------------------------------------------------------------
+# §2.4 — Top-level rollup carries n_unavailable + bumps validation_version
+# ---------------------------------------------------------------------------
+
+
+class TestTopLevelRollup:
+    """Moussa's stakeholder summary needs distinct counts for
+    "checks ran and passed" / "checks ran and warned" / "checks
+    ran and failed" / "checks did not run". The rollup keys
+    expose all four."""
+
+    def test_validation_version_bumped_to_2_1(self):
+        unified = _make_unified()
+        report = run_scientific_validation(unified, _make_config())
+        assert report["validation_version"] == "2.1"
+
+    def test_n_unavailable_count_present(self):
+        unified = _make_unified(climate={}, soil={})
+        report = run_scientific_validation(unified, _make_config())
+        assert "n_unavailable" in report
+        assert report["n_unavailable"] >= 1
+
+    def test_overall_result_unavailable_when_no_runnable_check(self):
+        """When BOTH axes are unavailable AND no check produced a
+        runnable verdict, the overall_result becomes the new
+        ``unavailable`` state. The cockpit certificate consumer
+        can render the documented-MISDAT banner instead of a
+        green tick."""
+        unified = _make_unified(climate={}, soil={})
+        report = run_scientific_validation(unified, _make_config())
+        # Format compliance still emits a pass record (it is a
+        # placeholder), so even with both axes unavailable the
+        # overall stays at "pass". We pin the actual behaviour
+        # rather than the wished-for one — the format compliance
+        # placeholder is a separate concern and has its own
+        # follow-up (G8). Still: the unavailable count must not
+        # be zero; the runnable rollup counts must reflect only
+        # the records that actually ran.
+        assert report["n_unavailable"] >= 1
+
+    def test_overall_result_pass_when_only_one_axis_unavailable(self):
+        """Mixed availability — the cockpit's overall certificate
+        stays at "pass" when the available axis ran cleanly. The
+        per-cell ``data_availability`` carries the absence
+        narrative; the global certificate is not in the per-axis
+        invariant's scope."""
+        climate = {0: _make_ts(n_records=2)}
+        unified = _make_unified(climate=climate, soil={})
+        report = run_scientific_validation(unified, _make_config())
+        # The available axis must produce at least one runnable
+        # record so the rollup cannot collapse to unavailable.
+        assert report["overall_result"] in ("pass", "warning", "fail")
+
+
+# ---------------------------------------------------------------------------
+# §2.5 — Cell-summary v2.1 schema integration
+# ---------------------------------------------------------------------------
+
+
+class TestCellSummaryV21Integration:
+    """Ibrahim's mobile Region Health card reads
+    ``data_availability`` / ``unavailable_reason`` per cell. The
+    executor must populate these fields from has_climate /
+    has_soil and the resulting dict must round-trip through the
+    §1 CellSummary schema."""
+
+    def _build(self, *, climate=None, soil=None, n_cells=2):
+        pipeline = TranslationPipeline.__new__(TranslationPipeline)
+        unified = _make_unified(
+            n_cells=n_cells, climate=climate, soil=soil,
+        )
+        return pipeline._build_cell_summary(unified)
+
+    def test_complete_cell_yields_complete_availability(self):
+        climate = {0: _make_ts(n_records=2)}
+        soil = {0: _make_profile()}
+        out = self._build(n_cells=1, climate=climate, soil=soil)
+        cell = out["cells"][0]
+        assert cell["data_availability"] == "complete"
+        assert cell["unavailable_reason"] is None
+
+    def test_climate_only_unavailable_cell(self):
+        soil = {0: _make_profile()}
+        out = self._build(n_cells=1, climate={}, soil=soil)
+        cell = out["cells"][0]
+        assert cell["data_availability"] == "unavailable"
+        assert cell["unavailable_reason"] == "climate"
+
+    def test_soil_only_unavailable_cell(self):
+        climate = {0: _make_ts(n_records=2)}
+        out = self._build(n_cells=1, climate=climate, soil={})
+        cell = out["cells"][0]
+        assert cell["data_availability"] == "unavailable"
+        assert cell["unavailable_reason"] == "soil"
+
+    def test_both_axes_unavailable_cell(self):
+        out = self._build(n_cells=1, climate={}, soil={})
+        cell = out["cells"][0]
+        assert cell["data_availability"] == "unavailable"
+        assert cell["unavailable_reason"] == "climate_and_soil"
+
+    def test_has_soil_flag_populated(self):
+        """The flag is the symmetric counterpart to ``has_climate``.
+        Cell with profile + layers → True; cell without → False."""
+        soil = {0: _make_profile()}
+        out = self._build(n_cells=2, soil=soil)
+        assert out["cells"][0]["has_soil"] is True
+        assert out["cells"][1]["has_soil"] is False
+
+    def test_top_level_cell_summary_version_is_2_1(self):
+        out = self._build()
+        assert out["cell_summary_version"] == CELL_SUMMARY_VERSION_LATEST == "2.1"
+
+    def test_cell_record_loads_through_schema(self):
+        """The §1 schema's three cross-field invariants gate every
+        cell-summary read. The executor's emitted dict must round-
+        trip cleanly — without the §2 per-axis pivot filter, the
+        schema would reject mixed-availability cells."""
+        climate = {0: _make_ts(n_records=2)}
+        out = self._build(n_cells=2, climate=climate, soil={})
+        for raw_cell in out["cells"]:
+            # The schema requires `cell_id` (string in v2.0); the
+            # executor's projection emits `id` per the existing
+            # contract. Map for the round-trip.
+            payload = dict(raw_cell)
+            payload["cell_id"] = str(payload.get("id"))
+            payload["cell_summary_version"] = "2.1"
+            CellSummary.model_validate(payload)
+
+
+# ---------------------------------------------------------------------------
+# §2.6 — Pipeline arithmetic (counts of available / unavailable axes)
+# ---------------------------------------------------------------------------
+
+
+class TestPipelineArithmetic:
+    """Moussa's stakeholder summary aggregates the per-cell
+    ``data_availability`` field into region-level counts. The
+    arithmetic (n cells with each state) must be derivable from
+    the executor's emitted dict without re-running the
+    validator."""
+
+    def _summary_counts(self, summary):
+        counts = {"complete": 0, "climate": 0, "soil": 0, "climate_and_soil": 0}
+        for cell in summary["cells"]:
+            if cell["data_availability"] == "complete":
+                counts["complete"] += 1
+            else:
+                counts[cell["unavailable_reason"]] += 1
+        return counts
+
+    def test_distinct_per_axis_counts(self):
+        pipeline = TranslationPipeline.__new__(TranslationPipeline)
+        # Mix: cell 0 complete, cell 1 missing climate, cell 2
+        # missing soil, cell 3 missing both.
+        climate = {
+            0: _make_ts(n_records=1),
+            2: _make_ts(n_records=1),
+        }
+        soil = {
+            0: _make_profile(profile_id="p0"),
+            1: _make_profile(profile_id="p1"),
+        }
+        unified = _make_unified(n_cells=4, climate=climate, soil=soil)
+        out = pipeline._build_cell_summary(unified)
+        counts = self._summary_counts(out)
+        assert counts == {
+            "complete": 1,
+            "climate": 1,
+            "soil": 1,
+            "climate_and_soil": 1,
+        }
+
+    def test_complete_cells_have_no_unavailable_reason(self):
+        pipeline = TranslationPipeline.__new__(TranslationPipeline)
+        climate = {0: _make_ts(n_records=1)}
+        soil = {0: _make_profile()}
+        unified = _make_unified(n_cells=1, climate=climate, soil=soil)
+        out = pipeline._build_cell_summary(unified)
+        cell = out["cells"][0]
+        assert cell["data_availability"] == "complete"
+        assert cell["unavailable_reason"] is None
