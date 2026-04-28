@@ -84,6 +84,22 @@ PLATFORM_SOIL_REQUIREMENTS = {
     "sarra_py": ["sand", "clay"],  # SARRA-Py derives HumFC/HumPF from texture
 }
 
+# F16 — canonical per-layer count each platform's translator emits.
+# Per-layer validators (e.g., ``value_range_texture_sum``) and the
+# soil-layer narrative consumer use this as the platform-side
+# expectation; the actual per-cell layer count comes from iterating
+# the profile's layers (which can vary by source cascade outcome,
+# especially for PYTHIA where iSDA → HWSD fallback may surface
+# different layer depths). The constant captures the conventional
+# count; downstream consumers compare actual against expected to
+# narrate "X of Y layers" honestly.
+LAYERS_PER_PLATFORM: Dict[str, int] = {
+    "craft": 6,     # 6-layer profile (surface to ~200 cm)
+    "pythia": 2,    # surface + subsurface
+    "acea": 4,      # 4-layer profile (canonical ACEA depth horizons)
+    "sarra_py": 2,  # surface texture (root + subsoil)
+}
+
 
 def run_scientific_validation(
     unified_data,
@@ -1287,24 +1303,102 @@ def _check_value_ranges(
             },
         })
 
-    # Texture fraction sum check
+    # Texture fraction sum check.
+    #
+    # F16 — soil-layer narrative emit. The summary wording was
+    # "abnormal totals" pre-F16; renamed to the explicit physical
+    # invariant "texture fractions that don't sum to 100%" so a
+    # researcher (Aminata first-time, Moussa stakeholder) reads
+    # the check name + summary as a single complete sentence
+    # without needing to remember which "abnormal totals" the
+    # validator was guarding against. The metadata block adds
+    # per-cell vs per-layer counts so the consumer renders chip
+    # text ("7 cells flagged") and drawer detail ("8 of 136
+    # layers") from one canonical emit. The convention generalizes
+    # to any future per-layer validator: emit per-layer counts
+    # alongside affected_cells / violation_details so the cockpit
+    # / drawer can decide which granularity to surface.
     if texture_total > 0:
         result = "warning" if texture_violations > 0 else "pass"
+        # Per-cell metadata derived from the per-(cell_id, layer_idx)
+        # violation list. Cell-level counts feed chip rendering;
+        # layer-level counts feed drawer detail.
+        flagged_cell_ids = {cid for cid, _ in texture_violation_cells}
+        n_flagged_cells = len(flagged_cell_ids)
+        # A cell is "multi-flagged" when more than one of its layers
+        # carry texture violations — useful for the drawer's
+        # "Cell #N: 3 of 6 layers flagged" rendering vs the more
+        # common "1 of 6" single-layer case.
+        n_per_cell: Dict[int, int] = {}
+        for cid, _ in texture_violation_cells:
+            n_per_cell[cid] = n_per_cell.get(cid, 0) + 1
+        n_multi_flagged_cells = sum(1 for n in n_per_cell.values() if n > 1)
+        # Per-cell layer-count typical (mode) — describes the cell-
+        # level layer count Aminata/Moussa expect, derived from the
+        # soil profiles actually iterated. Falls back to None when
+        # no profiles carry layer counts (defensive; the texture
+        # check only runs when at least one profile had layers).
+        layer_counts = [
+            len(profile.layers)
+            for profile in soil.values()
+            if hasattr(profile, "layers") and profile.layers
+        ]
+        n_layers_per_cell_typical = (
+            max(set(layer_counts), key=layer_counts.count)
+            if layer_counts else None
+        )
+        # Depth-range description across all profiles' layers.
+        # Renders as e.g. "0–200 cm" for the canonical CRAFT 6-layer
+        # profile. Falls back to None when depth_top/depth_bottom
+        # are unset (defensive).
+        depth_min = None
+        depth_max = None
+        for profile in soil.values():
+            for layer in getattr(profile, "layers", []) or []:
+                top = getattr(layer, "depth_top", None)
+                bot = getattr(layer, "depth_bottom", None)
+                if isinstance(top, (int, float)):
+                    depth_min = top if depth_min is None else min(depth_min, top)
+                if isinstance(bot, (int, float)):
+                    depth_max = bot if depth_max is None else max(depth_max, bot)
+        depth_range_description: Optional[str] = None
+        if depth_min is not None and depth_max is not None:
+            # Profiles sometimes carry depth in metres (CRAFT) or
+            # centimetres (PYTHIA / ACEA); the convention here is
+            # the canonical metric the loader writes — keep the
+            # raw numbers and append the unit downstream loaders
+            # populate. Until we resolve the m-vs-cm ambiguity,
+            # render the bare range so the consumer sees the
+            # actual numbers without an assumed unit.
+            depth_range_description = f"{depth_min}–{depth_max}"
         checks.append({
             "check": "value_range_texture_sum",
             "scope": "per_layer",
             "result": result,
             "summary": (
                 f"Soil texture fractions (sand + clay + silt) sum to ~100%"
-                + (f" — {texture_violations} of {texture_total} soil layers "
-                   f"have abnormal totals" if texture_violations > 0
-                   else f" for all {texture_total} soil layers")
+                + (
+                    f" — {texture_violations} of {texture_total} soil "
+                    f"layers carry texture fractions that don't sum to 100%"
+                    if texture_violations > 0
+                    else f" for all {texture_total} soil layers"
+                )
             ),
             "manuscript_claim": "Section 2.5: value range verification",
             "details": {
                 "expected_range": [95, 105],
                 "violations": texture_violations,
                 "total_layers": texture_total,
+                # F16 per-cell vs per-layer breakdown — chip text
+                # binds to ``n_flagged_cells`` (cell-count surface);
+                # drawer detail binds to ``n_flagged_layers`` /
+                # ``n_total_layers`` (layer-count surface).
+                "n_flagged_cells": n_flagged_cells,
+                "n_flagged_layers": texture_violations,
+                "n_total_layers": texture_total,
+                "n_multi_flagged_cells": n_multi_flagged_cells,
+                "n_layers_per_cell_typical": n_layers_per_cell_typical,
+                "depth_range_description": depth_range_description,
                 # V2-22c-PRE.1.4 — per-(cell_id, layer_idx) tuples for
                 # each layer where sand+clay+silt fell outside [95, 105].
                 # Sorted ASC for deterministic JSON diffs (evaluator §2).
