@@ -71,5 +71,45 @@ class TestTavProvenanceDescription(unittest.TestCase):
         self.assertIn("DSSAT", self.src)
 
 
+class TestTmeanFallbackProvenanceDescription(unittest.TestCase):
+    """F15 sibling-sweep finding — the tmean-fallback decision used
+    a CLI-style description ("PYTHIA tmean fallback: (tmax + tmin)
+    / 2 where source tmean missing") that leaked the variable name
+    and formula notation into the researcher-facing Methods tab.
+    Same translation pattern as the TAV rename: plain-language
+    description + technical detail preserved on rationale."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = PYTHIA_TRANSLATOR.read_text(encoding="utf-8")
+
+    def test_old_cli_artifact_phrasing_retired(self):
+        self.assertNotIn(
+            'description=(\n                    "PYTHIA tmean fallback:',
+            self.src,
+            "tmean fallback CLI-artifact wording must NOT appear "
+            "as a provenance description value (durable lesson "
+            "#7).",
+        )
+
+    def test_plain_language_description_present(self):
+        """Python concatenates adjacent string literals across
+        physical lines; the source carries the description split
+        across multiple lines for line-length. Anchor on
+        substrings each line provides directly."""
+        self.assertIn(
+            "Daily mean temperature filled from the average of",
+            self.src,
+        )
+        self.assertIn("the day's min and max", self.src)
+        self.assertIn("provide a mean directly", self.src)
+
+    def test_technical_method_preserved_on_rationale(self):
+        """The formula + variable-name detail moves to the
+        rationale where the audit trail still finds it."""
+        self.assertIn("``(tmax + tmin) / 2``", self.src)
+        self.assertIn("daytime-weighted mean", self.src)
+
+
 if __name__ == "__main__":
     unittest.main()
