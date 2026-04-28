@@ -664,40 +664,39 @@ _UNAVAILABLE_CAUSE_LABELS: Dict[str, str] = {
 
 
 # Canonical iteration constants for the Tier 1 climate / soil checks.
-# crop-modeling-specialist's §2 pack §3 calls for these as the source
-# of truth — production code uses them at the sibling-sweep callsites
-# AND test code uses them for DRY assertions. Adding a new check here
-# automatically propagates to both.
+# crop-modeling-specialist's §2 pack §3 + §3.4 follow-up calls for
+# these as the source of truth derived from the existing range +
+# requirement dicts; production code uses them at the sibling-sweep
+# callsites AND test code uses them for DRY assertions. Generator
+# expressions over CLIMATE_RANGES / SOIL_RANGES /
+# PLATFORM_SOIL_REQUIREMENTS keep the iteration sets in lockstep
+# with the source-of-truth dicts — adding a new variable to any
+# range dict automatically updates the corresponding iteration set
+# without a parallel rename pass.
 CLIMATE_TIER1_CHECKS: tuple[str, ...] = (
     "temporal_completeness",
     "cross_variable_consistency",
+    # Axis-level aggregator the §2 short-circuit emits when the
+    # whole climate axis is unavailable — distinct from the per-
+    # variable records below.
     "value_range_climate",
-    "value_range_tmax",
-    "value_range_tmin",
-    "value_range_precip",
-    "value_range_srad",
-    "value_range_rh",
-    "value_range_wind",
+    *(f"value_range_{var}" for var in CLIMATE_RANGES),
     "coverage_climate_cells",
     "region_specific_bounds",
 )
 SOIL_CHECKS_ALL: tuple[str, ...] = (
+    # Axis-level aggregator emitted when the soil axis is fully
+    # unavailable; per-variable records derive from SOIL_RANGES.
     "value_range_soil",
-    "value_range_soil_sand",
-    "value_range_soil_clay",
-    "value_range_soil_silt",
-    "value_range_soil_organic_carbon",
-    "value_range_soil_ph",
-    "value_range_soil_bulk_density",
+    *(f"value_range_soil_{var}" for var in SOIL_RANGES),
     "value_range_texture_sum",
     "coverage_soil_cells",
     # Platform-specific completeness check_ids follow the
-    # ``soil_completeness_<platform>`` pattern; explicit listing here
-    # for the four platforms in PLATFORM_SOIL_REQUIREMENTS.
-    "soil_completeness_craft",
-    "soil_completeness_pythia",
-    "soil_completeness_acea",
-    "soil_completeness_sarra_py",
+    # ``soil_completeness_<platform>`` pattern. Generated over
+    # PLATFORM_SOIL_REQUIREMENTS so a new platform key is picked
+    # up automatically — adding ``oryza`` to the requirements
+    # dict propagates here without a parallel iteration update.
+    *(f"soil_completeness_{platform}" for platform in PLATFORM_SOIL_REQUIREMENTS),
 )
 
 
@@ -764,6 +763,24 @@ def _unavailable(
         f"missing-data cells are reported as unavailable, distinct "
         f"from validation failures. ({label})"
     )
+    final_manuscript = manuscript_claim if manuscript_claim is not None else default_manuscript
+    # G7 §2 — defensive guard per crop-modeling-specialist's pack §3
+    # note 3: a caller who overrides ``manuscript_claim`` MUST
+    # preserve the ICASA / MISDAT semantic anchor so Dr. Kofi's
+    # audit grep continues to find the standards lineage on every
+    # unavailable record. The check is a logger.warning rather than
+    # a raise because (a) the contract is stricter than what would
+    # block a production run, and (b) older fixtures or external
+    # writers may legitimately predate the discipline. The warning
+    # surfaces the violation in audit logs without breaking the
+    # pipeline.
+    if "ICASA" not in final_manuscript and "MISDAT" not in final_manuscript:
+        logger.warning(
+            "_unavailable() override of manuscript_claim missing the "
+            "ICASA / MISDAT semantic anchor for check_id=%r; Dr. Kofi "
+            "audit-grep continuity at risk. Got: %r",
+            check_id, final_manuscript,
+        )
     merged_details: Dict[str, Any] = {
         "cause": cause,
         "icasa_misdat": True,
@@ -783,7 +800,7 @@ def _unavailable(
         "scope": scope,
         "result": _UNAVAILABLE_RESULT,
         "summary": summary or default_summary,
-        "manuscript_claim": manuscript_claim or default_manuscript,
+        "manuscript_claim": final_manuscript,
         "details": merged_details,
     }
 

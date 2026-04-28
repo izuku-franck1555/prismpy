@@ -723,6 +723,125 @@ class TestIterationConstants:
         assert "no_translated_output" in UNAVAILABLE_CAUSES
 
 
+class TestManuscriptClaimDefensiveGuard:
+    """Crop-modeling-specialist §2 pack §3 note 3 — when a caller
+    overrides ``manuscript_claim``, the override must preserve the
+    ICASA / MISDAT semantic anchor so Dr. Kofi's audit grep
+    continues to find the standards lineage on every unavailable
+    record. A non-conforming override fires a logger.warning so
+    the violation surfaces in audit logs without breaking the
+    pipeline."""
+
+    def test_default_claim_passes_guard_without_warning(self, caplog):
+        """The helper's default claim already carries 'ICASA MISDAT';
+        no warning fires on the canonical path."""
+        import logging
+        with caplog.at_level(logging.WARNING):
+            _unavailable("foo", "global", "no_climate_fetch")
+        assert not any(
+            "ICASA" in r.getMessage() or "MISDAT" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_override_with_icasa_anchor_passes_guard(self, caplog):
+        """A caller-supplied claim that preserves the ICASA anchor
+        does not trigger the guard."""
+        import logging
+        with caplog.at_level(logging.WARNING):
+            _unavailable(
+                check_id="foo",
+                scope="global",
+                cause="no_climate_fetch",
+                manuscript_claim="Custom audit row preserving ICASA MISDAT context.",
+            )
+        assert not any(
+            "audit-grep continuity at risk" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_override_dropping_icasa_marker_fires_warning(self, caplog):
+        """A caller-supplied claim that drops both ICASA and MISDAT
+        markers must surface the violation as a logger.warning so
+        Dr. Kofi's audit-grep continuity gap is visible in logs."""
+        import logging
+        with caplog.at_level(logging.WARNING):
+            _unavailable(
+                check_id="foo",
+                scope="global",
+                cause="no_climate_fetch",
+                manuscript_claim="A claim without the standards lineage.",
+            )
+        assert any(
+            "audit-grep continuity at risk" in r.getMessage()
+            for r in caplog.records
+        ), (
+            "Override missing both ICASA and MISDAT markers must "
+            "trigger the defensive logger.warning. Pack §3 note 3."
+        )
+
+    def test_override_with_misdat_alone_passes_guard(self, caplog):
+        """Either marker alone is sufficient — both ICASA and MISDAT
+        are recognised standards lineage tokens."""
+        import logging
+        with caplog.at_level(logging.WARNING):
+            _unavailable(
+                check_id="foo",
+                scope="global",
+                cause="no_climate_fetch",
+                manuscript_claim="MISDAT marker alone is fine.",
+            )
+        assert not any(
+            "audit-grep continuity at risk" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_warning_does_not_block_record_construction(self):
+        """The defensive guard fires a warning but still returns a
+        well-formed record so the pipeline keeps running. A future
+        promotion to ValueError is a contract change; today the
+        guard is observability-only."""
+        rec = _unavailable(
+            check_id="foo",
+            scope="global",
+            cause="no_climate_fetch",
+            manuscript_claim="No standards anchor in this claim.",
+        )
+        assert rec["check"] == "foo"
+        assert rec["result"] == "unavailable"
+        # The override-as-supplied is preserved verbatim — the guard
+        # logs but does not rewrite the field.
+        assert rec["manuscript_claim"] == "No standards anchor in this claim."
+
+
+class TestIterationConstantsDeriveFromSourceDicts:
+    """Crop-modeling-specialist §2 pack §3 note 4 — the iteration
+    constants must be generator-derived from CLIMATE_RANGES /
+    SOIL_RANGES / PLATFORM_SOIL_REQUIREMENTS so a new variable or
+    platform added to the source-of-truth dict propagates to every
+    consumer in lockstep. Tests pin the derivation at the structural
+    layer; if a future contributor hand-rolls an iteration set, the
+    drift surfaces here."""
+
+    def test_climate_tier1_includes_every_climate_range_variable(self):
+        from prismpy.validators.scientific import CLIMATE_RANGES
+        for var in CLIMATE_RANGES:
+            assert f"value_range_{var}" in CLIMATE_TIER1_CHECKS, (
+                f"value_range_{var} missing from CLIMATE_TIER1_CHECKS — "
+                "the iteration constant must derive from CLIMATE_RANGES "
+                "via generator expression so a new variable propagates."
+            )
+
+    def test_soil_checks_includes_every_soil_range_variable(self):
+        from prismpy.validators.scientific import SOIL_RANGES
+        for var in SOIL_RANGES:
+            assert f"value_range_soil_{var}" in SOIL_CHECKS_ALL
+
+    def test_soil_checks_includes_every_platform_in_requirements(self):
+        from prismpy.validators.scientific import PLATFORM_SOIL_REQUIREMENTS
+        for platform in PLATFORM_SOIL_REQUIREMENTS:
+            assert f"soil_completeness_{platform}" in SOIL_CHECKS_ALL
+
+
 class TestUnavailableHelperCellIdHandling:
     """The crop-specialist §2 pack signature added an optional
     ``cell_id`` parameter so per-cell short-circuit records can
