@@ -63,9 +63,31 @@ CELL_SUMMARY_VERSION_LATEST: str = "2.1"
 # `category` field (which is the preferred discriminator); the
 # name-based fallback handles older records that pre-date the
 # explicit category field.
+#
+# G7 §2 — taxonomy expanded in lockstep with the executor's
+# ``_axis_for_check_id`` classmethod (``prismpy.pipeline.executor``).
+# The executor's per-cell pivot drops fail/warning entries whose
+# axis matches the cell's ``unavailable_reason`` BEFORE the dict
+# reaches the schema; this taxonomy is the schema's own safety
+# net so a record produced by a non-executor path (manual fixture,
+# synthetic test, future writer) still triggers invariant 3.
 _CLIMATE_CHECK_NAMES: frozenset[str] = frozenset({
     "temporal_completeness",
     "cross_variable_consistency",
+    # G7 §2 additions — per-cell coverage + region-bounds + axis-
+    # level aggregators emitted as climate-axis records by the
+    # validator.
+    "coverage_climate_cells",
+    "region_specific_bounds",
+    "value_range_climate",
+})
+_SOIL_CHECK_NAMES: frozenset[str] = frozenset({
+    # G7 §2 — soil-axis siblings of the climate set above. The
+    # ``soil_completeness_<platform>`` prefix family is handled by
+    # the prefix branch below; these are the literal-id names.
+    "coverage_soil_cells",
+    "value_range_soil",
+    "value_range_texture_sum",
 })
 _CLIMATE_VALUE_RANGE_VARS: frozenset[str] = frozenset({
     "tmax", "tmin", "precip", "srad", "rh", "wind",
@@ -82,7 +104,14 @@ def _failed_check_category(failed_check: Any) -> Optional[str]:
     check-id does not match either taxonomy — those entries
     are NOT enforced by the per-axis invariant (they could be
     coverage / post-translate / region-scope checks that fall
-    outside the per-cell climate/soil split)."""
+    outside the per-cell climate/soil split).
+
+    The taxonomy mirrors the executor's ``_axis_for_check_id``
+    classmethod (G7 §2) so a record produced by either side
+    classifies identically. A skew between the two taxonomies
+    would let a climate-axis fail leak through the executor and
+    still parse cleanly through the schema, defeating the §1
+    invariant 3 contract."""
     if not isinstance(failed_check, dict):
         return None
     explicit = failed_check.get("category")
@@ -93,6 +122,8 @@ def _failed_check_category(failed_check: Any) -> Optional[str]:
         return None
     if raw_id in _CLIMATE_CHECK_NAMES:
         return "climate"
+    if raw_id in _SOIL_CHECK_NAMES:
+        return "soil"
     if raw_id.startswith("value_range_"):
         suffix = raw_id[len("value_range_"):]
         if suffix in _CLIMATE_VALUE_RANGE_VARS:

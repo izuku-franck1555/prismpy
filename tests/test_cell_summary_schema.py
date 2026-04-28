@@ -260,16 +260,56 @@ class TestCrossFieldInvariants:
                 }],
             })
 
+    @pytest.mark.parametrize("check_id,reason", [
+        ("coverage_climate_cells", "climate"),
+        ("region_specific_bounds", "climate"),
+        ("value_range_climate", "climate"),
+        ("coverage_soil_cells", "soil"),
+        ("value_range_soil", "soil"),
+        ("value_range_texture_sum", "soil"),
+    ])
+    def test_axis_aggregator_check_ids_enforced_by_invariant(
+        self, check_id, reason,
+    ):
+        """G7 §2 — the schema taxonomy now classifies the per-cell
+        coverage check_ids, region-bounds, and axis-level value-
+        range aggregators so a manual fixture or non-executor
+        producer cannot smuggle a climate fail past an
+        unavailable-climate cell. The executor's per-cell pivot
+        already filters these; this test pins the schema-side
+        safety net for every classification."""
+        with pytest.raises(ValidationError):
+            CellSummary.model_validate({
+                "data_availability": "unavailable",
+                "unavailable_reason": reason,
+                "failed_checks": [{
+                    "check_id": check_id,
+                    "result": "fail",
+                    # No explicit category — name-based classification.
+                }],
+            })
+
     def test_per_axis_ignores_uncategorised_checks(self):
-        """Coverage / post-translate / region-scope checks that
-        carry neither a climate nor a soil category fall
-        outside the invariant — they operate at a different
-        scope and are not bound by the per-cell axis split."""
+        """Checks whose name carries neither a climate nor a soil
+        affiliation fall outside the per-axis invariant — they
+        operate at a different scope (e.g., a delegated marker
+        like ``format_compliance`` that has no substrate axis,
+        or future post-translate / cross-platform checks). The
+        invariant only forbids fails on the unavailable axis;
+        truly axis-agnostic check_ids must round-trip cleanly.
+
+        NOTE (G7 §2) — the prior fixture used
+        ``coverage_climate_cells`` as the canonical uncategorised
+        example, but the taxonomy now classifies that id as
+        climate-axis in lockstep with the executor's per-cell
+        pivot filter. The new fixture uses
+        ``format_compliance`` — a delegated marker whose
+        check_id does not encode either substrate."""
         loaded = CellSummary.model_validate({
             "data_availability": "unavailable",
             "unavailable_reason": "climate",
             "failed_checks": [{
-                "check_id": "coverage_climate_cells",
+                "check_id": "format_compliance",
                 "result": "fail",
                 # No category, name does not match either prefix.
             }],
