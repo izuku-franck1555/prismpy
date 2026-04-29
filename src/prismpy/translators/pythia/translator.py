@@ -155,6 +155,16 @@ class PythiaTranslator(PythiaTranslatorBase):
             if climate_data:
                 weather_files = self._generate_weather_files(climate_data)
                 output_files.extend(weather_files)
+                # F13 — surface per-cell climate back onto the shared
+                # UnifiedData so the cell-summary writer, per-cell
+                # coverage validators, and the manifest's len(climate)
+                # reader observe the actual climate-loaded state. The
+                # download path returns one ClimateTimeSeries per grid
+                # cell keyed by cell.cell_id; without this surfacing
+                # the placeholder at -1 stays as the only entry and
+                # every real cell ends up has_climate=False even
+                # though .WTH files exist on disk.
+                self._surface_per_cell_climate(data, climate_data)
             else:
                 warnings.append("No climate data available - weather files not generated")
 
@@ -496,20 +506,29 @@ class PythiaTranslator(PythiaTranslatorBase):
         # an explicit DEFAULT_VALUE decision whenever the fallback was
         # actually exercised. This distinguishes source-provided tmean
         # from our derived approximation.
+        # F15 sibling-sweep: the prior description leaked the
+        # ``tmean`` variable name + the slash-formula notation into a
+        # researcher-facing surface (Methods tab via the prismweb
+        # provenance reader). Plain-language description now spells
+        # out what happens conceptually; the technical method
+        # (variable names, formula) stays in the rationale field
+        # below where Dr. Kofi's audit-grep finds it.
         if tmean_fallback_used and self.provenance:
             self.provenance.record_decision(
                 decision_type=DecisionType.DEFAULT_VALUE,
                 description=(
-                    "PYTHIA tmean fallback: (tmax + tmin) / 2 where "
-                    "source tmean missing"
+                    "Daily mean temperature filled from the average of "
+                    "the day's min and max where the source did not "
+                    "provide a mean directly"
                 ),
                 rationale=(
                     "When the climate source returns no mean temperature "
                     "for a given day, the arithmetic mean of tmax and tmin "
-                    "is used as a best-effort approximation. This is a "
-                    "standard practice but slightly biases TAV because "
-                    "the true daytime-weighted mean is closer to 0.5 * "
-                    "(tmax + tmin + diurnal-shape correction)."
+                    "(``(tmax + tmin) / 2``) is used as a best-effort "
+                    "approximation. This is a standard practice but "
+                    "slightly biases the annual average because the true "
+                    "daytime-weighted mean is closer to 0.5 * (tmax + "
+                    "tmin + diurnal-shape correction)."
                 ),
                 alternatives=[
                     "Drop records with missing tmean (reduces sample size)",
@@ -525,19 +544,31 @@ class PythiaTranslator(PythiaTranslatorBase):
 
         # V2-19 B0 finding #4: TAV is an unweighted arithmetic mean over
         # all records in the series — no seasonal or monthly weighting.
+        # F15 (2026-04-28): the human-readable ``description`` field
+        # surfaces in the Methods tab via the provenance reader.
+        # The earlier "PYTHIA TAV: unweighted arithmetic mean of daily
+        # mean temperatures" wording leaked the CLI parameter name +
+        # statistical method into a researcher-facing surface (durable
+        # lesson #7 CLI-artifact-leak). Plain-language phrasing now
+        # describes the user-visible meaning ("what this number does
+        # for the simulation"); the technical method stays in the
+        # rationale field below where Dr. Kofi's audit grep finds it.
         if self.provenance:
             self.provenance.record_decision(
                 decision_type=DecisionType.AGGREGATION_METHOD,
                 description=(
-                    "PYTHIA TAV: unweighted arithmetic mean of daily "
-                    "mean temperatures"
+                    "Average annual temperature used for soil thermal "
+                    "layer calibration"
                 ),
                 rationale=(
-                    "np.mean(tmeans) treats every day equally. A year "
-                    "with more days in the cool dry season is weighted "
-                    "identically to a year with more warm wet days. "
-                    "DSSAT TAV expects 'annual average temperature' and "
-                    "this matches the traditional unweighted definition."
+                    "Computed as the unweighted arithmetic mean of "
+                    "daily mean temperatures across the climate series "
+                    "(``np.mean(tmeans)``). Every day weighs equally — "
+                    "a year with more cool-dry-season days reads as the "
+                    "same TAV as a year with more warm-wet-season days. "
+                    "DSSAT's TAV parameter expects 'annual average "
+                    "temperature' and this matches the traditional "
+                    "unweighted definition."
                 ),
                 alternatives=[
                     "Monthly average then average-of-averages (more stable)",

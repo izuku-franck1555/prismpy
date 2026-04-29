@@ -206,6 +206,15 @@ class CraftTranslator(CraftTranslatorBase):
                     if real_climate:
                         weather_files = self._generate_weather_files(real_climate)
                         output_files.extend(weather_files)
+                        # F13 — surface real per-cell climate onto the
+                        # shared UnifiedData so the cell-summary writer
+                        # and per-cell coverage validators observe the
+                        # actual loaded state. Without this surfacing
+                        # the placeholder sentinel at -1 stays as the
+                        # only entry and every real cell renders as
+                        # has_climate=False after the §1+§2 v2.1
+                        # consumer reads.
+                        self._surface_per_cell_climate(data, real_climate)
                     else:
                         warnings.append(
                             "NASA POWER download returned no valid data — "

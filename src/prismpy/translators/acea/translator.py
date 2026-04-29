@@ -448,6 +448,19 @@ class AceaTranslator(AceaTranslatorBase):
                 )
                 output_files.extend(climate_files)
 
+                # F13 — surface per-cell climate onto the shared
+                # UnifiedData so the cell-summary writer and per-cell
+                # coverage validators observe the actual climate-loaded
+                # state. ``_download_climate_30arcmin`` already maps
+                # the 30-arcmin tile downloads back to 5-arcmin
+                # ``cell.cell_id`` keys (see the post-loop fanout at
+                # the bottom of that method), so ``climate_data`` is
+                # already 5-arcmin keyed by the time we get here. Pass
+                # it straight to the helper — re-fanning out via tile
+                # IDs would double-map and look up tile_ids in a
+                # 5-arcmin-keyed dict, returning None for every cell.
+                self._surface_per_cell_climate(data, climate_data)
+
             # 2. Generate soil data (ACEA-compatible NetCDF)
             # ACEA requires soil data in NetCDF format (HWSD_soil_data_on_cropland_v2.3.nc)
             # We generate this from HWSD to make packages work on any ACEA installation
