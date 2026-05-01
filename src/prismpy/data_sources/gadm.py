@@ -332,6 +332,8 @@ class GADMDataSource:
         resolution_deg: float = 5/60,
         decimal_places: int = 2,
         admin_info: Optional[Dict[str, str]] = None,
+        *,
+        threshold: float = 0.0,
     ) -> Tuple[List[Dict], List[Dict]]:
         """Generate CRAFT schema data from admin boundary polygon.
 
@@ -339,13 +341,22 @@ class GADMDataSource:
         1. Create fishnet grid covering polygon bounds
         2. Filter to cells that intersect with polygon
         3. Calculate intersection area (NOT full cell area)
-        4. Return data for both CRAFT_Schema and Python_Schemas
+        4. (F-R AC-3) Drop cells whose SharePercent is below ``threshold``
+        5. Return data for both CRAFT_Schema and Python_Schemas
 
         Args:
             gdf: GeoDataFrame with admin boundary polygon(s)
             resolution_deg: Grid resolution in degrees (default 5 arcmin = 5/60)
             decimal_places: Decimal places for SharePercent
             admin_info: Dict with admin names {'level1': 'Mali', 'level2': 'Koutiala', ...}
+            threshold: F-R AC-3 SharePercent threshold (0.0-100.0). Cells
+                with share_percent < threshold are excluded from BOTH
+                returned row lists. Default 0.0 admits every intersecting
+                cell (AgMIP-canonical baseline). The 4 CRAFT-translator
+                callsites (paths 1, 1b, 1c, 1d) thread
+                ``BoundaryConfig.min_share_percent`` here so the canonical
+                grid produced at HARMONIZE (AC-2) and the CRAFT schema
+                rows agree on the same cell set.
 
         Returns:
             Tuple of (craft_schema_rows, python_schema_rows) where:
@@ -409,8 +420,19 @@ class GADMDataSource:
                 intersection = cell_box.intersection(admin_geom)
                 intersection_area_deg2 = intersection.area
 
-                # SharePercent: percentage of cell covered by admin boundary
-                share_percent = round((intersection_area_deg2 / cell_area_deg2) * 100, decimal_places)
+                # F-R AC-3 + codex Gate B fix #4: compare the threshold
+                # against the UNROUNDED SharePercent, then round for
+                # display. Rounding-then-comparing diverges from the
+                # canonical-grid filter at AC-2 Stage 3 (which uses
+                # the unrounded percentage); cells with true SP just
+                # below the threshold but rounding up would be admitted
+                # here yet excluded from the canonical grid, breaking
+                # the cell-set agreement this kwarg exists to enforce.
+                share_percent_raw = (intersection_area_deg2 / cell_area_deg2) * 100
+                if share_percent_raw < threshold:
+                    continue
+                # Round AFTER threshold-pass for display precision.
+                share_percent = round(share_percent_raw, decimal_places)
 
                 # Area: intersection area in km² (with latitude correction)
                 # Formula from legacy: area_km² = area_deg² * 12364 * cos(lat)
