@@ -1436,11 +1436,35 @@ class SarraPyTranslator(SarraPyTranslatorBase):
             data.region.bounds.maxy,
         ]
 
+        # Resolved-source discriminator: read the runtime boundary
+        # source recorded on the Region (post-fallback at retrieve)
+        # and honor the configured GADM admin level only under GADM.
+        # Reading from the runtime ``Region.gadm_level`` here (the
+        # previous behavior) bypassed the resolved-source path —
+        # the runtime ``gadm_level`` is coerced to an integer for
+        # cache-path string formatting and therefore lies under
+        # MANUAL or SHAPEFILE configurations. Manifest derivation
+        # uses the discriminated value below; cache paths continue
+        # to read the runtime field unchanged.
+        from prismpy.packaging.manifest import derive_boundary_label
+        boundary_config = self.config.region.boundary
+        resolved_boundary_source = (
+            getattr(data.region, 'boundary_source', None)
+            or boundary_config.source.value
+        )
+        manifest_gadm_level = (
+            boundary_config.gadm_level
+            if resolved_boundary_source == 'gadm' else None
+        )
+        boundary_label, _ = derive_boundary_label(
+            resolved_boundary_source, manifest_gadm_level,
+        )
+
         project_config = {
             "project_name": self.config.project.name,
             "region_name": data.region.name,
             "country": data.region.country,
-            "gadm_level": data.region.gadm_level if hasattr(data.region, 'gadm_level') else 1,
+            "gadm_level": manifest_gadm_level,
             "crop_name": self.config.crop.name,
             "planting_doy": self.config.crop.calendar.planting_doy if self.config.crop.calendar else None,
             "maturity_doy": self.config.crop.calendar.maturity_doy if self.config.crop.calendar else None,
@@ -1450,7 +1474,7 @@ class SarraPyTranslator(SarraPyTranslatorBase):
             "bounds_sarra_py": sarra_bounds,
             "bounds_gis": gis_bounds,
             "data_sources": {
-                "boundaries": "GADM v4.1",
+                "boundaries": boundary_label,
                 "rainfall": "TAMSAT v3.1",
                 "temperature": "AgERA5",
                 "soil": "iSDA",
