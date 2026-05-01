@@ -2100,6 +2100,23 @@ if __name__ == "__main__":
         spinup_years = self.config.temporal.spinup_years
         climate_start = start_year - spinup_years
 
+        # Resolved-source discriminator for manifest derivation:
+        # read the runtime boundary source (post-fallback) and
+        # honor the configured GADM admin level only under GADM.
+        from prismpy.packaging.manifest import derive_boundary_label
+        boundary_config = self.config.region.boundary
+        resolved_boundary_source = (
+            getattr(data.region, 'boundary_source', None)
+            or boundary_config.source.value
+        )
+        manifest_gadm_level = (
+            boundary_config.gadm_level
+            if resolved_boundary_source == 'gadm' else None
+        )
+        boundary_label, _ = derive_boundary_label(
+            resolved_boundary_source, manifest_gadm_level,
+        )
+
         # Build config dict for manifest/README
         package_config = {
             # Project info
@@ -2113,6 +2130,24 @@ if __name__ == "__main__":
             # Crop info
             'crop_name': crop_name,
             'fao_code': fao_code,
+            'planting_doy': (
+                self.config.crop.calendar.planting_doy
+                if (self.config.crop
+                    and getattr(self.config.crop, 'calendar', None))
+                else None
+            ),
+            'maturity_doy': (
+                self.config.crop.calendar.maturity_doy
+                if (self.config.crop
+                    and getattr(self.config.crop, 'calendar', None))
+                else None
+            ),
+
+            # Boundary metadata. ``gadm_level`` is the configured
+            # admin level only when the resolved source is GADM;
+            # ``None`` for manual / shapefile / GADM-failed-fallback
+            # so the manifest tracks the actual on-disk artifact.
+            'gadm_level': manifest_gadm_level,
 
             # Temporal info
             'start_year': start_year,
@@ -2144,6 +2179,7 @@ if __name__ == "__main__":
                 'soil': soil_source,
                 'harvested_areas': spam_source,
                 'crop_suitability': gaez_source,
+                'boundaries': boundary_label,
             },
         }
 
