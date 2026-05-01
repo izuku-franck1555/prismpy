@@ -635,6 +635,74 @@ class ProvenanceTracker:
 
         self.record.config_hash = self._compute_data_hash(config)
 
+    def set_boundary(
+        self,
+        *,
+        source: str,
+        version: Optional[str],
+        inclusion_rule: str,
+        min_share_percent: float,
+        n_cells_full_extent: int,
+        n_cells_excluded_by_inclusion_rule: int,
+        n_cells_excluded_by_min_share_percent: int,
+        n_cells_admitted: int,
+    ) -> None:
+        """F-R AC-4: record the boundary-rule decisions that
+        produced the simulation domain.
+
+        Called once per run by the HARMONIZE-stage filter
+        (AC-2 Stage 5) once the canonical filtered grid is
+        finalized. Writes 8 fields onto ``record.boundary``;
+        the per-platform ``shutil.copy2`` step at
+        ``executor.py:2997-3011`` carries them into each
+        platform_dir/provenance.json copy automatically.
+
+        Keyword-only signature so the call-site reads as a
+        named-fields contract (mirrors the cell-count
+        arithmetic invariant `n_cells_full_extent =
+        n_cells_excluded_by_inclusion_rule +
+        n_cells_excluded_by_min_share_percent +
+        n_cells_admitted + n_cells_user_excluded`; the
+        last term is computed at AC-7 invariant test time
+        from ``config.region.exclude_cells``).
+
+        Args:
+            source: ``BoundaryConfig.source.value`` (e.g.,
+                ``"gadm"``, ``"manual"``, ``"shapefile"``).
+            version: e.g., ``"GADM v4.1"``; ``None`` when the
+                source has no version concept.
+            inclusion_rule: ``Literal['bbox_intersects',
+                'centroid_strict']`` from BoundaryConfig.
+            min_share_percent: float ∈ [0.0, 100.0] from
+                BoundaryConfig.
+            n_cells_full_extent: cells in raw extent before
+                any filter (informational; supports the AC-7
+                arithmetic invariant).
+            n_cells_excluded_by_inclusion_rule: cells trimmed
+                by the inclusion_rule filter (always 0 when
+                ``inclusion_rule='bbox_intersects'``).
+            n_cells_excluded_by_min_share_percent: cells
+                trimmed by the SP threshold filter (always 0
+                when ``min_share_percent=0.0``).
+            n_cells_admitted: final cell count after
+                inclusion_rule + threshold + user-skip;
+                equals ``cell_summary.n_cells`` at
+                run-finalization.
+        """
+        if not self.enabled:
+            return
+
+        self.record.boundary = {
+            "source": source,
+            "version": version,
+            "inclusion_rule": inclusion_rule,
+            "min_share_percent": min_share_percent,
+            "n_cells_full_extent": n_cells_full_extent,
+            "n_cells_excluded_by_inclusion_rule": n_cells_excluded_by_inclusion_rule,
+            "n_cells_excluded_by_min_share_percent": n_cells_excluded_by_min_share_percent,
+            "n_cells_admitted": n_cells_admitted,
+        }
+
     def get_summary(self) -> Dict[str, Any]:
         """Get summary statistics for the session.
 

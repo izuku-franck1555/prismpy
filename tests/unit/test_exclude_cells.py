@@ -220,13 +220,59 @@ class TestExecutorThreadThrough:
     construction call site. Verified via AST walk; full-pipeline
     e2e is reserved for Gate B integration smoke."""
 
-    def test_executor_passes_exclude_cells_to_factory(self):
+    def test_executor_filters_grid_cells_with_exclude_cells(self):
+        """Translators inherit grid pruning automatically because the
+        executor filters ``grid.cells`` post-construction. Per F-R
+        AC-2 (Stage 4), user-skip is applied AFTER the inclusion_rule
+        + share_percent filters so the canonical-grid arithmetic
+        identity holds (`n_cells_full_extent = excluded_by_rule +
+        excluded_by_threshold + admitted + user_excluded`). The
+        thread-through guarantee is preserved — translators still
+        see only non-excluded cells in ``grid.cells``; the factory
+        call is now ``exclude_cells=None`` and the filtering happens
+        in a post-Stage-3 list comprehension that reads from
+        ``self.config.region.exclude_cells``.
+
+        Asserts both: (a) the post-Stage-3 ``grid.cells`` filter
+        comprehension references ``exclude_cells``; (b) NO
+        ``SpatialGrid.from_bounds`` callsite passes
+        ``exclude_cells=`` other than ``None`` (the canonical-grid
+        arithmetic invariant — user-skip lives at Stage 4, not
+        inside the factory).
+        """
         executor_path = (
             Path(__file__).resolve().parents[2]
             / "src" / "prismpy" / "pipeline" / "executor.py"
         )
-        tree = ast.parse(executor_path.read_text())
-        # Find every `SpatialGrid.from_bounds(...)` call in the file.
+        source = executor_path.read_text()
+        tree = ast.parse(source)
+
+        # AC-2 invariant a: a list comprehension over grid.cells
+        # references exclude_cells (the Stage 4 user-skip filter).
+        assert "user_excluded" in source and "exclude_cells" in source, (
+            "F-R AC-2 Stage 4: executor.py must apply a "
+            "user-skip filter referencing "
+            "``self.config.region.exclude_cells`` (via a "
+            "``user_excluded = set(...)`` derivation) and a list "
+            "comprehension that drops excluded cells from "
+            "``grid.cells``. Translators inherit grid pruning "
+            "automatically because Stage 4 mutates grid.cells "
+            "before any translator reads it."
+        )
+        assert "c.cell_id not in user_excluded" in source, (
+            "F-R AC-2 Stage 4: the user-skip filter must "
+            "comprehension-skip cells whose cell_id is in the "
+            "user_excluded set. Pin enforces the canonical "
+            "arithmetic identity (`n_cells_full_extent = "
+            "excluded_by_rule + excluded_by_threshold + "
+            "admitted + user_excluded`)."
+        )
+
+        # AC-2 invariant b: SpatialGrid.from_bounds calls must NOT
+        # pass exclude_cells= other than None. The harmonize
+        # 5-stage flow uses the factory's clip_geometry param for
+        # the inclusion_rule, but exclude_cells stays None at
+        # construction so the cell-count arithmetic holds.
         from_bounds_calls = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
@@ -238,30 +284,20 @@ class TestExecutorThreadThrough:
                     and func.value.id == "SpatialGrid"
                 ):
                     from_bounds_calls.append(node)
-
         assert from_bounds_calls, (
             "AST walk found no SpatialGrid.from_bounds calls in "
             "executor.py — has the call site been moved or renamed?"
         )
-
         for call in from_bounds_calls:
-            kwarg_names = {kw.arg for kw in call.keywords}
-            assert "exclude_cells" in kwarg_names, (
-                "executor.py SpatialGrid.from_bounds call site is "
-                "missing the `exclude_cells=` keyword arg. PRE.3.3 "
-                "thread-through regressed — translators inherit grid "
-                "pruning automatically only if the factory call passes "
-                "the exclude_cells through."
-            )
-            # The corresponding value should reference
-            # `self.config.region.exclude_cells` (or a getattr
-            # equivalent). Soft check via source unparse.
             for kw in call.keywords:
                 if kw.arg == "exclude_cells":
                     src = ast.unparse(kw.value)
-                    assert "exclude_cells" in src, (
-                        "exclude_cells= keyword's value doesn't "
-                        f"reference exclude_cells; got {src!r}. The "
-                        "thread-through must read from "
-                        "self.config.region.exclude_cells."
+                    assert src == "None", (
+                        f"F-R AC-2: SpatialGrid.from_bounds at "
+                        f"line {call.lineno} passes "
+                        f"``exclude_cells={src}``; the post-F-R "
+                        f"flow filters at Stage 4 (post-construction "
+                        f"comprehension), not at the factory. "
+                        f"Pre-F-R thread-through has been replaced "
+                        f"by the canonical-grid arithmetic identity."
                     )

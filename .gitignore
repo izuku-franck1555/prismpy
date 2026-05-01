@@ -101,3 +101,8 @@ Thumbs.db
 *-PLAN.md
 *-NOTES.md
 *-RETROSPECTIVE.md
+
+# Local-only sandbox directory for Stage-N architecture docs, sprint
+# scoping, per-sprint sub-folders, and any harness-only files that do
+# not match the suffix patterns above. Symmetric with prismweb/.gitignore.
+.local/

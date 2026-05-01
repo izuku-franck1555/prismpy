@@ -33,6 +33,15 @@ from prismpy.translators.base import (
 from prismpy.validators.base import BaseValidator, ValidationResult
 
 
+class GeometryRequiredError(ValueError):
+    """F-R AC-2 Stage 0: ``inclusion_rule='centroid_strict'`` was
+    selected but ``region.geometry_wkt`` is empty/unparsable.
+    Centroid-strict can't reduce the grid without a polygon to
+    centroid-test against; raise at HARMONIZE entry rather than
+    silently fall back to bbox_intersects (CC-2 honest-signal
+    violation)."""
+
+
 class PipelineStage(str, Enum):
     """Stages of the translation pipeline."""
     RETRIEVE = "retrieve"
@@ -2076,33 +2085,155 @@ class TranslationPipeline:
                 if self.provenance.enabled:
                     self.provenance.start_artifact("grid", artifact_id="grid", stage="harmonize")
 
-                # Get clip geometry from region if available (for polygon clipping)
-                clip_geometry = None
-                if hasattr(region, 'geometry_wkt') and region.geometry_wkt:
-                    try:
-                        from shapely import wkt
-                        clip_geometry = wkt.loads(region.geometry_wkt)
-                        self.logger.info("Using polygon clipping for grid generation")
-                    except Exception as e:
-                        self.logger.warning(f"Failed to load geometry for clipping: {e}")
+                # F-R AC-2 — HARMONIZE-stage cell-inclusion filter.
+                # Five stages per Draft 6 + crop-specialist Option β:
+                #   Stage 0  centroid_strict guard (raise if no polygon)
+                #   Stage 1  baseline grid extent (informational count)
+                #   Stage 2  inclusion_rule filter (bbox_intersects vs
+                #            centroid_strict) via SpatialGrid.from_bounds
+                #   Stage 3  share_percent computation + min_share_percent
+                #            threshold filter
+                #   Stage 4  user-skip filter (cockpit per-cell exclude)
+                #   Stage 5  provenance.set_boundary() (canonical fields
+                #            propagate to per-platform copies via shutil)
+                # Defaults bbox_intersects + 0.0 reproduce the AgMIP-
+                # canonical Feb 2026 baseline (Koutiala 149 cells).
+                inclusion_rule = region.boundary.inclusion_rule
+                min_share_pct = region.boundary.min_share_percent
+                geometry_wkt_str = getattr(region, 'geometry_wkt', None)
 
-                # Always use 5-arcmin grid for maximum boundary precision.
-                # Platforms that need coarser grids (ACEA=30arcmin) handle
-                # the mapping internally (e.g., _compute_30arcmin_cell_ids).
-                # V2-22c-PRE.3.3 (D15) — thread the operator's
-                # `region.exclude_cells` through to the SpatialGrid
-                # factory. Translators iterate `grid.cells` directly
-                # so the prune propagates without per-translator
-                # edits per the §6.4 schema-bounds discipline.
+                # Stage 0 — centroid_strict guard
+                if inclusion_rule == 'centroid_strict' and not geometry_wkt_str:
+                    raise GeometryRequiredError(
+                        "inclusion_rule='centroid_strict' requires a "
+                        "GADM geometry; region.geometry_wkt is empty/"
+                        "unparsable. Either select a GADM source for "
+                        "region or use inclusion_rule='bbox_intersects'."
+                    )
+
+                # Stage 1 — baseline grid extent (no rule applied; count
+                # supports the AC-7 arithmetic invariant).
+                grid_full_extent = SpatialGrid.from_bounds(
+                    region.bounds,
+                    resolution="5arcmin",
+                    clip_geometry=None,
+                    exclude_cells=None,
+                )
+                n_cells_full_extent = len(grid_full_extent.cells)
+
+                # Stage 2 — apply inclusion_rule filter. Only
+                # centroid_strict requires a clip-geometry; bbox_intersects
+                # admits the full extent.
+                clip_geometry = None
+                if inclusion_rule == 'centroid_strict':
+                    from shapely import wkt
+                    try:
+                        clip_geometry = wkt.loads(geometry_wkt_str)
+                        self.logger.info(
+                            "Using centroid_strict polygon clipping for grid generation"
+                        )
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Failed to load geometry for centroid_strict: {e}"
+                        )
+                        clip_geometry = None
+
                 grid = SpatialGrid.from_bounds(
                     region.bounds,
                     resolution="5arcmin",
                     clip_geometry=clip_geometry,
-                    exclude_cells=getattr(
-                        self.config.region, 'exclude_cells', None,
-                    ),
+                    # NOTE: exclude_cells passed at Stage 4, not here —
+                    # preserves the arithmetic invariant
+                    # n_cells_full_extent = excluded_by_rule +
+                    # excluded_by_threshold + admitted + user_excluded.
+                    exclude_cells=None,
                 )
+                n_cells_post_inclusion_rule = len(grid.cells)
+                n_cells_excluded_by_inclusion_rule = (
+                    n_cells_full_extent - n_cells_post_inclusion_rule
+                )
+
+                # Stage 3 — compute share_percent + apply min_share_percent.
+                # admin_geom may be the SAME object as clip_geometry when
+                # inclusion_rule == 'centroid_strict'; loaded freshly here
+                # for the bbox_intersects path so SP can be computed when
+                # an admin polygon is available even though clip_geometry
+                # was None at Stage 2.
+                admin_geom = clip_geometry
+                if admin_geom is None and geometry_wkt_str:
+                    try:
+                        from shapely import wkt
+                        admin_geom = wkt.loads(geometry_wkt_str)
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Failed to load geometry for share-percent: {e}"
+                        )
+                        admin_geom = None
+
+                n_cells_excluded_by_min_share_percent = 0
+                if admin_geom is not None:
+                    from shapely.geometry import box as _shp_box
+                    halfres = (5.0 / 60.0) / 2.0  # half-cell-edge for 5arcmin
+                    cells_post_threshold = []
+                    for cell in grid.cells:
+                        cell_box = _shp_box(
+                            cell.lon - halfres, cell.lat - halfres,
+                            cell.lon + halfres, cell.lat + halfres,
+                        )
+                        if not cell_box.intersects(admin_geom):
+                            # Defensive — Stage 2 should have excluded these
+                            # via bbox; log + skip without counting toward
+                            # min_share_percent (preserves arithmetic).
+                            self.logger.warning(
+                                f"Cell {cell.cell_id} fell through Stage 2 "
+                                f"bbox bound; skipping."
+                            )
+                            continue
+                        intersection = cell_box.intersection(admin_geom)
+                        cell.share_percent = (
+                            intersection.area / cell_box.area
+                        ) * 100.0
+                        if cell.share_percent < min_share_pct:
+                            n_cells_excluded_by_min_share_percent += 1
+                            continue
+                        cells_post_threshold.append(cell)
+                    grid.cells = cells_post_threshold
+                # else: no admin polygon (manual-bbox); SP not computable;
+                # min_share_percent is a no-op; cell.share_percent stays
+                # None per AC-3.5.
+
+                # Stage 4 — apply user-skip filter (cockpit per-cell exclude).
+                user_excluded = set(getattr(
+                    self.config.region, 'exclude_cells', None,
+                ) or [])
+                if user_excluded:
+                    grid.cells = [
+                        c for c in grid.cells if c.cell_id not in user_excluded
+                    ]
+
                 self.logger.info(f"Created grid with {grid.n_cells} cells")
+
+                # Stage 5 — emit boundary provenance.
+                if self.provenance.enabled:
+                    boundary_source = (
+                        region.boundary.source.value
+                        if hasattr(region.boundary.source, 'value')
+                        else str(region.boundary.source)
+                    )
+                    self.provenance.set_boundary(
+                        source=boundary_source,
+                        version=getattr(region, 'boundary_version', None),
+                        inclusion_rule=inclusion_rule,
+                        min_share_percent=min_share_pct,
+                        n_cells_full_extent=n_cells_full_extent,
+                        n_cells_excluded_by_inclusion_rule=(
+                            n_cells_excluded_by_inclusion_rule
+                        ),
+                        n_cells_excluded_by_min_share_percent=(
+                            n_cells_excluded_by_min_share_percent
+                        ),
+                        n_cells_admitted=len(grid.cells),
+                    )
 
                 # V2-19 site #3: record AGGREGATION_METHOD decision for grid
                 # creation. The 5-arcmin resolution is hardcoded (not

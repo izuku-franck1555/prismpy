@@ -221,6 +221,14 @@ class ProvenanceRecord:
         config_hash: Hash of the configuration used
         artifacts: All data artifacts and their lineages
         summary: Summary statistics
+        boundary: F-R AC-4 — boundary section recording the
+            cell-inclusion-rule decisions that produced the
+            simulation domain. Empty dict ``{}`` for legacy
+            records (pre-F-R) so reads stay non-throwing;
+            ``ProvenanceTracker.set_boundary(...)`` populates
+            8 fields (source / version / inclusion_rule /
+            min_share_percent / 4 cell-count fields) once
+            HARMONIZE finishes.
     """
     session_id: str
     created_at: datetime = field(default_factory=datetime.now)
@@ -228,6 +236,11 @@ class ProvenanceRecord:
     config_hash: Optional[str] = None
     artifacts: Dict[str, DataLineage] = field(default_factory=dict)
     summary: Dict[str, Any] = field(default_factory=dict)
+    # F-R AC-4: boundary block populated by ProvenanceTracker.set_boundary().
+    # Dict[str, Any] (NOT Optional[Dict]) — empty {} is the legacy compat
+    # sentinel; readers can do ``record.boundary.get("inclusion_rule")``
+    # without None-checks.
+    boundary: Dict[str, Any] = field(default_factory=dict)
 
     def add_artifact(self, lineage: DataLineage) -> None:
         """Add an artifact lineage to the record."""
@@ -280,6 +293,10 @@ class ProvenanceRecord:
                 aid: lin.to_dict() for aid, lin in self.artifacts.items()
             },
             "summary": self.summary,
+            # F-R AC-4: boundary block always emitted (empty dict
+            # for legacy reads). Per-platform copies via shutil
+            # carry the same block automatically.
+            "boundary": self.boundary,
         }
 
     def save_json(self, path: str) -> None:

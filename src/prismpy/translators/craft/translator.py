@@ -535,12 +535,16 @@ class CraftTranslator(CraftTranslatorBase):
         # OPTION 1: Use GADM for accurate boundary-based schema (RECOMMENDED)
         # =====================================================================
         if gadm_data_path and gadm_country_iso3:
+            # F-R AC-3 Path 1: thread BoundaryConfig.min_share_percent
+            # so schema rows match the canonical filtered grid built at
+            # AC-2 HARMONIZE.
             craft_schema_rows, python_schema_rows = self._generate_schema_from_gadm(
                 gadm_data_path=gadm_data_path,
                 country_iso3=gadm_country_iso3,
                 schema_level=schema_level,
                 admin_name=gadm_admin_name,
                 decimal_places=decimal_places,
+                threshold=self.config.region.boundary.min_share_percent,
             )
 
             if craft_schema_rows:
@@ -602,10 +606,14 @@ class CraftTranslator(CraftTranslatorBase):
                 gdf_pygadm = gpd.GeoDataFrame(geometry=[geom], crs="EPSG:4326")
 
                 gadm = GADMDataSource(gadm_path=None)
+                # F-R AC-3 Path 1b: thread BoundaryConfig.min_share_percent
+                # so the pygadm-geometry schema rows match the canonical
+                # filtered grid built at AC-2 HARMONIZE.
                 craft_schema_rows, python_schema_rows = gadm.generate_schema_data(
                     gdf=gdf_pygadm,
                     resolution_deg=5 / 60,
                     decimal_places=decimal_places,
+                    threshold=self.config.region.boundary.min_share_percent,
                 )
 
                 if craft_schema_rows:
@@ -684,6 +692,8 @@ class CraftTranslator(CraftTranslatorBase):
         schema_level: int,
         admin_name: Optional[str] = None,
         decimal_places: int = 2,
+        *,
+        threshold: float = 0.0,
     ) -> Tuple[List[Dict], List[Dict]]:
         """Generate schema data directly from GADM boundaries.
 
@@ -697,6 +707,9 @@ class CraftTranslator(CraftTranslatorBase):
             schema_level: CRAFT schema level (1=country, 2=state, 3=district)
             admin_name: Admin region name to filter to
             decimal_places: Decimal places for SharePercent
+            threshold: F-R AC-3 SharePercent threshold (forwarded to
+                ``gadm.generate_schema_data``). Default 0.0 admits all
+                intersecting cells (AgMIP-canonical baseline).
 
         Returns:
             Tuple of (craft_schema_rows, python_schema_rows)
@@ -740,6 +753,7 @@ class CraftTranslator(CraftTranslatorBase):
             gdf=gdf,
             resolution_deg=5/60,  # 5 arcmin
             decimal_places=decimal_places,
+            threshold=threshold,  # F-R AC-3 SP threshold filter
         )
 
         logger.info(f"GADM schema generation: {len(craft_rows)} cells from boundary")
@@ -969,12 +983,15 @@ class CraftTranslator(CraftTranslatorBase):
         # OPTION 1: Use GADM for accurate boundary-based schema (RECOMMENDED)
         # =====================================================================
         if gadm_data_path and gadm_country_iso3:
+            # F-R AC-3 Path 1c (audit MISSED; surfaced at builder Phase 0):
+            # mirror Path 1 in the Python-schema-generation method.
             _, python_schema_rows = self._generate_schema_from_gadm(
                 gadm_data_path=gadm_data_path,
                 country_iso3=gadm_country_iso3,
                 schema_level=schema_level,
                 admin_name=gadm_admin_name,
                 decimal_places=decimal_places,
+                threshold=self.config.region.boundary.min_share_percent,
             )
 
             if python_schema_rows:
@@ -1027,10 +1044,13 @@ class CraftTranslator(CraftTranslatorBase):
                 gdf_pygadm = gpd.GeoDataFrame(geometry=[geom], crs="EPSG:4326")
 
                 gadm = GADMDataSource(gadm_path=None)
+                # F-R AC-3 Path 1d (audit MISSED; surfaced at builder Phase 0):
+                # mirror Path 1b in the Python-schema-generation method.
                 _, python_schema_rows = gadm.generate_schema_data(
                     gdf=gdf_pygadm,
                     resolution_deg=5 / 60,
                     decimal_places=decimal_places,
+                    threshold=self.config.region.boundary.min_share_percent,
                 )
 
                 if python_schema_rows:

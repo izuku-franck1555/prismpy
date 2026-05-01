@@ -332,6 +332,8 @@ class GADMDataSource:
         resolution_deg: float = 5/60,
         decimal_places: int = 2,
         admin_info: Optional[Dict[str, str]] = None,
+        *,
+        threshold: float = 0.0,
     ) -> Tuple[List[Dict], List[Dict]]:
         """Generate CRAFT schema data from admin boundary polygon.
 
@@ -339,13 +341,22 @@ class GADMDataSource:
         1. Create fishnet grid covering polygon bounds
         2. Filter to cells that intersect with polygon
         3. Calculate intersection area (NOT full cell area)
-        4. Return data for both CRAFT_Schema and Python_Schemas
+        4. (F-R AC-3) Drop cells whose SharePercent is below ``threshold``
+        5. Return data for both CRAFT_Schema and Python_Schemas
 
         Args:
             gdf: GeoDataFrame with admin boundary polygon(s)
             resolution_deg: Grid resolution in degrees (default 5 arcmin = 5/60)
             decimal_places: Decimal places for SharePercent
             admin_info: Dict with admin names {'level1': 'Mali', 'level2': 'Koutiala', ...}
+            threshold: F-R AC-3 SharePercent threshold (0.0-100.0). Cells
+                with share_percent < threshold are excluded from BOTH
+                returned row lists. Default 0.0 admits every intersecting
+                cell (AgMIP-canonical baseline). The 4 CRAFT-translator
+                callsites (paths 1, 1b, 1c, 1d) thread
+                ``BoundaryConfig.min_share_percent`` here so the canonical
+                grid produced at HARMONIZE (AC-2) and the CRAFT schema
+                rows agree on the same cell set.
 
         Returns:
             Tuple of (craft_schema_rows, python_schema_rows) where:
@@ -411,6 +422,14 @@ class GADMDataSource:
 
                 # SharePercent: percentage of cell covered by admin boundary
                 share_percent = round((intersection_area_deg2 / cell_area_deg2) * 100, decimal_places)
+
+                # F-R AC-3: drop cells whose SharePercent is below the
+                # caller-supplied threshold. Default 0.0 admits every
+                # intersecting cell (AgMIP-canonical baseline). Filter
+                # applied here so both schema rows + python rows for the
+                # excluded cell never get appended.
+                if share_percent < threshold:
+                    continue
 
                 # Area: intersection area in km² (with latitude correction)
                 # Formula from legacy: area_km² = area_deg² * 12364 * cos(lat)

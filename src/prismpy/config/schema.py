@@ -6,12 +6,20 @@ data-to-model translation framework, including region, crop, temporal,
 and platform-specific settings.
 """
 
+import logging
 import re
 import unicodedata
 from datetime import date, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Union
+
+
+# F-R AC-6: namespaced logger for boundary-config validators. INFO
+# log emits at validator call (NOT at every config access) when the
+# user explicitly opts into ``inclusion_rule='centroid_strict'`` so
+# the AgMIP-canonical baseline is cited in audit grep.
+_boundary_logger = logging.getLogger("prismpy.config.boundary")
 
 
 _DEFAULT_IGNORABLE_CODE_POINTS = frozenset({
@@ -313,6 +321,46 @@ class BoundaryConfig(BaseModel):
         default=None,
         description="Manual bounding box if source is 'manual'"
     )
+    # F-R AC-1: cell-inclusion rule for the simulation domain.
+    # Default ``'bbox_intersects'`` is the AgMIP regional convention
+    # per Müller 2017 + Rosenzweig 2014 — admits cells whose 5-arcmin
+    # extent intersects the admin polygon. ``'centroid_strict'`` is
+    # an advanced opt-in for crisp-domain workflows (admits only
+    # cells whose centroid lies inside the polygon). Stage 0 verdict
+    # locked default at ``'bbox_intersects'`` so reference Feb 2026
+    # outputs reproduce on Koutiala (149 cells).
+    inclusion_rule: Literal['bbox_intersects', 'centroid_strict'] = Field(
+        default='bbox_intersects',
+        description=(
+            "Cell inclusion rule for the simulation domain. "
+            "'bbox_intersects' (default; AgMIP regional convention "
+            "per Müller 2017 / Rosenzweig 2014) admits cells whose "
+            "5-arcmin extent intersects the admin polygon. "
+            "'centroid_strict' admits only cells whose centroid "
+            "lies inside the polygon; advanced opt-in for "
+            "crisp-domain workflows."
+        ),
+    )
+    # F-R AC-1: SharePercent threshold filter applied at HARMONIZE
+    # stage AFTER the inclusion_rule filter. Default 0.0 admits all
+    # cells passing inclusion_rule. Iizumi 2014 et al. discuss
+    # district-mean sensitivity to SP threshold; default 0.0
+    # preserves AgMIP-canonical full-domain inclusion.
+    min_share_percent: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=100.0,
+        description=(
+            "SharePercent threshold (0.0-100.0) applied at "
+            "HARMONIZE stage after the inclusion_rule filter. "
+            "Cells with computed SharePercent below this threshold "
+            "are excluded from the simulation domain. Default 0.0 "
+            "= no threshold (admits all cells passing "
+            "inclusion_rule). Iizumi 2014 et al. discuss "
+            "district-mean sensitivity to SP threshold; default "
+            "0.0 preserves AgMIP-canonical full-domain inclusion."
+        ),
+    )
 
     @field_validator(
         "gadm_filter_value", "gadm_filter_field", mode="before",
@@ -471,6 +519,24 @@ class BoundaryConfig(BaseModel):
         elif self.source == BoundarySource.MANUAL:
             if self.manual_bounds is None:
                 raise ValueError("manual_bounds required when source is 'manual'")
+        return self
+
+    @model_validator(mode="after")
+    def _flag_centroid_strict_opt_in(self) -> "BoundaryConfig":
+        """F-R AC-6: emit one INFO log when ``inclusion_rule``
+        is explicitly set to ``'centroid_strict'`` so the
+        AgMIP-canonical default is cited in audit grep. The
+        log fires per validator call (not per session) so
+        repeated config loads each leave a trail. Default
+        ``'bbox_intersects'`` emits no log."""
+        if self.inclusion_rule == 'centroid_strict':
+            _boundary_logger.info(
+                "BoundaryConfig: inclusion_rule='centroid_strict' "
+                "selected. Default is 'bbox_intersects' per the "
+                "AgMIP regional convention (Müller 2017 / "
+                "Rosenzweig 2014); centroid_strict is an advanced "
+                "opt-in for crisp-domain workflows."
+            )
         return self
 
 

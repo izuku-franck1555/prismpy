@@ -345,25 +345,31 @@ class TestCarveOutRegression:
         # hooks per §11) and documented below.
         #
         # iSDA soil source — local-only reads per §11
-        ("src/prismpy/pipeline/executor.py", 1104),
+        # Line shifted 1104 → 1229 after F-R added GeometryRequiredError
+        # class at module top (~9 lines) plus harmonize-stage 5-stage
+        # filter (~120 lines). Same try block, new line number.
+        ("src/prismpy/pipeline/executor.py", 1229),
         # HWSD soil source — local-only reads per §11
-        ("src/prismpy/pipeline/executor.py", 1741),
+        # Line shifted 1741 → 1866 after F-R additions.
+        ("src/prismpy/pipeline/executor.py", 1866),
         # HWSD per-cell sampling inside CRAFT translator
         ("src/prismpy/translators/craft/translator.py", 1692),
         # pygadm fallback inside _execute_retrieve: local pygadm import
         # + pygadm.Names/Items calls; no HTTP, cancel-inert.
         # Line shifted from 496 → 510 after V2-22c-PRE.4.1 added the
         # REMEDIATION enum value + multi-line comment to the
-        # PipelineStage class definition.
-        ("src/prismpy/pipeline/executor.py", 510),
+        # PipelineStage class definition. Then 510 → 519 after F-R
+        # added GeometryRequiredError class at module top (~9 lines).
+        ("src/prismpy/pipeline/executor.py", 519),
         # Provenance-flush inside the translator-dispatch except handler
         # in _execute_translate: writes decision records, cancel-inert.
         # Line shifted from 2338 → 2346 (PRE.3.3 thread-through)
         # → 2360 (PRE.4.1 enum) → 2404 after V2-22c-PRE.1.10
         # cascade orchestrator + climate metadata backstop added
-        # ~40 lines to `_execute_harmonize`. Same try block, new
-        # line number.
-        ("src/prismpy/pipeline/executor.py", 2404),
+        # ~40 lines to `_execute_harmonize`. Then 2404 → 2535 after
+        # F-R AC-2 5-stage filter added ~120 lines to _execute_harmonize.
+        # Same try block, new line number.
+        ("src/prismpy/pipeline/executor.py", 2535),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed

@@ -21,6 +21,13 @@ class GridCell:
         row: Row index in grid (0-indexed, top to bottom)
         col: Column index in grid (0-indexed, left to right)
         resolution: Grid resolution identifier
+        share_percent: Fraction (0-100) of the cell's area that
+            falls inside the admin polygon. Pre-computed at the
+            HARMONIZE stage by the F-R AC-2 helper; downstream
+            translators read this single value instead of each
+            re-running the polygon-intersection arithmetic. Stays
+            ``None`` when the boundary has no admin polygon
+            (e.g., manual-bbox without GADM lookup).
     """
     cell_id: int
     lat: float
@@ -28,6 +35,12 @@ class GridCell:
     row: int
     col: int
     resolution: str = "5arcmin"
+    # F-R AC-3.5: pre-computed at AC-2 harmonize helper; read by
+    # AC-3 CRAFT translator (4 paths). Optional[float] (NOT
+    # float-with-default-0.0) so ``None`` distinguishes
+    # "polygon-less boundary; SP not computable" from
+    # "polygon present; SP is exactly 0.0".
+    share_percent: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -38,6 +51,7 @@ class GridCell:
             "row": self.row,
             "col": self.col,
             "resolution": self.resolution,
+            "share_percent": self.share_percent,
         }
 
 
