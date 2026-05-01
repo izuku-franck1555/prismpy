@@ -34,12 +34,41 @@ from prismpy.packaging.manifest import (
 from prismpy.provenance.tracker import ProvenanceTracker
 
 
-def _build_manifest_for_resolved_source(
-    platform: str, resolved_source: str, configured_gadm_level: int = 2,
+def _build_manifest_via_discriminator(
+    platform: str,
+    config_source: str,
+    runtime_resolved_source,
+    configured_gadm_level: int = 2,
 ):
     """Mirror the post-Sprint-C discriminator pattern every translator
-    uses: gadm_level is the configured value when resolved is GADM,
-    None otherwise. Pass through ``create_manifest``."""
+    uses verbatim:
+
+        resolved_source = (
+            getattr(data.region, "boundary_source", None)
+            or boundary.source.value
+        )
+
+    Both the runtime field (post-fallback) and the config source
+    feed the discriminator; the runtime value wins when present.
+    The fallback case is ``config_source='gadm'`` AND
+    ``runtime_resolved_source='manual'`` — the runtime value takes
+    precedence, manifest reflects the runtime outcome.
+
+    Args:
+        platform: target translator name (used in the synthetic
+            package name; doesn't affect the discriminator).
+        config_source: ``self.config.region.boundary.source.value``
+            — the requested source.
+        runtime_resolved_source: ``data.region.boundary_source`` —
+            the runtime field set by the executor post-fallback. Pass
+            ``None`` (or empty string) to simulate "runtime field
+            absent" so the discriminator falls back to config_source.
+        configured_gadm_level: ``self.config.region.boundary.gadm_level``
+            — honored only when the discriminator-resolved source
+            is GADM.
+    """
+    # The actual discriminator pattern:
+    resolved_source = runtime_resolved_source or config_source
     manifest_gadm_level = (
         configured_gadm_level if resolved_source == 'gadm' else None
     )
@@ -120,12 +149,22 @@ def test_manifest_boundaries_matches_provenance_source(
     fallback) → the fallback case (config GADM, runtime MANUAL)
     fails because manifest claims GADM while provenance says MANUAL.
     """
-    # Both sides consume the SAME resolved source per the architecture
-    # lock — the executor writes resolved_source to data.region.boundary_source
-    # AND to provenance.boundary.source.
-    manifest = _build_manifest_for_resolved_source(
-        platform, runtime_resolved_source,
+    # Manifest derivation runs the actual discriminator with BOTH
+    # config_source AND runtime_resolved_source — the discriminator
+    # picks runtime when present, otherwise falls back to config.
+    # The fallback case (config GADM, runtime MANUAL) is the load-
+    # bearing scenario the F-W audit caught: pre-Sprint-C the
+    # manifest read from config_source directly and lied about
+    # GADM-failed-fallback runs; post-Sprint-C the runtime value
+    # wins so the manifest reflects on-disk reality.
+    manifest = _build_manifest_via_discriminator(
+        platform,
+        config_source=config_source,
+        runtime_resolved_source=runtime_resolved_source,
     )
+    # The executor writes the resolved (post-fallback) source onto
+    # provenance.boundary at Stage 5; both sides therefore consume
+    # the runtime-resolved value.
     provenance_boundary = _build_provenance_for_resolved_source(
         runtime_resolved_source,
     )
