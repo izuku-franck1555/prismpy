@@ -368,8 +368,12 @@ class TestCarveOutRegression:
         # cascade orchestrator + climate metadata backstop added
         # ~40 lines to `_execute_harmonize`. Then 2404 → 2535 after
         # F-R AC-2 5-stage filter added ~120 lines to _execute_harmonize.
-        # Same try block, new line number.
-        ("src/prismpy/pipeline/executor.py", 2535),
+        # Then 2535 → 2570 after F-R Sprint A codex Gate B absorption
+        # added ~35 lines to _execute_harmonize (Stage 3 exclusion-counter
+        # increment, Stage 5 boundary_source fallback resolution, and
+        # GeometryRequiredError re-raise on shapely parse failure for
+        # centroid_strict). Same try block, new line number.
+        ("src/prismpy/pipeline/executor.py", 2570),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed

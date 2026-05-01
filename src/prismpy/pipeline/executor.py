@@ -2098,8 +2098,15 @@ class TranslationPipeline:
                 #            propagate to per-platform copies via shutil)
                 # Defaults bbox_intersects + 0.0 reproduce the AgMIP-
                 # canonical Feb 2026 baseline (Koutiala 149 cells).
-                inclusion_rule = region.boundary.inclusion_rule
-                min_share_pct = region.boundary.min_share_percent
+                # Codex Gate B fix #1: read inclusion_rule + threshold
+                # from ``self.config.region.boundary`` (the Pydantic
+                # config), NOT from ``region.boundary`` — runtime
+                # ``Region`` is a different model that carries
+                # ``boundary_source`` only. Reading from the runtime
+                # Region raises AttributeError on every real run.
+                config_boundary = self.config.region.boundary
+                inclusion_rule = config_boundary.inclusion_rule
+                min_share_pct = config_boundary.min_share_percent
                 geometry_wkt_str = getattr(region, 'geometry_wkt', None)
 
                 # Stage 0 — centroid_strict guard
@@ -2124,6 +2131,10 @@ class TranslationPipeline:
                 # Stage 2 — apply inclusion_rule filter. Only
                 # centroid_strict requires a clip-geometry; bbox_intersects
                 # admits the full extent.
+                # Codex Gate B fix #2: parse-failure on centroid_strict
+                # MUST raise GeometryRequiredError, NOT silently fall
+                # back to bbox_intersects with provenance recording the
+                # wrong rule (CC-2 honest-signal violation).
                 clip_geometry = None
                 if inclusion_rule == 'centroid_strict':
                     from shapely import wkt
@@ -2133,10 +2144,13 @@ class TranslationPipeline:
                             "Using centroid_strict polygon clipping for grid generation"
                         )
                     except Exception as e:
-                        self.logger.warning(
-                            f"Failed to load geometry for centroid_strict: {e}"
+                        raise GeometryRequiredError(
+                            f"inclusion_rule='centroid_strict' selected "
+                            f"but region.geometry_wkt could not be "
+                            f"parsed by shapely: {e}. Either fix the "
+                            f"geometry source or use "
+                            f"inclusion_rule='bbox_intersects'."
                         )
-                        clip_geometry = None
 
                 grid = SpatialGrid.from_bounds(
                     region.bounds,
@@ -2181,12 +2195,22 @@ class TranslationPipeline:
                             cell.lon + halfres, cell.lat + halfres,
                         )
                         if not cell_box.intersects(admin_geom):
-                            # Defensive — Stage 2 should have excluded these
-                            # via bbox; log + skip without counting toward
-                            # min_share_percent (preserves arithmetic).
-                            self.logger.warning(
-                                f"Cell {cell.cell_id} fell through Stage 2 "
-                                f"bbox bound; skipping."
+                            # Codex Gate B fix #3: for bbox_intersects +
+                            # irregular polygon, Stage 2 (clip_geometry=None)
+                            # admits the full bounding rectangle, but the
+                            # canonical bbox-intersects rule excludes
+                            # cells whose box does NOT intersect the
+                            # polygon. Count them toward
+                            # n_cells_excluded_by_inclusion_rule so the
+                            # AC-7 arithmetic identity holds. (For
+                            # centroid_strict, Stage 2 already excluded
+                            # these; this branch is unreachable since the
+                            # SpatialGrid.from_bounds clip already filters
+                            # at the centroid level.)
+                            n_cells_excluded_by_inclusion_rule += 1
+                            self.logger.debug(
+                                f"Cell {cell.cell_id} excluded — bbox "
+                                f"does not intersect admin polygon."
                             )
                             continue
                         intersection = cell_box.intersection(admin_geom)
@@ -2214,12 +2238,23 @@ class TranslationPipeline:
                 self.logger.info(f"Created grid with {grid.n_cells} cells")
 
                 # Stage 5 — emit boundary provenance.
+                # Codex Gate B fix #1 (continued): read source from the
+                # runtime ``Region``'s ``boundary_source`` field (already
+                # populated at retrieve-stage) so we capture the
+                # RESOLVED source after any GADM-failed → manual fallback.
+                # Fall back to the config-side BoundaryConfig.source for
+                # the value when the runtime field is absent (legacy
+                # callsites).
                 if self.provenance.enabled:
-                    boundary_source = (
-                        region.boundary.source.value
-                        if hasattr(region.boundary.source, 'value')
-                        else str(region.boundary.source)
-                    )
+                    runtime_source = getattr(region, 'boundary_source', None)
+                    if runtime_source:
+                        boundary_source = str(runtime_source)
+                    else:
+                        cfg_src = config_boundary.source
+                        boundary_source = (
+                            cfg_src.value if hasattr(cfg_src, 'value')
+                            else str(cfg_src)
+                        )
                     self.provenance.set_boundary(
                         source=boundary_source,
                         version=getattr(region, 'boundary_version', None),

@@ -420,16 +420,19 @@ class GADMDataSource:
                 intersection = cell_box.intersection(admin_geom)
                 intersection_area_deg2 = intersection.area
 
-                # SharePercent: percentage of cell covered by admin boundary
-                share_percent = round((intersection_area_deg2 / cell_area_deg2) * 100, decimal_places)
-
-                # F-R AC-3: drop cells whose SharePercent is below the
-                # caller-supplied threshold. Default 0.0 admits every
-                # intersecting cell (AgMIP-canonical baseline). Filter
-                # applied here so both schema rows + python rows for the
-                # excluded cell never get appended.
-                if share_percent < threshold:
+                # F-R AC-3 + codex Gate B fix #4: compare the threshold
+                # against the UNROUNDED SharePercent, then round for
+                # display. Rounding-then-comparing diverges from the
+                # canonical-grid filter at AC-2 Stage 3 (which uses
+                # the unrounded percentage); cells with true SP just
+                # below the threshold but rounding up would be admitted
+                # here yet excluded from the canonical grid, breaking
+                # the cell-set agreement this kwarg exists to enforce.
+                share_percent_raw = (intersection_area_deg2 / cell_area_deg2) * 100
+                if share_percent_raw < threshold:
                     continue
+                # Round AFTER threshold-pass for display precision.
+                share_percent = round(share_percent_raw, decimal_places)
 
                 # Area: intersection area in km² (with latitude correction)
                 # Formula from legacy: area_km² = area_deg² * 12364 * cos(lat)
