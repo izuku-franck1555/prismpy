@@ -229,6 +229,29 @@ class ProvenanceRecord:
             8 fields (source / version / inclusion_rule /
             min_share_percent / 4 cell-count fields) once
             HARMONIZE finishes.
+        texture_renormalize_details: Sprint D.1 AC-6 — per-layer
+            entries for every texture-fraction renormalization
+            applied at the harmonize stage. Each entry is the
+            serialized form of
+            :class:`prismpy.harmonize.texture_renormalize.TextureRenormalizationProvenance`.
+            Empty list when no renormalization fired.
+        rh_clip_details: Sprint D.1 AC-6 — per-record entries for
+            every rh value clipped from (100, 102] to 100 at the
+            harmonize stage. Each entry is the serialized form of
+            :class:`prismpy.harmonize.rh_clip.RHClipProvenance`.
+            Empty list when no clip fired.
+        cells_unavailable_details: Sprint D.1 AC-6 — per-cell
+            entries for every cell routed to
+            ``data_availability='unavailable'`` at the harmonize
+            stage with the reason / cause taxonomy populated. Each
+            entry is a dict with ``cell_id`` plus the matching
+            ``unavailable_reason`` and ``unavailable_cause``
+            literals.
+        pythia_misdat_replacements: Sprint D.1 AC-6 — per-translator
+            count of records that wrote the DSSAT MISDAT sentinel
+            (-99.0) for missing rain. Currently the value is the
+            count keyed by translator name; PYTHIA is the only
+            target today. Empty dict when no missing rain occurred.
     """
     session_id: str
     created_at: datetime = field(default_factory=datetime.now)
@@ -241,6 +264,14 @@ class ProvenanceRecord:
     # sentinel; readers can do ``record.boundary.get("inclusion_rule")``
     # without None-checks.
     boundary: Dict[str, Any] = field(default_factory=dict)
+    # Sprint D.1 AC-6 — additive harmonize-stage detail lists.
+    # Each list is empty by default for legacy compat; the
+    # corresponding setter methods on ProvenanceTracker populate
+    # them as the pipeline runs.
+    texture_renormalize_details: List[Dict[str, Any]] = field(default_factory=list)
+    rh_clip_details: List[Dict[str, Any]] = field(default_factory=list)
+    cells_unavailable_details: List[Dict[str, Any]] = field(default_factory=list)
+    pythia_misdat_replacements: Dict[str, int] = field(default_factory=dict)
 
     def add_artifact(self, lineage: DataLineage) -> None:
         """Add an artifact lineage to the record."""
@@ -251,7 +282,14 @@ class ProvenanceRecord:
         return self.artifacts.get(artifact_id)
 
     def compute_summary(self) -> Dict[str, Any]:
-        """Compute summary statistics."""
+        """Compute summary statistics.
+
+        Sprint D.1 AC-6: aggregate counts for the harmonize-stage
+        transformations are merged into the summary alongside the
+        existing artifact / decision / warning aggregates so
+        consumers reading the summary block get every per-sprint
+        invariant in one place.
+        """
         total_decisions = sum(
             len(lin.all_decisions) for lin in self.artifacts.values()
         )
@@ -269,6 +307,25 @@ class ProvenanceRecord:
                 dtype = decision.decision_type.value
                 decision_counts[dtype] = decision_counts.get(dtype, 0) + 1
 
+        # Sprint D.1 AC-6 — aggregate per-cause counts for
+        # unavailable cells. The detail list carries each entry's
+        # ``unavailable_cause`` (the schema-pinned cause field on
+        # CellSummary); the summary surfaces the count keyed by
+        # cause so a consumer reads the headline number without
+        # iterating the detail list. Entries that pre-date the
+        # cause field (or come from a writer that doesn't set
+        # one) bucket into ``"unknown"``.
+        cells_unavailable_by_cause: Dict[str, int] = {}
+        for entry in self.cells_unavailable_details:
+            cause = (
+                entry.get("unavailable_cause")
+                or entry.get("cause")
+                or "unknown"
+            )
+            cells_unavailable_by_cause[cause] = (
+                cells_unavailable_by_cause.get(cause, 0) + 1
+            )
+
         self.summary = {
             "n_artifacts": len(self.artifacts),
             "n_transformations": total_transformations,
@@ -278,11 +335,29 @@ class ProvenanceRecord:
             "artifact_types": list(set(
                 lin.artifact_type for lin in self.artifacts.values()
             )),
+            # Sprint D.1 AC-6 additions — additive aggregates from
+            # the harmonize-stage detail lists. Empty / zero
+            # values for runs without the corresponding fix
+            # firing.
+            "texture_renormalize_count": len(
+                self.texture_renormalize_details
+            ),
+            "rh_clip_count": len(self.rh_clip_details),
+            "cells_unavailable_by_cause": cells_unavailable_by_cause,
+            "pythia_misdat_replacements": dict(
+                self.pythia_misdat_replacements
+            ),
         }
         return self.summary
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
+        """Convert to dictionary for JSON serialization.
+
+        Sprint D.1 AC-6: harmonize-stage detail lists serialize
+        alongside the existing top-level keys. JSON insertion
+        order matches the field order on the dataclass so a
+        diff-friendly serialization stays stable across runs.
+        """
         self.compute_summary()
         return {
             "session_id": self.session_id,
@@ -297,6 +372,18 @@ class ProvenanceRecord:
             # for legacy reads). Per-platform copies via shutil
             # carry the same block automatically.
             "boundary": self.boundary,
+            # Sprint D.1 AC-6 — additive harmonize-stage detail
+            # lists. Empty lists / dicts for legacy reads (the
+            # corresponding setter methods on ProvenanceTracker
+            # populate the lists; consumers should ``.get(key,
+            # [])`` to stay backward-compat with old payloads).
+            "texture_renormalize_details": list(
+                self.texture_renormalize_details
+            ),
+            "rh_clip_details": list(self.rh_clip_details),
+            "cells_unavailable_details": list(
+                self.cells_unavailable_details
+            ),
         }
 
     def save_json(self, path: str) -> None:
