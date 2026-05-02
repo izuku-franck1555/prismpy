@@ -113,6 +113,17 @@ class HWSDSource(DataSource):
         """
         super().__init__(cache_dir=cache_dir, provenance=provenance)
         self.config = config or HWSDConfig()
+        # Sprint D.1 AC-4 — cells the loader could not extract a
+        # real profile for. Each entry is a dict with at least
+        # ``cell_id`` and ``cause`` (currently always
+        # ``"soil_no_hwsd_coverage"``). The executor consumes
+        # this list at HARMONIZE end + routes the cells to
+        # ``data_availability='unavailable'`` with axis ``soil``
+        # and the recorded cause. Replaces the prior
+        # DEFAULT_SOIL silent-fill that used to inject a Sahel-
+        # typical synthetic profile and pretend the cell was
+        # covered.
+        self.unavailable_cells: List[Dict[str, Any]] = []
 
     def retrieve(
         self,
@@ -167,15 +178,22 @@ class HWSDSource(DataSource):
             except Exception as e:
                 warnings.append(f"NetCDF extraction failed: {e}")
 
-        # Apply defaults for missing data
+        # Sprint D.1 AC-4 — when HWSD returns nothing, the cells are
+        # genuinely without coverage; flag them as unavailable
+        # rather than silently inject a Sahel-typical synthetic
+        # profile. The executor reads ``self.unavailable_cells`` at
+        # HARMONIZE end and routes each cell accordingly.
         if self.config.use_defaults and not profiles:
-            self.logger.warning("Using default soil values")
-            warnings.append("No HWSD data found, using default values")
-
+            self.logger.info(
+                "HWSD retrieval returned no profiles; flagging cells unavailable"
+            )
+            warnings.append(
+                "No HWSD data found; cells flagged data_availability='unavailable'"
+            )
             if cell_coords:
-                for i, (lat, lon) in enumerate(cell_coords):
-                    profiles[i] = self._create_default_profile(i, lat, lon, region)
-            source_type = "defaults"
+                for i, _ in enumerate(cell_coords):
+                    self._record_unavailable(i, cause="soil_no_hwsd_coverage")
+            source_type = "no_coverage"
 
         if not profiles:
             return self.create_result(
@@ -199,6 +217,12 @@ class HWSDSource(DataSource):
         metadata["source_type"] = source_type
         metadata["profile_count"] = len(profiles)
         metadata["statistics"] = stats
+        # Sprint D.1 AC-4 — surface the unavailable-cells list to
+        # the executor so HARMONIZE can route cells to the
+        # ``data_availability='unavailable'`` path with the
+        # recorded cause.
+        if self.unavailable_cells:
+            metadata["unavailable_cells"] = list(self.unavailable_cells)
 
         return self.create_result(
             success=True,
@@ -208,7 +232,19 @@ class HWSDSource(DataSource):
         )
 
     def validate(self, data: Any) -> List[str]:
-        """Validate HWSD data."""
+        """Validate HWSD data.
+
+        Sprint D.1 AC-1.1: the source-level texture-sum warning
+        previously emitted from this method is retired.
+        Texture-fraction validation now happens once at the
+        harmonize stage via
+        :func:`prismpy.harmonize.texture_renormalize.texture_action_for`,
+        which routes layers to renormalize / warn-retain / exclude
+        with provenance per layer. Keeping the duplicate
+        source-level emit would surface the same warning twice
+        (once here, once at harmonize) and let the two layers
+        drift if the thresholds ever changed independently.
+        """
         warnings = []
 
         if not isinstance(data, HWSDData):
@@ -217,20 +253,16 @@ class HWSDSource(DataSource):
         if not data.profiles:
             warnings.append("No soil profiles extracted")
 
-        # Check for default-only profiles
-        if data.source_type == "defaults":
-            warnings.append("All profiles are defaults - no actual HWSD data used")
-
-        # Validate individual profiles
-        for profile_id, profile in data.profiles.items():
-            if profile.layers:
-                layer = profile.layers[0]
-                if layer.sand is not None and layer.clay is not None:
-                    total = layer.sand + layer.clay + (layer.silt or 0)
-                    if abs(total - 100) > 5:
-                        warnings.append(
-                            f"Profile {profile_id}: texture fractions sum to {total:.1f}%"
-                        )
+        # Sprint D.1 AC-4: ``data.source_type == "defaults"`` no
+        # longer occurs (DEFAULT_SOIL injection is retired); the
+        # equivalent signal is ``data.source_type == "no_coverage"``
+        # plus a non-empty ``unavailable_cells`` list propagated
+        # through the retrieval-result metadata.
+        if data.source_type == "no_coverage":
+            warnings.append(
+                "HWSD coverage missing; cells routed to "
+                "data_availability='unavailable'"
+            )
 
         return warnings
 
@@ -271,10 +303,10 @@ class HWSDSource(DataSource):
             if missing_cols:
                 logger.error(f"HWSD MDB missing required columns: {missing_cols}")
                 logger.error("Expected HWSD v2.0 format with LAYER, SEQUENCE columns.")
-                logger.warning("Falling back to default soil profiles for all cells.")
+                logger.warning("MDB columns missing; flagging cells unavailable.")
                 if self.config.use_defaults:
-                    for i, (lat, lon) in enumerate(cell_coords or []):
-                        profiles[i] = self._create_default_profile(i, lat, lon, region)
+                    for i, _ in enumerate(cell_coords or []):
+                        self._record_unavailable(i, cause="soil_no_hwsd_coverage")
                 return profiles
 
             # Filter to selected layer and sequence
@@ -295,38 +327,39 @@ class HWSDSource(DataSource):
                         cell_id=i, lat=lat, lon=lon, props=props, region=region
                     )
                 elif self.config.use_defaults:
-                    profiles[i] = self._create_default_profile(i, lat, lon, region)
+                    self._record_unavailable(i, cause="soil_no_hwsd_coverage")
 
-        # V2-19 C9 (RH-03): HWSD secondary fallback rules rationale.
-        # Summarize fallback outcome for provenance.
-        n_real = sum(1 for p in profiles.values()
-                     if not p.metadata.get('is_default', False))
-        n_default = len(profiles) - n_real
-        if n_default > 0 and self.provenance:
+        # Sprint D.1 AC-4 \u2014 record the SMU-lookup-miss outcome
+        # honestly. The previous FALLBACK_SUBSTITUTION decision
+        # used to claim cells received a Sahel-typical synthetic
+        # profile (DEFAULT_SOIL injection); that fallback is
+        # retired. Cells that miss the SMU lookup are now flagged
+        # for the executor to route to data_availability=
+        # 'unavailable' with cause soil_no_hwsd_coverage.
+        n_unavailable = len(self.unavailable_cells)
+        if n_unavailable > 0 and self.provenance:
             self.provenance.record_decision(
                 decision_type=DecisionType.FALLBACK_SUBSTITUTION,
                 description=(
-                    f"HWSD SMU-lookup miss: {n_default} cells received "
-                    f"DEFAULT_SOIL profile"
+                    f"HWSD SMU-lookup miss: {n_unavailable} cells flagged "
+                    f"data_availability='unavailable' (cause: "
+                    f"soil_no_hwsd_coverage)"
                 ),
                 rationale=(
-                    f"The HWSD BIL raster returned Soil Mapping Unit IDs for "
-                    f"all queried coordinates, but {n_default} SMU IDs were "
-                    f"absent from the MDB soil-properties table (HWSD2_LAYERS). "
-                    f"This occurs for water bodies, bare rock, urban areas, or "
-                    f"HWSD mapping gaps. With use_defaults=True, these cells "
-                    f"receive the Sahel-typical DEFAULT_SOIL profile (sand=60%, "
-                    f"clay=18%, silt=22%, SOC=0.5%, pH=6.5, BD=1.4 g/cm\u00b3). "
-                    f"Valid for gap-filling in Sahelian regions where most "
-                    f"unmapped cells are sandy soils. NOT valid for regions "
-                    f"with diverse unmapped soil types (volcanic, alluvial, "
-                    f"organic). See C3/RH-01 rationale for DEFAULT_SOIL "
-                    f"scientific validity bounds."
+                    "The HWSD BIL raster returned Soil Mapping Unit IDs for "
+                    "all queried coordinates, but some SMU IDs were absent "
+                    "from the MDB soil-properties table (HWSD2_LAYERS). "
+                    "This occurs for water bodies, bare rock, urban areas, "
+                    "or HWSD mapping gaps. The cells are routed to "
+                    "data_availability='unavailable' so downstream "
+                    "consumers see an honest missing-soil signal rather "
+                    "than a synthetic placeholder profile."
                 ),
                 alternatives=[
                     "iSDA 30m (higher resolution, fewer gaps in Africa)",
                     "Spatial interpolation from neighbouring HWSD cells",
-                    "Exclude cells with no soil data (reduces coverage)",
+                    "Synthetic DEFAULT_SOIL profile (retired in Sprint D.1 "
+                    "as data cooking)",
                 ],
                 reference="prismpy.sources.soil.hwsd.HWSDSource._extract_from_bil_mdb",
                 artifact_id="soil",
@@ -422,7 +455,7 @@ class HWSDSource(DataSource):
                         cell_id=i, lat=lat, lon=lon, props=props, region=region
                     )
                 elif self.config.use_defaults:
-                    profiles[i] = self._create_default_profile(i, lat, lon, region)
+                    self._record_unavailable(i, cause="soil_no_hwsd_coverage")
 
         ds.close()
         return profiles
@@ -529,36 +562,36 @@ class HWSDSource(DataSource):
         lat: float,
         lon: float,
         region: Region,
-    ) -> SoilProfile:
-        """Create profile with default values."""
-        layer = SoilLayer(
-            depth_top=0.0,
-            depth_bottom=0.2,
-            sand=DEFAULT_SOIL["sand"],
-            clay=DEFAULT_SOIL["clay"],
-            silt=DEFAULT_SOIL["silt"],
-            organic_carbon=DEFAULT_SOIL["soc"],
-            bulk_density=DEFAULT_SOIL["bd"],
-            ph=DEFAULT_SOIL["ph"],
-        )
+    ) -> None:
+        """Sprint D.1 AC-4: returns None.
 
-        return SoilProfile(
-            profile_id=f"HWSD_DEFAULT_{cell_id:06d}",
-            lat=lat,
-            lon=lon,
-            source=f"{self.NAME}_default",
-            layers=[layer],
-            total_depth=0.2,
-            metadata={
-                "is_default": True,
-                # V2-22c-PRE.1.10 (D37) — DEFAULT fallback within
-                # HWSD's own loader; the source-name suffix
-                # `_default` flags the fallback to the cockpit.
-                "source": "HWSD_default",
-                "version": "v2.0",
-                "cascade_rank": 1,
-                "fallback_attempts": [],
-            },
+        The synthetic Sahel-typical DEFAULT_SOIL profile is retired.
+        Callers must consult the loader's ``unavailable_cells``
+        list (or ``RetrievalResult.metadata['unavailable_cells']``)
+        to discover which cells lack HWSD coverage and route them
+        to ``data_availability='unavailable'`` with axis ``soil``
+        and cause ``soil_no_hwsd_coverage``.
+
+        The DEFAULT_SOIL dict at :data:`DEFAULT_SOIL` (module top
+        of file) is preserved as historical documentation of the
+        retired synthetic values; no caller in active code paths
+        constructs a profile from it.
+        """
+        return None
+
+    def _record_unavailable(
+        self,
+        cell_id: int,
+        cause: str = "soil_no_hwsd_coverage",
+    ) -> None:
+        """Record that the loader could not produce a real profile
+        for this cell. The executor reads
+        ``self.unavailable_cells`` at HARMONIZE stage end and
+        routes each cell to ``data_availability='unavailable'``
+        with axis ``soil`` and the recorded cause.
+        """
+        self.unavailable_cells.append(
+            {"cell_id": cell_id, "cause": cause}
         )
 
     def _calculate_statistics(
