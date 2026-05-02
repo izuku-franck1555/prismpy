@@ -15,12 +15,14 @@ Sprint D.1 band rationale:
 
 * Lower bound 815 — preserves the contract's lower bound from
   the Draft 3 LOCKED FINAL absorption.
-* Upper bound 900 — widened from the Draft 3 contract's 850
-  upper bound to absorb the parametrize-fixture spread that
-  came in higher than the contract's 43-net-new estimate.
-  Per builder GB-ready report, the actual fixture spread is
-  documented; the upper-bound widening is a sprint-cadence
-  amendment surfaced at GB-ready.
+* Upper bound 910 — initially widened from the Draft 3
+  contract's 850 upper bound to 900 to absorb the parametrize-
+  fixture spread that came in higher than the contract's
+  43-net-new estimate. Then re-anchored to 910 in commit 10
+  to absorb codex self-check LOW Q3 (3 new remap unit tests
+  in ``test_executor_hwsd_remap.py``) without trimming load-
+  bearing pins. Per builder GB-ready report, the upper-bound
+  widening is a sprint-cadence amendment surfaced at GB-ready.
 
 Re-anchor this pin by updating ``_LOWER`` / ``_UPPER`` after a
 new sprint deliberately changes the trajectory.
@@ -38,7 +40,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 _LOWER = 815
-_UPPER = 900
+_UPPER = 910
 
 
 class TestSprintDTrajectory(TestCase):

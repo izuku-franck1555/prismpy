@@ -382,8 +382,11 @@ class TestCarveOutRegression:
         # ``unavailable_cells`` propagation through the cascade
         # orchestrator (~49 lines: extended docstring + tuple-return
         # capture/remap + caller unpacking + retrieved_data stash).
-        # Same try block, new line number.
-        ("src/prismpy/pipeline/executor.py", 2666),
+        # Then 2666 → 2671 after Sprint D.1 commit 10 absorbed
+        # codex LOW Q5 (replaced defensive ``getattr(..., [])`` with
+        # direct attribute access + 5-line comment documenting the
+        # rationale). Same try block, new line number.
+        ("src/prismpy/pipeline/executor.py", 2671),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed

@@ -1927,8 +1927,13 @@ class TranslationPipeline:
             # retrieval succeeded with partial coverage or failed
             # entirely (the all-miss case still records each cell
             # via ``_record_unavailable``).
+            # Direct attribute access — ``HWSDSource.__init__`` always
+            # initializes ``unavailable_cells`` to an empty list, so a
+            # missing-attribute case represents a contract regression
+            # that should surface loudly rather than silently degrade
+            # to an empty list via ``getattr``.
             unavailable_cells: List[Dict[str, Any]] = []
-            for entry in getattr(hwsd_source, 'unavailable_cells', []) or []:
+            for entry in hwsd_source.unavailable_cells:
                 idx = entry.get("cell_id")
                 if idx is None or not (0 <= idx < len(cell_ids)):
                     continue

@@ -7,7 +7,11 @@ new sprint deliberately changes the trajectory"). Sprint D.1's
 harmonize-stage helpers + axis/cause schema + provenance
 additions add ~90 net-new tests including parametrize spread
 across 4 platforms × 4 soil labels and texture/rh boundary
-inclusivity cases.
+inclusivity cases. Then re-anchored to [815, 910] in Sprint D.1
+commit 10 to absorb codex self-check LOW Q3 (3 new remap unit
+tests in ``test_executor_hwsd_remap.py``); kept in sync with
+``test_sprint_d_trajectory.py`` since both pins measure the
+same ``pytest tests/ --collect-only`` count.
 
 Anti-mutation drill: a count outside ``[_LOWER, _UPPER]`` fails
 this pin. Catches both under-shooting (a contributor accidentally
@@ -29,7 +33,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 _LOWER = 815
-_UPPER = 900
+_UPPER = 910
 
 
 class TestSprintCTrajectory(TestCase):
