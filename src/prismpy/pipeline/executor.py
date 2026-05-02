@@ -1780,7 +1780,7 @@ class TranslationPipeline:
 
     def _retrieve_hwsd_for_grid(
         self, grid, region: Region
-    ) -> Optional[Dict[int, SoilProfile]]:
+    ) -> Tuple[Optional[Dict[int, SoilProfile]], List[Dict[str, Any]]]:
         """Retrieve per-cell HWSD soil data for ACEA/CRAFT platforms.
 
         NOTE: This retrieval runs in the HARMONIZE stage because it needs
@@ -1806,13 +1806,25 @@ class TranslationPipeline:
             region: Region for metadata
 
         Returns:
-            Dictionary of cell_id -> SoilProfile, or None if unavailable
+            Tuple of ``(profiles, unavailable_cells)``. ``profiles`` is a
+            dict of cell_id -> SoilProfile when extraction succeeded, or
+            None when HWSD was not run (no enabled platform / paths not
+            found / exception). ``unavailable_cells`` is a list of
+            ``{"cell_id", "cause"}`` records the loader populated for
+            cells without HWSD coverage; cell_id is remapped from the
+            loader's grid-index keying to the actual grid cell IDs so
+            downstream consumers see consistent identifiers. Sprint D.1
+            AC-4 surfaces this list to ``_execute_harmonize`` via
+            ``retrieved_data['hwsd_unavailable_cells']`` so the
+            harmonize-stage helper can route each cell to
+            ``data_availability='unavailable'`` with cause
+            ``soil_no_hwsd_coverage``.
         """
         # Check if any platform that can use HWSD soil data is enabled
         enabled = self.config.get_enabled_platforms()
         hwsd_platforms = {Platform.ACEA, Platform.CRAFT, Platform.SARRA_PY, Platform.PYTHIA}
         if not hwsd_platforms.intersection(set(enabled)):
-            return None
+            return None, []
 
         # Resolve HWSD paths: top-level data_sources > platform config > auto-discovery
         bil_path = None
@@ -1853,7 +1865,7 @@ class TranslationPipeline:
 
         if not (bil_path and mdb_path and bil_path.exists() and mdb_path.exists()):
             self.logger.debug("HWSD paths not configured or not found, skipping per-cell retrieval")
-            return None
+            return None, []
 
         # Build cell coordinates from grid
         cell_coords = [(cell.lat, cell.lon) for cell in grid.cells]
@@ -1907,6 +1919,28 @@ class TranslationPipeline:
                 region=region,
                 cell_coords=cell_coords,
             )
+
+            # Sprint D.1 AC-4 — capture loader-level unavailable
+            # cells and remap from the source's grid-index keying
+            # to actual grid cell IDs so the harmonize helper sees
+            # consistent identifiers. The list is populated whether
+            # retrieval succeeded with partial coverage or failed
+            # entirely (the all-miss case still records each cell
+            # via ``_record_unavailable``).
+            # Direct attribute access — ``HWSDSource.__init__`` always
+            # initializes ``unavailable_cells`` to an empty list, so a
+            # missing-attribute case represents a contract regression
+            # that should surface loudly rather than silently degrade
+            # to an empty list via ``getattr``.
+            unavailable_cells: List[Dict[str, Any]] = []
+            for entry in hwsd_source.unavailable_cells:
+                idx = entry.get("cell_id")
+                if idx is None or not (0 <= idx < len(cell_ids)):
+                    continue
+                unavailable_cells.append({
+                    "cell_id": cell_ids[idx],
+                    "cause": entry.get("cause", "soil_no_hwsd_coverage"),
+                })
 
             if result.success and result.data:
                 raw_profiles = result.data.profiles
@@ -1979,14 +2013,19 @@ class TranslationPipeline:
                         artifact_id="soil",
                     )
 
-                return profiles
+                return profiles, unavailable_cells
             else:
                 self.logger.warning(f"HWSD retrieval failed: {result.errors}")
+                # Sprint D.1 AC-4 — surface unavailable cells even
+                # on the all-miss failure path so the harmonize
+                # helper still routes the contract-named no-HWSD-
+                # coverage class to ``data_availability='unavailable'``.
+                return None, unavailable_cells
 
         except Exception as e:
             self.logger.warning(f"HWSD retrieval error: {e}")
 
-        return None
+        return None, []
 
     def _load_crop_params(self) -> Optional[CropParameters]:
         """Load crop parameters from templates or config.
@@ -2371,7 +2410,22 @@ class TranslationPipeline:
                             artifact_id="soil",
                         )
                 else:
-                    hwsd_soil = self._retrieve_hwsd_for_grid(grid, region)
+                    hwsd_soil, hwsd_unavailable = (
+                        self._retrieve_hwsd_for_grid(grid, region)
+                    )
+                    # Sprint D.1 AC-4 — surface the loader-level
+                    # unavailable list to the harmonize stage via
+                    # ``retrieved_data``. The harmonize helper reads
+                    # ``hwsd_unavailable_cells`` and routes each
+                    # cell to ``data_availability='unavailable'``
+                    # with cause ``soil_no_hwsd_coverage``. Done
+                    # before the ``if hwsd_soil`` branch so the
+                    # all-miss case (no profiles + a populated
+                    # unavailable list) still propagates.
+                    if hwsd_unavailable:
+                        retrieved_data["hwsd_unavailable_cells"] = (
+                            hwsd_unavailable
+                        )
                     if hwsd_soil:
                         soil_data = hwsd_soil
                         # V2-22c-PRE.1.10 (D37) cascade-rank update —
@@ -2453,6 +2507,42 @@ class TranslationPipeline:
                     # "version: unknown".
                     ts.metadata.setdefault("version", None)
 
+            # Sprint D.1 — apply the harmonize-stage transformations
+            # in place. Mutates soil_data (texture-fraction
+            # renormalization per layer; cells with delta > 5%
+            # routed to ``unavailable``) and climate_data_for_unified
+            # (rh clip-to-100 in (100, 102]; >102 routes the cell's
+            # climate axis to ``unavailable``). Surface HWSD
+            # coverage misses (the loader-level
+            # ``unavailable_cells`` list propagated through the
+            # retrieval-result metadata) as cell-unavailable
+            # records on the harmonize stats. The returned stats
+            # carry the cell list so the cell-summary build path
+            # downstream can populate ``unavailable_cause``.
+            from prismpy.harmonize.apply import apply_harmonize_transformations
+            # The HWSD-unavailable list propagates through the
+            # retrieval-result metadata; the executor surfaces it
+            # to the harmonize helper when the cascade walked
+            # through HWSD. The helper accepts None / empty for
+            # the iSDA-only path.
+            hwsd_unavailable_cells = (
+                retrieved_data.get("hwsd_unavailable_cells") or []
+            )
+            harmonize_stats = apply_harmonize_transformations(
+                soil_data=soil_data,
+                climate_data=climate_data_for_unified,
+                provenance_tracker=(
+                    self.provenance if self.provenance.enabled else None
+                ),
+                hwsd_unavailable_cells=hwsd_unavailable_cells,
+            )
+            self.logger.info(
+                "Harmonize transformations: "
+                f"texture_renormalized={harmonize_stats.n_texture_renormalized}, "
+                f"rh_clipped={harmonize_stats.n_rh_clipped}, "
+                f"cells_unavailable={len(harmonize_stats.cells_unavailable)}"
+            )
+
             unified_data = UnifiedData(
                 region=region,
                 grid=grid,
@@ -2463,11 +2553,22 @@ class TranslationPipeline:
                 metadata={
                     "harmonized_at": datetime.now().isoformat(),
                     "config_version": self.config.project.version,
+                    # Sprint D.1 — surface the harmonize stats so
+                    # the cell-summary build path can route cells
+                    # to ``data_availability='unavailable'`` with
+                    # the matching cause.
+                    "harmonize_stats": {
+                        "n_texture_renormalized": (
+                            harmonize_stats.n_texture_renormalized
+                        ),
+                        "n_texture_warned": harmonize_stats.n_texture_warned,
+                        "n_rh_clipped": harmonize_stats.n_rh_clipped,
+                        "cells_unavailable": list(
+                            harmonize_stats.cells_unavailable
+                        ),
+                    },
                 },
             )
-
-            # Note: Actual harmonization (gap-filling, resampling, etc.)
-            # would be implemented using the harmonizers module
 
         except Exception as e:
             errors.append(f"Harmonization failed: {str(e)}")

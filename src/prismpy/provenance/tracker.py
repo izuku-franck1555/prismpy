@@ -703,6 +703,86 @@ class ProvenanceTracker:
             "n_cells_admitted": n_cells_admitted,
         }
 
+    def record_texture_renormalization(
+        self,
+        provenance_entry: Any,
+    ) -> None:
+        """Sprint D.1 AC-6 — record one texture-fraction
+        renormalization at the harmonize stage. The argument is
+        either a
+        :class:`prismpy.harmonize.texture_renormalize.TextureRenormalizationProvenance`
+        Pydantic instance or an already-serialized dict; the
+        record stores the dict form so the provenance JSON
+        round-trips cleanly.
+        """
+        if not self.enabled:
+            return
+        entry = (
+            provenance_entry.model_dump()
+            if hasattr(provenance_entry, "model_dump")
+            else dict(provenance_entry)
+        )
+        self.record.texture_renormalize_details.append(entry)
+
+    def record_rh_clip(
+        self,
+        provenance_entry: Any,
+    ) -> None:
+        """Sprint D.1 AC-6 — record one rh clip at the harmonize
+        stage. The argument is either a
+        :class:`prismpy.harmonize.rh_clip.RHClipProvenance`
+        Pydantic instance or an already-serialized dict.
+        """
+        if not self.enabled:
+            return
+        entry = (
+            provenance_entry.model_dump()
+            if hasattr(provenance_entry, "model_dump")
+            else dict(provenance_entry)
+        )
+        self.record.rh_clip_details.append(entry)
+
+    def record_cell_unavailable(
+        self,
+        cell_id: int,
+        unavailable_reason: str,
+        unavailable_cause: Optional[str] = None,
+    ) -> None:
+        """Sprint D.1 AC-6 — record one cell routed to
+        ``data_availability='unavailable'`` at the harmonize
+        stage. The detail list captures the cell id plus the
+        axis (``unavailable_reason``) and cause
+        (``unavailable_cause``) so the consumer can replay the
+        routing per cell.
+        """
+        if not self.enabled:
+            return
+        self.record.cells_unavailable_details.append(
+            {
+                "cell_id": cell_id,
+                "unavailable_reason": unavailable_reason,
+                "unavailable_cause": unavailable_cause,
+            }
+        )
+
+    def record_pythia_misdat_replacement(
+        self,
+        translator: str = "pythia",
+        count: int = 1,
+    ) -> None:
+        """Sprint D.1 AC-6 — track records that wrote the DSSAT
+        MISDAT sentinel for missing rain. Currently the count
+        is keyed by translator name; PYTHIA is the only target
+        for the AC-2 fix today, but the keyed shape leaves room
+        for a future translator to surface its own MISDAT
+        statistics without changing the field shape.
+        """
+        if not self.enabled:
+            return
+        self.record.pythia_misdat_replacements[translator] = (
+            self.record.pythia_misdat_replacements.get(translator, 0) + count
+        )
+
     def get_summary(self) -> Dict[str, Any]:
         """Get summary statistics for the session.
 

@@ -1,12 +1,21 @@
-"""F-W Sprint C — test trajectory pin (AC-10).
+"""F-W Sprint C — test trajectory pin (re-anchored for Sprint D.1).
 
-Asserts the prismpy test collection stays within the band the
-contract documented for Sprint C: 742 (pre-Sprint-C baseline) +
-30 to 50 net-new = 772 to 792.
+Originally anchored at the Sprint C band [772, 792]; re-anchored
+in Sprint D.1 to [815, 900] following the pin's own contract
+("Re-anchor this pin by updating ``_LOWER`` / ``_UPPER`` after a
+new sprint deliberately changes the trajectory"). Sprint D.1's
+harmonize-stage helpers + axis/cause schema + provenance
+additions add ~90 net-new tests including parametrize spread
+across 4 platforms × 4 soil labels and texture/rh boundary
+inclusivity cases. Then re-anchored to [815, 910] in Sprint D.1
+commit 10 to absorb codex self-check LOW Q3 (3 new remap unit
+tests in ``test_executor_hwsd_remap.py``); kept in sync with
+``test_sprint_d_trajectory.py`` since both pins measure the
+same ``pytest tests/ --collect-only`` count.
 
-Anti-mutation drill: a count outside ``[772, 792]`` fails this
-pin. Catches both under-shooting (a contributor accidentally
-removed Sprint C tests) and over-shooting (test churn that
+Anti-mutation drill: a count outside ``[_LOWER, _UPPER]`` fails
+this pin. Catches both under-shooting (a contributor accidentally
+removed Sprint C/D tests) and over-shooting (test churn that
 adds tests beyond the budget without re-anchoring this pin).
 
 Re-anchor this pin by updating ``_LOWER`` / ``_UPPER`` after a
@@ -23,8 +32,8 @@ from unittest import TestCase
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-_LOWER = 772
-_UPPER = 792
+_LOWER = 815
+_UPPER = 910
 
 
 class TestSprintCTrajectory(TestCase):

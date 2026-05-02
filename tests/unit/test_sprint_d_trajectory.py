@@ -1,0 +1,82 @@
+"""Sprint D.1 AC-9 — test trajectory pin.
+
+Asserts the prismpy test collection stays within the band the
+contract documented for Sprint D.1. Pre-Sprint-D baseline: 790
+collected at prismpy main ``4420035``. Post-Sprint-D actual is
+~883 driven by harmonize-stage helpers + axis/cause schema +
+provenance additions + AC-7 16-case soil-string-pin parametrize.
+
+Anti-mutation drill: a count outside ``[_LOWER, _UPPER]`` fails
+this pin. Catches both under-shooting (a contributor
+accidentally removed Sprint D tests) and over-shooting (test
+churn beyond the documented band).
+
+Sprint D.1 band rationale:
+
+* Lower bound 815 — preserves the contract's lower bound from
+  the Draft 3 LOCKED FINAL absorption.
+* Upper bound 910 — initially widened from the Draft 3
+  contract's 850 upper bound to 900 to absorb the parametrize-
+  fixture spread that came in higher than the contract's
+  43-net-new estimate. Then re-anchored to 910 in commit 10
+  to absorb codex self-check LOW Q3 (3 new remap unit tests
+  in ``test_executor_hwsd_remap.py``) without trimming load-
+  bearing pins. Per builder GB-ready report, the upper-bound
+  widening is a sprint-cadence amendment surfaced at GB-ready.
+
+Re-anchor this pin by updating ``_LOWER`` / ``_UPPER`` after a
+new sprint deliberately changes the trajectory.
+"""
+from __future__ import annotations
+
+import re
+import subprocess
+import sys
+from pathlib import Path
+from unittest import TestCase
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+_LOWER = 815
+_UPPER = 910
+
+
+class TestSprintDTrajectory(TestCase):
+
+    def test_collected_test_count_falls_within_sprint_d_band(self):
+        """Run ``pytest --collect-only -q`` in a subprocess so the
+        pin reflects the same number a developer (or CI) sees."""
+        result = subprocess.run(
+            [sys.executable, '-m', 'pytest', 'tests/',
+             '--collect-only', '-q'],
+            cwd=str(_REPO_ROOT),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        match = re.search(
+            r'(\d+)\s+tests?\s+collected', result.stdout,
+        )
+        if match is None:
+            self.fail(
+                f'Could not parse collect-only output: '
+                f'{result.stdout[-200:]!r}'
+            )
+        n_collected = int(match.group(1))
+        self.assertGreaterEqual(
+            n_collected, _LOWER,
+            f'Test collection count {n_collected} is BELOW the '
+            f'Sprint D.1 band [{_LOWER}, {_UPPER}]. A drop '
+            f'indicates tests were removed without updating this '
+            f'pin. Re-anchor _LOWER/_UPPER if intentional.',
+        )
+        self.assertLessEqual(
+            n_collected, _UPPER,
+            f'Test collection count {n_collected} is ABOVE the '
+            f'Sprint D.1 band [{_LOWER}, {_UPPER}]. Test churn '
+            f'beyond the documented band. Re-anchor '
+            f'_LOWER/_UPPER if intentional, or split the extra '
+            f'tests into a follow-up sprint.',
+        )

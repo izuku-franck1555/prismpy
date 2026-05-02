@@ -454,16 +454,30 @@ class PythiaTranslator(PythiaTranslatorBase):
                 for record in ts.records:
                     yrdoy = date_to_yrdoy(record.date)
 
-                    srad = record.srad if record.srad is not None else -99.0
-                    tmax = record.tmax if record.tmax is not None else -99.0
-                    tmin = record.tmin if record.tmin is not None else -99.0
-                    rain = record.precip if record.precip is not None else 0.0
-                    tdew = record.tdew if record.tdew is not None else -99.0
-                    rhum = record.rh if record.rh is not None else -99.0
-                    wind = record.wind if record.wind is not None else -99.0
+                    # Sprint D.1 AC-2 — every climate field uses the
+                    # DSSAT-canonical -99.0 missing-value sentinel
+                    # (Jones 2003 DSSAT v4.7 Wth.WTH spec). Rain
+                    # previously defaulted to 0.0 on missing and
+                    # was then re-clamped from -99 to 0.0 on the
+                    # next line; both paths silently filled missing
+                    # rain with phantom zero-rain days. Papers using
+                    # PYTHIA-derived Sahel rainy-season rain
+                    # analyses would attribute yield variability to
+                    # zero-rain days that never existed.
+                    MISDAT = -99.0
+                    srad = record.srad if record.srad is not None else MISDAT
+                    tmax = record.tmax if record.tmax is not None else MISDAT
+                    tmin = record.tmin if record.tmin is not None else MISDAT
+                    rain = record.precip if record.precip is not None else MISDAT
+                    tdew = record.tdew if record.tdew is not None else MISDAT
+                    rhum = record.rh if record.rh is not None else MISDAT
+                    wind = record.wind if record.wind is not None else MISDAT
 
-                    # Handle missing values
-                    rain = max(0, rain) if rain != -99 else 0.0
+                    # Clamp negative real-rain values to 0 (data
+                    # error correction), but never the missing
+                    # sentinel — let MISDAT propagate honestly.
+                    if rain != MISDAT and rain < 0.0:
+                        rain = 0.0
 
                     f.write(f"{yrdoy:7d} {srad:5.1f} {tmax:5.1f} {tmin:5.1f} ")
                     f.write(f"{rain:5.1f} {tdew:5.1f} {rhum:5.1f} {wind:5.1f}\n")

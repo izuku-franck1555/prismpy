@@ -350,8 +350,11 @@ class TestCarveOutRegression:
         # filter (~120 lines). Same try block, new line number.
         ("src/prismpy/pipeline/executor.py", 1229),
         # HWSD soil source — local-only reads per §11
-        # Line shifted 1741 → 1866 after F-R additions.
-        ("src/prismpy/pipeline/executor.py", 1866),
+        # Line shifted 1741 → 1866 after F-R additions. Then
+        # 1866 → 1878 after Sprint D.1 commit 9 extended the
+        # ``_retrieve_hwsd_for_grid`` docstring with the AC-4
+        # tuple-return contract.
+        ("src/prismpy/pipeline/executor.py", 1878),
         # HWSD per-cell sampling inside CRAFT translator
         ("src/prismpy/translators/craft/translator.py", 1692),
         # pygadm fallback inside _execute_retrieve: local pygadm import
@@ -372,8 +375,18 @@ class TestCarveOutRegression:
         # added ~35 lines to _execute_harmonize (Stage 3 exclusion-counter
         # increment, Stage 5 boundary_source fallback resolution, and
         # GeometryRequiredError re-raise on shapely parse failure for
-        # centroid_strict). Same try block, new line number.
-        ("src/prismpy/pipeline/executor.py", 2570),
+        # centroid_strict). Then 2570 → 2617 after Sprint D.1 wired the
+        # apply_harmonize_transformations call + harmonize-stats
+        # metadata into _execute_harmonize (~47 lines). Then 2617 →
+        # 2666 after Sprint D.1 commit 9 wired the HWSD
+        # ``unavailable_cells`` propagation through the cascade
+        # orchestrator (~49 lines: extended docstring + tuple-return
+        # capture/remap + caller unpacking + retrieved_data stash).
+        # Then 2666 → 2671 after Sprint D.1 commit 10 absorbed
+        # codex LOW Q5 (replaced defensive ``getattr(..., [])`` with
+        # direct attribute access + 5-line comment documenting the
+        # rationale). Same try block, new line number.
+        ("src/prismpy/pipeline/executor.py", 2671),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed
