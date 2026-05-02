@@ -2453,6 +2453,42 @@ class TranslationPipeline:
                     # "version: unknown".
                     ts.metadata.setdefault("version", None)
 
+            # Sprint D.1 — apply the harmonize-stage transformations
+            # in place. Mutates soil_data (texture-fraction
+            # renormalization per layer; cells with delta > 5%
+            # routed to ``unavailable``) and climate_data_for_unified
+            # (rh clip-to-100 in (100, 102]; >102 routes the cell's
+            # climate axis to ``unavailable``). Surface HWSD
+            # coverage misses (the loader-level
+            # ``unavailable_cells`` list propagated through the
+            # retrieval-result metadata) as cell-unavailable
+            # records on the harmonize stats. The returned stats
+            # carry the cell list so the cell-summary build path
+            # downstream can populate ``unavailable_cause``.
+            from prismpy.harmonize.apply import apply_harmonize_transformations
+            # The HWSD-unavailable list propagates through the
+            # retrieval-result metadata; the executor surfaces it
+            # to the harmonize helper when the cascade walked
+            # through HWSD. The helper accepts None / empty for
+            # the iSDA-only path.
+            hwsd_unavailable_cells = (
+                retrieved_data.get("hwsd_unavailable_cells") or []
+            )
+            harmonize_stats = apply_harmonize_transformations(
+                soil_data=soil_data,
+                climate_data=climate_data_for_unified,
+                provenance_tracker=(
+                    self.provenance if self.provenance.enabled else None
+                ),
+                hwsd_unavailable_cells=hwsd_unavailable_cells,
+            )
+            self.logger.info(
+                "Harmonize transformations: "
+                f"texture_renormalized={harmonize_stats.n_texture_renormalized}, "
+                f"rh_clipped={harmonize_stats.n_rh_clipped}, "
+                f"cells_unavailable={len(harmonize_stats.cells_unavailable)}"
+            )
+
             unified_data = UnifiedData(
                 region=region,
                 grid=grid,
@@ -2463,11 +2499,22 @@ class TranslationPipeline:
                 metadata={
                     "harmonized_at": datetime.now().isoformat(),
                     "config_version": self.config.project.version,
+                    # Sprint D.1 — surface the harmonize stats so
+                    # the cell-summary build path can route cells
+                    # to ``data_availability='unavailable'`` with
+                    # the matching cause.
+                    "harmonize_stats": {
+                        "n_texture_renormalized": (
+                            harmonize_stats.n_texture_renormalized
+                        ),
+                        "n_texture_warned": harmonize_stats.n_texture_warned,
+                        "n_rh_clipped": harmonize_stats.n_rh_clipped,
+                        "cells_unavailable": list(
+                            harmonize_stats.cells_unavailable
+                        ),
+                    },
                 },
             )
-
-            # Note: Actual harmonization (gap-filling, resampling, etc.)
-            # would be implemented using the harmonizers module
 
         except Exception as e:
             errors.append(f"Harmonization failed: {str(e)}")
