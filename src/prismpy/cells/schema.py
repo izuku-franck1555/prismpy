@@ -66,6 +66,21 @@ DataAvailability = Literal["complete", "unavailable"]
 UnavailableReason = Literal["climate", "soil", "climate_and_soil"]
 CellSummaryVersion = Literal["2.0", "2.1"]
 
+# The cause taxonomy is the per-cell explanation that complements
+# the axis-level ``unavailable_reason``. ``unavailable_reason``
+# answers "which axis is missing" (climate / soil / both); a cause
+# answers "why this axis is missing for this cell" so consumers
+# can route to a cause-specific message instead of a generic
+# missing-substrate one. Only the literals that a producer in this
+# repo emits are listed — adding an unreachable literal lets the
+# schema drift from runtime reality and is forbidden until a
+# matching producer ships.
+UnavailableCause = Literal[
+    "soil_no_hwsd_coverage",
+    "soil_texture_invalid",
+    "climate_rh_invalid",
+]
+
 CELL_SUMMARY_VERSIONS: tuple[str, ...] = ("2.0", "2.1")
 CELL_SUMMARY_VERSION_LATEST: str = "2.1"
 
@@ -177,6 +192,21 @@ class CellSummary(BaseModel):
     unavailable_reason: Optional[UnavailableReason] = None
     cell_summary_version: CellSummaryVersion = CELL_SUMMARY_VERSION_LATEST
 
+    # --- v2.1 cause discriminator (additive, default None) ---
+    # ``unavailable_cause`` is the cell-level explanation that
+    # pairs with the axis-level ``unavailable_reason``. Default
+    # None preserves backward compatibility with serialized
+    # records that pre-date this field — a v2.1 reader of an
+    # earlier v2.1 record (cause not yet emitted) loads cleanly
+    # with ``unavailable_cause=None``. Producers that route a
+    # cell to ``data_availability='unavailable'`` should pair
+    # the axis with a cause whenever a specific reason exists;
+    # the consumer's contract is "cause may be None even when
+    # axis is set" (legacy compat) but "cause must be
+    # axis-compatible when both are set" (the §1.3 fourth
+    # invariant below).
+    unavailable_cause: Optional[UnavailableCause] = None
+
     # --- §1.3 cross-field invariants ---
 
     @model_validator(mode="after")
@@ -266,5 +296,43 @@ class CellSummary(BaseModel):
                 f"unavailable_reason={reason!r} forbids {category} "
                 f"checks in failed_checks (got check_id={check_id!r}). "
                 f"The validator cannot fail an axis that did not run."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_axis_cause_coherence(self) -> "CellSummary":
+        """Invariant 4 — when ``unavailable_cause`` is set, it must be
+        axis-compatible with ``unavailable_reason``. The cause
+        prefix encodes the axis it belongs to (``soil_*`` causes
+        live on the soil axis; ``climate_*`` causes live on the
+        climate axis); pairing a soil cause with a climate-only
+        axis is an internal-consistency bug the schema rejects so
+        downstream consumers can trust the discriminator without
+        a runtime double-check.
+        """
+        if self.unavailable_cause is None:
+            return self
+        if self.unavailable_reason is None:
+            raise ValueError(
+                f"unavailable_cause={self.unavailable_cause!r} requires "
+                "unavailable_reason to be set ('climate', 'soil', or "
+                "'climate_and_soil') so the consumer can identify the "
+                "axis the cause belongs to."
+            )
+        cause_axis_prefix = self.unavailable_cause.split("_", 1)[0]
+        axis = self.unavailable_reason
+        if cause_axis_prefix == "soil" and axis not in ("soil", "climate_and_soil"):
+            raise ValueError(
+                f"unavailable_cause={self.unavailable_cause!r} is on "
+                f"the soil axis but unavailable_reason={axis!r} does "
+                f"not include soil. Soil causes require reason in "
+                f"{{'soil', 'climate_and_soil'}}."
+            )
+        if cause_axis_prefix == "climate" and axis not in ("climate", "climate_and_soil"):
+            raise ValueError(
+                f"unavailable_cause={self.unavailable_cause!r} is on "
+                f"the climate axis but unavailable_reason={axis!r} "
+                f"does not include climate. Climate causes require "
+                f"reason in {{'climate', 'climate_and_soil'}}."
             )
         return self
