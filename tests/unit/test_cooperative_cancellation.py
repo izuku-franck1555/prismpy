@@ -372,8 +372,11 @@ class TestCarveOutRegression:
         # added ~35 lines to _execute_harmonize (Stage 3 exclusion-counter
         # increment, Stage 5 boundary_source fallback resolution, and
         # GeometryRequiredError re-raise on shapely parse failure for
-        # centroid_strict). Same try block, new line number.
-        ("src/prismpy/pipeline/executor.py", 2570),
+        # centroid_strict). Then 2570 → 2617 after Sprint D.1 wired the
+        # apply_harmonize_transformations call + harmonize-stats
+        # metadata into _execute_harmonize (~47 lines). Same try
+        # block, new line number.
+        ("src/prismpy/pipeline/executor.py", 2617),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed
