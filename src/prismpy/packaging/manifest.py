@@ -9,7 +9,65 @@ import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+
+def derive_boundary_label(
+    resolved_source: str,
+    gadm_level: Optional[int],
+) -> Tuple[str, str]:
+    """Derive (label, description) for the boundary inclusion field
+    on a package manifest and the corresponding README cells.
+
+    The pipeline executor records the RESOLVED boundary source on
+    the runtime ``Region`` object after any retrieve-stage fallback
+    fires. Manifest writers must read that resolved value and pass
+    it here, along with the configured GADM admin level. The level
+    is only emitted when the resolved source is GADM; otherwise the
+    label / description describe the actual on-disk boundary
+    artifact (a manual bounding box, a shapefile, or — when the
+    resolved value is the runtime alias ``manual_bounds`` produced
+    by a GADM-failed-fallback at retrieve time — the same manual
+    label as for an explicit manual configuration).
+
+    Args:
+        resolved_source: the runtime-resolved boundary source string.
+            Expected values: ``"gadm"``, ``"manual"``,
+            ``"manual_bounds"``, ``"shapefile"``. Unknown values
+            raise ``ValueError`` so a future ``BoundarySource`` enum
+            extension surfaces at sprint-time rather than as a
+            silent fallthrough into the manual label.
+        gadm_level: the configured GADM admin level. Honored only
+            when ``resolved_source == "gadm"``; ignored (and may be
+            ``None``) for every other source. ``None`` is also
+            tolerated under GADM with a fallback to admin level 2 —
+            the same default the BoundaryConfig schema uses.
+
+    Returns:
+        A ``(label, description)`` tuple suitable for the manifest's
+        ``data_sources.boundaries`` field and the README's boundary
+        row.
+
+    Raises:
+        ValueError: if ``resolved_source`` is not one of the four
+            known values. The message names the offending source so
+            the caller can map it to a new branch in this helper.
+    """
+    if resolved_source == "gadm":
+        level = gadm_level if gadm_level is not None else 2
+        return (
+            f"GADM v4.1 admin level {level}",
+            "Official administrative boundaries",
+        )
+    if resolved_source in ("manual", "manual_bounds"):
+        return ("Bounding box", "Manual coordinate bounds")
+    if resolved_source == "shapefile":
+        return ("Custom shapefile", "User-provided boundary")
+    raise ValueError(
+        f"Unknown boundary source: {resolved_source!r}. "
+        "Update derive_boundary_label() when adding a "
+        "BoundarySource enum value."
+    )
 
 
 def compute_sha256(file_path: Union[str, Path]) -> str:
@@ -134,7 +192,15 @@ def create_manifest(
         "region": {
             "name": project_config.get("region_name", ""),
             "country": project_config.get("country", ""),
-            "gadm_level": project_config.get("gadm_level", 1),
+            # The default applies only when the translator omits
+            # the key entirely; an explicit ``None`` from the
+            # translator (the resolved-source-discriminator path
+            # for non-GADM sources) is preserved by ``dict.get``
+            # because the key is present. The default value 2
+            # matches the BoundaryConfig schema default for GADM
+            # configs, which is the only path that reaches this
+            # branch via the omit semantics.
+            "gadm_level": project_config.get("gadm_level", 2),
         },
 
         "crop": {

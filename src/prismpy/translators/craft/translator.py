@@ -2925,13 +2925,28 @@ class CraftTranslator(CraftTranslatorBase):
                 crop_mask_source = "SPAM 2020"
                 crop_mask_description = "Harvested area fractions from MapSPAM"
 
-        boundary_source = "Bounding box"
-        boundary_description = "Manual coordinate bounds"
-        if platform_config:
-            gadm_path = getattr(platform_config, 'gadm_data_path', None)
-            if gadm_path:
-                boundary_source = "GADM v4.1"
-                boundary_description = "Official administrative boundaries"
+        # Manifest derivation reads the RESOLVED runtime boundary
+        # source so the package label tracks what actually landed
+        # on disk (the executor sets ``data.region.boundary_source``
+        # after any retrieve-stage fallback fires; a config that
+        # requested GADM but fell back to manual bounds resolves to
+        # ``manual``). The configured GADM admin level is honored
+        # only when the resolved source is GADM, so non-GADM
+        # packages emit a null admin level rather than a fake
+        # default.
+        from prismpy.packaging.manifest import derive_boundary_label
+        boundary_config = self.config.region.boundary
+        resolved_boundary_source = (
+            getattr(data.region, 'boundary_source', None)
+            or boundary_config.source.value
+        )
+        manifest_gadm_level = (
+            boundary_config.gadm_level
+            if resolved_boundary_source == 'gadm' else None
+        )
+        boundary_source, boundary_description = derive_boundary_label(
+            resolved_boundary_source, manifest_gadm_level,
+        )
 
         # Get admin names for schema
         admin_level1 = getattr(platform_config, 'admin_level1_name', 'Unknown') if platform_config else 'Unknown'
@@ -2976,6 +2991,18 @@ class CraftTranslator(CraftTranslatorBase):
 
             # Crop info
             'crop_name': self.config.crop.name if hasattr(self.config, 'crop') and self.config.crop else 'Unknown',
+            'planting_doy': (
+                self.config.crop.calendar.planting_doy
+                if (hasattr(self.config, 'crop') and self.config.crop
+                    and getattr(self.config.crop, 'calendar', None))
+                else None
+            ),
+            'maturity_doy': (
+                self.config.crop.calendar.maturity_doy
+                if (hasattr(self.config, 'crop') and self.config.crop
+                    and getattr(self.config.crop, 'calendar', None))
+                else None
+            ),
 
             # Temporal info
             'start_year': self.config.temporal.start_year if hasattr(self.config, 'temporal') and self.config.temporal else 2010,
@@ -3012,8 +3039,13 @@ class CraftTranslator(CraftTranslatorBase):
                 'climate': 'NASA POWER (to be downloaded)',
             },
 
-            # Additional manifest metadata
-            'gadm_level': getattr(platform_config, 'gadm_level', 2) if platform_config else 2,
+            # Additional manifest metadata. ``gadm_level`` is the
+            # configured admin level only when the resolved source
+            # is GADM; otherwise it is ``None`` so the manifest
+            # signals "no admin level applied" instead of leaking
+            # a fake default. Computed once via the resolved-source
+            # discriminator above.
+            'gadm_level': manifest_gadm_level,
         }
 
         # 1. Generate manifest

@@ -78,7 +78,7 @@ from sarra_py import load_TAMSAT_data, run_model
 
 | Data Type | Source | Format | Resolution |
 |-----------|--------|--------|------------|
-| Boundaries | {boundary_source} | JSON | Admin Level {gadm_level} |
+| Boundaries | {boundary_source} | JSON | {admin_level_label} |
 | Rainfall | {rainfall_source} | GeoTIFF | ~4km |
 | Temperature | {temperature_source} | GeoTIFF | ~10km |
 | Soil | {soil_source} | YAML | Regional |
@@ -1121,6 +1121,22 @@ def generate_readme(
     region_name = config.get('region_name', config.get('region', {}).get('name', 'Unknown'))
     package_name = config.get('package_name', f"{region_name.lower()}_package")
 
+    # Resolve gadm_level for the boundary cell. Translators emit
+    # ``None`` for non-GADM resolved sources via the manifest's
+    # resolved-source discriminator; rendering that None as
+    # ``Admin Level None`` would leak the runtime sentinel into
+    # the user-visible README. Map it to ``Admin Level: N/A`` so
+    # the boundary row stays readable for manual / shapefile /
+    # GADM-failed-fallback packages.
+    raw_gadm_level = config.get(
+        'gadm_level',
+        config.get('region', {}).get('gadm_level'),
+    )
+    if raw_gadm_level is None:
+        admin_level_label = "Admin Level: N/A"
+    else:
+        admin_level_label = f"Admin Level {raw_gadm_level}"
+
     # Common values for all platforms
     values = {
         'project_name': config.get('project_name', package_name),
@@ -1131,7 +1147,8 @@ def generate_readme(
         'start_year': config.get('start_year', config.get('temporal', {}).get('start_year', 2017)),
         'end_year': config.get('end_year', config.get('temporal', {}).get('end_year', 2017)),
         'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'gadm_level': config.get('gadm_level', config.get('region', {}).get('gadm_level', 1)),
+        'gadm_level': raw_gadm_level if raw_gadm_level is not None else 'N/A',
+        'admin_level_label': admin_level_label,
         'boundary_source': config.get('data_sources', {}).get('boundaries', 'GADM v4.1'),
         'rainfall_source': config.get('data_sources', {}).get('rainfall', 'TAMSAT v3.1'),
         'temperature_source': config.get('data_sources', {}).get('temperature', 'AgERA5'),

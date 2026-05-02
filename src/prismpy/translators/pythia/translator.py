@@ -2306,14 +2306,32 @@ class PythiaTranslator(PythiaTranslatorBase):
         Returns:
             Path to manifest.json
         """
-        from prismpy.packaging.manifest import create_manifest, save_manifest
+        from prismpy.packaging.manifest import (
+            create_manifest, derive_boundary_label, save_manifest,
+        )
+
+        # Resolved-source discriminator: read the runtime boundary
+        # source recorded on the Region (post-fallback at retrieve)
+        # and honor the configured GADM admin level only under GADM.
+        boundary_config = self.config.region.boundary
+        resolved_boundary_source = (
+            getattr(data.region, 'boundary_source', None)
+            or boundary_config.source.value
+        )
+        manifest_gadm_level = (
+            boundary_config.gadm_level
+            if resolved_boundary_source == 'gadm' else None
+        )
+        boundary_label, _ = derive_boundary_label(
+            resolved_boundary_source, manifest_gadm_level,
+        )
 
         # Build project config for manifest
         project_config = {
             "project_name": self.config.project.name,
             "region_name": data.region.name,
             "country": data.region.country,
-            "gadm_level": self.config.region.boundary.gadm_level or 2,
+            "gadm_level": manifest_gadm_level,
             "crop_name": self.config.crop.name,
             "planting_doy": self.config.crop.calendar.planting_doy if self.config.crop.calendar else None,
             "maturity_doy": self.config.crop.calendar.maturity_doy if self.config.crop.calendar else None,
@@ -2324,6 +2342,7 @@ class PythiaTranslator(PythiaTranslatorBase):
                 "climate": "NASA POWER",
                 "soil": "eGHR",
                 "crop_mask": "SPAM 2020",
+                "boundaries": boundary_label,
             }
         }
 
@@ -2350,7 +2369,23 @@ class PythiaTranslator(PythiaTranslatorBase):
         Returns:
             Path to README.md
         """
+        from prismpy.packaging.manifest import derive_boundary_label
         from prismpy.packaging.readme_generator import generate_readme
+
+        # Resolved-source discriminator (mirrors the manifest path)
+        # so the README boundary cell tracks the runtime outcome.
+        boundary_config = self.config.region.boundary
+        resolved_boundary_source = (
+            getattr(data.region, 'boundary_source', None)
+            or boundary_config.source.value
+        )
+        manifest_gadm_level = (
+            boundary_config.gadm_level
+            if resolved_boundary_source == 'gadm' else None
+        )
+        boundary_label, _ = derive_boundary_label(
+            resolved_boundary_source, manifest_gadm_level,
+        )
 
         # Count files by type
         weather_count = len(list((self.output_dir / "weather").glob("*.WTH"))) if (self.output_dir / "weather").exists() else 0
@@ -2375,7 +2410,7 @@ class PythiaTranslator(PythiaTranslatorBase):
             'region_name': data.region.name,
             'country': data.region.country,
             'crop_name': self.config.crop.name,
-            'gadm_level': self.config.region.boundary.gadm_level or 2,
+            'gadm_level': manifest_gadm_level,
 
             # Temporal
             'start_year': self.config.temporal.start_year if self.config.temporal else 2010,
@@ -2407,7 +2442,7 @@ class PythiaTranslator(PythiaTranslatorBase):
                 'climate': 'NASA POWER',
                 'soil': 'eGHR (GGCMI)',
                 'crop_mask': 'SPAM 2020',
-                'boundaries': 'GADM v4.1',
+                'boundaries': boundary_label,
             }
         }
 
