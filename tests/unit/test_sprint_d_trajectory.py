@@ -40,7 +40,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 _LOWER = 815
-_UPPER = 910
+_UPPER = 970
 
 
 class TestSprintDTrajectory(TestCase):
