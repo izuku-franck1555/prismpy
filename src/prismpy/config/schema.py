@@ -1987,6 +1987,31 @@ class ProjectConfig(BaseModel):
         description="Validation configuration"
     )
 
+    # Sprint E.0.5 AC-Q2-C2 — pin the bounds version and the
+    # zone-classifier raster version PER PROJECT at creation
+    # time. Re-runs use the recorded pin so a downstream
+    # bounds-version ratchet (new WMO normals window, new Beck
+    # KG raster, AgERA5 archive bump, numpy major-with-
+    # semantic-change) does not silently shift the science of
+    # an already-shipped project. CC-19 enforcement.
+    bounds_version: str = Field(
+        default="frozen_v1",
+        description=(
+            "Per-zone climate bounds version, e.g. 'frozen_v1'. "
+            "Pinned at project creation so re-runs reproduce. "
+            "Ratchets on WMO normals / Beck KG raster / "
+            "AgERA5 archive / numpy semantic changes."
+        ),
+    )
+    zone_classifier_version: str = Field(
+        default="beck_2023_v1",
+        description=(
+            "Köppen-Geiger raster classifier version, e.g. "
+            "'beck_2023_v1'. Pinned at project creation. "
+            "Ratchets on a new Beck raster release."
+        ),
+    )
+
     # V2-22c-PRE.4.2 (D32) — remediation spec submitted by the
     # cockpit's bulk-fix re-run path. Optional dict so original
     # runs and retries default to None and the REMEDIATION stage
