@@ -19,6 +19,7 @@ import logging
 
 from prismpy.config.schema import ProjectConfig, Platform
 from prismpy.config.loader import load_config
+from prismpy.warnings import WarningCategory
 from prismpy.models.region import Region
 from prismpy.models.climate import ClimateTimeSeries, ClimateRecord
 from prismpy.models.soil import SoilProfile, SoilLayer
@@ -1939,7 +1940,10 @@ class TranslationPipeline:
                     continue
                 unavailable_cells.append({
                     "cell_id": cell_ids[idx],
-                    "cause": entry.get("cause", "soil_no_hwsd_coverage"),
+                    "cause": entry.get(
+                        "cause",
+                        WarningCategory.SOIL_NO_HWSD_COVERAGE.value,
+                    ),
                 })
 
             if result.success and result.data:

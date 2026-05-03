@@ -347,14 +347,17 @@ class TestCarveOutRegression:
         # iSDA soil source — local-only reads per §11
         # Line shifted 1104 → 1229 after F-R added GeometryRequiredError
         # class at module top (~9 lines) plus harmonize-stage 5-stage
-        # filter (~120 lines). Same try block, new line number.
-        ("src/prismpy/pipeline/executor.py", 1229),
+        # filter (~120 lines). Then 1229 → 1230 after Sprint E.0
+        # imported WarningCategory at module top (+1 import line).
+        # Same try block, new line number.
+        ("src/prismpy/pipeline/executor.py", 1230),
         # HWSD soil source — local-only reads per §11
         # Line shifted 1741 → 1866 after F-R additions. Then
         # 1866 → 1878 after Sprint D.1 commit 9 extended the
         # ``_retrieve_hwsd_for_grid`` docstring with the AC-4
-        # tuple-return contract.
-        ("src/prismpy/pipeline/executor.py", 1878),
+        # tuple-return contract. Then 1878 → 1879 after Sprint
+        # E.0 imported WarningCategory at module top.
+        ("src/prismpy/pipeline/executor.py", 1879),
         # HWSD per-cell sampling inside CRAFT translator
         ("src/prismpy/translators/craft/translator.py", 1692),
         # pygadm fallback inside _execute_retrieve: local pygadm import
@@ -363,7 +366,8 @@ class TestCarveOutRegression:
         # REMEDIATION enum value + multi-line comment to the
         # PipelineStage class definition. Then 510 → 519 after F-R
         # added GeometryRequiredError class at module top (~9 lines).
-        ("src/prismpy/pipeline/executor.py", 519),
+        # Then 519 → 520 after Sprint E.0 added WarningCategory import.
+        ("src/prismpy/pipeline/executor.py", 520),
         # Provenance-flush inside the translator-dispatch except handler
         # in _execute_translate: writes decision records, cancel-inert.
         # Line shifted from 2338 → 2346 (PRE.3.3 thread-through)
@@ -385,8 +389,11 @@ class TestCarveOutRegression:
         # Then 2666 → 2671 after Sprint D.1 commit 10 absorbed
         # codex LOW Q5 (replaced defensive ``getattr(..., [])`` with
         # direct attribute access + 5-line comment documenting the
-        # rationale). Same try block, new line number.
-        ("src/prismpy/pipeline/executor.py", 2671),
+        # rationale). Then 2671 → 2675 after Sprint E.0
+        # commit 2 site-migrated the HWSD remap default-cause
+        # to ``WarningCategory.SOIL_NO_HWSD_COVERAGE.value``
+        # (multi-line argument + WarningCategory import on top).
+        ("src/prismpy/pipeline/executor.py", 2675),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed

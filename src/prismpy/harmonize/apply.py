@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from prismpy.harmonize.rh_clip import rh_action_for, RHClipProvenance
+from prismpy.warnings import WarningCategory
 from prismpy.harmonize.texture_renormalize import (
     renormalize_layer,
     texture_action_for,
@@ -78,7 +79,10 @@ def apply_harmonize_transformations(
     if hwsd_unavailable_cells:
         for entry in hwsd_unavailable_cells:
             cell_id = entry.get("cell_id")
-            cause = entry.get("cause") or "soil_no_hwsd_coverage"
+            cause = (
+                entry.get("cause")
+                or WarningCategory.SOIL_NO_HWSD_COVERAGE.value
+            )
             stats.cells_unavailable.append(
                 {
                     "cell_id": cell_id,
@@ -131,14 +135,14 @@ def apply_harmonize_transformations(
                 {
                     "cell_id": cell_id,
                     "unavailable_reason": "soil",
-                    "unavailable_cause": "soil_texture_invalid",
+                    "unavailable_cause": WarningCategory.SOIL_TEXTURE_INVALID.value,
                 }
             )
             if provenance_tracker is not None:
                 provenance_tracker.record_cell_unavailable(
                     cell_id=cell_id,
                     unavailable_reason="soil",
-                    unavailable_cause="soil_texture_invalid",
+                    unavailable_cause=WarningCategory.SOIL_TEXTURE_INVALID.value,
                 )
 
     # -------------------------------------------------------------
@@ -174,14 +178,14 @@ def apply_harmonize_transformations(
                 {
                     "cell_id": cell_id,
                     "unavailable_reason": "climate",
-                    "unavailable_cause": "climate_rh_invalid",
+                    "unavailable_cause": WarningCategory.CLIMATE_RH_INVALID.value,
                 }
             )
             if provenance_tracker is not None:
                 provenance_tracker.record_cell_unavailable(
                     cell_id=cell_id,
                     unavailable_reason="climate",
-                    unavailable_cause="climate_rh_invalid",
+                    unavailable_cause=WarningCategory.CLIMATE_RH_INVALID.value,
                 )
 
     return stats

@@ -22,6 +22,7 @@ from prismpy.models.region import Region
 from prismpy.models.soil import SoilLayer, SoilProfile
 from prismpy.provenance.tracker import ProvenanceTracker
 from prismpy.sources.base import DataSource, RetrievalResult
+from prismpy.warnings import WarningCategory
 
 
 logger = logging.getLogger(__name__)
@@ -192,7 +193,10 @@ class HWSDSource(DataSource):
             )
             if cell_coords:
                 for i, _ in enumerate(cell_coords):
-                    self._record_unavailable(i, cause="soil_no_hwsd_coverage")
+                    self._record_unavailable(
+                        i,
+                        cause=WarningCategory.SOIL_NO_HWSD_COVERAGE.value,
+                    )
             source_type = "no_coverage"
 
         if not profiles:
@@ -306,7 +310,10 @@ class HWSDSource(DataSource):
                 logger.warning("MDB columns missing; flagging cells unavailable.")
                 if self.config.use_defaults:
                     for i, _ in enumerate(cell_coords or []):
-                        self._record_unavailable(i, cause="soil_no_hwsd_coverage")
+                        self._record_unavailable(
+                        i,
+                        cause=WarningCategory.SOIL_NO_HWSD_COVERAGE.value,
+                    )
                 return profiles
 
             # Filter to selected layer and sequence
@@ -327,7 +334,10 @@ class HWSDSource(DataSource):
                         cell_id=i, lat=lat, lon=lon, props=props, region=region
                     )
                 elif self.config.use_defaults:
-                    self._record_unavailable(i, cause="soil_no_hwsd_coverage")
+                    self._record_unavailable(
+                        i,
+                        cause=WarningCategory.SOIL_NO_HWSD_COVERAGE.value,
+                    )
 
         # Sprint D.1 AC-4 \u2014 record the SMU-lookup-miss outcome
         # honestly. The previous FALLBACK_SUBSTITUTION decision
@@ -455,7 +465,10 @@ class HWSDSource(DataSource):
                         cell_id=i, lat=lat, lon=lon, props=props, region=region
                     )
                 elif self.config.use_defaults:
-                    self._record_unavailable(i, cause="soil_no_hwsd_coverage")
+                    self._record_unavailable(
+                        i,
+                        cause=WarningCategory.SOIL_NO_HWSD_COVERAGE.value,
+                    )
 
         ds.close()
         return profiles
@@ -582,7 +595,7 @@ class HWSDSource(DataSource):
     def _record_unavailable(
         self,
         cell_id: int,
-        cause: str = "soil_no_hwsd_coverage",
+        cause: str = WarningCategory.SOIL_NO_HWSD_COVERAGE.value,
     ) -> None:
         """Record that the loader could not produce a real profile
         for this cell. The executor reads
