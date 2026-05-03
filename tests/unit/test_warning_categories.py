@@ -325,6 +325,31 @@ class TestPydanticDeterminism(unittest.TestCase):
         second = tuple(WarningCategory)
         self.assertEqual(first, second)
 
+    def test_pydantic_basemodel_serializes_member_as_bare_string(self):
+        """The ``str``-based StrEnum convention works with
+        Pydantic v2's :meth:`BaseModel.model_dump` when
+        ``mode='json'`` is used: enum members serialize as
+        their string value, not as ``"WarningCategory.X"`` or
+        the bare member name. Catches a hypothetical Pydantic
+        2.x point release that flips the default to enum-name
+        serialization without this suite noticing — the
+        cell-summary v2.x JSON contract depends on the bare
+        string form.
+        """
+        from pydantic import BaseModel
+
+        class _Carrier(BaseModel):
+            cause: WarningCategory
+
+        carrier = _Carrier(cause=WarningCategory.SOIL_NO_HWSD_COVERAGE)
+        # mode='json' emits JSON-compatible types; the enum
+        # member must collapse to its string value.
+        dumped = carrier.model_dump(mode="json")
+        self.assertEqual(dumped["cause"], "soil_no_hwsd_coverage")
+        # The full JSON dump carries the same bytes.
+        json_str = carrier.model_dump_json()
+        self.assertIn('"cause":"soil_no_hwsd_coverage"', json_str)
+
     def test_bucket_map_serialization_byte_identical(self):
         """Serialize the bucket map twice and assert byte-
         identical JSON output. This is the load-bearing pin

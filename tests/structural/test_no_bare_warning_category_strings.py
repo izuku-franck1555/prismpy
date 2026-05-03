@@ -47,6 +47,18 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC_ROOT = _REPO_ROOT / "src" / "prismpy"
 
 
+# Scope note: the walker only flags BARE STRING LITERAL
+# constants (``ast.Constant`` nodes whose value is a known
+# WarningCategory string). String concatenation
+# (``"soil_" + "no_hwsd_coverage"``) and f-string
+# interpolation (``f"soil_{suffix}"``) deliberately stay
+# outside the walker's scope per the contract — the canonical
+# anti-pattern is a copy-pasted bare string, and a future
+# constructed-string bypass is rare enough that scoping the
+# walker tightly avoids false positives on legitimate string
+# arithmetic. A future sprint that needs broader coverage can
+# extend the walker's AST traversal at that time.
+#
 # Files allowed to contain bare warning-category strings. The
 # enum's own definition module is the canonical home; the
 # cells/schema.py Literal is the AC-E0-6 backward-compat

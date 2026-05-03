@@ -100,5 +100,43 @@ class TestMigrationPins(unittest.TestCase):
         )
 
 
+class TestValidatorTaxonomyBoundary(unittest.TestCase):
+    """Document the boundary between :data:`WarningCategory`
+    (cockpit warning taxonomy) and
+    :data:`prismpy.validators.scientific.UNAVAILABLE_CAUSES`
+    (validator audit-record taxonomy).
+
+    Both name "why this cell is unavailable" but serve
+    different surfaces: WarningCategory drives cockpit
+    warning rendering + the 5-bucket response taxonomy;
+    UNAVAILABLE_CAUSES drives validator details.cause field
+    on the manuscript audit record. They are deliberately
+    separate today.
+
+    This test documents the boundary in code so a future
+    contributor cannot silently introduce overlap. If a
+    future sprint unifies the two taxonomies, this test
+    fires first and the dev consciously decides whether to
+    delete it (intentional unification) or rename the
+    overlapping value (preserve the boundary).
+    """
+
+    def test_taxonomies_are_disjoint(self):
+        from prismpy.validators.scientific import UNAVAILABLE_CAUSES
+        from prismpy.warnings import WarningCategory
+
+        warning_values = {c.value for c in WarningCategory}
+        validator_values = set(UNAVAILABLE_CAUSES)
+        overlap = warning_values & validator_values
+        self.assertEqual(
+            overlap, set(),
+            f"WarningCategory + UNAVAILABLE_CAUSES must stay "
+            f"disjoint. Overlap detected: {sorted(overlap)!r}. "
+            f"If a future sprint unifies the two taxonomies, "
+            f"delete this test consciously rather than letting "
+            f"overlap accumulate silently.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
