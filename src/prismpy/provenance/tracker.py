@@ -783,6 +783,47 @@ class ProvenanceTracker:
             self.record.pythia_misdat_replacements.get(translator, 0) + count
         )
 
+    def record_stage_1_verdicts(
+        self,
+        snapshot: Dict[str, Any],
+    ) -> None:
+        """Sprint F AC-F-7 — attach a Stage 1 verdict snapshot
+        to the provenance record at pipeline start.
+
+        The wizard caller computes the snapshot at project
+        creation (the cached ``Project.stage_1_verdicts``
+        JSONField shape) and passes it here so the run's
+        provenance.json carries the per-(crop, zone) verdict
+        plus the substrate-version stamps the verdict was
+        computed against. The snapshot is the same shape AC-F-5
+        defines for the cache + AC-F-9 cockpit-readiness pin
+        consumes.
+
+        Args:
+            snapshot: Dict matching the AC-F-5 schema
+                (``{"schema_version", "cache_key", "created_at",
+                "entries", "substrate_versions"}``). Pass the
+                FULL dict, not just the entries list, so a
+                consumer can read the substrate stamps without
+                also reading the cached entries.
+
+        Stored on
+        :attr:`ProvenanceRecord.stage_1_verdicts_snapshot`;
+        serialized into ``provenance.json`` per
+        :meth:`ProvenanceRecord.to_dict`.
+        """
+        if not self.enabled:
+            return
+        # Defensive deep-copy so a downstream caller mutating
+        # the passed-in dict (or any of its nested lists /
+        # dicts) cannot retroactively alter the recorded
+        # snapshot. AC-F-7 + codex Gate A #14 — the snapshot
+        # is the audit trail of which verdict shape produced
+        # the run; a shallow copy would let entries[] mutation
+        # leak through.
+        import copy
+        self.record.stage_1_verdicts_snapshot = copy.deepcopy(snapshot)
+
     def record_bound_gen_provenance(
         self,
         provenance: "BoundGenProvenance",
