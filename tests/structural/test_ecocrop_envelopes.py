@@ -24,6 +24,7 @@ import json
 import re
 import unittest
 from datetime import date
+from pathlib import Path
 
 from prismpy.koppen.envelopes import (
     ECOCROP_ENVELOPE_PATH,
@@ -31,6 +32,9 @@ from prismpy.koppen.envelopes import (
     REQUIRED_PROVENANCE_FIELDS,
     load_ecocrop_envelopes,
 )
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 # Forbidden ECOCROP fields per AC-Q3-A-d + probe-1-A scope
@@ -162,6 +166,28 @@ class TestECOCROPProvenanceF28(unittest.TestCase):
         self.assertEqual(
             self.envelopes["rice"]["verbatim_source_url"],
             "https://ecocrop.apps.fao.org/ecocrop/srv/en/dataSheet?id=1574",
+        )
+
+
+class TestECOCROPPackageData(unittest.TestCase):
+    """Pin the pyproject package-data declaration so the
+    bundled JSON ships in installed wheels. Without this the
+    loader's default-path resolution raises FileNotFoundError
+    on a pip-installed prismpy even though source-tree tests
+    pass — a release-safety hole codex Gate A flagged HIGH."""
+
+    def test_pyproject_declares_koppen_package_data(self):
+        pyproject = (_REPO_ROOT / "pyproject.toml").read_text(
+            encoding="utf-8",
+        )
+        self.assertRegex(
+            pyproject,
+            r'\[tool\.setuptools\.package-data\][\s\S]*'
+            r'"prismpy\.koppen"\s*=\s*\[\s*"\*\.json"\s*\]',
+            "pyproject.toml must declare a "
+            "[tool.setuptools.package-data] block with "
+            '\'"prismpy.koppen" = ["*.json"]\' so the bundled '
+            "ecocrop_envelopes.json ships in installed wheels.",
         )
 
 

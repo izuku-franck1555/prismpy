@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from datetime import date
 from pathlib import Path
 from typing import Any, Dict
@@ -53,8 +54,11 @@ ECOCROP_ENVELOPE_PATH: Path = (
 
 # Required envelope fields per AC-Q3-A-d. Stage 1 uses ONLY
 # these four; ALTMX / pH / photoperiod / GMIN / GMAX /
-# latitude are Sprint F or V3 territory. The F27 AST walker
-# enforces this scope discipline at module-code time.
+# latitude are Sprint F or V3 territory. A subsequent
+# Sprint E.0.5 commit lands an F27 AST walker that enforces
+# this scope discipline at module-code time. This commit's
+# bundled JSON enforces it at the data layer via the
+# ``test_no_out_of_scope_fields_in_any_crop`` structural pin.
 REQUIRED_FIELDS: tuple[str, ...] = ("TMIN", "TMAX", "RMIN", "RMAX")
 
 
@@ -77,6 +81,15 @@ REQUIRED_PROVENANCE_FIELDS: tuple[str, ...] = (
 # future ECOCROP migration to a different domain does not
 # require a loader code change.
 REQUIRED_URL_PREFIX: str = "https://"
+
+
+# Canonical ISO 8601 calendar-date pattern (YYYY-MM-DD).
+# ``date.fromisoformat`` on Python 3.11+ also accepts the
+# compact ``YYYYMMDD`` and ISO week-date ``YYYY-Www-D``
+# forms; F28 rejects those because the structural test pin
+# requires canonical YYYY-MM-DD and downstream provenance
+# diffing assumes a single canonical representation.
+CANONICAL_DATE_RE: re.Pattern[str] = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 class EnvelopeValidationError(ValueError):
@@ -217,15 +230,27 @@ def _validate_one_envelope(
             f"with {REQUIRED_URL_PREFIX!r}. F28 requires "
             f"HTTPS URLs only."
         )
+    date_str = coerced["verbatim_retrieval_date"]
+    if not CANONICAL_DATE_RE.fullmatch(date_str):
+        raise EnvelopeValidationError(
+            f"Envelope for crop {crop_name!r} provenance "
+            f"verbatim_retrieval_date "
+            f"({date_str!r}) is not in canonical ISO 8601 "
+            f"calendar form (YYYY-MM-DD). F28 rejects compact "
+            f"YYYYMMDD and ISO week-date YYYY-Www-D forms; "
+            f"only canonical YYYY-MM-DD is accepted so "
+            f"downstream provenance diffing has a single "
+            f"canonical representation."
+        )
     try:
-        date.fromisoformat(coerced["verbatim_retrieval_date"])
+        date.fromisoformat(date_str)
     except ValueError as exc:
         raise EnvelopeValidationError(
             f"Envelope for crop {crop_name!r} provenance "
             f"verbatim_retrieval_date "
-            f"({coerced['verbatim_retrieval_date']!r}) is not a "
-            f"valid ISO 8601 calendar date (YYYY-MM-DD). F28 "
-            f"requires parseable ISO 8601 retrieval dates."
+            f"({date_str!r}) is not a real calendar date "
+            f"(month/day overflow). F28 requires a valid "
+            f"YYYY-MM-DD calendar value."
         ) from exc
 
     return coerced

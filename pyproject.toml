@@ -85,6 +85,15 @@ Repository = "https://github.com/izuku-franck1555/prismpy"
 where = ["src"]
 include = ["prismpy*"]
 
+[tool.setuptools.package-data]
+# Bundle non-Python data files into installed wheels. The
+# ``prismpy.koppen`` package ships ``ecocrop_envelopes.json``
+# which the loader expects to live next to the module at
+# install time; without this declaration setuptools omits
+# the JSON from the wheel and ``load_ecocrop_envelopes()``
+# raises FileNotFoundError on a pip-installed prismpy.
+"prismpy.koppen" = ["*.json"]
+
 [tool.black]
 line-length = 100
 target-version = ["py39", "py310", "py311", "py312"]

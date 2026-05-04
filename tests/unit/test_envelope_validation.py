@@ -243,6 +243,34 @@ class TestEnvelopeValidationF28(_LoaderTestBase):
         with self.assertRaises(EnvelopeValidationError):
             self._load(_valid_payload(m))
 
+    def test_compact_iso_date_rejected(self):
+        # ``date.fromisoformat`` accepts the compact YYYYMMDD form
+        # on Python 3.11+; F28 rejects it because downstream
+        # provenance diffing expects canonical YYYY-MM-DD only.
+        m = _valid_maize()
+        m["verbatim_retrieval_date"] = "20260503"
+        with self.assertRaises(EnvelopeValidationError) as ctx:
+            self._load(_valid_payload(m))
+        self.assertIn("YYYY-MM-DD", str(ctx.exception))
+
+    def test_iso_week_date_rejected(self):
+        # ``date.fromisoformat`` accepts the ISO week-date form
+        # on Python 3.11+; F28 rejects it for the same reason.
+        m = _valid_maize()
+        m["verbatim_retrieval_date"] = "2026-W18-7"
+        with self.assertRaises(EnvelopeValidationError) as ctx:
+            self._load(_valid_payload(m))
+        self.assertIn("YYYY-MM-DD", str(ctx.exception))
+
+    def test_calendar_overflow_date_rejected(self):
+        # YYYY-MM-DD shape passes the canonical regex but
+        # ``date.fromisoformat`` rejects month overflow (13).
+        m = _valid_maize()
+        m["verbatim_retrieval_date"] = "2026-13-01"
+        with self.assertRaises(EnvelopeValidationError) as ctx:
+            self._load(_valid_payload(m))
+        self.assertIn("real calendar date", str(ctx.exception))
+
     def test_empty_url_rejected(self):
         m = _valid_maize()
         m["verbatim_source_url"] = ""

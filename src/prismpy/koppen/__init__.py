@@ -24,9 +24,13 @@ Sprint E.0.5 (V2-22c-RESTART Phase 2) ships:
 
 Out-of-scope ECOCROP fields (Sprint F or V3 territory):
 ALTMX (max altitude), pH range, photoperiod, GMIN/GMAX
-growing-day range, latitude range. The F27 AST walker at
-``tests/structural/test_stage1_scope_walker.py`` enforces the
-precip-tmin-tmax-only discipline at module-code time.
+growing-day range, latitude range. A subsequent Sprint
+E.0.5 commit lands an F27 AST walker at
+``tests/structural/test_stage1_scope_walker.py`` to enforce
+the precip-tmin-tmax-only discipline at module-code time;
+this commit's bundled JSON enforces the discipline at the
+data layer via ``test_no_out_of_scope_fields_in_any_crop``
+in ``tests/structural/test_ecocrop_envelopes.py``.
 """
 from __future__ import annotations
 
