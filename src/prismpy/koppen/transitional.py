@@ -25,6 +25,20 @@ neighbors are treated per the "non-zero" rule from the
 research doc: an ocean neighbor does not flag a non-ocean
 cell as transitional (a coastal land cell is interior with
 respect to its land neighbors).
+
+Antimeridian wrap: when the center is near longitude 180°,
+neighbor offsets ±cell_size can land outside the raster's
+[-180, 180] extent. The neighbor longitude is wrapped via
+``((lon + 180) % 360) - 180`` so the antipodal-side neighbor
+is sampled correctly (a real BSh-BWh-style seam crossing
+the antimeridian is detected, not silently dropped as
+ocean).
+
+Pole crossing: when the center is near ±90° latitude,
+neighbor offsets can push latitude out of [-90, 90]. Those
+offsets are skipped — the raster cannot represent points
+above the pole, and the contract does not require pole-
+hop sampling for this sprint.
 """
 from __future__ import annotations
 
@@ -48,6 +62,22 @@ NEIGHBOR_OFFSETS: tuple[tuple[float, float], ...] = (
 )
 
 
+# WGS84 latitude range; neighbor offsets that push latitude
+# beyond ±90° are skipped (no pole-hop sampling in v1).
+_LAT_MIN: float = -90.0
+_LAT_MAX: float = 90.0
+
+
+def _wrap_lon(lon: float) -> float:
+    """Wrap longitude into [-180, 180) for the antimeridian.
+
+    ``((lon + 180) % 360) - 180`` maps any real number into
+    the canonical WGS84 range. ``180`` wraps to ``-180`` (same
+    physical longitude); ``180.005`` wraps to ``-179.995``.
+    """
+    return ((lon + 180.0) % 360.0) - 180.0
+
+
 def is_transitional_cell(
     lat: float, lon: float, classifier: KGClassifier,
 ) -> bool:
@@ -58,6 +88,11 @@ def is_transitional_cell(
     center. Ocean cells (center=nodata) are NOT transitional.
     Ocean neighbors do not flag a non-ocean center.
 
+    Antimeridian-aware: neighbor longitudes are wrapped into
+    [-180, 180) so seams crossing 180° fire correctly.
+    Pole-aware: neighbor latitudes outside [-90, 90] are
+    skipped (the raster does not extend past the poles).
+
     Per AC-Q1-A. Per the research doc §Q1.3 and CC-13.
     """
     center = classifier.classify(lat, lon)
@@ -65,7 +100,12 @@ def is_transitional_cell(
         # Ocean / nodata center — not transitional, just ocean.
         return False
     for dlat, dlon in NEIGHBOR_OFFSETS:
-        neighbor = classifier.classify(lat + dlat, lon + dlon)
+        n_lat = lat + dlat
+        if not _LAT_MIN <= n_lat <= _LAT_MAX:
+            # Pole crossing: skip offsets above ±90°.
+            continue
+        n_lon = _wrap_lon(lon + dlon)
+        neighbor = classifier.classify(n_lat, n_lon)
         if neighbor is None:
             # Ocean neighbor: skip per the "non-zero" rule
             # (research doc §Q1.3).
@@ -85,14 +125,19 @@ def classify_with_transitional_flag(
     are needed (e.g. bound-gen pre-filtering, wizard banner
     rendering).
 
-    Ocean cells return ``(None, False)``.
+    Ocean cells return ``(None, False)``. Antimeridian +
+    pole handling matches :func:`is_transitional_cell`.
     """
     center = classifier.classify(lat, lon)
     if center is None:
         return None, False
     transitional = False
     for dlat, dlon in NEIGHBOR_OFFSETS:
-        neighbor = classifier.classify(lat + dlat, lon + dlon)
+        n_lat = lat + dlat
+        if not _LAT_MIN <= n_lat <= _LAT_MAX:
+            continue
+        n_lon = _wrap_lon(lon + dlon)
+        neighbor = classifier.classify(n_lat, n_lon)
         if neighbor is None:
             continue
         if neighbor != center:

@@ -22,6 +22,7 @@ trail with the raster DOI + the bounds_version pin.
 """
 from __future__ import annotations
 
+import math
 from enum import Enum
 from pathlib import Path
 from typing import Iterable, Optional
@@ -33,6 +34,41 @@ from prismpy.koppen.raster_loader import (
     KG_CODE_TO_NAME,
     NODATA_CODE,
 )
+
+
+# WGS84 lat/lon ranges. Coordinates outside these ranges cannot
+# be sampled meaningfully; the classifier raises ValueError
+# rather than silently returning ``None`` so a bad upstream
+# coordinate is distinguishable from a true ocean cell.
+_LAT_MIN: float = -90.0
+_LAT_MAX: float = 90.0
+_LON_MIN: float = -180.0
+_LON_MAX: float = 180.0
+
+
+def _validate_coords(lat: float, lon: float) -> None:
+    """Reject non-finite or out-of-globe coordinates fail-loud.
+
+    ``classify()`` reserves ``None`` for in-bounds raster
+    nodata (ocean / no data). Bad upstream coordinates must
+    raise so coordinate-schema bugs surface rather than
+    masquerading as ocean.
+    """
+    if not (math.isfinite(lat) and math.isfinite(lon)):
+        raise ValueError(
+            f"KGClassifier coordinates must be finite; got "
+            f"lat={lat!r}, lon={lon!r}."
+        )
+    if not _LAT_MIN <= lat <= _LAT_MAX:
+        raise ValueError(
+            f"KGClassifier latitude {lat!r} out of range "
+            f"[{_LAT_MIN}, {_LAT_MAX}]."
+        )
+    if not _LON_MIN <= lon <= _LON_MAX:
+        raise ValueError(
+            f"KGClassifier longitude {lon!r} out of range "
+            f"[{_LON_MIN}, {_LON_MAX}]."
+        )
 
 
 class KGZone(str, Enum):
@@ -122,8 +158,12 @@ class KGClassifier:
         """Sample the raster at (lon, lat) and return the KG zone.
 
         Returns ``None`` for ocean / nodata cells. Coordinates
-        are in EPSG:4326 (WGS84 lat/lon).
+        are in EPSG:4326 (WGS84 lat/lon). Raises
+        :class:`ValueError` for non-finite or out-of-globe
+        coordinates so a bad upstream coordinate is
+        distinguishable from a true ocean cell.
         """
+        _validate_coords(lat, lon)
         return self._code_to_zone(self._sample_one(lat, lon))
 
     def classify_batch(
@@ -132,14 +172,21 @@ class KGClassifier:
         """Batch classify ``(lat, lon)`` points.
 
         More efficient than per-point :meth:`classify` calls
-        since rasterio amortizes the dataset traversal.
+        since rasterio amortizes the dataset traversal. Each
+        point is validated up-front; the first invalid point
+        raises :class:`ValueError`.
         """
         if self._dataset is None:
             raise RuntimeError(
                 "KGClassifier dataset is closed; cannot classify."
             )
+        # Materialize points so validation runs once + sampling
+        # gets a stable list (Iterable is single-shot in general).
+        materialized = list(points)
+        for lat, lon in materialized:
+            _validate_coords(lat, lon)
         # rasterio.sample expects (x, y) = (lon, lat) tuples
-        coords = [(lon, lat) for lat, lon in points]
+        coords = [(lon, lat) for lat, lon in materialized]
         codes = [int(v[0]) for v in self._dataset.sample(coords)]
         return [self._code_to_zone(c) for c in codes]
 

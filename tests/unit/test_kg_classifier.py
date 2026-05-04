@@ -193,5 +193,71 @@ class TestKGClassifierLifecycle(unittest.TestCase):
         cls.close()  # second close is a no-op
 
 
+class TestKGClassifierCoordinateValidation(unittest.TestCase):
+    """Bad upstream coordinates must raise so they don't
+    masquerade as ocean. ``None`` is reserved for in-bounds
+    raster nodata only."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.classifier = KGClassifier()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.classifier.close()
+
+    def test_lat_above_90_rejected(self):
+        with self.assertRaises(ValueError):
+            self.classifier.classify(91.0, 0.0)
+
+    def test_lat_below_minus_90_rejected(self):
+        with self.assertRaises(ValueError):
+            self.classifier.classify(-91.0, 0.0)
+
+    def test_lon_above_180_rejected(self):
+        with self.assertRaises(ValueError):
+            self.classifier.classify(0.0, 181.0)
+
+    def test_lon_below_minus_180_rejected(self):
+        with self.assertRaises(ValueError):
+            self.classifier.classify(0.0, -181.0)
+
+    def test_nan_lat_rejected(self):
+        with self.assertRaises(ValueError):
+            self.classifier.classify(float("nan"), 0.0)
+
+    def test_nan_lon_rejected(self):
+        with self.assertRaises(ValueError):
+            self.classifier.classify(0.0, float("nan"))
+
+    def test_inf_lat_rejected(self):
+        import math as _m
+        with self.assertRaises(ValueError):
+            self.classifier.classify(_m.inf, 0.0)
+
+    def test_neg_inf_lon_rejected(self):
+        import math as _m
+        with self.assertRaises(ValueError):
+            self.classifier.classify(0.0, -_m.inf)
+
+    def test_lat_at_pole_accepted(self):
+        # Exactly ±90° is in range — should not raise (returns
+        # whatever the raster has at the pole, which may be EF
+        # or nodata).
+        self.classifier.classify(90.0, 0.0)
+        self.classifier.classify(-90.0, 0.0)
+
+    def test_lon_at_dateline_accepted(self):
+        # Exactly ±180° is in range; the wrap-equivalent.
+        self.classifier.classify(0.0, 180.0)
+        self.classifier.classify(0.0, -180.0)
+
+    def test_classify_batch_rejects_invalid_in_list(self):
+        with self.assertRaises(ValueError):
+            self.classifier.classify_batch(
+                [(13.5, 2.1), (91.0, 0.0)],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -157,5 +157,83 @@ class TestOceanNeighborSemantics(unittest.TestCase):
         )
 
 
+# Empirically verified antimeridian seam: center Dsc near
+# Russian Far East; east-wrap neighbor at ~-180°E is Dfc.
+# Without the longitude wrap the ``+CELL`` offset overflows
+# the raster and the neighbor is incorrectly read as ocean.
+_ANTIMERIDIAN_SEAM: tuple[float, float] = (67.9291666667, 179.9958333333)
+
+
+class TestAntimeridianWrap(unittest.TestCase):
+    """Cells near longitude 180° must sample their wrap-side
+    neighbors correctly. Without the wrap, the +CELL offset
+    overflows raster bounds and the neighbor is silently
+    dropped as ocean (codex Gate-A HIGH on commit 5)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.classifier = KGClassifier()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.classifier.close()
+
+    def test_antimeridian_seam_is_transitional(self):
+        # Without the wrap, the east neighbor (lon+CELL ~ 180.004)
+        # falls out of raster bounds and is read as ocean,
+        # silently flagging this real Dsc/Dfc seam as not-
+        # transitional. With the wrap (-179.996 = Dfc) the seam
+        # fires correctly.
+        lat, lon = _ANTIMERIDIAN_SEAM
+        self.assertTrue(
+            is_transitional_cell(lat, lon, self.classifier),
+            "Antimeridian Dsc/Dfc seam at (~67.93°N, ~179.996°E) "
+            "must classify as TRANSITIONAL after longitude wrap.",
+        )
+
+    def test_antimeridian_seam_classify_with_flag(self):
+        lat, lon = _ANTIMERIDIAN_SEAM
+        zone, transitional = classify_with_transitional_flag(
+            lat, lon, self.classifier,
+        )
+        self.assertEqual(zone, KGZone.Dsc)
+        self.assertTrue(transitional)
+
+
+class TestPoleNeighborHandling(unittest.TestCase):
+    """Cells at ±90° latitude have no neighbors above the pole;
+    those offsets must be skipped without a ValueError leaking
+    out of :func:`is_transitional_cell`."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.classifier = KGClassifier()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.classifier.close()
+
+    def test_north_pole_does_not_raise(self):
+        # The ``lat + CELL`` offsets at lat=90° push above the
+        # pole. The function must skip those rather than
+        # propagating ValueError from classify().
+        try:
+            is_transitional_cell(90.0, 0.0, self.classifier)
+        except ValueError as exc:
+            self.fail(
+                f"is_transitional_cell at the North Pole must "
+                f"not raise; got {exc!r}",
+            )
+
+    def test_south_pole_does_not_raise(self):
+        try:
+            is_transitional_cell(-90.0, 0.0, self.classifier)
+        except ValueError as exc:
+            self.fail(
+                f"is_transitional_cell at the South Pole must "
+                f"not raise; got {exc!r}",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
