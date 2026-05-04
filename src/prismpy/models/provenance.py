@@ -41,6 +41,13 @@ class DecisionType(str, Enum):
     UNIT_CONVERSION = "unit_conversion"              # Unit conversions (iSDA bd/100, pH/10, W/m² → MJ/m²/day)
     AGGREGATION_METHOD = "aggregation_method"        # Aggregation choice (mean/sum/majority) distinct from RESAMPLING
     QUALITY_CHECK = "quality_check"                  # Validation quality check outcome (Phase 2a)
+    # Sprint F additive — wizard-time user override on a Bucket 3
+    # warning. Distinct from PARAMETER_OVERRIDE because it carries
+    # the persona's stated rationale + evidence, not a substrate
+    # threshold change. See :class:`WizardOverrideRecord` for the
+    # canonical payload shape stored at wizard time and replayed
+    # into the pipeline tracker at run-start time.
+    USER_OVERRIDE = "user_override"
 
 
 @dataclass
