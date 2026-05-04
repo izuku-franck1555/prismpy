@@ -771,5 +771,173 @@ class TestClimateEnvelopeValidator(unittest.TestCase):
                 self.assertIn(issue.category, emits_values)
 
 
+# ── Sprint F G-c-4 reason-helper unit tests ──────────────────────────
+
+
+class TestPrecipVerdictReason(unittest.TestCase):
+    """Sprint F AC-F-2: ``precip_verdict_reason`` returns a
+    short data-only reason string for INCOMPATIBLE precip
+    verdicts and ``None`` otherwise.
+
+    Anti-mutation drill (per AC-F-2): change the helper to skip
+    the percentile crossing report → cockpit drawer would show
+    only "incompatible" with no number → caller's ECOCROP-URL-
+    aware composer has nothing to anchor → audit grep test
+    fails."""
+
+    def setUp(self):
+        from prismpy.validators.climate_envelope import (
+            CompatibilityVerdict,
+            precip_verdict_reason,
+        )
+        self._reason = precip_verdict_reason
+        self._Verdict = CompatibilityVerdict
+
+    def test_incompatible_low_side_reports_below_rmin(self):
+        # rice (RMIN=1000) × Sahel BSh (P50=280) — the canonical
+        # Sprint F G-c-4 inverse case.
+        out = self._reason(
+            self._Verdict.INCOMPATIBLE,
+            p25=200, p50=280, p75=350,
+            rmin=1000, rmax=4000,
+        )
+        self.assertEqual(
+            out, "P50 = 280mm/yr below RMIN = 1000mm/yr",
+        )
+
+    def test_incompatible_high_side_reports_above_rmax(self):
+        # Synthetic high-side branch (no Sahel-zone v1 crop hits
+        # this case; sorghum RMAX=700 is the closest).
+        out = self._reason(
+            self._Verdict.INCOMPATIBLE,
+            p25=2000, p50=4500, p75=5200,
+            rmin=400, rmax=4000,
+        )
+        self.assertEqual(
+            out, "P50 = 4500mm/yr above RMAX = 4000mm/yr",
+        )
+
+    def test_compatible_returns_none(self):
+        out = self._reason(
+            self._Verdict.COMPATIBLE,
+            p25=600, p50=900, p75=1200,
+            rmin=400, rmax=1800,
+        )
+        self.assertIsNone(out)
+
+    def test_marginal_heterogeneous_returns_none(self):
+        # MARGINAL_* verdicts NEVER drive a Sprint F emission;
+        # ClimateEnvelopeValidator's Bucket 2 INFO already
+        # surfaces them. Reason helper returns None so the
+        # caller cannot accidentally compose a noisy banner.
+        out = self._reason(
+            self._Verdict.MARGINAL_HETEROGENEOUS,
+            p25=350, p50=500, p75=800,
+            rmin=400, rmax=1800,
+        )
+        self.assertIsNone(out)
+
+    def test_marginal_thermal_seasonal_returns_none(self):
+        out = self._reason(
+            self._Verdict.MARGINAL_THERMAL_SEASONAL,
+            p25=400, p50=600, p75=900,
+            rmin=400, rmax=1800,
+        )
+        self.assertIsNone(out)
+
+    def test_reason_data_only_no_crop_no_url_no_zone(self):
+        # AC-F-2 contract: helper omits crop name + zone label +
+        # ECOCROP URL. Caller composes those at the wizard banner
+        # layer per ≤120-char budget. Pin guards against
+        # substrate drift that would re-introduce crop / zone /
+        # url into the helper signature.
+        out = self._reason(
+            self._Verdict.INCOMPATIBLE,
+            p25=200, p50=280, p75=350,
+            rmin=1000, rmax=4000,
+        )
+        self.assertNotIn("rice", out.lower())
+        self.assertNotIn("BSh", out)
+        self.assertNotIn("http", out.lower())
+        self.assertNotIn("FAO", out)
+        self.assertNotIn("ECOCROP", out)
+
+
+class TestThermalVerdictReason(unittest.TestCase):
+    """Sprint F AC-F-2: ``thermal_verdict_reason`` returns a
+    short data-only reason string for INCOMPATIBLE thermal
+    verdicts and ``None`` for compatible / marginal_thermal_
+    seasonal."""
+
+    def setUp(self):
+        from prismpy.validators.climate_envelope import (
+            CompatibilityVerdict,
+            thermal_verdict_reason,
+        )
+        self._reason = thermal_verdict_reason
+        self._Verdict = CompatibilityVerdict
+
+    def test_incompatible_cold_kill_reports_p10_below_tmin(self):
+        # Synthetic: maize TMIN=10 vs zone P10 extreme tmin=-5
+        out = self._reason(
+            self._Verdict.INCOMPATIBLE,
+            zone_p10_extreme_tmin=-5,
+            zone_p90_extreme_tmax=40,
+            crop_tmin=10, crop_tmax=47,
+        )
+        self.assertEqual(
+            out,
+            "P10 extreme tmin = -5°C below crop TMIN = 10°C",
+        )
+
+    def test_incompatible_heat_kill_reports_p90_above_tmax(self):
+        # Synthetic: rice TMAX=36 vs zone P90 extreme tmax=48
+        out = self._reason(
+            self._Verdict.INCOMPATIBLE,
+            zone_p10_extreme_tmin=12,
+            zone_p90_extreme_tmax=48,
+            crop_tmin=10, crop_tmax=36,
+        )
+        self.assertEqual(
+            out,
+            "P90 extreme tmax = 48°C above crop TMAX = 36°C",
+        )
+
+    def test_compatible_returns_none(self):
+        out = self._reason(
+            self._Verdict.COMPATIBLE,
+            zone_p10_extreme_tmin=15,
+            zone_p90_extreme_tmax=40,
+            crop_tmin=10, crop_tmax=47,
+        )
+        self.assertIsNone(out)
+
+    def test_marginal_thermal_seasonal_returns_none(self):
+        # Both cold-kill AND heat-kill route to
+        # MARGINAL_THERMAL_SEASONAL; reason helper returns None
+        # because Sprint F does not emit on marginal verdicts.
+        out = self._reason(
+            self._Verdict.MARGINAL_THERMAL_SEASONAL,
+            zone_p10_extreme_tmin=-5,
+            zone_p90_extreme_tmax=48,
+            crop_tmin=10, crop_tmax=36,
+        )
+        self.assertIsNone(out)
+
+    def test_reason_under_80_chars_for_caller_budget(self):
+        # Banner ≤120-char total budget per AC-F-2; the data-
+        # only reason this helper returns must stay well under
+        # that to leave room for the caller's "{Crop} requires
+        # T per FAO ECOCROP ({url}); {zone} ..." wrapper.
+        out = self._reason(
+            self._Verdict.INCOMPATIBLE,
+            zone_p10_extreme_tmin=-15,
+            zone_p90_extreme_tmax=48,
+            crop_tmin=10, crop_tmax=36,
+        )
+        self.assertIsNotNone(out)
+        self.assertLessEqual(len(out), 80)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import math
 from enum import Enum
-from typing import Dict, Iterable, List, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
 
@@ -215,6 +215,129 @@ def compare_thermal_extremes(
     if cold_kill or heat_kill:
         return CompatibilityVerdict.INCOMPATIBLE
     return CompatibilityVerdict.COMPATIBLE
+
+
+# ── Sprint F G-c-4 reason helpers ────────────────────────────────────
+#
+# Per Sprint F AC-F-2 + builder grounding Adj-3 Path B: the
+# verdict functions above stay pure (return enum only); these
+# sibling helpers compose a short data-only reason string the
+# caller can wrap with crop + zone + ECOCROP URL when emitting
+# the wizard banner. Reason copy is intentionally data-only —
+# zone-specific editorial gloss ("typical for arid climate")
+# moves to the banner template per AC-F-10. Returning ``None``
+# for non-INCOMPATIBLE verdicts keeps the contract honest:
+# only INCOMPATIBLE drives the Bucket 3 EXCLUDE emit, and
+# MARGINAL_* verdicts already surface via Bucket 2 INFO from
+# :class:`ClimateEnvelopeValidator` so a marginal reason here
+# would produce a noisy double-emit.
+
+
+def precip_verdict_reason(
+    verdict: CompatibilityVerdict,
+    p25: float, p50: float, p75: float,
+    rmin: float, rmax: float,
+) -> Optional[str]:
+    """Return a short data-only reason string for a precip
+    INCOMPATIBLE verdict, or ``None`` for any non-INCOMPATIBLE
+    state.
+
+    The reason names which IQR percentile drove the verdict
+    (P50 below RMIN, or P50 above RMAX) and reports the
+    crossing magnitude. Caller is responsible for wrapping with
+    crop name + zone label + ECOCROP source URL per AC-F-2's
+    ≤120-char banner-copy budget; this helper deliberately
+    omits those fields so the substrate stays free of free-text
+    formatting concerns.
+
+    Args:
+        verdict: result of :func:`compare_precip_iqr` for the
+            same (p25, p50, p75, rmin, rmax) tuple.
+        p25, p50, p75: zone P25/P50/P75 of per-cell annual mean
+            precip (mm/yr).
+        rmin, rmax: ECOCROP RMIN/RMAX envelope (mm/yr).
+
+    Returns:
+        ``None`` if verdict is COMPATIBLE / MARGINAL_*. For
+        INCOMPATIBLE, a string of the form
+        ``"P50 = 280mm/yr below RMIN = 1000mm/yr"`` (low side)
+        or ``"P50 = 4500mm/yr above RMAX = 4000mm/yr"`` (high
+        side). Inclusive boundary semantics match
+        :func:`compare_precip_iqr` (P50 == RMIN is in-envelope,
+        so an INCOMPATIBLE on that boundary cannot be reached).
+    """
+    if verdict is not CompatibilityVerdict.INCOMPATIBLE:
+        return None
+    # The verdict-fn marks INCOMPATIBLE only when P50 falls
+    # outside the envelope; one of the two branches must fire.
+    # The third "shouldn't happen" branch returns None defensively
+    # rather than raising — a substrate change in the verdict
+    # function should be caught by the substrate's own tests, not
+    # by the reason helper crashing the wizard.
+    if p50 < rmin:
+        return (
+            f"P50 = {p50:.0f}mm/yr below RMIN = {rmin:.0f}mm/yr"
+        )
+    if p50 > rmax:
+        return (
+            f"P50 = {p50:.0f}mm/yr above RMAX = {rmax:.0f}mm/yr"
+        )
+    return None
+
+
+def thermal_verdict_reason(
+    verdict: CompatibilityVerdict,
+    zone_p10_extreme_tmin: float,
+    zone_p90_extreme_tmax: float,
+    crop_tmin: float,
+    crop_tmax: float,
+) -> Optional[str]:
+    """Return a short data-only reason string for a thermal
+    INCOMPATIBLE verdict, or ``None`` for any non-INCOMPATIBLE
+    state.
+
+    Names which extreme drove the verdict (cold-kill = P10
+    extreme tmin below crop TMIN, or heat-kill = P90 extreme
+    tmax above crop TMAX) and reports the crossing magnitude.
+    Per :func:`compare_thermal_extremes` semantics, INCOMPATIBLE
+    fires only on cold-kill OR heat-kill alone; the both-kills
+    case routes to MARGINAL_THERMAL_SEASONAL and returns
+    ``None`` here because Sprint F does not emit on marginal
+    verdicts (already covered by ClimateEnvelopeValidator's
+    Bucket 2 INFO emit).
+
+    Args:
+        verdict: result of :func:`compare_thermal_extremes` for
+            the same input tuple.
+        zone_p10_extreme_tmin: zone P10 of per-cell minimum-of-
+            daily-tmin across the substrate window (°C).
+        zone_p90_extreme_tmax: zone P90 of per-cell maximum-of-
+            daily-tmax across the substrate window (°C).
+        crop_tmin, crop_tmax: ECOCROP TMIN/TMAX envelope (°C).
+
+    Returns:
+        ``None`` if verdict is COMPATIBLE / MARGINAL_*. For
+        INCOMPATIBLE, either ``"P10 extreme tmin = -5°C below
+        crop TMIN = 10°C"`` (cold-kill) or ``"P90 extreme tmax
+        = 48°C above crop TMAX = 40°C"`` (heat-kill).
+    """
+    if verdict is not CompatibilityVerdict.INCOMPATIBLE:
+        return None
+    cold_kill = zone_p10_extreme_tmin < crop_tmin
+    heat_kill = zone_p90_extreme_tmax > crop_tmax
+    # INCOMPATIBLE fires only on cold-kill OR heat-kill (not
+    # both — the both-kill case routes to MARGINAL_THERMAL_*).
+    if cold_kill:
+        return (
+            f"P10 extreme tmin = {zone_p10_extreme_tmin:.0f}°C "
+            f"below crop TMIN = {crop_tmin:.0f}°C"
+        )
+    if heat_kill:
+        return (
+            f"P90 extreme tmax = {zone_p90_extreme_tmax:.0f}°C "
+            f"above crop TMAX = {crop_tmax:.0f}°C"
+        )
+    return None
 
 
 def aggregate_verdicts(
