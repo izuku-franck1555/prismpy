@@ -1,0 +1,29 @@
+{
+  "version": "ecocrop_v1_2026-05-03",
+  "license": "FAO ECOCROP fair-use derivative; 8 numeric facts (2 crops × 4 fields); each fact carries verbatim_source_url + verbatim_retrieval_date provenance.",
+  "stage_1_scope_note": "Per AC-Q3-A-a/b/c, only TMIN/TMAX/RMIN/RMAX used for Stage 1; ALTMX/pH/photoperiod/GMIN/GMAX/latitude excluded per probe-1-A scope clarity. CLIZ field also excluded per AC-Q3-A-d (data-completeness gaps).",
+  "fields": {
+    "TMIN": "Absolute minimum annual temperature tolerated by the crop (°C)",
+    "TMAX": "Absolute maximum annual temperature tolerated by the crop (°C)",
+    "RMIN": "Minimum annual rainfall required (mm)",
+    "RMAX": "Maximum annual rainfall tolerated (mm)"
+  },
+  "crops": {
+    "maize": {
+      "TMIN": 10,
+      "TMAX": 47,
+      "RMIN": 400,
+      "RMAX": 1800,
+      "verbatim_source_url": "https://ecocrop.apps.fao.org/ecocrop/srv/en/dataSheet?id=2175",
+      "verbatim_retrieval_date": "2026-05-03"
+    },
+    "rice": {
+      "TMIN": 10,
+      "TMAX": 36,
+      "RMIN": 1000,
+      "RMAX": 4000,
+      "verbatim_source_url": "https://ecocrop.apps.fao.org/ecocrop/srv/en/dataSheet?id=1574",
+      "verbatim_retrieval_date": "2026-05-03"
+    }
+  }
+}

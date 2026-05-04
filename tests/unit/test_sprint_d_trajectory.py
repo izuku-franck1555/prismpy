@@ -15,14 +15,22 @@ Sprint D.1 band rationale:
 
 * Lower bound 815 — preserves the contract's lower bound from
   the Draft 3 LOCKED FINAL absorption.
-* Upper bound 910 — initially widened from the Draft 3
-  contract's 850 upper bound to 900 to absorb the parametrize-
-  fixture spread that came in higher than the contract's
-  43-net-new estimate. Then re-anchored to 910 in commit 10
-  to absorb codex self-check LOW Q3 (3 new remap unit tests
-  in ``test_executor_hwsd_remap.py``) without trimming load-
-  bearing pins. Per builder GB-ready report, the upper-bound
-  widening is a sprint-cadence amendment surfaced at GB-ready.
+* Upper bound 1080 — successive ratchets:
+  - 850 → 900 (Sprint D.1 mid-sprint) to absorb the parametrize-
+    fixture spread that came in higher than the contract's
+    43-net-new estimate.
+  - 900 → 910 (Sprint D.1 commit 10) to absorb codex self-check
+    LOW Q3 (3 new remap unit tests in
+    ``test_executor_hwsd_remap.py``).
+  - 910 → 970 (Sprint E.0) to absorb the WarningCategory enum
+    + 5-bucket map + 12-site Sprint D.1 migration tests.
+  - 970 → 1080 (Sprint E.0.5 commit 3) to absorb the ECOCROP
+    envelope substrate (AC-Q3-A-d + AC-Q3-A-NaN + F28 per-crop
+    provenance). Commit 3 added 38 tests + 12 subtests across
+    ``test_ecocrop_envelopes.py`` + ``test_envelope_validation.py``.
+    Headroom of ~91 tests reserved for the remaining Sprint
+    E.0.5 commits (KG classifier + jitter + bound-comparison
+    + provenance writer + sample-quality + F24/F26/F27 walkers).
 
 Re-anchor this pin by updating ``_LOWER`` / ``_UPPER`` after a
 new sprint deliberately changes the trajectory.
@@ -40,7 +48,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 _LOWER = 815
-_UPPER = 970
+_UPPER = 1080
 
 
 class TestSprintDTrajectory(TestCase):
