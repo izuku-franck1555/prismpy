@@ -15,14 +15,30 @@ Sprint D.1 band rationale:
 
 * Lower bound 815 — preserves the contract's lower bound from
   the Draft 3 LOCKED FINAL absorption.
-* Upper bound 910 — initially widened from the Draft 3
-  contract's 850 upper bound to 900 to absorb the parametrize-
-  fixture spread that came in higher than the contract's
-  43-net-new estimate. Then re-anchored to 910 in commit 10
-  to absorb codex self-check LOW Q3 (3 new remap unit tests
-  in ``test_executor_hwsd_remap.py``) without trimming load-
-  bearing pins. Per builder GB-ready report, the upper-bound
-  widening is a sprint-cadence amendment surfaced at GB-ready.
+* Upper bound 1080 — successive ratchets:
+  - 850 → 900 (Sprint D.1 mid-sprint) to absorb the parametrize-
+    fixture spread that came in higher than the contract's
+    43-net-new estimate.
+  - 900 → 910 (Sprint D.1 commit 10) to absorb codex self-check
+    LOW Q3 (3 new remap unit tests in
+    ``test_executor_hwsd_remap.py``).
+  - 910 → 970 (Sprint E.0) to absorb the WarningCategory enum
+    + 5-bucket map + 12-site Sprint D.1 migration tests.
+  - 970 → 1080 (Sprint E.0.5 commit 3) to absorb the ECOCROP
+    envelope substrate (AC-Q3-A-d + AC-Q3-A-NaN + F28 per-crop
+    provenance). Commit 3 added 38 tests + 12 subtests across
+    ``test_ecocrop_envelopes.py`` + ``test_envelope_validation.py``.
+  - 1080 → 1200 (Sprint E.0.5 commit 6) to absorb the climate-
+    envelope verdict logic (AC-Q3-A-a/b/c three-state precip
+    + extremes-aware thermal + verdict aggregation + zone
+    aggregation helpers).
+  - 1200 → 1300 (Sprint E.0.5 commit 9) to absorb the
+    walker family (F24 zone-purity + F26 designated-CI-runner
+    + F27 Stage 1 scope discipline) + cross-platform numpy.
+    quantile reproducibility unit tests + AC-Q2-A1-a public
+    constant + AC-Q2-A1-b dual-date-filter negative grep.
+    Headroom of ~80 tests reserved for commit 10 bound-gen.
+    yml + Gate B anti-mutation drill additions.
 
 Re-anchor this pin by updating ``_LOWER`` / ``_UPPER`` after a
 new sprint deliberately changes the trajectory.
@@ -40,7 +56,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 _LOWER = 815
-_UPPER = 970
+_UPPER = 1300
 
 
 class TestSprintDTrajectory(TestCase):

@@ -1,0 +1,223 @@
+# Bound-generation CI workflow per Sprint E.0.5 AC-Q2-B1.
+#
+# Scope: this workflow runs the bound-generation pipeline on
+# the designated CI Linux + OpenBLAS runner with the 5
+# thread-pin env vars all set to "1" so percentile output is
+# byte-identical across runs given byte-identical input.
+#
+# F26 forbids running bound-gen on macOS (Apple Accelerate
+# parallelism) or Windows (Intel MKL parallelism) or any non-
+# OpenBLAS BLAS backend; those backends produce non-byte-
+# identical reduction output that would break the AC-Q2-C2
+# cross-version ratchet detector.
+#
+# Trigger policy (per warning-auditor probe-A2 LOW
+# counter-add): the workflow runs only when files in the
+# bound-gen scope change (paths-filter on bounds/ + koppen/
+# + this workflow file itself) plus on explicit manual
+# dispatch (workflow_dispatch) for new bounds_version
+# ratchet runs. Other PRs do not touch bound-gen substrate
+# and don't trigger.
+#
+# Pre-flight runner-spec audit (per warning-auditor probe-B-2
+# LOW counter-add): the first job step reports numpy.show_config()
+# BLAS backend, all 5 env-var values, dep versions, and runner
+# OS/image SHA so a reviewer can audit compliance from CI logs
+# without re-running.
+#
+# Sprint E.0.5 ships the workflow + the audit step.
+# Sprint F populates the workflow with the actual bound-gen
+# run + the AC-Q2-C2 within-run determinism meta-test (run
+# bound-gen twice on synthetic fixture; assert byte-identical
+# output) + the cross-version ratchet detector (compare to
+# prior frozen_v1 if it exists).
+name: bound-gen
+
+# Per codex Gate-A HIGH on commit 10: top-level least-
+# privilege permissions. The job only needs read access to
+# the repo to check out + run tests; no write tokens leak
+# into PR-submitted code that runs in this workflow.
+permissions:
+  contents: read
+
+on:
+  push:
+    paths:
+      # Substrate scope:
+      - 'src/prismpy/bounds/**'
+      - 'src/prismpy/koppen/**'
+      # Per codex Gate-A HIGH on commit 10: runtime
+      # manifests + the tests that enforce the contract
+      # also trigger the designated-runner workflow so a
+      # PR that changes pyproject.toml or the structural
+      # tests cannot bypass the CI gate.
+      - 'pyproject.toml'
+      - 'tests/structural/**'
+      - 'tests/unit/test_quantile_cross_platform.py'
+      - '.github/workflows/bound-gen.yml'
+  pull_request:
+    paths:
+      - 'src/prismpy/bounds/**'
+      - 'src/prismpy/koppen/**'
+      - 'pyproject.toml'
+      - 'tests/structural/**'
+      - 'tests/unit/test_quantile_cross_platform.py'
+      - '.github/workflows/bound-gen.yml'
+  workflow_dispatch:  # Explicit ratchet runs (e.g., new bounds_version)
+
+env:
+  # F26 / AC-Q2-B1: 5-thread-pin set. All five MUST be set
+  # to "1" to guarantee deterministic single-threaded
+  # reduction across BLAS backends. Apple Accelerate doesn't
+  # honor OPENBLAS_NUM_THREADS alone (per warning-auditor
+  # probe-4-A empirical verification), so VECLIB_MAXIMUM_THREADS
+  # is also pinned. Intel MKL needs MKL_NUM_THREADS. Numexpr
+  # (transitive via xarray) needs NUMEXPR_NUM_THREADS.
+  OMP_NUM_THREADS: "1"
+  OPENBLAS_NUM_THREADS: "1"
+  MKL_NUM_THREADS: "1"
+  VECLIB_MAXIMUM_THREADS: "1"
+  NUMEXPR_NUM_THREADS: "1"
+
+jobs:
+  bound-gen:
+    # F26 designated-runner: Linux only. Pin to a specific
+    # ubuntu-22.04 image rather than ubuntu-latest so the
+    # runner image SHA is stable for byte-identical
+    # reproducibility across runs separated by GitHub's
+    # ubuntu-latest version bumps.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          # Per codex Gate-A HIGH on commit 10: the PR-code
+          # path must NOT carry the GITHUB_TOKEN beyond the
+          # checkout. ``persist-credentials: false`` removes
+          # the auth header from .git/config so subsequent
+          # steps (pip install -e .[dev], substrate-import,
+          # tests) cannot leak write access to the repo.
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install prismpy + dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+
+      - name: Pre-flight runner-spec gate (fail-fast)
+        # Per codex Gate-A HIGH on commit 10: the audit step
+        # is now a HARD GATE, not log-only. It asserts
+        # RUNNER_OS=Linux, the 5 thread-pin env vars all = 1,
+        # and that numpy reports OpenBLAS as the BLAS backend.
+        # A non-designated backend or stale env var fails the
+        # workflow before any substrate run, instead of
+        # waiting for a human to spot the log line.
+        run: |
+          set -euo pipefail
+          echo "=== Runner OS + image metadata ==="
+          uname -a
+          echo "RUNNER_OS=$RUNNER_OS"
+          if [ "$RUNNER_OS" != "Linux" ]; then
+            echo "F26 violation: RUNNER_OS=$RUNNER_OS; must be Linux." >&2
+            exit 1
+          fi
+          # GitHub Actions sets ImageOS / ImageVersion env
+          # vars on hosted runners; print them for audit.
+          echo "ImageOS=${ImageOS:-(unset)}"
+          echo "ImageVersion=${ImageVersion:-(unset)}"
+
+          echo ""
+          echo "=== Thread-pin env vars (must all be 1) ==="
+          for var in OMP_NUM_THREADS OPENBLAS_NUM_THREADS \
+                     MKL_NUM_THREADS VECLIB_MAXIMUM_THREADS \
+                     NUMEXPR_NUM_THREADS; do
+            value=$(eval "echo \${$var:-unset}")
+            echo "$var=$value"
+            if [ "$value" != "1" ]; then
+              echo "F26 violation: $var=$value; must be 1." >&2
+              exit 1
+            fi
+          done
+
+          echo ""
+          echo "=== Python + dep versions ==="
+          python --version
+          pip show numpy rasterio xarray pydantic | grep -E "^(Name|Version)"
+
+          echo ""
+          echo "=== Resolved dependency snapshot ==="
+          pip freeze | sort
+
+          echo ""
+          echo "=== numpy BLAS backend (F26: must be OpenBLAS) ==="
+          python - <<'PY'
+          import sys
+          import numpy as np
+          # numpy.show_config() prints to stdout; capture via
+          # internal config dict (numpy >= 1.25) or fall back
+          # to printing for log + grepping below.
+          try:
+              info = np.__config__.show("dicts")
+          except TypeError:
+              # Older numpy: show() returns None and prints.
+              np.show_config()
+              info = None
+          combined_text = repr(info or "") + str(np.__config__.blas_info if hasattr(np.__config__, "blas_info") else "")
+          # Print BLAS backend tokens for grepability + assert.
+          import io, contextlib
+          buf = io.StringIO()
+          with contextlib.redirect_stdout(buf):
+              np.show_config()
+          full = buf.getvalue() + combined_text
+          print(full)
+          if "openblas" not in full.lower():
+              print(
+                  "F26 violation: numpy BLAS backend does not "
+                  "report OpenBLAS. Designated CI runner must "
+                  "use OpenBLAS for byte-identical reduction.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          PY
+
+      - name: Verify bound-gen substrate imports
+        # Sprint E.0.5 substrate-only step. Sprint F replaces
+        # this with the actual bound-gen command + the
+        # AC-Q2-C2 within-run determinism meta-test.
+        run: |
+          python - <<'PY'
+          from prismpy.bounds import (
+              AGERA5_RECORD_CUTOFF_DAYS,
+              BoundGenProvenance,
+              MIN_CELL_DAYS_PER_ZONE,
+          )
+          assert AGERA5_RECORD_CUTOFF_DAYS == 180, (
+              f"AC-Q2-A1-a constant pin: expected 180, "
+              f"got {AGERA5_RECORD_CUTOFF_DAYS}"
+          )
+          assert MIN_CELL_DAYS_PER_ZONE == 1_000_000, (
+              f"AC-Q2-E-a threshold pin: expected 1,000,000, "
+              f"got {MIN_CELL_DAYS_PER_ZONE}"
+          )
+          print("Bounds substrate imports clean.")
+          print(f"  AGERA5_RECORD_CUTOFF_DAYS = {AGERA5_RECORD_CUTOFF_DAYS}")
+          print(f"  MIN_CELL_DAYS_PER_ZONE = {MIN_CELL_DAYS_PER_ZONE}")
+          print("Sprint F populates the actual bound-gen run "
+                "+ determinism meta-test in this step.")
+          PY
+
+      - name: Run bound-gen-substrate tests
+        # Substrate-level tests pass on the designated runner
+        # as a sanity gate before Sprint F's bound-gen runs
+        # land. The structural tests pin the contract; the
+        # unit tests pin the verdict logic.
+        run: |
+          pip install pyyaml
+          pytest tests/structural tests/unit -v \
+            --no-header -q --tb=short

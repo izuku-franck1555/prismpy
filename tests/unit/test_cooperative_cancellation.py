@@ -966,10 +966,33 @@ class TestBroadExceptCarveOutEscape:
         self, tmp_path: Path, maradi_region: Region,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """F-2 regression: AgERA5 ``retrieve()`` with ``cancel_check =
-        lambda: True`` must RAISE past the broad ``except Exception``
-        at :544. Pre-fix behavior: cancel was rewritten as
-        ``RetrievalResult(success=False, errors=["Download failed: ..."])``."""
+        """F-2 regression: AgERA5 ``retrieve()`` with cancel observed
+        inside the download branch must RAISE past the broad
+        ``except Exception`` at agera5.py:564. The carve-out at
+        :559 (``except PipelineCancelled: raise``) is what makes
+        this work. Pre-fix behavior: cancel was rewritten as
+        ``RetrievalResult(success=False, errors=["Download failed: ..."])``.
+
+        F-AB env-divergence fix: ``SARRA_data_download`` is not in
+        ``pyproject.toml`` dependencies, so CI / evaluator
+        environments do NOT have it installed. The previous form of
+        this test let ``_download_agera5`` run, which immediately
+        executes ``from SARRA_data_download.get_AgERA5_data import
+        download_AgERA5_year`` at agera5.py:727. In environments
+        without the optional library, that import raised
+        ``ImportError`` BEFORE any cancel hook fired, and the broad
+        ``except Exception`` rewrote it as ``Download failed:
+        ...`` — exactly the swallow path the carve-out exists to
+        prevent, but for an unrelated reason (missing optional dep).
+        Patching ``_download_agera5`` to raise ``PipelineCancelled``
+        directly (mimicking the year-top
+        ``raise_if_cancelled`` at agera5.py:759) decouples this
+        test from the optional SARRA_data_download install footprint
+        while still binding the F-2 retrieve()-level carve-out
+        — removing the carve-out at :559 still rewrites the raise
+        as ``RetrievalResult`` because ``PipelineCancelled``
+        inherits from ``Exception`` and would be caught by :564.
+        """
         from prismpy.sources.climate.agera5 import AgERA5Source
 
         cache_dir = tmp_path / "cache"
@@ -982,6 +1005,25 @@ class TestBroadExceptCarveOutEscape:
             property(lambda self: True),
         )
 
+        # F-AB env-divergence fix: stub ``_download_agera5`` so the
+        # cancel surfaces from inside the protected try-block without
+        # touching the optional ``SARRA_data_download`` import. Mimics
+        # the year-top ``raise_if_cancelled`` site at agera5.py:759.
+        def fake_download_raises_cancel(
+            self, *, bounds, start_date, end_date,
+            output_dir: Path, region_name,
+            progress_callback=None, cancel_check=None,
+        ):
+            raise_if_cancelled(
+                cancel_check, f"agera5.year={start_date.year}",
+            )
+
+        monkeypatch.setattr(
+            AgERA5Source,
+            "_download_agera5",
+            fake_download_raises_cancel,
+        )
+
         source = AgERA5Source(cache_dir=cache_dir)
         with pytest.raises(PipelineCancelled) as excinfo:
             source.retrieve(
@@ -991,7 +1033,13 @@ class TestBroadExceptCarveOutEscape:
                 download=True,
                 cancel_check=lambda: True,
             )
-        assert excinfo.value.where.startswith("agera5.")
+        # Tighter than ``startswith("agera5.")``: pin the canonical
+        # year-top cancel site so a future hook at, e.g.,
+        # ``agera5.checksum`` or ``agera5.lock`` cannot satisfy this
+        # assertion vacuously. Year value left wild so the test can be
+        # parametrized over different ``start_date`` years without
+        # touching this assertion.
+        assert excinfo.value.where.startswith("agera5.year=")
 
 
 # ── AC L.6 — post-cancel B2 invariant preserved ─────────────────────

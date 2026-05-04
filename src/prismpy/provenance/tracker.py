@@ -783,6 +783,37 @@ class ProvenanceTracker:
             self.record.pythia_misdat_replacements.get(translator, 0) + count
         )
 
+    def record_bound_gen_provenance(
+        self,
+        provenance: "BoundGenProvenance",
+        output_path: Union[str, Path],
+    ) -> Path:
+        """Sprint E.0.5 AC-Q2-A1-c — record a bound-gen run.
+
+        Writes a sidecar JSON file at ``output_path`` describing
+        the environment + ERA5 archive metadata + dependency +
+        thread-pin configuration of the bound-gen run that
+        produced the bounds file. Sprint-level provenance — not
+        attached to a per-artifact lineage — so the bound-gen
+        management command can call this once per run regardless
+        of whether the prismpy session has an active artifact.
+
+        See :class:`prismpy.bounds.BoundGenProvenance` for the
+        full schema (including the deposit-status conjunction
+        validator) and
+        :func:`prismpy.bounds.write_bound_gen_provenance` for
+        the underlying serialization helper.
+
+        Returns the absolute path of the written file.
+        """
+        # Local import keeps prismpy.provenance free of a hard
+        # dependency on prismpy.bounds at module import time;
+        # the bound-gen substrate is an opt-in consumer.
+        from prismpy.bounds import write_bound_gen_provenance
+        if not self.enabled:
+            return Path(output_path).resolve()
+        return write_bound_gen_provenance(provenance, output_path)
+
     def get_summary(self) -> Dict[str, Any]:
         """Get summary statistics for the session.
 

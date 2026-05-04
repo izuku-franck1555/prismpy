@@ -1,4 +1,4 @@
-"""F-W Sprint C — test trajectory pin (re-anchored for Sprint D.1).
+"""F-W Sprint C — test trajectory pin (re-anchored across sprints).
 
 Originally anchored at the Sprint C band [772, 792]; re-anchored
 in Sprint D.1 to [815, 900] following the pin's own contract
@@ -7,11 +7,27 @@ new sprint deliberately changes the trajectory"). Sprint D.1's
 harmonize-stage helpers + axis/cause schema + provenance
 additions add ~90 net-new tests including parametrize spread
 across 4 platforms × 4 soil labels and texture/rh boundary
-inclusivity cases. Then re-anchored to [815, 910] in Sprint D.1
+inclusivity cases. Re-anchored to [815, 910] in Sprint D.1
 commit 10 to absorb codex self-check LOW Q3 (3 new remap unit
-tests in ``test_executor_hwsd_remap.py``); kept in sync with
-``test_sprint_d_trajectory.py`` since both pins measure the
-same ``pytest tests/ --collect-only`` count.
+tests in ``test_executor_hwsd_remap.py``). Re-anchored to
+[815, 970] in Sprint E.0 to absorb the WarningCategory enum +
+5-bucket map + 12-site Sprint D.1 migration. Re-anchored to
+[815, 1080] in Sprint E.0.5 commit 3 to absorb the ECOCROP
+envelope substrate (AC-Q3-A-d + AC-Q3-A-NaN + F28 per-crop
+provenance — 38 tests + 12 subtests across
+``test_ecocrop_envelopes.py`` + ``test_envelope_validation.py``).
+Re-anchored to [815, 1200] in Sprint E.0.5 commit 6 to absorb
+the climate-envelope verdict logic (AC-Q3-A-a/b/c three-state
+precip + extremes-aware thermal + verdict aggregation + zone
+aggregation helpers — 46 tests in ``test_climate_envelope.py``;
+plus 52 KG-classifier + jitter + transitional + antimeridian
+tests from commit 5). Re-anchored to [815, 1300] in Sprint
+E.0.5 commit 9 to absorb the walker family (F24 + F26 + F27),
+cross-platform numpy.quantile reproducibility unit tests,
+and the AC-Q2-A1-a public constant + AC-Q2-A1-b negative-
+grep structural pins.
+Kept in sync with ``test_sprint_d_trajectory.py`` since both
+pins measure the same ``pytest tests/ --collect-only`` count.
 
 Anti-mutation drill: a count outside ``[_LOWER, _UPPER]`` fails
 this pin. Catches both under-shooting (a contributor accidentally
@@ -33,7 +49,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 _LOWER = 815
-_UPPER = 970
+_UPPER = 1300
 
 
 class TestSprintCTrajectory(TestCase):
