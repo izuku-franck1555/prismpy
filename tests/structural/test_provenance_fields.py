@@ -428,6 +428,28 @@ class TestWriteBoundGenProvenance(unittest.TestCase):
             self.assertTrue(written.exists())
 
 
+class TestProvenanceImmutability(unittest.TestCase):
+    """Per codex Gate-A HIGH on commit 7b (symmetric concern):
+    the record is frozen after construction so a downstream
+    caller cannot flip ``era5_archive_deposit_status`` to
+    'deposited' after the conjunction validator has run."""
+
+    def test_deposit_status_is_immutable(self):
+        prov = _minimal_pending_provenance()
+        with self.assertRaises(Exception):
+            prov.era5_archive_deposit_status = DepositStatus.DEPOSITED
+
+    def test_quantile_method_is_immutable(self):
+        prov = _minimal_pending_provenance()
+        with self.assertRaises(Exception):
+            prov.quantile_method = "linear"  # any assignment fails
+
+    def test_thread_pin_is_immutable(self):
+        prov = _minimal_pending_provenance()
+        with self.assertRaises(Exception):
+            prov.omp_threads = 1  # any assignment fails
+
+
 class TestProvenanceTrackerDelegation(unittest.TestCase):
     """Pin :meth:`ProvenanceTracker.record_bound_gen_provenance`
     as a thin delegate to :func:`write_bound_gen_provenance`."""

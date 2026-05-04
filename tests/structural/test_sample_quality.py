@@ -134,6 +134,40 @@ class TestZoneSampleQualityFields(unittest.TestCase):
         self.assertIn("n_cell_days", model_fields)
 
 
+class TestZoneSampleQualityImmutability(unittest.TestCase):
+    """Per codex Gate-A HIGH on commit 7b: the record is
+    frozen after construction so a downstream caller cannot
+    mutate ``sample_quality`` or ``n_cell_days`` and serialize
+    an incoherent JSON that bypasses the verdict-vs-count
+    consistency model_validator."""
+
+    def test_sample_quality_is_immutable(self):
+        record = assess_zone_sample_quality(
+            n_cells=10, n_cell_days=500_000,
+        )
+        # Initial verdict: insufficient.
+        self.assertEqual(
+            record.sample_quality, SampleQuality.INSUFFICIENT,
+        )
+        # Attempting to mutate must raise.
+        with self.assertRaises(Exception):  # ValidationError or AttributeError
+            record.sample_quality = SampleQuality.SUFFICIENT
+
+    def test_n_cell_days_is_immutable(self):
+        record = assess_zone_sample_quality(
+            n_cells=10, n_cell_days=500_000,
+        )
+        with self.assertRaises(Exception):
+            record.n_cell_days = 2_000_000
+
+    def test_threshold_is_immutable(self):
+        record = assess_zone_sample_quality(
+            n_cells=10, n_cell_days=500_000,
+        )
+        with self.assertRaises(Exception):
+            record.threshold = 1
+
+
 class TestZoneSampleQualityVerdictConsistency(unittest.TestCase):
     """The model validator pins ``sample_quality`` to the
     threshold check on ``n_cell_days``. An incoherent record

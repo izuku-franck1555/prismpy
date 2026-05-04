@@ -85,7 +85,15 @@ class ZoneSampleQuality(BaseModel):
     fragment.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    # frozen=True makes the record immutable after
+    # construction so a downstream caller cannot mutate
+    # ``sample_quality`` or ``n_cell_days`` after the
+    # model_validator has run; without this, an enriched-
+    # then-serialized record could emit a "sufficient"
+    # verdict with sub-threshold cell-days and hide the
+    # Bucket 2 INSUFFICIENTLY_SAMPLED warning. extra='forbid'
+    # rejects typo'd / extra fields at construction.
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     n_cells: int = Field(
         ..., ge=0,

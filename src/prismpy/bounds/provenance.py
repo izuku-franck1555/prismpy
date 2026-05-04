@@ -116,9 +116,16 @@ class BoundGenProvenance(BaseModel):
     ``model_config`` sets ``extra='forbid'`` so a typo'd
     field (e.g. ``omp_thread`` instead of ``omp_threads``)
     fails validation rather than silently being ignored.
+    ``frozen=True`` makes the record immutable after
+    construction so a downstream caller cannot mutate, e.g.,
+    ``era5_archive_deposit_status`` after the deposit
+    conjunction validator has run; without this, an
+    enriched-then-serialized record could flip to
+    ``deposited`` with null DOI and bypass the AC-Q2-A1-c
+    archive-verification claim.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     # --- Bound-gen identity ---
     bounds_version: str = Field(
