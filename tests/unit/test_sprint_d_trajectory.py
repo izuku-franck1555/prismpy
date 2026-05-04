@@ -28,9 +28,16 @@ Sprint D.1 band rationale:
     envelope substrate (AC-Q3-A-d + AC-Q3-A-NaN + F28 per-crop
     provenance). Commit 3 added 38 tests + 12 subtests across
     ``test_ecocrop_envelopes.py`` + ``test_envelope_validation.py``.
-    Headroom of ~91 tests reserved for the remaining Sprint
-    E.0.5 commits (KG classifier + jitter + bound-comparison
-    + provenance writer + sample-quality + F24/F26/F27 walkers).
+  - 1080 → 1200 (Sprint E.0.5 commit 6) to absorb the climate-
+    envelope verdict logic (AC-Q3-A-a/b/c three-state precip
+    + extremes-aware thermal + verdict aggregation + zone
+    aggregation helpers). Commit 6 added 46 tests across
+    ``test_climate_envelope.py``; commit 5 already added 52
+    KG-classifier + jitter + transitional + antimeridian-wrap
+    tests. Headroom of ~106 tests reserved for the remaining
+    Sprint E.0.5 commits (provenance writer + sample-quality
+    + validator skeletons + F24/F26/F27 walkers + bound-gen
+    CI workflow).
 
 Re-anchor this pin by updating ``_LOWER`` / ``_UPPER`` after a
 new sprint deliberately changes the trajectory.
@@ -48,7 +55,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 _LOWER = 815
-_UPPER = 1080
+_UPPER = 1200
 
 
 class TestSprintDTrajectory(TestCase):

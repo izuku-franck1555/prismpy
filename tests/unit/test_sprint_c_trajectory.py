@@ -16,6 +16,12 @@ tests in ``test_executor_hwsd_remap.py``). Re-anchored to
 envelope substrate (AC-Q3-A-d + AC-Q3-A-NaN + F28 per-crop
 provenance — 38 tests + 12 subtests across
 ``test_ecocrop_envelopes.py`` + ``test_envelope_validation.py``).
+Re-anchored to [815, 1200] in Sprint E.0.5 commit 6 to absorb
+the climate-envelope verdict logic (AC-Q3-A-a/b/c three-state
+precip + extremes-aware thermal + verdict aggregation + zone
+aggregation helpers — 46 tests in ``test_climate_envelope.py``;
+plus 52 KG-classifier + jitter + transitional + antimeridian
+tests from commit 5).
 Kept in sync with ``test_sprint_d_trajectory.py`` since both
 pins measure the same ``pytest tests/ --collect-only`` count.
 
@@ -39,7 +45,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 _LOWER = 815
-_UPPER = 1080
+_UPPER = 1200
 
 
 class TestSprintCTrajectory(TestCase):
