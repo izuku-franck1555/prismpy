@@ -21,7 +21,11 @@ the climate-envelope verdict logic (AC-Q3-A-a/b/c three-state
 precip + extremes-aware thermal + verdict aggregation + zone
 aggregation helpers — 46 tests in ``test_climate_envelope.py``;
 plus 52 KG-classifier + jitter + transitional + antimeridian
-tests from commit 5).
+tests from commit 5). Re-anchored to [815, 1300] in Sprint
+E.0.5 commit 9 to absorb the walker family (F24 + F26 + F27),
+cross-platform numpy.quantile reproducibility unit tests,
+and the AC-Q2-A1-a public constant + AC-Q2-A1-b negative-
+grep structural pins.
 Kept in sync with ``test_sprint_d_trajectory.py`` since both
 pins measure the same ``pytest tests/ --collect-only`` count.
 
@@ -45,7 +49,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 _LOWER = 815
-_UPPER = 1200
+_UPPER = 1300
 
 
 class TestSprintCTrajectory(TestCase):

@@ -23,6 +23,7 @@ the data substrate is generated.
 """
 from __future__ import annotations
 
+from prismpy.bounds.constants import AGERA5_RECORD_CUTOFF_DAYS
 from prismpy.bounds.provenance import (
     BoundGenProvenance,
     DepositStatus,
@@ -37,6 +38,7 @@ from prismpy.bounds.sample_quality import (
 
 
 __all__ = [
+    "AGERA5_RECORD_CUTOFF_DAYS",
     "BoundGenProvenance",
     "DepositStatus",
     "MIN_CELL_DAYS_PER_ZONE",

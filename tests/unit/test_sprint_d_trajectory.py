@@ -31,13 +31,14 @@ Sprint D.1 band rationale:
   - 1080 → 1200 (Sprint E.0.5 commit 6) to absorb the climate-
     envelope verdict logic (AC-Q3-A-a/b/c three-state precip
     + extremes-aware thermal + verdict aggregation + zone
-    aggregation helpers). Commit 6 added 46 tests across
-    ``test_climate_envelope.py``; commit 5 already added 52
-    KG-classifier + jitter + transitional + antimeridian-wrap
-    tests. Headroom of ~106 tests reserved for the remaining
-    Sprint E.0.5 commits (provenance writer + sample-quality
-    + validator skeletons + F24/F26/F27 walkers + bound-gen
-    CI workflow).
+    aggregation helpers).
+  - 1200 → 1300 (Sprint E.0.5 commit 9) to absorb the
+    walker family (F24 zone-purity + F26 designated-CI-runner
+    + F27 Stage 1 scope discipline) + cross-platform numpy.
+    quantile reproducibility unit tests + AC-Q2-A1-a public
+    constant + AC-Q2-A1-b dual-date-filter negative grep.
+    Headroom of ~80 tests reserved for commit 10 bound-gen.
+    yml + Gate B anti-mutation drill additions.
 
 Re-anchor this pin by updating ``_LOWER`` / ``_UPPER`` after a
 new sprint deliberately changes the trajectory.
@@ -55,7 +56,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 _LOWER = 815
-_UPPER = 1200
+_UPPER = 1300
 
 
 class TestSprintDTrajectory(TestCase):

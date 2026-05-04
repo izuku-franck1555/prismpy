@@ -60,12 +60,21 @@ from pydantic import (
 )
 
 
+from prismpy.bounds.constants import AGERA5_RECORD_CUTOFF_DAYS
+
+
 # AgERA5 cutoff offset per AC-Q2-A1-a. Bound-gen consumes
 # only AgERA5 records dated at least this far before the
 # snapshot date. The substrate-construction math is "up to
 # 120-day AgERA5 lag accommodation; 90+ days margin under
-# pessimistic 30-day estimate" (AC-Q2-A1-Reframe).
-_AGERA5_CUTOFF_OFFSET: timedelta = timedelta(days=180)
+# pessimistic 30-day estimate" (AC-Q2-A1-Reframe). Sourced
+# from the public ``AGERA5_RECORD_CUTOFF_DAYS`` constant so
+# downstream consumers (bound-gen tooling, Methods-text
+# generation) and this module agree on a single source of
+# truth.
+_AGERA5_CUTOFF_OFFSET: timedelta = timedelta(
+    days=AGERA5_RECORD_CUTOFF_DAYS,
+)
 
 
 # SHA256 hex-digest pattern. 64 hex chars (case-insensitive).
