@@ -28,10 +28,20 @@ from prismpy.bounds.provenance import (
     DepositStatus,
     write_bound_gen_provenance,
 )
+from prismpy.bounds.sample_quality import (
+    MIN_CELL_DAYS_PER_ZONE,
+    SampleQuality,
+    ZoneSampleQuality,
+    assess_zone_sample_quality,
+)
 
 
 __all__ = [
     "BoundGenProvenance",
     "DepositStatus",
+    "MIN_CELL_DAYS_PER_ZONE",
+    "SampleQuality",
+    "ZoneSampleQuality",
+    "assess_zone_sample_quality",
     "write_bound_gen_provenance",
 ]
