@@ -138,6 +138,33 @@ class TestWizardOverrideRecordValidators(unittest.TestCase):
                 "rationale": "a" * 60,
             })
 
+    def test_rejects_short_token_repetition(self):
+        # Codex post-batch Dim 2: catch ``"123" * 20`` (60
+        # chars, 3 unique chars) which the original ≤2-unique
+        # heuristic missed. The strengthened
+        # short-token-repetition rule rejects any short block
+        # repeated to fill ≥80% of the rationale.
+        for filler in ("123" * 20, "abc " * 14, "ab" * 30, "----" * 14):
+            with self.subTest(filler=filler):
+                with self.assertRaises(ValidationError):
+                    WizardOverrideRecord(**{
+                        **self._BASE, "rationale": filler,
+                    })
+
+    def test_accepts_real_sentence_with_repeated_phrases(self):
+        # Anti-mutation: a real sentence with a few repeated
+        # phrases (not a 1-6 char block repeated) must pass.
+        # Pin guards the strengthened heuristic against false-
+        # positives that would block legitimate explanations.
+        rationale = (
+            "We have a documented local trial proving the "
+            "cultivar performs in this zone — proving with "
+            "field data. Specifically yields exceeded 4 t/ha "
+            "across two seasons of ICRISAT trials."
+        )
+        # Should construct without error.
+        WizardOverrideRecord(**{**self._BASE, "rationale": rationale})
+
     def test_rejects_invalid_evidence_type(self):
         with self.assertRaises(ValidationError):
             WizardOverrideRecord(**{

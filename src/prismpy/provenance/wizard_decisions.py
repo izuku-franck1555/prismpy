@@ -52,16 +52,47 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # justification while excluding hand-wavers.
 _MIN_RATIONALE_CHARS: int = 50
 
-# Banned filler patterns — repeated single chars (e.g.,
-# "aaaaaaaaaa..." or "..............") would clear the
-# 50-char floor without carrying real content. Reject them
-# heuristically per warning-auditor LOW-4.
+# Banned filler patterns — repeated single/few characters or
+# short tokens (e.g., "aaaa..." / "...." / "abcabc..." /
+# "123123...") would clear the 50-char floor without carrying
+# real content. Reject them heuristically per warning-auditor
+# LOW-4 + codex Gate A second-round Dim 2.
+def _has_low_unique_chars(rationale: str) -> bool:
+    """≤2 unique characters across the stripped rationale."""
+    return len(set(rationale.strip())) <= 2
+
+
+def _has_short_token_repetition(rationale: str) -> bool:
+    """Reject when the rationale is a short token repeated
+    until it clears the 50-char floor.
+
+    Examples caught: ``"123" * 20`` (60 chars, 3 unique chars,
+    one 3-char repeating block), ``"abc " * 14`` (4-char block
+    repeating). Examples NOT caught: a real sentence with a
+    common phrase repeated for emphasis (multiple distinct
+    tokens / words).
+    """
+    stripped = rationale.strip()
+    # Try block lengths 1..6; if any block of length k repeats
+    # to fill ≥80% of the rationale, it's filler.
+    for block_len in range(1, 7):
+        if block_len > len(stripped):
+            break
+        block = stripped[:block_len]
+        repeated = (block * (len(stripped) // block_len + 1))[:len(stripped)]
+        # Allow up to 20% mismatch to admit single-char typos.
+        match_chars = sum(
+            1 for a, b in zip(stripped, repeated) if a == b
+        )
+        if match_chars / len(stripped) >= 0.80:
+            return True
+    return False
+
+
 _FILLER_PATTERN_PARAMETERS = (
     # (description, predicate-on-rationale)
-    (
-        "single-char repeats",
-        lambda r: len(set(r.strip())) <= 2,
-    ),
+    ("single-char repeats", _has_low_unique_chars),
+    ("short-token repetition", _has_short_token_repetition),
 )
 
 

@@ -5,6 +5,7 @@ These models track the complete lineage and transformation history
 of all data artifacts, enabling full reproducibility and audit trails.
 """
 
+import copy
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -411,9 +412,9 @@ class ProvenanceRecord:
             # into the underlying record per AC-F-7 audit-
             # trail discipline.
             **(
-                {"stage_1_verdicts_snapshot": __import__(
-                    "copy"
-                ).deepcopy(self.stage_1_verdicts_snapshot)}
+                {"stage_1_verdicts_snapshot": copy.deepcopy(
+                    self.stage_1_verdicts_snapshot
+                )}
                 if self.stage_1_verdicts_snapshot is not None
                 else {}
             ),
