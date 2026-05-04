@@ -33,16 +33,35 @@
 # prior frozen_v1 if it exists).
 name: bound-gen
 
+# Per codex Gate-A HIGH on commit 10: top-level least-
+# privilege permissions. The job only needs read access to
+# the repo to check out + run tests; no write tokens leak
+# into PR-submitted code that runs in this workflow.
+permissions:
+  contents: read
+
 on:
   push:
     paths:
+      # Substrate scope:
       - 'src/prismpy/bounds/**'
       - 'src/prismpy/koppen/**'
+      # Per codex Gate-A HIGH on commit 10: runtime
+      # manifests + the tests that enforce the contract
+      # also trigger the designated-runner workflow so a
+      # PR that changes pyproject.toml or the structural
+      # tests cannot bypass the CI gate.
+      - 'pyproject.toml'
+      - 'tests/structural/**'
+      - 'tests/unit/test_quantile_cross_platform.py'
       - '.github/workflows/bound-gen.yml'
   pull_request:
     paths:
       - 'src/prismpy/bounds/**'
       - 'src/prismpy/koppen/**'
+      - 'pyproject.toml'
+      - 'tests/structural/**'
+      - 'tests/unit/test_quantile_cross_platform.py'
       - '.github/workflows/bound-gen.yml'
   workflow_dispatch:  # Explicit ratchet runs (e.g., new bounds_version)
 
@@ -72,6 +91,14 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v4
+        with:
+          # Per codex Gate-A HIGH on commit 10: the PR-code
+          # path must NOT carry the GITHUB_TOKEN beyond the
+          # checkout. ``persist-credentials: false`` removes
+          # the auth header from .git/config so subsequent
+          # steps (pip install -e .[dev], substrate-import,
+          # tests) cannot leak write access to the repo.
+          persist-credentials: false
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -83,28 +110,81 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .[dev]
 
-      - name: Pre-flight runner-spec audit
-        # Reports the runner's BLAS backend, env-var values,
-        # dep versions, and runner OS at workflow start. A
-        # reviewer can audit F26 compliance from CI logs
-        # without re-running.
+      - name: Pre-flight runner-spec gate (fail-fast)
+        # Per codex Gate-A HIGH on commit 10: the audit step
+        # is now a HARD GATE, not log-only. It asserts
+        # RUNNER_OS=Linux, the 5 thread-pin env vars all = 1,
+        # and that numpy reports OpenBLAS as the BLAS backend.
+        # A non-designated backend or stale env var fails the
+        # workflow before any substrate run, instead of
+        # waiting for a human to spot the log line.
         run: |
-          echo "=== Runner OS ==="
+          set -euo pipefail
+          echo "=== Runner OS + image metadata ==="
           uname -a
+          echo "RUNNER_OS=$RUNNER_OS"
+          if [ "$RUNNER_OS" != "Linux" ]; then
+            echo "F26 violation: RUNNER_OS=$RUNNER_OS; must be Linux." >&2
+            exit 1
+          fi
+          # GitHub Actions sets ImageOS / ImageVersion env
+          # vars on hosted runners; print them for audit.
+          echo "ImageOS=${ImageOS:-(unset)}"
+          echo "ImageVersion=${ImageVersion:-(unset)}"
+
           echo ""
           echo "=== Thread-pin env vars (must all be 1) ==="
-          echo "OMP_NUM_THREADS=$OMP_NUM_THREADS"
-          echo "OPENBLAS_NUM_THREADS=$OPENBLAS_NUM_THREADS"
-          echo "MKL_NUM_THREADS=$MKL_NUM_THREADS"
-          echo "VECLIB_MAXIMUM_THREADS=$VECLIB_MAXIMUM_THREADS"
-          echo "NUMEXPR_NUM_THREADS=$NUMEXPR_NUM_THREADS"
+          for var in OMP_NUM_THREADS OPENBLAS_NUM_THREADS \
+                     MKL_NUM_THREADS VECLIB_MAXIMUM_THREADS \
+                     NUMEXPR_NUM_THREADS; do
+            value=$(eval "echo \${$var:-unset}")
+            echo "$var=$value"
+            if [ "$value" != "1" ]; then
+              echo "F26 violation: $var=$value; must be 1." >&2
+              exit 1
+            fi
+          done
+
           echo ""
           echo "=== Python + dep versions ==="
           python --version
           pip show numpy rasterio xarray pydantic | grep -E "^(Name|Version)"
+
+          echo ""
+          echo "=== Resolved dependency snapshot ==="
+          pip freeze | sort
+
           echo ""
           echo "=== numpy BLAS backend (F26: must be OpenBLAS) ==="
-          python -c "import numpy; numpy.show_config()"
+          python - <<'PY'
+          import sys
+          import numpy as np
+          # numpy.show_config() prints to stdout; capture via
+          # internal config dict (numpy >= 1.25) or fall back
+          # to printing for log + grepping below.
+          try:
+              info = np.__config__.show("dicts")
+          except TypeError:
+              # Older numpy: show() returns None and prints.
+              np.show_config()
+              info = None
+          combined_text = repr(info or "") + str(np.__config__.blas_info if hasattr(np.__config__, "blas_info") else "")
+          # Print BLAS backend tokens for grepability + assert.
+          import io, contextlib
+          buf = io.StringIO()
+          with contextlib.redirect_stdout(buf):
+              np.show_config()
+          full = buf.getvalue() + combined_text
+          print(full)
+          if "openblas" not in full.lower():
+              print(
+                  "F26 violation: numpy BLAS backend does not "
+                  "report OpenBLAS. Designated CI runner must "
+                  "use OpenBLAS for byte-identical reduction.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          PY
 
       - name: Verify bound-gen substrate imports
         # Sprint E.0.5 substrate-only step. Sprint F replaces

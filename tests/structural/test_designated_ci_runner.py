@@ -96,7 +96,15 @@ class TestBoundGenRunsOnLinux(unittest.TestCase):
     Apple Accelerate / MKL on Windows / dev-machine paths
     are forbidden."""
 
-    def test_runs_on_ubuntu(self):
+    def test_runs_on_pinned_ubuntu_22_04(self):
+        # Per codex Gate-A MEDIUM on commit 10: the walker
+        # asserts the EXACT scalar 'ubuntu-22.04', not just
+        # any 'ubuntu-' prefix. The workflow pins to a
+        # specific image so the runner image SHA is stable
+        # across runs separated by GitHub's ubuntu-latest
+        # version bumps; accepting ubuntu-latest or list/
+        # composite values would silently break that pin.
+        _ALLOWED_RUNNERS = frozenset({"ubuntu-22.04"})
         workflow = _load_workflow()
         jobs = workflow.get("jobs", {})
         self.assertGreater(
@@ -105,16 +113,23 @@ class TestBoundGenRunsOnLinux(unittest.TestCase):
         )
         for job_name, job in jobs.items():
             with self.subTest(job=job_name):
-                runs_on = job.get("runs-on", "")
-                # Accept ubuntu-latest, ubuntu-22.04, ubuntu-20.04,
-                # etc. Reject macos-* + windows-* + arbitrary.
-                if isinstance(runs_on, list):
-                    runs_on = runs_on[0] if runs_on else ""
-                self.assertTrue(
-                    str(runs_on).startswith("ubuntu"),
+                runs_on = job.get("runs-on")
+                # Reject lists / composite values; the
+                # designated runner contract requires a single
+                # explicit string.
+                self.assertIsInstance(
+                    runs_on, str,
                     f"F26 violation: bound-gen job {job_name!r} "
-                    f"runs-on {runs_on!r}; must be Linux "
-                    f"(ubuntu-*).",
+                    f"runs-on must be a string, not "
+                    f"{type(runs_on).__name__}: {runs_on!r}.",
+                )
+                self.assertIn(
+                    runs_on, _ALLOWED_RUNNERS,
+                    f"F26 violation: bound-gen job {job_name!r} "
+                    f"runs-on={runs_on!r}; must be one of "
+                    f"{sorted(_ALLOWED_RUNNERS)} (no "
+                    f"ubuntu-latest / macos-* / windows-* / "
+                    f"self-hosted).",
                 )
 
 
@@ -207,17 +222,16 @@ class TestBoundGenTriggerPolicy(unittest.TestCase):
         )
 
 
-class TestBoundGenPreFlightAudit(unittest.TestCase):
-    """Per warning-auditor probe-B-2 LOW counter-add: the
-    workflow's first substantive step reports the runner's
-    BLAS backend, env-var values, dep versions, and runner OS
-    so a reviewer can audit F26 compliance from CI logs."""
+class TestBoundGenPreFlightGate(unittest.TestCase):
+    """Per codex Gate-A HIGH on commit 10 + warning-auditor
+    probe-B-2 LOW: the pre-flight step is a HARD GATE that
+    fails the workflow if the runner isn't Linux + OpenBLAS
+    or the thread pins drifted. Log-only auditing was
+    insufficient because it relied on a human noticing."""
 
     def test_pre_flight_audit_step_present(self):
         workflow = _load_workflow()
         jobs = workflow.get("jobs", {})
-        # At least one job must have a step that reports
-        # numpy.show_config (the canonical BLAS-backend probe).
         found = False
         for job in jobs.values():
             for step in job.get("steps", []):
@@ -233,6 +247,110 @@ class TestBoundGenPreFlightAudit(unittest.TestCase):
             "pre-flight audit step so the BLAS backend is "
             "visible in CI logs.",
         )
+
+    def test_pre_flight_gate_uses_set_e(self):
+        # The audit step must use ``set -e`` (or pipefail)
+        # so the assert checks below fail-fast rather than
+        # logging a warning and continuing.
+        workflow = _load_workflow()
+        for job in workflow.get("jobs", {}).values():
+            for step in job.get("steps", []):
+                run = step.get("run", "")
+                if "numpy.show_config" in run:
+                    self.assertIn(
+                        "set -e", run,
+                        "Pre-flight audit must use 'set -e' "
+                        "(or 'set -euo pipefail') so failures "
+                        "exit the step.",
+                    )
+
+    def test_pre_flight_gate_asserts_linux(self):
+        workflow = _load_workflow()
+        gate_text = ""
+        for job in workflow.get("jobs", {}).values():
+            for step in job.get("steps", []):
+                run = step.get("run", "")
+                if "numpy.show_config" in run:
+                    gate_text = run
+                    break
+        self.assertIn(
+            "RUNNER_OS", gate_text,
+            "Pre-flight gate must check RUNNER_OS = Linux.",
+        )
+
+    def test_pre_flight_gate_asserts_openblas(self):
+        workflow = _load_workflow()
+        gate_text = ""
+        for job in workflow.get("jobs", {}).values():
+            for step in job.get("steps", []):
+                run = step.get("run", "")
+                if "numpy.show_config" in run:
+                    gate_text = run
+                    break
+        self.assertIn(
+            "openblas", gate_text.lower(),
+            "Pre-flight gate must enforce OpenBLAS BLAS backend.",
+        )
+
+    def test_pre_flight_gate_asserts_thread_pins(self):
+        workflow = _load_workflow()
+        gate_text = ""
+        for job in workflow.get("jobs", {}).values():
+            for step in job.get("steps", []):
+                run = step.get("run", "")
+                if "numpy.show_config" in run:
+                    gate_text = run
+                    break
+        # The gate iterates the 5 vars and asserts each = 1.
+        for var in _THREAD_PIN_VARS:
+            with self.subTest(var=var):
+                self.assertIn(
+                    var, gate_text,
+                    f"Pre-flight gate must verify {var} = 1.",
+                )
+
+
+class TestBoundGenPermissionsAndCredentials(unittest.TestCase):
+    """Per codex Gate-A HIGH on commit 10: the workflow runs
+    on pull_request and checks out PR code; it must not leak
+    write tokens to that code path. Top-level
+    ``permissions: contents: read`` + ``persist-credentials:
+    false`` on checkout enforce the trust boundary."""
+
+    def test_top_level_permissions_contents_read(self):
+        workflow = _load_workflow()
+        permissions = workflow.get("permissions")
+        self.assertIsNotNone(
+            permissions,
+            "bound-gen.yml must declare top-level permissions "
+            "to constrain GITHUB_TOKEN scope.",
+        )
+        # Either ``permissions: read-all`` or
+        # ``permissions: { contents: read }`` is acceptable.
+        if isinstance(permissions, dict):
+            self.assertEqual(
+                permissions.get("contents"), "read",
+                "Top-level permissions must have contents: read.",
+            )
+        else:
+            self.assertEqual(permissions, "read-all")
+
+    def test_checkout_disables_persist_credentials(self):
+        workflow = _load_workflow()
+        for job_name, job in workflow.get("jobs", {}).items():
+            with self.subTest(job=job_name):
+                for step in job.get("steps", []):
+                    uses = step.get("uses", "")
+                    if uses.startswith("actions/checkout"):
+                        with_block = step.get("with", {}) or {}
+                        self.assertEqual(
+                            with_block.get("persist-credentials"), False,
+                            f"actions/checkout step in job "
+                            f"{job_name!r} must set "
+                            f"persist-credentials: false to "
+                            f"avoid leaking GITHUB_TOKEN to "
+                            f"PR code.",
+                        )
 
 
 if __name__ == "__main__":
