@@ -311,6 +311,23 @@ class TestCompareThermalExtremes(unittest.TestCase):
                 crop_tmin=_MAIZE_TMIN, crop_tmax=_MAIZE_TMAX,
             )
 
+    def test_inverted_zone_aggregates_rejected(self):
+        # P10 of cold extremes greater than P90 of hot extremes
+        # is physically impossible; without this guard the
+        # comparator returned COMPATIBLE silently because both
+        # kill predicates evaluate False (cold-tail above TMIN,
+        # hot-tail below TMAX). Silent COMPATIBLE on swapped-
+        # variable inputs would mask an upstream aggregation
+        # bug; reject fail-loud per honest-signal contract.
+        with self.assertRaises(ValueError) as ctx:
+            compare_thermal_extremes(
+                zone_p10_extreme_tmin=50.0,  # warmer than P90
+                zone_p90_extreme_tmax=40.0,  # cooler than P10
+                crop_tmin=_MAIZE_TMIN, crop_tmax=_MAIZE_TMAX,
+            )
+        self.assertIn("P10_extreme_tmin", str(ctx.exception))
+        self.assertIn("P90_extreme_tmax", str(ctx.exception))
+
 
 class TestComputeZonePrecipIQR(unittest.TestCase):
     """Per AC-Q3-A-a aggregation: zone P25/P50/P75 of per-cell
@@ -426,6 +443,23 @@ class TestComputeZoneThermalExtremes(unittest.TestCase):
                 cell_extreme_tmins=[-5.0, float("nan"), 5.0],
                 cell_extreme_tmaxs=[35.0, 40.0, 45.0],
             )
+
+    def test_inverted_per_cell_pair_rejected(self):
+        # An inverted (tmin > tmax) per-cell pair indicates
+        # swapped variables at the caller. Without the guard,
+        # the aggregator silently produces a P10 from the
+        # "tmin" sequence (actually tmax values) that could
+        # fall above P90 from the "tmax" sequence — and the
+        # downstream comparator would either reject the
+        # aggregate (post-fix) or silently emit COMPATIBLE
+        # (pre-fix). Reject at the per-cell layer so the
+        # caller's bug surfaces immediately.
+        with self.assertRaises(ValueError) as ctx:
+            compute_zone_thermal_extremes(
+                cell_extreme_tmins=[-5.0, 30.0, 5.0],  # cell 1 inverted
+                cell_extreme_tmaxs=[35.0, 10.0, 45.0],  # cell 1: tmin=30 > tmax=10
+            )
+        self.assertIn("tmin <= tmax", str(ctx.exception))
 
 
 class TestAggregateVerdicts(unittest.TestCase):

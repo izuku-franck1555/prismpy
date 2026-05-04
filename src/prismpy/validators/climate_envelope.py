@@ -184,6 +184,24 @@ def compare_thermal_extremes(
             f"Envelope must satisfy TMIN < TMAX; got "
             f"TMIN={crop_tmin}, TMAX={crop_tmax}."
         )
+    # Aggregate sanity: P10 of cold extremes must not exceed
+    # P90 of hot extremes. An inverted aggregate indicates
+    # swapped variables, unit corruption, or broken upstream
+    # aggregation; without this guard, inverted inputs slip
+    # through as a silent COMPATIBLE because both kill checks
+    # are False (cold-kill compares cold-tail to TMIN; heat-
+    # kill compares hot-tail to TMAX).
+    if zone_p10_extreme_tmin > zone_p90_extreme_tmax:
+        raise ValueError(
+            f"compare_thermal_extremes: zone aggregates must "
+            f"satisfy P10_extreme_tmin <= P90_extreme_tmax; "
+            f"got P10={zone_p10_extreme_tmin}, "
+            f"P90={zone_p90_extreme_tmax}. An inverted "
+            f"aggregate indicates swapped variables, unit "
+            f"corruption, or broken upstream aggregation; "
+            f"silent COMPATIBLE on this input would mask the "
+            f"upstream bug."
+        )
     cold_kill = zone_p10_extreme_tmin < crop_tmin
     heat_kill = zone_p90_extreme_tmax > crop_tmax
     if cold_kill and heat_kill:
@@ -274,6 +292,21 @@ def compute_zone_thermal_extremes(
     tmax_arr = _to_finite_float64(
         cell_extreme_tmaxs, "cell_extreme_tmaxs",
     )
+    # Per-cell ordering: each cell's extreme tmin must be at
+    # most its extreme tmax. An inverted pair indicates
+    # swapped variables at the caller; without this guard
+    # the aggregate (P10 of "tmin", P90 of "tmax") could
+    # silently pass into compare_thermal_extremes and
+    # produce a meaningless verdict.
+    inverted_mask = tmin_arr > tmax_arr
+    if bool(np.any(inverted_mask)):
+        bad_indices = [int(i) for i in np.where(inverted_mask)[0][:5]]
+        raise ValueError(
+            f"compute_zone_thermal_extremes: per-cell extremes "
+            f"must satisfy tmin <= tmax; first inverted cells "
+            f"(up to 5): {bad_indices}. An inverted pair "
+            f"indicates swapped variables at the caller."
+        )
     return {
         "p10_extreme_tmin": float(
             np.quantile(tmin_arr, 0.10, method=_NP_QUANTILE_METHOD),
