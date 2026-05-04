@@ -353,3 +353,133 @@ def _to_finite_float64(
             f"(NaN / inf)."
         )
     return arr
+
+
+# --- ClimateEnvelopeValidator (commit 8 — InputValidator subclass) ---
+
+
+from prismpy.validators.base import ValidationIssue
+from prismpy.validators.input_base import (
+    InputValidationContext,
+    InputValidationResult,
+    InputValidator,
+)
+from prismpy.warnings.categories import WarningCategory
+
+
+class ClimateEnvelopeValidator(InputValidator):
+    """Wizard-time climate-envelope check per Sprint E.0.5.
+
+    For each Köppen-Geiger zone in the input state, the
+    validator (a) flags the zone INSUFFICIENTLY_SAMPLED if
+    ``n_cell_days`` < ``min_cell_days_per_zone`` and (b) for
+    sufficient zones, runs the AC-Q3-A-a/b/c precip + thermal
+    verdict logic and emits a CLIMATE_ENVELOPE_TAIL issue
+    when the verdict is marginal. INCOMPATIBLE verdicts are
+    NOT emitted by this validator; per the team-lead Decision
+    2 framing, the crop-incompatibility surface is
+    :class:`CropPhysiologicalValidator` (skeleton in E.0.5;
+    populated in Sprint F).
+
+    EMITS is the canonical pin for the F25-shape walker:
+    every WarningCategory emitted by :meth:`validate` MUST
+    appear in this frozenset. INCOMPATIBLE verdicts produce
+    no issue, so CROP_REGION_MISMATCH stays out of the
+    EMITS frozenset for this validator.
+    """
+
+    EMITS = frozenset({
+        WarningCategory.CLIMATE_ENVELOPE_TAIL,
+        WarningCategory.INSUFFICIENTLY_SAMPLED,
+    })
+
+    def validate(
+        self, input_state: InputValidationContext,
+    ) -> InputValidationResult:
+        """Run per-zone envelope checks on the input state."""
+        crop_envelope = input_state.crop_envelope
+        crop_tmin = float(crop_envelope["TMIN"])
+        crop_tmax = float(crop_envelope["TMAX"])
+        crop_rmin = float(crop_envelope["RMIN"])
+        crop_rmax = float(crop_envelope["RMAX"])
+
+        issues: list[ValidationIssue] = []
+        per_zone_verdicts: dict[str, dict[str, str]] = {}
+
+        for zone, aggs in input_state.zone_aggregates.items():
+            n_cell_days = int(aggs.get("n_cell_days", 0))
+            if n_cell_days < input_state.min_cell_days_per_zone:
+                issues.append(ValidationIssue(
+                    severity="warning",
+                    category=WarningCategory.INSUFFICIENTLY_SAMPLED.value,
+                    message=(
+                        f"Zone {zone!r} has insufficient sample "
+                        f"({n_cell_days:,} cell-days < "
+                        f"{input_state.min_cell_days_per_zone:,} "
+                        f"threshold); skipping envelope verdict."
+                    ),
+                    details={
+                        "zone": zone,
+                        "n_cell_days": n_cell_days,
+                        "threshold": input_state.min_cell_days_per_zone,
+                    },
+                ))
+                per_zone_verdicts[zone] = {
+                    "precip": "skipped_insufficient_sample",
+                    "thermal": "skipped_insufficient_sample",
+                }
+                continue
+
+            precip_verdict = compare_precip_iqr(
+                p25=float(aggs["p25"]),
+                p50=float(aggs["p50"]),
+                p75=float(aggs["p75"]),
+                rmin=crop_rmin,
+                rmax=crop_rmax,
+            )
+            thermal_verdict = compare_thermal_extremes(
+                zone_p10_extreme_tmin=float(aggs["p10_extreme_tmin"]),
+                zone_p90_extreme_tmax=float(aggs["p90_extreme_tmax"]),
+                crop_tmin=crop_tmin,
+                crop_tmax=crop_tmax,
+            )
+            per_zone_verdicts[zone] = {
+                "precip": precip_verdict.value,
+                "thermal": thermal_verdict.value,
+            }
+
+            for variable, verdict in (
+                ("precip", precip_verdict),
+                ("thermal", thermal_verdict),
+            ):
+                if verdict in (
+                    CompatibilityVerdict.MARGINAL_HETEROGENEOUS,
+                    CompatibilityVerdict.MARGINAL_THERMAL_SEASONAL,
+                ):
+                    issues.append(ValidationIssue(
+                        severity="warning",
+                        category=WarningCategory.CLIMATE_ENVELOPE_TAIL.value,
+                        message=(
+                            f"Zone {zone!r} {variable} verdict is "
+                            f"{verdict.value!r} for crop "
+                            f"{input_state.crop_name!r}; the "
+                            f"climate is at the tail of the crop's "
+                            f"envelope (Bucket 2 informational)."
+                        ),
+                        details={
+                            "zone": zone,
+                            "variable": variable,
+                            "verdict": verdict.value,
+                            "crop": input_state.crop_name,
+                        },
+                    ))
+                # COMPATIBLE -> no issue.
+                # INCOMPATIBLE -> no issue from this validator;
+                # CropPhysiologicalValidator (Sprint F populates)
+                # owns the CROP_REGION_MISMATCH emission.
+
+        return InputValidationResult(
+            valid=all(i.severity != "error" for i in issues),
+            issues=issues,
+            metadata={"per_zone_verdicts": per_zone_verdicts},
+        )

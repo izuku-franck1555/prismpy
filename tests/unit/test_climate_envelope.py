@@ -587,5 +587,180 @@ class TestNumpyQuantileDeterminism(unittest.TestCase):
         self.assertEqual(a, b)
 
 
+class TestClimateEnvelopeValidator(unittest.TestCase):
+    """Sprint E.0.5 commit 8 — :class:`ClimateEnvelopeValidator`
+    wraps the function-level verdict logic from commit 6 and
+    maps verdicts to canonical :class:`ValidationIssue`
+    instances. Pin the EMITS frozenset + the verdict-to-issue
+    mapping + the F25-shape discipline (no out-of-EMITS
+    categories surface)."""
+
+    @classmethod
+    def setUpClass(cls):
+        # Local imports to avoid circular import surprises in
+        # the rest of this module's tests, which exercise the
+        # function-level logic directly.
+        from prismpy.validators.climate_envelope import (
+            ClimateEnvelopeValidator,
+        )
+        from prismpy.validators.input_base import (
+            InputValidationContext,
+        )
+        from prismpy.warnings.categories import WarningCategory
+
+        cls.ClimateEnvelopeValidator = ClimateEnvelopeValidator
+        cls.InputValidationContext = InputValidationContext
+        cls.WarningCategory = WarningCategory
+
+    def _maize_context(self, zone_aggregates):
+        return self.InputValidationContext(
+            crop_name="maize",
+            crop_envelope={
+                "TMIN": _MAIZE_TMIN, "TMAX": _MAIZE_TMAX,
+                "RMIN": _MAIZE_RMIN, "RMAX": _MAIZE_RMAX,
+            },
+            zone_aggregates=zone_aggregates,
+        )
+
+    def test_emits_frozenset(self):
+        self.assertEqual(
+            self.ClimateEnvelopeValidator.EMITS,
+            frozenset({
+                self.WarningCategory.CLIMATE_ENVELOPE_TAIL,
+                self.WarningCategory.INSUFFICIENTLY_SAMPLED,
+            }),
+        )
+
+    def test_compatible_zone_no_issues(self):
+        ctx = self._maize_context({
+            "BSh": {
+                "p25": 600.0, "p50": 900.0, "p75": 1200.0,
+                "p10_extreme_tmin": 15.0, "p90_extreme_tmax": 40.0,
+                "n_cell_days": 2_000_000,
+            },
+        })
+        result = self.ClimateEnvelopeValidator().validate(ctx)
+        self.assertTrue(result.valid)
+        self.assertEqual(result.issues, [])
+
+    def test_marginal_heterogeneous_zone_emits_envelope_tail(self):
+        ctx = self._maize_context({
+            "BSh": {
+                "p25": 350.0, "p50": 500.0, "p75": 800.0,  # marginal
+                "p10_extreme_tmin": 15.0, "p90_extreme_tmax": 40.0,
+                "n_cell_days": 2_000_000,
+            },
+        })
+        result = self.ClimateEnvelopeValidator().validate(ctx)
+        precip_issues = [
+            i for i in result.issues
+            if i.details.get("variable") == "precip"
+        ]
+        self.assertEqual(len(precip_issues), 1)
+        self.assertEqual(
+            precip_issues[0].category,
+            self.WarningCategory.CLIMATE_ENVELOPE_TAIL.value,
+        )
+        self.assertEqual(precip_issues[0].severity, "warning")
+
+    def test_marginal_thermal_seasonal_emits_envelope_tail(self):
+        ctx = self._maize_context({
+            "BSh": {
+                "p25": 600.0, "p50": 900.0, "p75": 1200.0,
+                "p10_extreme_tmin": 5.0,    # cold-kill
+                "p90_extreme_tmax": 50.0,   # heat-kill
+                "n_cell_days": 2_000_000,
+            },
+        })
+        result = self.ClimateEnvelopeValidator().validate(ctx)
+        thermal_issues = [
+            i for i in result.issues
+            if i.details.get("variable") == "thermal"
+        ]
+        self.assertEqual(len(thermal_issues), 1)
+        self.assertEqual(
+            thermal_issues[0].category,
+            self.WarningCategory.CLIMATE_ENVELOPE_TAIL.value,
+        )
+
+    def test_incompatible_verdict_emits_no_issue(self):
+        # Per the team-lead Decision 2: ClimateEnvelopeValidator
+        # does NOT emit CROP_REGION_MISMATCH. INCOMPATIBLE
+        # verdicts surface through CropPhysiologicalValidator
+        # (Sprint F populates).
+        ctx = self._maize_context({
+            "BSh": {
+                "p25": 200.0, "p50": 300.0, "p75": 380.0,  # P50 < RMIN -> incompat
+                "p10_extreme_tmin": 15.0, "p90_extreme_tmax": 40.0,
+                "n_cell_days": 2_000_000,
+            },
+        })
+        result = self.ClimateEnvelopeValidator().validate(ctx)
+        precip_issues = [
+            i for i in result.issues
+            if i.details.get("variable") == "precip"
+        ]
+        # No CLIMATE_ENVELOPE_TAIL for incompatible.
+        self.assertEqual(len(precip_issues), 0)
+
+    def test_insufficient_zone_emits_insufficiently_sampled(self):
+        ctx = self._maize_context({
+            "Csc": {
+                "p25": 600.0, "p50": 900.0, "p75": 1200.0,
+                "p10_extreme_tmin": 15.0, "p90_extreme_tmax": 40.0,
+                "n_cell_days": 50_000,  # below 1M threshold
+            },
+        })
+        result = self.ClimateEnvelopeValidator().validate(ctx)
+        self.assertEqual(len(result.issues), 1)
+        self.assertEqual(
+            result.issues[0].category,
+            self.WarningCategory.INSUFFICIENTLY_SAMPLED.value,
+        )
+
+    def test_insufficient_zone_skips_verdict(self):
+        ctx = self._maize_context({
+            "Csc": {
+                "p25": 600.0, "p50": 900.0, "p75": 1200.0,
+                "p10_extreme_tmin": 15.0, "p90_extreme_tmax": 40.0,
+                "n_cell_days": 50_000,
+            },
+        })
+        result = self.ClimateEnvelopeValidator().validate(ctx)
+        per_zone = result.metadata["per_zone_verdicts"]
+        self.assertEqual(
+            per_zone["Csc"]["precip"], "skipped_insufficient_sample",
+        )
+
+    def test_emits_discipline_only_emit_categories_in_emits(self):
+        # F25-shape walker discipline: every issue's category
+        # MUST be a member of EMITS. Test exercises multiple
+        # zones to ensure no out-of-EMITS slip.
+        ctx = self._maize_context({
+            "BSh_marginal": {
+                "p25": 350.0, "p50": 500.0, "p75": 800.0,
+                "p10_extreme_tmin": 5.0, "p90_extreme_tmax": 50.0,
+                "n_cell_days": 2_000_000,
+            },
+            "BSh_compatible": {
+                "p25": 600.0, "p50": 900.0, "p75": 1200.0,
+                "p10_extreme_tmin": 15.0, "p90_extreme_tmax": 40.0,
+                "n_cell_days": 2_000_000,
+            },
+            "Csc_insufficient": {
+                "p25": 600.0, "p50": 900.0, "p75": 1200.0,
+                "p10_extreme_tmin": 15.0, "p90_extreme_tmax": 40.0,
+                "n_cell_days": 100,
+            },
+        })
+        result = self.ClimateEnvelopeValidator().validate(ctx)
+        emits_values = {
+            c.value for c in self.ClimateEnvelopeValidator.EMITS
+        }
+        for issue in result.issues:
+            with self.subTest(category=issue.category):
+                self.assertIn(issue.category, emits_values)
+
+
 if __name__ == "__main__":
     unittest.main()
