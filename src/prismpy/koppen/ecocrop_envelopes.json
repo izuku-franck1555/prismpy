@@ -1,6 +1,6 @@
 {
-  "version": "ecocrop_v1_2026-05-03",
-  "license": "FAO ECOCROP fair-use derivative; 8 numeric facts (2 crops × 4 fields); each fact carries verbatim_source_url + verbatim_retrieval_date provenance.",
+  "version": "ecocrop_v2_2026-05-04",
+  "license": "FAO ECOCROP fair-use derivative; 24 numeric facts (6 crops × 4 fields); each fact carries verbatim_source_url + verbatim_retrieval_date provenance.",
   "stage_1_scope_note": "Per AC-Q3-A-a/b/c, only TMIN/TMAX/RMIN/RMAX used for Stage 1; ALTMX/pH/photoperiod/GMIN/GMAX/latitude excluded per probe-1-A scope clarity. CLIZ field also excluded per AC-Q3-A-d (data-completeness gaps).",
   "fields": {
     "TMIN": "Absolute minimum annual temperature tolerated by the crop (°C)",
@@ -24,6 +24,38 @@
       "RMAX": 4000,
       "verbatim_source_url": "https://ecocrop.apps.fao.org/ecocrop/srv/en/dataSheet?id=1574",
       "verbatim_retrieval_date": "2026-05-03"
+    },
+    "sorghum": {
+      "TMIN": 8,
+      "TMAX": 40,
+      "RMIN": 300,
+      "RMAX": 700,
+      "verbatim_source_url": "https://ecocrop.apps.fao.org/ecocrop/srv/en/dataSheet?id=48747",
+      "verbatim_retrieval_date": "2026-05-04"
+    },
+    "millet": {
+      "TMIN": 12,
+      "TMAX": 40,
+      "RMIN": 200,
+      "RMAX": 1700,
+      "verbatim_source_url": "https://ecocrop.apps.fao.org/ecocrop/srv/en/dataSheet?id=8418",
+      "verbatim_retrieval_date": "2026-05-04"
+    },
+    "cowpea": {
+      "TMIN": 15,
+      "TMAX": 40,
+      "RMIN": 300,
+      "RMAX": 4100,
+      "verbatim_source_url": "https://ecocrop.apps.fao.org/ecocrop/srv/en/dataSheet?id=2153",
+      "verbatim_retrieval_date": "2026-05-04"
+    },
+    "groundnut": {
+      "TMIN": 10,
+      "TMAX": 45,
+      "RMIN": 400,
+      "RMAX": 4000,
+      "verbatim_source_url": "https://ecocrop.apps.fao.org/ecocrop/srv/en/dataSheet?id=2199",
+      "verbatim_retrieval_date": "2026-05-04"
     }
   }
 }

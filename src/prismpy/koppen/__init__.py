@@ -60,6 +60,11 @@ from prismpy.koppen.transitional import (
     classify_with_transitional_flag,
     is_transitional_cell,
 )
+from prismpy.koppen.zone_aggregates import (
+    ZONE_AGGREGATES_PATH,
+    build_zone_aggregate,
+    load_zone_aggregates,
+)
 
 
 __all__ = [
@@ -75,7 +80,10 @@ __all__ = [
     "NATIVE_CELL_DEG",
     "NEIGHBOR_OFFSETS",
     "NODATA_CODE",
+    "ZONE_AGGREGATES_PATH",
+    "build_zone_aggregate",
     "classify_with_transitional_flag",
     "is_transitional_cell",
     "load_ecocrop_envelopes",
+    "load_zone_aggregates",
 ]

@@ -1,0 +1,84 @@
+{
+  "version": "zone_aggregates_v1_2026-05-04",
+  "license": "Synthetic test-fixture data; not derived from real AgERA5. The substrate stays in-tree under this synthetic shape until the V2-19.5 Data Bootstrapper ships and produces real AgERA5-derived per-zone aggregates from the designated CI runner. Values here are chosen to exercise the four CompatibilityVerdict branches across the 6-crop AC-F-0 envelope; absolute magnitudes are NOT climate-realistic — in particular, BSh's P90 extreme tmax is held at 35 °C to keep the four Sahel-canonical crops (sorghum / millet / cowpea / groundnut) in MARGINAL_HETEROGENEOUS rather than INCOMPATIBLE. Real Sahel BSh peaks well above 40 °C; do NOT calibrate any threshold against this fixture.",
+  "stage_1_scope_note": "Sprint F AC-F-3 — five canonical Köppen-Geiger zones with per-zone aggregates that the wizard reads to populate ZoneAggregate inputs at validation time. Schema mirrors prismpy.validators.input_base.ZoneAggregate (precip P25/P50/P75 + thermal P10 extreme tmin / P90 extreme tmax + n_cell_days). n_cells is informational only; n_cell_days is what the AC-Q2-E sample-quality threshold compares against.",
+  "fields": {
+    "label": "Human-readable zone name shown in the wizard banner + cockpit drawer",
+    "n_cells": "Count of distinct cells contributing to the zone aggregate (informational)",
+    "n_cell_days": "Cells × per-cell day-coverage; compared to MIN_CELL_DAYS_PER_ZONE for the sample-quality gate",
+    "precip": "Per-cell annual mean precip percentiles in mm/yr (P25, P50, P75)",
+    "thermal": "Per-cell extreme percentiles in °C (P10 of cell-minimum-of-daily-tmin; P90 of cell-maximum-of-daily-tmax)"
+  },
+  "zones": {
+    "BSh": {
+      "label": "Hot semi-arid (Sahel-canonical)",
+      "n_cells": 421,
+      "n_cell_days": 4614540,
+      "precip": {
+        "p25": 180.0,
+        "p50": 400.0,
+        "p75": 550.0
+      },
+      "thermal": {
+        "p10_extreme_tmin": 16.0,
+        "p90_extreme_tmax": 35.0
+      }
+    },
+    "Aw": {
+      "label": "Tropical savanna (Sudan-Savanna)",
+      "n_cells": 580,
+      "n_cell_days": 6356400,
+      "precip": {
+        "p25": 700.0,
+        "p50": 1100.0,
+        "p75": 1450.0
+      },
+      "thermal": {
+        "p10_extreme_tmin": 18.0,
+        "p90_extreme_tmax": 35.0
+      }
+    },
+    "Cfa": {
+      "label": "Humid subtropical",
+      "n_cells": 312,
+      "n_cell_days": 3417480,
+      "precip": {
+        "p25": 1000.0,
+        "p50": 1450.0,
+        "p75": 1800.0
+      },
+      "thermal": {
+        "p10_extreme_tmin": 11.0,
+        "p90_extreme_tmax": 35.0
+      }
+    },
+    "Cwa": {
+      "label": "Subtropical highland",
+      "n_cells": 198,
+      "n_cell_days": 2169180,
+      "precip": {
+        "p25": 600.0,
+        "p50": 950.0,
+        "p75": 1300.0
+      },
+      "thermal": {
+        "p10_extreme_tmin": 5.0,
+        "p90_extreme_tmax": 32.0
+      }
+    },
+    "Af": {
+      "label": "Tropical rainforest",
+      "n_cells": 145,
+      "n_cell_days": 1588050,
+      "precip": {
+        "p25": 1900.0,
+        "p50": 2400.0,
+        "p75": 3000.0
+      },
+      "thermal": {
+        "p10_extreme_tmin": 20.0,
+        "p90_extreme_tmax": 33.0
+      }
+    }
+  }
+}

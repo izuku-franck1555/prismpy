@@ -5,6 +5,7 @@ This module provides the central tracking system for all data handling
 decisions, implementing the 'formalized methodology' requirement.
 """
 
+import copy
 import hashlib
 import json
 import logging
@@ -781,6 +782,136 @@ class ProvenanceTracker:
             return
         self.record.pythia_misdat_replacements[translator] = (
             self.record.pythia_misdat_replacements.get(translator, 0) + count
+        )
+
+    def record_stage_1_verdicts(
+        self,
+        snapshot: Dict[str, Any],
+    ) -> None:
+        """Sprint F AC-F-7 — attach a Stage 1 verdict snapshot
+        to the provenance record at pipeline start.
+
+        The wizard caller computes the snapshot at project
+        creation (the cached ``Project.stage_1_verdicts``
+        JSONField shape) and passes it here so the run's
+        provenance.json carries the per-(crop, zone) verdict
+        plus the substrate-version stamps the verdict was
+        computed against. The snapshot is the same shape AC-F-5
+        defines for the cache + AC-F-9 cockpit-readiness pin
+        consumes.
+
+        Args:
+            snapshot: Dict matching the AC-F-5 schema
+                (``{"schema_version", "cache_key", "created_at",
+                "entries", "substrate_versions"}``). Pass the
+                FULL dict, not just the entries list, so a
+                consumer can read the substrate stamps without
+                also reading the cached entries.
+
+        Stored on
+        :attr:`ProvenanceRecord.stage_1_verdicts_snapshot`;
+        serialized into ``provenance.json`` per
+        :meth:`ProvenanceRecord.to_dict`.
+        """
+        if not self.enabled:
+            return
+        # Defensive deep-copy so a downstream caller mutating
+        # the passed-in dict (or any of its nested lists /
+        # dicts) cannot retroactively alter the recorded
+        # snapshot. AC-F-7 + codex Gate A #14 — the snapshot
+        # is the audit trail of which verdict shape produced
+        # the run; a shallow copy would let entries[] mutation
+        # leak through.
+        self.record.stage_1_verdicts_snapshot = copy.deepcopy(snapshot)
+
+    def record_wizard_decision(
+        self,
+        record_payload: Union[Dict[str, Any], "WizardOverrideRecord"],
+        artifact_id: Optional[str] = None,
+    ) -> None:
+        """Sprint F AC-F-6 — replay a saved wizard-time
+        override into the run's provenance trail.
+
+        The wizard-time override is captured BEFORE the
+        pipeline starts (no tracker exists yet) and persisted
+        by prismweb in ``Project.wizard_decisions``. At
+        pipeline-start, the saved payload is replayed here:
+        the helper validates the payload via
+        :class:`prismpy.provenance.WizardOverrideRecord` (or
+        accepts an already-typed record), then routes it
+        through :meth:`record_decision` with
+        ``DecisionType.USER_OVERRIDE``.
+
+        A single validated entry-point keeps the prismweb
+        caller side simple — the form-validation + the
+        pipeline-start replay both go through the same
+        :class:`WizardOverrideRecord` shape rather than
+        duplicating field rules across repos.
+
+        Args:
+            record_payload: Either a
+                :class:`WizardOverrideRecord` instance or the
+                JSON-mode dict it serializes to. The dict is
+                validated through Pydantic on entry so a
+                malformed payload fails-loud instead of
+                drifting into provenance.
+            artifact_id: Optional artifact binding. When
+                provided + the artifact already has at least
+                one transformation, the decision attaches
+                directly; otherwise it lands on the pending
+                list per the existing :meth:`record_decision`
+                semantics.
+        """
+        if not self.enabled:
+            return
+        # Local import keeps the module-import surface lean;
+        # WizardOverrideRecord is an opt-in consumer per the
+        # existing record_bound_gen_provenance pattern.
+        from prismpy.provenance.wizard_decisions import (
+            WizardOverrideRecord,
+            build_wizard_override_payload,
+        )
+        if isinstance(record_payload, WizardOverrideRecord):
+            record = record_payload
+        else:
+            # Will raise pydantic.ValidationError on malformed
+            # payload — caller's responsibility to catch +
+            # surface to the user.
+            record = WizardOverrideRecord.model_validate(record_payload)
+        payload = build_wizard_override_payload(record)
+        # The structured payload lands in description /
+        # rationale / reference per the existing DecisionRecord
+        # shape; the verdict_hash + evidence_type + zones land
+        # in the rationale free-text per builder Adj-12 (V2-23
+        # polish extends DecisionRecord with first-class
+        # structured fields).
+        zones = ", ".join(record.affected_zones)
+        rationale_full = (
+            f"User override on Stage 1 verdict for zones "
+            f"[{zones}]. Evidence type: {record.evidence_type}. "
+            f"Rationale: {record.rationale} "
+            f"verdict_hash={record.verdict_hash}"
+        )
+        if record.evidence_url:
+            rationale_full += f" evidence_url={record.evidence_url}"
+        if record.methodology_paper_doi:
+            rationale_full += (
+                f" methodology_paper_doi="
+                f"{record.methodology_paper_doi}"
+            )
+        self.record_decision(
+            decision_type=DecisionType.USER_OVERRIDE,
+            description=(
+                f"Wizard-time override for affected zones "
+                f"[{zones}]"
+            ),
+            rationale=rationale_full,
+            reference=(
+                record.evidence_url or record.methodology_paper_doi
+            ),
+            artifact_id=artifact_id,
+            severity="warning",
+            label="user_override",
         )
 
     def record_bound_gen_provenance(

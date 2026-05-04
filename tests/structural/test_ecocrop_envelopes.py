@@ -1,9 +1,11 @@
 """Sprint E.0.5 AC-Q3-A-d + F28 — bundled ECOCROP envelope substrate.
 
-Pins the v1 ECOCROP envelope JSON shape, the verbatim values
-for maize + rice (the two crops verified via Chrome MCP at the
-ECOCROP source on 2026-05-03), and the F28 per-crop provenance
-contract.
+Pins the v2 ECOCROP envelope JSON shape (six crops covering the
+prismweb wizard catalog: maize + rice from Sprint E.0.5;
+sorghum / pearl millet / cowpea / groundnut from Sprint F
+crop-specialist Chrome MCP retrieval 2026-05-04 per CC-28
+envelope-coverage-parity invariant) and the F28 per-crop
+provenance contract.
 
 Anti-mutation drills:
 - Drop a required field from any crop → loader raises
@@ -11,7 +13,8 @@ Anti-mutation drills:
   ``test_each_crop_has_4_required_envelope_fields`` fails.
 - Introduce CLIZ (or any forbidden ECOCROP field) on any crop →
   ``test_no_out_of_scope_fields_in_any_crop`` fails.
-- Change maize/rice envelope value → verbatim-pin test fails.
+- Change any crop's envelope value (incl. the 4 new Sprint F
+  crops) → verbatim-pin test fails.
 - Drop verbatim_source_url or verbatim_retrieval_date from any
   crop → loader raises (F28) →
   ``test_each_crop_has_provenance_block`` fails.
@@ -63,8 +66,10 @@ ISO8601_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 class TestECOCROPEnvelopesShape(unittest.TestCase):
-    """Pin the bundled v1 JSON shape + maize/rice verbatim
-    values + scope discipline at the data layer."""
+    """Pin the bundled v2 JSON shape + verbatim envelope values
+    for the six wizard-catalog crops (maize / rice / sorghum /
+    pearl millet / cowpea / groundnut) + scope discipline at
+    the data layer."""
 
     @classmethod
     def setUpClass(cls):
@@ -73,7 +78,7 @@ class TestECOCROPEnvelopesShape(unittest.TestCase):
             cls.payload = json.load(fp)
 
     def test_default_path_loads(self):
-        self.assertGreaterEqual(len(self.envelopes), 2)
+        self.assertGreaterEqual(len(self.envelopes), 6)
 
     def test_each_crop_has_4_required_envelope_fields(self):
         for crop, env in self.envelopes.items():
@@ -108,8 +113,60 @@ class TestECOCROPEnvelopesShape(unittest.TestCase):
         self.assertEqual(env["RMIN"], 1000.0)
         self.assertEqual(env["RMAX"], 4000.0)
 
+    # Sprint F AC-F-0 — verbatim envelope pins for the four new
+    # crops added per CC-28 envelope-coverage-parity. Values
+    # retrieved 2026-05-04 by the crop-specialist via Chrome MCP
+    # against the FAO ECOCROP web data sheets and cross-validated
+    # against the OpenCLIM CSV mirror. Persona alignment: pearl
+    # millet (Pennisetum glaucum, code 8418) chosen over finger
+    # millet for Sahel-canonical-staple + drought-tolerance
+    # rationale.
+    def test_sorghum_verbatim_envelope(self):
+        env = self.envelopes["sorghum"]
+        self.assertEqual(env["TMIN"], 8.0)
+        self.assertEqual(env["TMAX"], 40.0)
+        self.assertEqual(env["RMIN"], 300.0)
+        self.assertEqual(env["RMAX"], 700.0)
+
+    def test_millet_verbatim_envelope(self):
+        env = self.envelopes["millet"]
+        self.assertEqual(env["TMIN"], 12.0)
+        self.assertEqual(env["TMAX"], 40.0)
+        self.assertEqual(env["RMIN"], 200.0)
+        self.assertEqual(env["RMAX"], 1700.0)
+
+    def test_cowpea_verbatim_envelope(self):
+        env = self.envelopes["cowpea"]
+        self.assertEqual(env["TMIN"], 15.0)
+        self.assertEqual(env["TMAX"], 40.0)
+        self.assertEqual(env["RMIN"], 300.0)
+        self.assertEqual(env["RMAX"], 4100.0)
+
+    def test_groundnut_verbatim_envelope(self):
+        env = self.envelopes["groundnut"]
+        self.assertEqual(env["TMIN"], 10.0)
+        self.assertEqual(env["TMAX"], 45.0)
+        self.assertEqual(env["RMIN"], 400.0)
+        self.assertEqual(env["RMAX"], 4000.0)
+
     def test_version_pinned(self):
-        self.assertEqual(self.payload["version"], "ecocrop_v1_2026-05-03")
+        # Sprint F AC-F-0 bumps the substrate version to v2 to
+        # signal that the cache key composed in
+        # ``Project.stage_1_verdicts`` (per AC-F-5) recomputes for
+        # any project whose cached verdicts reference v1 — a
+        # 4-crop expansion is a substrate change even if the two
+        # original entries are unchanged.
+        self.assertEqual(self.payload["version"], "ecocrop_v2_2026-05-04")
+
+    def test_license_footer_reflects_six_crops(self):
+        # Pin the license footer reframe per AC-F-0. A future
+        # crop-coverage expansion that bumps to 32+ facts must
+        # update both the JSON and this pin in the same commit
+        # so the test catches an unsynchronized footer.
+        self.assertIn(
+            "24 numeric facts (6 crops × 4 fields)",
+            self.payload["license"],
+        )
 
 
 class TestECOCROPProvenanceF28(unittest.TestCase):
@@ -166,6 +223,35 @@ class TestECOCROPProvenanceF28(unittest.TestCase):
         self.assertEqual(
             self.envelopes["rice"]["verbatim_source_url"],
             "https://ecocrop.apps.fao.org/ecocrop/srv/en/dataSheet?id=1574",
+        )
+
+    # Sprint F AC-F-0 — provenance URL pins for the four new
+    # crops. Each ECOCROP data-sheet ID is the verbatim retrieval
+    # target; a typo in the JSON would otherwise route the audit
+    # link to a different (or missing) crop record on the FAO
+    # site without surfacing.
+    def test_sorghum_provenance_url(self):
+        self.assertEqual(
+            self.envelopes["sorghum"]["verbatim_source_url"],
+            "https://ecocrop.apps.fao.org/ecocrop/srv/en/dataSheet?id=48747",
+        )
+
+    def test_millet_provenance_url(self):
+        self.assertEqual(
+            self.envelopes["millet"]["verbatim_source_url"],
+            "https://ecocrop.apps.fao.org/ecocrop/srv/en/dataSheet?id=8418",
+        )
+
+    def test_cowpea_provenance_url(self):
+        self.assertEqual(
+            self.envelopes["cowpea"]["verbatim_source_url"],
+            "https://ecocrop.apps.fao.org/ecocrop/srv/en/dataSheet?id=2153",
+        )
+
+    def test_groundnut_provenance_url(self):
+        self.assertEqual(
+            self.envelopes["groundnut"]["verbatim_source_url"],
+            "https://ecocrop.apps.fao.org/ecocrop/srv/en/dataSheet?id=2199",
         )
 
 

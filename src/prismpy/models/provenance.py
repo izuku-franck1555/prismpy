@@ -5,6 +5,7 @@ These models track the complete lineage and transformation history
 of all data artifacts, enabling full reproducibility and audit trails.
 """
 
+import copy
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -41,6 +42,13 @@ class DecisionType(str, Enum):
     UNIT_CONVERSION = "unit_conversion"              # Unit conversions (iSDA bd/100, pH/10, W/m² → MJ/m²/day)
     AGGREGATION_METHOD = "aggregation_method"        # Aggregation choice (mean/sum/majority) distinct from RESAMPLING
     QUALITY_CHECK = "quality_check"                  # Validation quality check outcome (Phase 2a)
+    # Sprint F additive — wizard-time user override on a Bucket 3
+    # warning. Distinct from PARAMETER_OVERRIDE because it carries
+    # the persona's stated rationale + evidence, not a substrate
+    # threshold change. See :class:`WizardOverrideRecord` for the
+    # canonical payload shape stored at wizard time and replayed
+    # into the pipeline tracker at run-start time.
+    USER_OVERRIDE = "user_override"
 
 
 @dataclass
@@ -272,6 +280,18 @@ class ProvenanceRecord:
     rh_clip_details: List[Dict[str, Any]] = field(default_factory=list)
     cells_unavailable_details: List[Dict[str, Any]] = field(default_factory=list)
     pythia_misdat_replacements: Dict[str, int] = field(default_factory=dict)
+    # Sprint F AC-F-7 — Stage 1 verdict snapshot. Populated by
+    # ``ProvenanceTracker.record_stage_1_verdicts(...)`` at
+    # pipeline start with the cached per-(crop, zone) verdict
+    # dict + the substrate-version stamps the verdict was
+    # computed against (``bounds_version`` /
+    # ``zone_classifier_version`` /
+    # ``ecocrop_envelope_version``). ``None`` for runs that
+    # don't use the Stage 1 substrate (e.g., legacy pipelines
+    # or non-wizard programmatic usage). Distinct top-level
+    # field per codex Gate A #14 — explicit, not a vague
+    # ``metadata`` bag.
+    stage_1_verdicts_snapshot: Optional[Dict[str, Any]] = None
 
     def add_artifact(self, lineage: DataLineage) -> None:
         """Add an artifact lineage to the record."""
@@ -383,6 +403,20 @@ class ProvenanceRecord:
             "rh_clip_details": list(self.rh_clip_details),
             "cells_unavailable_details": list(
                 self.cells_unavailable_details
+            ),
+            # Sprint F AC-F-7 — Stage 1 verdict snapshot. Omit
+            # the key when ``None`` so legacy consumers reading
+            # via ``.get("stage_1_verdicts_snapshot")`` see the
+            # same shape they did pre-Sprint-F. Deep-copy so a
+            # downstream serializer mutation cannot leak back
+            # into the underlying record per AC-F-7 audit-
+            # trail discipline.
+            **(
+                {"stage_1_verdicts_snapshot": copy.deepcopy(
+                    self.stage_1_verdicts_snapshot
+                )}
+                if self.stage_1_verdicts_snapshot is not None
+                else {}
             ),
         }
 
