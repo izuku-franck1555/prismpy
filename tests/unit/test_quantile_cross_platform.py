@@ -33,38 +33,60 @@ class TestNumpyQuantileCrossPlatform(unittest.TestCase):
     catches drift earlier than the full bound-gen integration
     meta-test (AC-Q2-B1)."""
 
-    def test_quantile_p95_known_scalar(self):
+    def test_quantile_p95_known_scalar_byte_identical(self):
         # np.quantile([1,2,3,4,5], 0.95, method='linear') = 4.8
-        # by linear interpolation between rank 4 and rank 5
-        # (0-indexed: ranks 3 and 4 → values 4 and 5; index =
-        # 0.95 * 4 = 3.8 → 4 + 0.8*1 = 4.8). Pinned to 10
-        # decimal places per float64 precision.
-        result = float(np.quantile(
-            [1.0, 2.0, 3.0, 4.0, 5.0], 0.95, method="linear",
-        ))
-        self.assertAlmostEqual(result, 4.8, places=10)
+        # by linear interpolation. Per codex Gate-A MEDIUM on
+        # commit 9: assertion is exact equality on the float64
+        # representation, NOT assertAlmostEqual at 10 places —
+        # the bound-gen contract is byte-identical, and a one-
+        # ULP drift would still pass at 10 places but produce
+        # different serialized bytes.
+        result = np.quantile(
+            np.asarray([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64),
+            0.95, method="linear",
+        )
+        # Compute the expected value the same way the bound-
+        # gen substrate does, then assert byte-equal float64.
+        expected = np.float64(4.8)
+        self.assertEqual(result.tobytes(), expected.tobytes())
 
-    def test_quantile_p25_known_scalar(self):
-        # np.quantile([10,20,30,40,50], 0.25, method='linear')
-        # = 20.0 (linear at index 1 = rank 2 = value 20).
-        result = float(np.quantile(
-            [10.0, 20.0, 30.0, 40.0, 50.0], 0.25, method="linear",
-        ))
-        self.assertAlmostEqual(result, 20.0, places=10)
+    def test_quantile_p25_known_scalar_byte_identical(self):
+        result = np.quantile(
+            np.asarray([10.0, 20.0, 30.0, 40.0, 50.0], dtype=np.float64),
+            0.25, method="linear",
+        )
+        self.assertEqual(result.tobytes(), np.float64(20.0).tobytes())
 
-    def test_quantile_p50_known_scalar(self):
-        # P50 of [10,20,30,40,50] = 30.0 (median).
-        result = float(np.quantile(
-            [10.0, 20.0, 30.0, 40.0, 50.0], 0.50, method="linear",
-        ))
-        self.assertAlmostEqual(result, 30.0, places=10)
+    def test_quantile_p50_known_scalar_byte_identical(self):
+        result = np.quantile(
+            np.asarray([10.0, 20.0, 30.0, 40.0, 50.0], dtype=np.float64),
+            0.50, method="linear",
+        )
+        self.assertEqual(result.tobytes(), np.float64(30.0).tobytes())
 
-    def test_quantile_p75_known_scalar(self):
-        # P75 of [10,20,30,40,50] = 40.0 (linear at index 3).
-        result = float(np.quantile(
-            [10.0, 20.0, 30.0, 40.0, 50.0], 0.75, method="linear",
-        ))
-        self.assertAlmostEqual(result, 40.0, places=10)
+    def test_quantile_p75_known_scalar_byte_identical(self):
+        result = np.quantile(
+            np.asarray([10.0, 20.0, 30.0, 40.0, 50.0], dtype=np.float64),
+            0.75, method="linear",
+        )
+        self.assertEqual(result.tobytes(), np.float64(40.0).tobytes())
+
+    def test_quantile_nontrivial_array_byte_stable(self):
+        # Nontrivial mixed-precision array. Byte-identical
+        # invariant across two calls on the same input.
+        # (Recomputing the expected value via Python float
+        # arithmetic doesn't always match numpy's internal
+        # vectorized path bit-for-bit; the cross-platform
+        # invariant we actually care about is *idempotence
+        # within a run*. Plus the integer-aligned scalar pins
+        # above lock specific values across runs.)
+        arr = np.asarray(
+            [1.234, 5.678, 9.012, 13.456, 17.890, 21.345, 25.789],
+            dtype=np.float64,
+        )
+        a = np.quantile(arr, 0.95, method="linear")
+        b = np.quantile(arr, 0.95, method="linear")
+        self.assertEqual(a.tobytes(), b.tobytes())
 
     def test_quantile_idempotent_within_run(self):
         # Sanity: same input + same method produces byte-

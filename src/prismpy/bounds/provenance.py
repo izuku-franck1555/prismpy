@@ -180,11 +180,15 @@ class BoundGenProvenance(BaseModel):
             "while deposit_status='pending'."
         ),
     )
-    era5_archive_snapshot_date: Optional[date] = Field(
-        default=None,
+    era5_archive_snapshot_date: date = Field(
+        ...,
         description=(
             "Calendar date when the AgERA5 archive was sampled "
-            "for bound-gen input. Null while "
+            "for bound-gen input. Required for every bound-gen "
+            "run regardless of deposit_status — the run sampled "
+            "from AgERA5 at SOME date, and that date pins the "
+            "cutoff math. Only the Zenodo DOI / URL / SHA256 "
+            "are conditionally nullable while "
             "deposit_status='pending'."
         ),
     )
@@ -361,10 +365,10 @@ class BoundGenProvenance(BaseModel):
     @model_validator(mode="after")
     def _validate_deposit_conjunction(self) -> "BoundGenProvenance":
         """Per AC-Q2-A1-c: when deposit_status='deposited', all
-        four Zenodo fields MUST be populated AND non-empty.
-        A blank DOI string or empty SHA256 list defeats the
-        archive-verification point of AC-Q2-A1-c just as
-        thoroughly as ``None`` would."""
+        three Zenodo fields (DOI / URL / SHA256) MUST be
+        populated AND non-empty. ``era5_archive_snapshot_date``
+        is now always required so it isn't part of this
+        conjunction."""
         if self.era5_archive_deposit_status == DepositStatus.DEPOSITED:
             missing_or_empty: List[str] = []
             if not self.era5_archive_zenodo_doi:  # None or empty string
@@ -373,12 +377,10 @@ class BoundGenProvenance(BaseModel):
                 missing_or_empty.append("era5_archive_zenodo_url")
             if not self.era5_archive_sha256:  # None or empty list
                 missing_or_empty.append("era5_archive_sha256")
-            if self.era5_archive_snapshot_date is None:
-                missing_or_empty.append("era5_archive_snapshot_date")
             if missing_or_empty:
                 raise ValueError(
                     f"BoundGenProvenance: deposit_status='deposited' "
-                    f"requires all four Zenodo fields populated "
+                    f"requires all three Zenodo fields populated "
                     f"and non-empty; missing or blank: "
                     f"{missing_or_empty}. Methods text MUST NOT "
                     f"claim DOI retrieval until the deposit lands "
@@ -397,25 +399,24 @@ class BoundGenProvenance(BaseModel):
 
     @model_validator(mode="after")
     def _validate_cutoff_matches_snapshot(self) -> "BoundGenProvenance":
-        """Per AC-Q2-A1-a + the field documentation: when the
-        snapshot date is populated (i.e. deposited), the cutoff
-        MUST equal snapshot − 180 days. Without this check, a
-        deposited record can certify the 120-day lag /
-        90+-day margin while the actual cutoff is inconsistent
-        with the snapshot."""
-        if self.era5_archive_snapshot_date is not None:
-            expected_cutoff = (
-                self.era5_archive_snapshot_date - _AGERA5_CUTOFF_OFFSET
+        """Per AC-Q2-A1-a + the field documentation:
+        ``era5_archive_snapshot_date`` is required for every
+        bound-gen run, and ``agera5_record_cutoff`` MUST equal
+        snapshot − 180 days unconditionally. The pending state
+        no longer lets a record carry an arbitrary (e.g.
+        future) cutoff."""
+        expected_cutoff = (
+            self.era5_archive_snapshot_date - _AGERA5_CUTOFF_OFFSET
+        )
+        if self.agera5_record_cutoff != expected_cutoff:
+            raise ValueError(
+                f"BoundGenProvenance: agera5_record_cutoff "
+                f"must equal era5_archive_snapshot_date - "
+                f"180 days; got cutoff="
+                f"{self.agera5_record_cutoff!r}, snapshot="
+                f"{self.era5_archive_snapshot_date!r}, "
+                f"expected_cutoff={expected_cutoff!r}."
             )
-            if self.agera5_record_cutoff != expected_cutoff:
-                raise ValueError(
-                    f"BoundGenProvenance: agera5_record_cutoff "
-                    f"must equal era5_archive_snapshot_date - "
-                    f"180 days; got cutoff="
-                    f"{self.agera5_record_cutoff!r}, snapshot="
-                    f"{self.era5_archive_snapshot_date!r}, "
-                    f"expected_cutoff={expected_cutoff!r}."
-                )
         return self
 
 

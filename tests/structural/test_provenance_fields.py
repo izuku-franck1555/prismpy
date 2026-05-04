@@ -87,6 +87,9 @@ def _minimal_pending_provenance(**overrides) -> BoundGenProvenance:
         bounds_version="frozen_v1",
         regenerated_at=datetime(2026, 5, 4, 12, 0, 0),
         era5_archive_deposit_status=DepositStatus.PENDING,
+        # snapshot_date is now always required (not just for
+        # 'deposited' status) per codex Gate-A HIGH on commit 9.
+        era5_archive_snapshot_date=date(2026, 5, 4),
         agera5_record_cutoff=date(2025, 11, 5),  # snapshot - 180d
         agera5_filename_versions_observed=["v1.1.0"],
         license_chain=(
@@ -222,13 +225,19 @@ class TestDepositStatusEnum(unittest.TestCase):
 
 
 class TestDepositConjunction(unittest.TestCase):
-    """Per AC-Q2-A1-c: when deposit_status='deposited', all
-    four Zenodo fields MUST be populated. Pending allows null."""
+    """Per AC-Q2-A1-c (post codex Gate-A HIGH on commit 9):
+    snapshot_date is required for every record;
+    deposit_status='deposited' additionally requires all
+    three Zenodo fields (DOI / URL / SHA256). Pending allows
+    null DOI / URL / SHA256 only."""
 
     def test_pending_allows_null_zenodo_fields(self):
         # Sanity: the minimal pending provenance is valid.
+        # DOI / URL / SHA256 are nullable while pending; the
+        # snapshot date itself is always required.
         prov = _minimal_pending_provenance()
         self.assertIsNone(prov.era5_archive_zenodo_doi)
+        self.assertIsNotNone(prov.era5_archive_snapshot_date)
         self.assertEqual(
             prov.era5_archive_deposit_status, DepositStatus.PENDING,
         )
@@ -323,16 +332,24 @@ class TestCutoffMatchesSnapshot(unittest.TestCase):
                 agera5_record_cutoff=date(2025, 1, 1),  # arbitrary
             )
 
-    def test_cutoff_unconstrained_when_snapshot_none(self):
-        # While deposit_status='pending', snapshot is None and
-        # the cutoff is free (the bound-gen run can record any
-        # local cutoff value).
-        prov = _minimal_pending_provenance(
-            agera5_record_cutoff=date(2099, 1, 1),  # arbitrary
-        )
-        self.assertEqual(
-            prov.agera5_record_cutoff, date(2099, 1, 1),
-        )
+    def test_cutoff_required_to_match_snapshot_even_when_pending(self):
+        # Per codex Gate-A HIGH on commit 9: snapshot_date is
+        # required for every record, so the cross-field
+        # validator runs unconditionally. A pending record
+        # with cutoff != snapshot - 180 days is rejected.
+        with self.assertRaises(ValueError) as ctx:
+            _minimal_pending_provenance(
+                agera5_record_cutoff=date(2099, 1, 1),  # arbitrary
+            )
+        self.assertIn("180 days", str(ctx.exception))
+
+    def test_snapshot_date_required_even_when_pending(self):
+        # Snapshot date is now non-optional. Setting it to
+        # None (via override) raises at construction.
+        with self.assertRaises(Exception):
+            _minimal_pending_provenance(
+                era5_archive_snapshot_date=None,
+            )
 
 
 class TestLicenseChainFormat(unittest.TestCase):

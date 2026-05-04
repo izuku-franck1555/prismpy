@@ -74,6 +74,70 @@ class TestSubstrateAggregatorsTakeSingleZone(unittest.TestCase):
         )
 
 
+class TestSubstrateCrossZoneIndependence(unittest.TestCase):
+    """Per codex Gate-A MEDIUM on commit 9: a positive
+    synthetic-fixture test that catches cross-zone pollution
+    even if a future helper avoids the forbidden function-name
+    patterns. Two synthetic zones with deliberately different
+    distributions: aggregating each independently must produce
+    that zone's distribution, NOT a mean of both. A re-pooling
+    refactor would converge both zones toward the global mean
+    and trip this test."""
+
+    def test_per_zone_aggregation_does_not_cross_contaminate(self):
+        # BSh zone: 100 cells with narrow distribution at
+        # 200 mm. BSk zone: 100 cells at 800 mm. Separated
+        # P50s are ~200 and ~800; pooling would converge both
+        # to ~500 (the global mean).
+        bsh_cells = [200.0] * 100
+        bsk_cells = [800.0] * 100
+
+        bsh_iqr = compute_zone_precip_iqr(bsh_cells)
+        bsk_iqr = compute_zone_precip_iqr(bsk_cells)
+
+        # Each zone's P50 reflects only its own cells.
+        self.assertAlmostEqual(bsh_iqr["p50"], 200.0, places=10)
+        self.assertAlmostEqual(bsk_iqr["p50"], 800.0, places=10)
+
+        # Pool would have given P50 ≈ 500 (mean of 200 + 800)
+        # for BOTH zones. The substrate doesn't.
+        self.assertNotAlmostEqual(bsh_iqr["p50"], 500.0, places=1)
+        self.assertNotAlmostEqual(bsk_iqr["p50"], 500.0, places=1)
+
+    def test_thermal_extremes_per_zone_independent(self):
+        # Symmetric synthetic for thermal. BSh extreme tmin
+        # cells = 15°C; BSk extreme tmin cells = -10°C. Cells
+        # in one zone must NOT influence the other zone's P10.
+        bsh_extreme_tmins = [15.0] * 100
+        bsh_extreme_tmaxs = [40.0] * 100
+        bsk_extreme_tmins = [-10.0] * 100
+        bsk_extreme_tmaxs = [25.0] * 100
+
+        bsh_aggs = compute_zone_thermal_extremes(
+            bsh_extreme_tmins, bsh_extreme_tmaxs,
+        )
+        bsk_aggs = compute_zone_thermal_extremes(
+            bsk_extreme_tmins, bsk_extreme_tmaxs,
+        )
+
+        # Each zone's P10 reflects only its own cells.
+        self.assertAlmostEqual(
+            bsh_aggs["p10_extreme_tmin"], 15.0, places=10,
+        )
+        self.assertAlmostEqual(
+            bsk_aggs["p10_extreme_tmin"], -10.0, places=10,
+        )
+        # Pool would have given P10 around 2.5 (linear at the
+        # middle of the bimodal distribution). The substrate
+        # doesn't pool.
+        self.assertNotAlmostEqual(
+            bsh_aggs["p10_extreme_tmin"], 2.5, places=1,
+        )
+        self.assertNotAlmostEqual(
+            bsk_aggs["p10_extreme_tmin"], 2.5, places=1,
+        )
+
+
 class TestNoCrossZonePoolHelpers(unittest.TestCase):
     """Walker scans the prismpy source tree for function-name
     patterns that would indicate cross-zone pooling. A bound-
