@@ -613,13 +613,22 @@ class TestClimateEnvelopeValidator(unittest.TestCase):
         cls.WarningCategory = WarningCategory
 
     def _maize_context(self, zone_aggregates):
+        from prismpy.validators.input_base import CropEnvelope, ZoneAggregate
+        envelope = CropEnvelope(
+            TMIN=_MAIZE_TMIN, TMAX=_MAIZE_TMAX,
+            RMIN=_MAIZE_RMIN, RMAX=_MAIZE_RMAX,
+        )
+        typed_aggregates = {
+            zone: (
+                aggs if isinstance(aggs, ZoneAggregate)
+                else ZoneAggregate(**aggs)
+            )
+            for zone, aggs in zone_aggregates.items()
+        }
         return self.InputValidationContext(
             crop_name="maize",
-            crop_envelope={
-                "TMIN": _MAIZE_TMIN, "TMAX": _MAIZE_TMAX,
-                "RMIN": _MAIZE_RMIN, "RMAX": _MAIZE_RMAX,
-            },
-            zone_aggregates=zone_aggregates,
+            crop_envelope=envelope,
+            zone_aggregates=typed_aggregates,
         )
 
     def test_emits_frozenset(self):

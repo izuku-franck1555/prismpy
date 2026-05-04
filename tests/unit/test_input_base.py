@@ -23,11 +23,29 @@ from typing import FrozenSet
 
 from prismpy.validators.base import ValidationIssue
 from prismpy.validators.input_base import (
+    CropEnvelope,
     InputValidationContext,
     InputValidationResult,
     InputValidator,
+    ZoneAggregate,
 )
 from prismpy.warnings.categories import WarningCategory
+
+
+def _maize_envelope(**overrides) -> CropEnvelope:
+    base = dict(TMIN=10.0, TMAX=47.0, RMIN=400.0, RMAX=1800.0)
+    base.update(overrides)
+    return CropEnvelope(**base)
+
+
+def _bsh_aggregate(**overrides) -> ZoneAggregate:
+    base = dict(
+        p25=600.0, p50=900.0, p75=1200.0,
+        p10_extreme_tmin=12.0, p90_extreme_tmax=40.0,
+        n_cell_days=2_000_000,
+    )
+    base.update(overrides)
+    return ZoneAggregate(**base)
 
 
 class TestInputValidationResult(unittest.TestCase):
@@ -57,20 +75,13 @@ class TestInputValidationResult(unittest.TestCase):
 
 class TestInputValidationContext(unittest.TestCase):
     """Pin the Pydantic context model: frozen + extra-forbid +
-    required fields."""
+    required fields + typed nested models."""
 
     def _ctx(self, **overrides):
         base = dict(
             crop_name="maize",
-            crop_envelope={"TMIN": 10.0, "TMAX": 47.0, "RMIN": 400.0, "RMAX": 1800.0},
-            zone_aggregates={
-                "BSh": {
-                    "p25": 600.0, "p50": 900.0, "p75": 1200.0,
-                    "p10_extreme_tmin": 12.0,
-                    "p90_extreme_tmax": 40.0,
-                    "n_cell_days": 2_000_000,
-                },
-            },
+            crop_envelope=_maize_envelope(),
+            zone_aggregates={"BSh": _bsh_aggregate()},
         )
         base.update(overrides)
         return InputValidationContext(**base)
@@ -96,6 +107,103 @@ class TestInputValidationContext(unittest.TestCase):
     def test_negative_min_cell_days_rejected(self):
         with self.assertRaises(Exception):
             self._ctx(min_cell_days_per_zone=-1)
+
+    def test_empty_zone_aggregates_rejected(self):
+        # Per codex Gate-A MEDIUM on commit 8: an empty
+        # zone_aggregates dict must fail-loud rather than
+        # returning a clean preflight from the validator.
+        with self.assertRaises(Exception):
+            self._ctx(zone_aggregates={})
+
+
+class TestCropEnvelopeModel(unittest.TestCase):
+    """Per codex Gate-A HIGH on commit 8: the previously-flat
+    Dict[str, float] crop envelope is now a frozen Pydantic
+    model so missing keys / typo'd fields / mutation fail-loud."""
+
+    def test_required_fields(self):
+        with self.assertRaises(Exception):
+            CropEnvelope(TMIN=10, TMAX=47, RMIN=400)  # missing RMAX
+
+    def test_extra_fields_forbidden(self):
+        with self.assertRaises(Exception):
+            CropEnvelope(
+                TMIN=10, TMAX=47, RMIN=400, RMAX=1800,
+                ALTMX=2000,  # forbidden out-of-scope ECOCROP field
+            )
+
+    def test_frozen_after_construction(self):
+        env = _maize_envelope()
+        with self.assertRaises(Exception):
+            env.TMIN = 20.0
+
+    def test_tmin_must_be_strictly_below_tmax(self):
+        with self.assertRaises(Exception):
+            _maize_envelope(TMIN=50.0)  # TMIN > TMAX
+
+    def test_rmin_must_be_strictly_below_rmax(self):
+        with self.assertRaises(Exception):
+            _maize_envelope(RMIN=2000.0)  # RMIN > RMAX
+
+    def test_negative_rmin_rejected(self):
+        with self.assertRaises(Exception):
+            _maize_envelope(RMIN=-100.0)
+
+
+class TestZoneAggregateModel(unittest.TestCase):
+    """Per codex Gate-A HIGH on commit 8: zone aggregates are
+    typed Pydantic models so n_cell_days cannot silently
+    default to 0 and the precip-percentile / thermal ordering
+    cannot drift."""
+
+    def test_required_fields(self):
+        with self.assertRaises(Exception):
+            # Missing n_cell_days
+            ZoneAggregate(
+                p25=600, p50=900, p75=1200,
+                p10_extreme_tmin=12, p90_extreme_tmax=40,
+            )
+
+    def test_n_cell_days_required(self):
+        # Per codex Gate-A HIGH on commit 8: missing
+        # n_cell_days previously silently defaulted to 0 in
+        # the validator and silenced the precip/thermal
+        # verdict behind a sample-quality warning. Now it
+        # fails at context construction.
+        with self.assertRaises(Exception):
+            ZoneAggregate(
+                p25=600, p50=900, p75=1200,
+                p10_extreme_tmin=12, p90_extreme_tmax=40,
+                # n_cell_days missing
+            )
+
+    def test_extra_fields_forbidden(self):
+        with self.assertRaises(Exception):
+            ZoneAggregate(
+                p25=600, p50=900, p75=1200,
+                p10_extreme_tmin=12, p90_extreme_tmax=40,
+                n_cell_days=2_000_000,
+                p99_extreme=45,  # forbidden / not-a-Stage-1-field
+            )
+
+    def test_frozen_after_construction(self):
+        agg = _bsh_aggregate()
+        with self.assertRaises(Exception):
+            agg.p50 = 100.0
+
+    def test_iqr_ordering_required(self):
+        with self.assertRaises(Exception):
+            _bsh_aggregate(p25=1200.0, p50=900.0, p75=600.0)
+
+    def test_thermal_ordering_required(self):
+        with self.assertRaises(Exception):
+            _bsh_aggregate(
+                p10_extreme_tmin=50.0, p90_extreme_tmax=40.0,
+            )
+
+    def test_negative_n_cell_days_rejected(self):
+        with self.assertRaises(Exception):
+            _bsh_aggregate(n_cell_days=-1)
 
 
 class TestInputValidatorABC(unittest.TestCase):

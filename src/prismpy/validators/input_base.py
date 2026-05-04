@@ -40,10 +40,121 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Dict, FrozenSet, List
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from prismpy.validators.base import ValidationIssue
 from prismpy.warnings.categories import WarningCategory
+
+
+class CropEnvelope(BaseModel):
+    """Frozen ECOCROP envelope for a single crop.
+
+    Replaces the earlier ``Dict[str, float]`` shape so a
+    downstream validator cannot mutate the envelope mid-check
+    and so typo'd / extra fields fail-loud rather than being
+    silently accepted. Strict-ordering validators mirror the
+    AC-Q3-A-NaN contract on the bundled JSON loader.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    TMIN: float = Field(
+        ...,
+        description="Absolute minimum tolerable annual temperature (°C).",
+    )
+    TMAX: float = Field(
+        ...,
+        description="Absolute maximum tolerable annual temperature (°C).",
+    )
+    RMIN: float = Field(
+        ..., ge=0,
+        description="Minimum required annual rainfall (mm).",
+    )
+    RMAX: float = Field(
+        ..., ge=0,
+        description="Maximum tolerable annual rainfall (mm).",
+    )
+
+    @model_validator(mode="after")
+    def _validate_ordering(self) -> "CropEnvelope":
+        if not self.TMIN < self.TMAX:
+            raise ValueError(
+                f"CropEnvelope: TMIN ({self.TMIN}) must be "
+                f"strictly less than TMAX ({self.TMAX})."
+            )
+        if not self.RMIN < self.RMAX:
+            raise ValueError(
+                f"CropEnvelope: RMIN ({self.RMIN}) must be "
+                f"strictly less than RMAX ({self.RMAX})."
+            )
+        return self
+
+
+class ZoneAggregate(BaseModel):
+    """Frozen per-zone climate aggregates consumed by the
+    Stage 1 wizard-time envelope check.
+
+    Replaces the earlier ``Dict[str, float]`` shape so missing
+    keys (notably ``n_cell_days``) cannot silently default to
+    zero and silence the precipitation / thermal verdict
+    behind a sample-quality warning.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    p25: float = Field(
+        ..., ge=0,
+        description="Zone P25 of per-cell annual mean precip (mm/yr).",
+    )
+    p50: float = Field(
+        ..., ge=0,
+        description="Zone P50 of per-cell annual mean precip (mm/yr).",
+    )
+    p75: float = Field(
+        ..., ge=0,
+        description="Zone P75 of per-cell annual mean precip (mm/yr).",
+    )
+    p10_extreme_tmin: float = Field(
+        ...,
+        description=(
+            "Zone P10 of per-cell extreme tmin (the 30-yr "
+            "single coldest day per cell), in °C."
+        ),
+    )
+    p90_extreme_tmax: float = Field(
+        ...,
+        description=(
+            "Zone P90 of per-cell extreme tmax (the 30-yr "
+            "single hottest day per cell), in °C."
+        ),
+    )
+    n_cell_days: int = Field(
+        ..., ge=0,
+        description=(
+            "Total cell-days contributing to the zone aggregate. "
+            "Compared to the AC-Q2-E threshold by the validator. "
+            "Required: a missing value here would silence the "
+            "envelope verdict behind a sample-quality warning."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_ordering(self) -> "ZoneAggregate":
+        if not (self.p25 <= self.p50 <= self.p75):
+            raise ValueError(
+                f"ZoneAggregate: precip percentiles must satisfy "
+                f"P25 <= P50 <= P75; got P25={self.p25}, "
+                f"P50={self.p50}, P75={self.p75}."
+            )
+        if self.p10_extreme_tmin > self.p90_extreme_tmax:
+            raise ValueError(
+                f"ZoneAggregate: P10 extreme tmin "
+                f"({self.p10_extreme_tmin}) must not exceed "
+                f"P90 extreme tmax ({self.p90_extreme_tmax}); an "
+                f"inverted aggregate indicates swapped variables "
+                f"or unit corruption upstream."
+            )
+        return self
 
 
 @dataclass
@@ -101,22 +212,23 @@ class InputValidationContext(BaseModel):
             "``ecocrop_envelopes.json``."
         ),
     )
-    crop_envelope: Dict[str, float] = Field(
+    crop_envelope: CropEnvelope = Field(
         ...,
         description=(
-            "ECOCROP envelope for the crop: TMIN/TMAX/RMIN/RMAX "
-            "(°C / mm). Loaded via "
-            ":func:`prismpy.koppen.load_ecocrop_envelopes`."
+            "ECOCROP envelope for the crop. Frozen Pydantic "
+            "model; see :class:`CropEnvelope`."
         ),
     )
-    zone_aggregates: Dict[str, Dict[str, float]] = Field(
+    zone_aggregates: Dict[str, ZoneAggregate] = Field(
         ...,
+        min_length=1,
         description=(
             "Per-zone climate aggregates keyed by Köppen-Geiger "
-            "zone code (e.g. 'BSh', 'Aw'). Each value carries "
-            "p25/p50/p75 (precip mm/yr), "
-            "p10_extreme_tmin/p90_extreme_tmax (°C), and "
-            "n_cell_days for the AC-Q2-E sample-quality check."
+            "zone code (e.g. 'BSh', 'Aw'). At least one zone "
+            "is required so an empty input does not return a "
+            "false-green preflight; an empty region or failed "
+            "KG lookup must surface as an error before reaching "
+            "the validator."
         ),
     )
     min_cell_days_per_zone: int = Field(

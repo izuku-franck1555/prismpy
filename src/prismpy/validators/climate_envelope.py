@@ -396,31 +396,37 @@ class ClimateEnvelopeValidator(InputValidator):
     def validate(
         self, input_state: InputValidationContext,
     ) -> InputValidationResult:
-        """Run per-zone envelope checks on the input state."""
+        """Run per-zone envelope checks on the input state.
+
+        The crop envelope and zone aggregates are typed
+        Pydantic models (``CropEnvelope`` /
+        ``ZoneAggregate``) by the time they reach this method,
+        so missing-key / typo'd-field / mutated-mid-check
+        defects have already failed at context construction.
+        """
         crop_envelope = input_state.crop_envelope
-        crop_tmin = float(crop_envelope["TMIN"])
-        crop_tmax = float(crop_envelope["TMAX"])
-        crop_rmin = float(crop_envelope["RMIN"])
-        crop_rmax = float(crop_envelope["RMAX"])
+        crop_tmin = crop_envelope.TMIN
+        crop_tmax = crop_envelope.TMAX
+        crop_rmin = crop_envelope.RMIN
+        crop_rmax = crop_envelope.RMAX
 
         issues: list[ValidationIssue] = []
         per_zone_verdicts: dict[str, dict[str, str]] = {}
 
         for zone, aggs in input_state.zone_aggregates.items():
-            n_cell_days = int(aggs.get("n_cell_days", 0))
-            if n_cell_days < input_state.min_cell_days_per_zone:
+            if aggs.n_cell_days < input_state.min_cell_days_per_zone:
                 issues.append(ValidationIssue(
                     severity="warning",
                     category=WarningCategory.INSUFFICIENTLY_SAMPLED.value,
                     message=(
                         f"Zone {zone!r} has insufficient sample "
-                        f"({n_cell_days:,} cell-days < "
+                        f"({aggs.n_cell_days:,} cell-days < "
                         f"{input_state.min_cell_days_per_zone:,} "
                         f"threshold); skipping envelope verdict."
                     ),
                     details={
                         "zone": zone,
-                        "n_cell_days": n_cell_days,
+                        "n_cell_days": aggs.n_cell_days,
                         "threshold": input_state.min_cell_days_per_zone,
                     },
                 ))
@@ -431,15 +437,15 @@ class ClimateEnvelopeValidator(InputValidator):
                 continue
 
             precip_verdict = compare_precip_iqr(
-                p25=float(aggs["p25"]),
-                p50=float(aggs["p50"]),
-                p75=float(aggs["p75"]),
+                p25=aggs.p25,
+                p50=aggs.p50,
+                p75=aggs.p75,
                 rmin=crop_rmin,
                 rmax=crop_rmax,
             )
             thermal_verdict = compare_thermal_extremes(
-                zone_p10_extreme_tmin=float(aggs["p10_extreme_tmin"]),
-                zone_p90_extreme_tmax=float(aggs["p90_extreme_tmax"]),
+                zone_p10_extreme_tmin=aggs.p10_extreme_tmin,
+                zone_p90_extreme_tmax=aggs.p90_extreme_tmax,
                 crop_tmin=crop_tmin,
                 crop_tmax=crop_tmax,
             )

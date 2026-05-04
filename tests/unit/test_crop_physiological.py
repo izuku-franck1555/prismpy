@@ -29,19 +29,19 @@ from prismpy.warnings.categories import WarningCategory
 
 
 def _ctx() -> InputValidationContext:
+    from prismpy.validators.input_base import CropEnvelope, ZoneAggregate
     return InputValidationContext(
         crop_name="maize",
-        crop_envelope={
-            "TMIN": 10.0, "TMAX": 47.0,
-            "RMIN": 400.0, "RMAX": 1800.0,
-        },
+        crop_envelope=CropEnvelope(
+            TMIN=10.0, TMAX=47.0, RMIN=400.0, RMAX=1800.0,
+        ),
         zone_aggregates={
-            "BSh": {
-                "p25": 200.0, "p50": 300.0, "p75": 380.0,
-                "p10_extreme_tmin": 5.0,
-                "p90_extreme_tmax": 50.0,
-                "n_cell_days": 2_000_000,
-            },
+            "BSh": ZoneAggregate(
+                p25=200.0, p50=300.0, p75=380.0,
+                p10_extreme_tmin=5.0,
+                p90_extreme_tmax=50.0,
+                n_cell_days=2_000_000,
+            ),
         },
     )
 
