@@ -45,12 +45,46 @@ the field description on ``agera5_record_cutoff``.
 from __future__ import annotations
 
 import json
-from datetime import date, datetime
+import re
+from datetime import date, datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Any, List, Optional, Union
+from typing import Any, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
+
+
+# AgERA5 cutoff offset per AC-Q2-A1-a. Bound-gen consumes
+# only AgERA5 records dated at least this far before the
+# snapshot date. The substrate-construction math is "up to
+# 120-day AgERA5 lag accommodation; 90+ days margin under
+# pessimistic 30-day estimate" (AC-Q2-A1-Reframe).
+_AGERA5_CUTOFF_OFFSET: timedelta = timedelta(days=180)
+
+
+# SHA256 hex-digest pattern. 64 hex chars (case-insensitive).
+_SHA256_HEX_RE: re.Pattern[str] = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+# FAO ECOCROP source URL — required substring of any
+# ecocrop_citation per fair-use posture (the citation must
+# point readers to the canonical source).
+_ECOCROP_SOURCE_URL: str = "https://ecocrop.apps.fao.org"
+
+
+# License chain canonical pattern. The substring "Copernicus"
+# (raw AgERA5 license) must be present alongside "CC-BY 4.0"
+# (per-zone aggregated derivative). The "->" arrow is
+# convention but not strictly enforced; the substring
+# presence is.
+_LICENSE_COPERNICUS_TOKEN: str = "Copernicus"
+_LICENSE_DERIVATIVE_TOKEN: str = "CC-BY 4.0"
 
 
 class DepositStatus(str, Enum):
@@ -78,7 +112,13 @@ class BoundGenProvenance(BaseModel):
     safe via ``.model_dump_json()`` / ``.model_validate_json()``;
     bound-gen sidecar files are written by
     :func:`write_bound_gen_provenance`.
+
+    ``model_config`` sets ``extra='forbid'`` so a typo'd
+    field (e.g. ``omp_thread`` instead of ``omp_threads``)
+    fails validation rather than silently being ignored.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     # --- Bound-gen identity ---
     bounds_version: str = Field(
@@ -239,13 +279,15 @@ class BoundGenProvenance(BaseModel):
     )
 
     # --- Numerical method pins ---
-    quantile_method: str = Field(
-        default="linear",
+    quantile_method: Literal["linear"] = Field(
+        ...,
         description=(
             "np.quantile method pinned per substrate determinism "
             "contract (research doc §Q2.X). 'linear' equals the "
             "WMO No. 1203 climatological-normal percentile "
-            "convention."
+            "convention. Required (no default) so a sidecar "
+            "JSON that omits the field cannot silently claim "
+            "linear was used."
         ),
     )
 
@@ -259,28 +301,104 @@ class BoundGenProvenance(BaseModel):
         ),
     )
 
+    @field_validator("license_chain")
+    @classmethod
+    def _validate_license_chain(cls, value: str) -> str:
+        """The license chain string must reference both the
+        raw Copernicus license and the CC-BY 4.0 derivative
+        license. A free-text field that omits either token
+        defeats the AC-Q2-A1-c license-chain claim."""
+        if _LICENSE_COPERNICUS_TOKEN not in value:
+            raise ValueError(
+                f"license_chain must reference "
+                f"{_LICENSE_COPERNICUS_TOKEN!r} (raw AgERA5 "
+                f"license); got {value!r}."
+            )
+        if _LICENSE_DERIVATIVE_TOKEN not in value:
+            raise ValueError(
+                f"license_chain must reference "
+                f"{_LICENSE_DERIVATIVE_TOKEN!r} (per-zone "
+                f"aggregated derivative); got {value!r}."
+            )
+        return value
+
+    @field_validator("ecocrop_citation")
+    @classmethod
+    def _validate_ecocrop_citation(cls, value: str) -> str:
+        """The FAO ECOCROP citation must reference the
+        canonical source URL and an ISO 8601 access date.
+        Both anchors are AC-Q2-A1-c content pins."""
+        if _ECOCROP_SOURCE_URL not in value:
+            raise ValueError(
+                f"ecocrop_citation must reference the FAO "
+                f"ECOCROP source URL {_ECOCROP_SOURCE_URL!r}; "
+                f"got {value!r}."
+            )
+        if not re.search(r"\d{4}-\d{2}-\d{2}", value):
+            raise ValueError(
+                f"ecocrop_citation must include an ISO 8601 "
+                f"calendar access date (YYYY-MM-DD); got "
+                f"{value!r}."
+            )
+        return value
+
     @model_validator(mode="after")
     def _validate_deposit_conjunction(self) -> "BoundGenProvenance":
         """Per AC-Q2-A1-c: when deposit_status='deposited', all
-        four Zenodo fields MUST be populated; null DOI + deposit
-        is invalid."""
+        four Zenodo fields MUST be populated AND non-empty.
+        A blank DOI string or empty SHA256 list defeats the
+        archive-verification point of AC-Q2-A1-c just as
+        thoroughly as ``None`` would."""
         if self.era5_archive_deposit_status == DepositStatus.DEPOSITED:
-            missing = [
-                name for name, value in (
-                    ("era5_archive_zenodo_doi", self.era5_archive_zenodo_doi),
-                    ("era5_archive_zenodo_url", self.era5_archive_zenodo_url),
-                    ("era5_archive_sha256", self.era5_archive_sha256),
-                    ("era5_archive_snapshot_date", self.era5_archive_snapshot_date),
-                )
-                if value is None
-            ]
-            if missing:
+            missing_or_empty: List[str] = []
+            if not self.era5_archive_zenodo_doi:  # None or empty string
+                missing_or_empty.append("era5_archive_zenodo_doi")
+            if not self.era5_archive_zenodo_url:
+                missing_or_empty.append("era5_archive_zenodo_url")
+            if not self.era5_archive_sha256:  # None or empty list
+                missing_or_empty.append("era5_archive_sha256")
+            if self.era5_archive_snapshot_date is None:
+                missing_or_empty.append("era5_archive_snapshot_date")
+            if missing_or_empty:
                 raise ValueError(
                     f"BoundGenProvenance: deposit_status='deposited' "
-                    f"requires all four Zenodo fields populated; "
-                    f"missing: {missing}. Methods text MUST NOT "
+                    f"requires all four Zenodo fields populated "
+                    f"and non-empty; missing or blank: "
+                    f"{missing_or_empty}. Methods text MUST NOT "
                     f"claim DOI retrieval until the deposit lands "
                     f"and these fields are filled in."
+                )
+            # SHA256 hashes must be valid 64-char hex digests.
+            for i, sha in enumerate(self.era5_archive_sha256 or []):
+                if not _SHA256_HEX_RE.fullmatch(sha):
+                    raise ValueError(
+                        f"BoundGenProvenance: "
+                        f"era5_archive_sha256[{i}] = {sha!r} is "
+                        f"not a 64-character hex digest. Each "
+                        f"hash must match {_SHA256_HEX_RE.pattern!r}."
+                    )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_cutoff_matches_snapshot(self) -> "BoundGenProvenance":
+        """Per AC-Q2-A1-a + the field documentation: when the
+        snapshot date is populated (i.e. deposited), the cutoff
+        MUST equal snapshot − 180 days. Without this check, a
+        deposited record can certify the 120-day lag /
+        90+-day margin while the actual cutoff is inconsistent
+        with the snapshot."""
+        if self.era5_archive_snapshot_date is not None:
+            expected_cutoff = (
+                self.era5_archive_snapshot_date - _AGERA5_CUTOFF_OFFSET
+            )
+            if self.agera5_record_cutoff != expected_cutoff:
+                raise ValueError(
+                    f"BoundGenProvenance: agera5_record_cutoff "
+                    f"must equal era5_archive_snapshot_date - "
+                    f"180 days; got cutoff="
+                    f"{self.agera5_record_cutoff!r}, snapshot="
+                    f"{self.era5_archive_snapshot_date!r}, "
+                    f"expected_cutoff={expected_cutoff!r}."
                 )
         return self
 
