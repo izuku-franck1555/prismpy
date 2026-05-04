@@ -88,11 +88,17 @@ include = ["prismpy*"]
 [tool.setuptools.package-data]
 # Bundle non-Python data files into installed wheels. The
 # ``prismpy.koppen`` package ships ``ecocrop_envelopes.json``
-# which the loader expects to live next to the module at
-# install time; without this declaration setuptools omits
-# the JSON from the wheel and ``load_ecocrop_envelopes()``
-# raises FileNotFoundError on a pip-installed prismpy.
-"prismpy.koppen" = ["*.json"]
+# (loader default-path), the Beck 2023 1km raster
+# ``data/beck_2023_v1.tif``, and its legend
+# ``data/beck_2023_v1_legend.txt``. Without these patterns
+# setuptools omits non-Python files from the wheel and
+# loader / classifier default-path resolution raises
+# FileNotFoundError on a pip-installed prismpy.
+"prismpy.koppen" = [
+    "*.json",
+    "data/*.tif",
+    "data/*.txt",
+]
 
 [tool.black]
 line-length = 100

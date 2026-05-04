@@ -171,23 +171,65 @@ class TestECOCROPProvenanceF28(unittest.TestCase):
 
 class TestECOCROPPackageData(unittest.TestCase):
     """Pin the pyproject package-data declaration so the
-    bundled JSON ships in installed wheels. Without this the
-    loader's default-path resolution raises FileNotFoundError
+    bundled JSON, the Beck 2023 raster, and its legend ship
+    in installed wheels. Without these patterns the loader /
+    classifier default-path resolution raises FileNotFoundError
     on a pip-installed prismpy even though source-tree tests
     pass — a release-safety hole codex Gate A flagged HIGH."""
 
-    def test_pyproject_declares_koppen_package_data(self):
-        pyproject = (_REPO_ROOT / "pyproject.toml").read_text(
+    @classmethod
+    def setUpClass(cls):
+        cls.pyproject = (_REPO_ROOT / "pyproject.toml").read_text(
             encoding="utf-8",
         )
+
+    def test_pyproject_has_koppen_package_data_block(self):
         self.assertRegex(
-            pyproject,
-            r'\[tool\.setuptools\.package-data\][\s\S]*'
-            r'"prismpy\.koppen"\s*=\s*\[\s*"\*\.json"\s*\]',
+            self.pyproject,
+            r'\[tool\.setuptools\.package-data\][\s\S]*?'
+            r'"prismpy\.koppen"\s*=',
             "pyproject.toml must declare a "
-            "[tool.setuptools.package-data] block with "
-            '\'"prismpy.koppen" = ["*.json"]\' so the bundled '
-            "ecocrop_envelopes.json ships in installed wheels.",
+            "[tool.setuptools.package-data] block keyed on "
+            "'prismpy.koppen' so non-Python data files ship "
+            "in installed wheels.",
+        )
+
+    def test_pyproject_includes_json_pattern(self):
+        # Captures the koppen package-data list (the chunk
+        # between '"prismpy.koppen" = [' and the closing ']')
+        # and asserts the JSON pattern is in it.
+        self._assert_pattern_in_koppen_list("*.json")
+
+    def test_pyproject_includes_tif_pattern(self):
+        # Beck 2023 raster (data/beck_2023_v1.tif) ships under
+        # data/. Without the data/*.tif pattern the wheel omits
+        # it and the classifier default-path raises.
+        self._assert_pattern_in_koppen_list("data/*.tif")
+
+    def test_pyproject_includes_txt_pattern(self):
+        # Legend (data/beck_2023_v1_legend.txt). Same rationale
+        # as the tif: the legend test depends on the file
+        # shipping next to the module.
+        self._assert_pattern_in_koppen_list("data/*.txt")
+
+    def _assert_pattern_in_koppen_list(self, pattern: str):
+        # Match the entire list value after "prismpy.koppen" =
+        # whether the list is single-line or multi-line.
+        match = re.search(
+            r'"prismpy\.koppen"\s*=\s*\[(?P<items>[\s\S]*?)\]',
+            self.pyproject,
+        )
+        self.assertIsNotNone(
+            match,
+            "Could not find 'prismpy.koppen = [...]' list in "
+            "pyproject.toml [tool.setuptools.package-data] block.",
+        )
+        items = match.group("items")
+        self.assertIn(
+            f'"{pattern}"', items,
+            f"pyproject.toml [tool.setuptools.package-data] "
+            f"'prismpy.koppen' list must include {pattern!r} so "
+            f"the corresponding file(s) ship in installed wheels.",
         )
 
 

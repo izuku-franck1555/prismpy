@@ -18,9 +18,12 @@ Sprint E.0.5 (V2-22c-RESTART Phase 2) ships:
   JSON; raises on NaN values, RMIN ≥ RMAX / TMIN ≥ TMAX
   (AC-Q3-A-NaN strict-ordering pin), or missing /
   malformed per-crop provenance block (F28).
-* (Sprint F populates) :class:`KGClassifier` — Beck 2023
-  raster loader + zone classification + transitional-cell
-  detection.
+* :class:`KGClassifier` — Beck 2023 1km raster classifier
+  returning :class:`KGZone` for non-ocean cells, ``None``
+  for ocean.
+* :func:`is_transitional_cell` — 8-neighbor honest-fail
+  flag for cells whose neighbors include a different
+  (non-zero) KG zone (per CC-13).
 
 Out-of-scope ECOCROP fields (Sprint F or V3 territory):
 ALTMX (max altitude), pH range, photoperiod, GMIN/GMAX
@@ -39,10 +42,40 @@ from prismpy.koppen.envelopes import (
     EnvelopeValidationError,
     load_ecocrop_envelopes,
 )
+from prismpy.koppen.kg_classifier import (
+    KG_CODE_TO_ZONE,
+    KGClassifier,
+    KGZone,
+)
+from prismpy.koppen.raster_loader import (
+    BECK_2023_LEGEND_PATH,
+    BECK_2023_RASTER_PATH,
+    KG_CODE_TO_NAME,
+    KG_NAME_TO_CODE,
+    NATIVE_CELL_DEG,
+    NODATA_CODE,
+)
+from prismpy.koppen.transitional import (
+    NEIGHBOR_OFFSETS,
+    classify_with_transitional_flag,
+    is_transitional_cell,
+)
 
 
 __all__ = [
+    "BECK_2023_LEGEND_PATH",
+    "BECK_2023_RASTER_PATH",
     "ECOCROP_ENVELOPE_PATH",
     "EnvelopeValidationError",
+    "KG_CODE_TO_NAME",
+    "KG_CODE_TO_ZONE",
+    "KG_NAME_TO_CODE",
+    "KGClassifier",
+    "KGZone",
+    "NATIVE_CELL_DEG",
+    "NEIGHBOR_OFFSETS",
+    "NODATA_CODE",
+    "classify_with_transitional_flag",
+    "is_transitional_cell",
     "load_ecocrop_envelopes",
 ]

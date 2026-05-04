@@ -71,6 +71,12 @@ venv.bak/
 
 # Data and output directories (local only)
 data/
+# Bundled package data ships with the wheel and is tracked
+# in source: Beck 2023 KG raster + legend. Negation pattern
+# re-includes the koppen package's data directory after the
+# generic ``data/`` rule has filtered it out.
+!src/prismpy/koppen/data/
+!src/prismpy/koppen/data/**
 data.zip
 output/
 output_BEFORE_refactor/
