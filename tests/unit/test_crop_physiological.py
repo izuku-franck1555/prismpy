@@ -161,8 +161,9 @@ class TestCropPhysiologicalValidatorIncompatibleEmit(unittest.TestCase):
     def test_rice_dry_zone_emits_crop_region_mismatch(self):
         # G-c-4 canonical case: rice (RMIN=1000) × Sahel BSh
         # (P50=280). Substrate routes precip to INCOMPATIBLE;
-        # validator emits CROP_REGION_MISMATCH with the data-
-        # only reason from precip_verdict_reason.
+        # validator emits ONE CROP_REGION_MISMATCH per zone
+        # (the one-issue-per-zone shape matches AC-F-5 cache
+        # entries[]).
         ctx = _ctx("rice", RICE_ENVELOPE, {"BSh": SAHEL_BSh_DRY})
         result = self.validator.validate(ctx)
         self.assertEqual(len(result.issues), 1)
@@ -177,19 +178,19 @@ class TestCropPhysiologicalValidatorIncompatibleEmit(unittest.TestCase):
         self.assertIn("below", issue.message)
         # Details carry the structured fields the cockpit reads.
         self.assertEqual(issue.details["zone"], "BSh")
-        self.assertEqual(issue.details["variable"], "precip")
+        self.assertEqual(issue.details["variables"], ["precip"])
         self.assertEqual(issue.details["crop"], "rice")
         self.assertEqual(issue.details["verdict"], "incompatible")
 
     def test_cold_kill_emits_thermal_mismatch(self):
         # Maize at highland zone with extreme tmin -5°C →
         # cold-kill below crop TMIN=10°C → INCOMPATIBLE thermal
-        # → CROP_REGION_MISMATCH.
+        # → CROP_REGION_MISMATCH (single issue, variables=[thermal]).
         ctx = _ctx("maize", MAIZE_ENVELOPE, {"highland": HIGHLAND_COLD_KILL})
         result = self.validator.validate(ctx)
         self.assertEqual(len(result.issues), 1)
         issue = result.issues[0]
-        self.assertEqual(issue.details["variable"], "thermal")
+        self.assertEqual(issue.details["variables"], ["thermal"])
         self.assertIn("tmin", issue.message)
 
     def test_heat_kill_emits_thermal_mismatch(self):
@@ -199,7 +200,7 @@ class TestCropPhysiologicalValidatorIncompatibleEmit(unittest.TestCase):
         result = self.validator.validate(ctx)
         self.assertEqual(len(result.issues), 1)
         issue = result.issues[0]
-        self.assertEqual(issue.details["variable"], "thermal")
+        self.assertEqual(issue.details["variables"], ["thermal"])
         self.assertIn("tmax", issue.message)
 
     def test_marginal_zones_emit_no_issue(self):
@@ -232,12 +233,13 @@ class TestCropPhysiologicalValidatorIncompatibleEmit(unittest.TestCase):
             "skipped_insufficient_sample",
         )
 
-    def test_per_variable_emit_keeps_zone_grouping(self):
-        # If both precip AND thermal fire INCOMPATIBLE on the
-        # same zone, Sprint F emits TWO issues (one per
-        # variable) so the cockpit can render the per-variable
-        # reason. Both share zone=BSh, crop=rice; details
-        # distinguish via the ``variable`` field.
+    def test_combined_precip_and_thermal_emit_one_issue(self):
+        # When both precip AND thermal fire INCOMPATIBLE on
+        # the same zone, Sprint F emits ONE
+        # CROP_REGION_MISMATCH issue with combined reason +
+        # ``details["variables"] = ["precip", "thermal"]``.
+        # The one-issue-per-zone shape matches AC-F-5 cache
+        # ``entries[]`` (singular ``verdict`` + ``reason``).
         zone = ZoneAggregate(
             p25=200.0, p50=280.0, p75=350.0,
             p10_extreme_tmin=20.0,
@@ -246,9 +248,58 @@ class TestCropPhysiologicalValidatorIncompatibleEmit(unittest.TestCase):
         )
         ctx = _ctx("rice", RICE_ENVELOPE, {"BSh": zone})
         result = self.validator.validate(ctx)
-        self.assertEqual(len(result.issues), 2)
-        variables = {i.details["variable"] for i in result.issues}
-        self.assertEqual(variables, {"precip", "thermal"})
+        self.assertEqual(len(result.issues), 1)
+        issue = result.issues[0]
+        self.assertEqual(
+            issue.details["variables"], ["precip", "thermal"],
+        )
+        # Combined reason carries both halves; the joiner is
+        # "; " so the cockpit can split on it for per-variable
+        # rendering inside the drawer.
+        self.assertIn("280", issue.message)  # precip P50
+        self.assertIn("48", issue.message)   # thermal P90
+        self.assertIn(";", issue.message)
+        # Untruncated reason mirrored in details for audit log.
+        self.assertEqual(
+            issue.details["reason_full"], issue.message,
+        )
+
+    def test_message_truncated_to_budget_on_extreme_input(self):
+        # AC-F-2 banner-copy budget defense: if a unit-corrupted
+        # upstream pushes ``p50`` past the helper's ``.0f``
+        # formatter, the validator truncates ``message`` so the
+        # ≤120-char banner-copy budget still holds. Full reason
+        # stays in ``details["reason_full"]`` for audit trail.
+        # Synthetic over-budget zone: 16-digit values force the
+        # combined precip + thermal reason past the validator's
+        # 100-char internal budget.
+        zone = ZoneAggregate(
+            p25=9_999_999_999_999_999.0,
+            p50=9_999_999_999_999_999.0,
+            p75=9_999_999_999_999_999.0,
+            p10_extreme_tmin=20.0,
+            p90_extreme_tmax=9_999_999_999_999_999.0,
+            n_cell_days=2_000_000,
+        )
+        ctx = _ctx("rice", RICE_ENVELOPE, {"BSh": zone})
+        result = self.validator.validate(ctx)
+        self.assertEqual(len(result.issues), 1)
+        issue = result.issues[0]
+        # ``message`` truncated to ≤100 chars (validator's
+        # internal budget; banner adds crop+zone+url on top
+        # within the AC-F-2 ≤120-char ceiling).
+        self.assertLessEqual(len(issue.message), 100)
+        # ``...`` truncation marker present.
+        self.assertTrue(
+            issue.message.endswith("..."),
+            f"expected truncation marker at end of "
+            f"{issue.message!r}",
+        )
+        # Full reason length exceeds the truncated message.
+        self.assertGreater(
+            len(issue.details["reason_full"]),
+            len(issue.message),
+        )
 
 
 class TestCropPhysiologicalValidatorMetadata(unittest.TestCase):

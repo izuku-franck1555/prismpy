@@ -153,40 +153,48 @@ class CropPhysiologicalValidator(InputValidator):
                 "thermal": thermal_verdict.value,
             }
 
-            # Per AC-F-1: emit only on INCOMPATIBLE. Compose a
-            # single CROP_REGION_MISMATCH per zone, naming both
-            # the precip and thermal reasons when both branches
-            # fire. This keeps the cockpit drawer's per-zone
-            # reading at one Bucket 3 row regardless of how many
-            # variables crossed the envelope.
-            if precip_verdict is CompatibilityVerdict.INCOMPATIBLE:
-                issues.append(self._build_mismatch_issue(
-                    crop_name=crop_name,
-                    zone=zone,
-                    variable="precip",
-                    reason=precip_verdict_reason(
+            # Per AC-F-1 + AC-F-5 cache schema: emit ONE
+            # CROP_REGION_MISMATCH per zone regardless of how
+            # many variables crossed the envelope. Codex pre-
+            # commit review flagged a one-issue-vs-two-issues
+            # ambiguity in Draft 2 wording; the cache schema's
+            # ``entries[]`` shape (singular ``verdict``,
+            # singular ``reason`` per zone-crop pair) drives the
+            # one-row-per-zone resolution. Multi-variable cases
+            # combine the per-variable reason strings into a
+            # single message; ``details["variables"]`` carries
+            # the full per-variable breakdown so the cockpit
+            # drawer can still render the structured fields.
+            precip_incompat = (
+                precip_verdict is CompatibilityVerdict.INCOMPATIBLE
+            )
+            thermal_incompat = (
+                thermal_verdict is CompatibilityVerdict.INCOMPATIBLE
+            )
+            if precip_incompat or thermal_incompat:
+                reasons: list[str] = []
+                variables_in_emit: list[str] = []
+                if precip_incompat:
+                    reasons.append(precip_verdict_reason(
                         verdict=precip_verdict,
                         p25=aggs.p25, p50=aggs.p50, p75=aggs.p75,
                         rmin=crop_rmin, rmax=crop_rmax,
-                    ),
-                    aggs=aggs,
-                    envelope_tmin=crop_tmin,
-                    envelope_tmax=crop_tmax,
-                    envelope_rmin=crop_rmin,
-                    envelope_rmax=crop_rmax,
-                ))
-            if thermal_verdict is CompatibilityVerdict.INCOMPATIBLE:
-                issues.append(self._build_mismatch_issue(
-                    crop_name=crop_name,
-                    zone=zone,
-                    variable="thermal",
-                    reason=thermal_verdict_reason(
+                    ) or "precip INCOMPATIBLE")
+                    variables_in_emit.append("precip")
+                if thermal_incompat:
+                    reasons.append(thermal_verdict_reason(
                         verdict=thermal_verdict,
                         zone_p10_extreme_tmin=aggs.p10_extreme_tmin,
                         zone_p90_extreme_tmax=aggs.p90_extreme_tmax,
                         crop_tmin=crop_tmin,
                         crop_tmax=crop_tmax,
-                    ),
+                    ) or "thermal INCOMPATIBLE")
+                    variables_in_emit.append("thermal")
+                issues.append(self._build_mismatch_issue(
+                    crop_name=crop_name,
+                    zone=zone,
+                    variables=variables_in_emit,
+                    reason="; ".join(reasons),
                     aggs=aggs,
                     envelope_tmin=crop_tmin,
                     envelope_tmax=crop_tmax,
@@ -209,44 +217,60 @@ class CropPhysiologicalValidator(InputValidator):
             },
         )
 
+    # Banner-copy budget: AC-F-2 caps the rendered wizard
+    # banner at ≤120 chars. The validator's ``message`` is the
+    # data-only stem the wizard wraps with crop name + zone
+    # label + ECOCROP URL, so the stem itself stays under a
+    # tighter budget. 100 chars leaves comfortable headroom
+    # for "...; ..." composition when both precip + thermal
+    # fire on the same zone.
+    _MAX_REASON_CHARS = 100
+
     @staticmethod
     def _build_mismatch_issue(
         crop_name: str,
         zone: str,
-        variable: str,
-        reason: Optional[str],
+        variables: list[str],
+        reason: str,
         aggs: ZoneAggregate,
         envelope_tmin: float,
         envelope_tmax: float,
         envelope_rmin: float,
         envelope_rmax: float,
     ) -> ValidationIssue:
-        """Build a single CROP_REGION_MISMATCH issue.
+        """Build a single CROP_REGION_MISMATCH issue per zone.
 
-        The ``message`` field carries the data-only reason
-        from the per-variable reason helper; the wizard banner
+        ``message`` carries the data-only reason composed from
+        the per-variable reason helpers; the wizard banner
         composes crop name + zone label + ECOCROP source URL
         on top of this when rendering the persona-readable copy
         per AC-F-10. ``details`` carries structured fields for
-        the cockpit drawer + override audit log.
+        the cockpit drawer + override audit log, including the
+        list of ``variables`` (precip / thermal) that fired so
+        the drawer can break the row down per variable when the
+        user opens it.
+
+        ``message`` is truncated to ``_MAX_REASON_CHARS`` chars
+        with ``...`` to defend the AC-F-2 ≤120-char banner-copy
+        budget against unrealistic substrate values (e.g., a
+        unit-corruption upstream that pushed ``p50`` past the
+        ``.0f`` formatter). The full untruncated reason stays
+        in ``details["reason_full"]`` for the audit log.
         """
-        # Defensive against a substrate refactor that returns
-        # None unexpectedly: fall back to a generic data-less
-        # message rather than crashing the whole wizard. The
-        # F30 walker plus the substrate's own tests are the
-        # primary defenders.
-        message = reason or (
-            f"{variable} INCOMPATIBLE — see substrate verdict"
-        )
+        truncated = reason
+        if len(truncated) > CropPhysiologicalValidator._MAX_REASON_CHARS:
+            cap = CropPhysiologicalValidator._MAX_REASON_CHARS - 3
+            truncated = truncated[:cap] + "..."
         return ValidationIssue(
             severity="error",
             category=WarningCategory.CROP_REGION_MISMATCH.value,
-            message=message,
+            message=truncated,
             details={
                 "zone": zone,
-                "variable": variable,
+                "variables": list(variables),
                 "crop": crop_name,
                 "verdict": CompatibilityVerdict.INCOMPATIBLE.value,
+                "reason_full": reason,
                 "n_cell_days_in_zone": aggs.n_cell_days,
                 "p25": aggs.p25,
                 "p50": aggs.p50,
@@ -263,6 +287,9 @@ class CropPhysiologicalValidator(InputValidator):
     @staticmethod
     def unsupported_crop_result(
         crop_name: str,
+        *,
+        region_name: Optional[str] = None,
+        zones: Optional[list] = None,
     ) -> InputValidationResult:
         """Return the canonical neutral signal for an unsupported
         crop (no envelope in the bundled v1 ECOCROP JSON).
@@ -276,7 +303,20 @@ class CropPhysiologicalValidator(InputValidator):
         2 INFO) so the user sees "compatibility check
         unavailable for this crop" rather than a silent green
         light.
+
+        Optional ``region_name`` + ``zones`` are kept keyword-
+        only so a future Sprint that wants to thread region or
+        zone context through the unsupported-crop signal can
+        add fields without breaking the existing call sites.
         """
+        details = {
+            "crop": crop_name,
+            "reason": "no_envelope_in_substrate",
+        }
+        if region_name is not None:
+            details["region"] = region_name
+        if zones is not None:
+            details["zones"] = list(zones)
         return InputValidationResult(
             valid=True,
             issues=[
@@ -287,10 +327,7 @@ class CropPhysiologicalValidator(InputValidator):
                         f"compatibility check unavailable for "
                         f"{crop_name!r} (no ECOCROP envelope in v1)"
                     ),
-                    details={
-                        "crop": crop_name,
-                        "reason": "no_envelope_in_substrate",
-                    },
+                    details=details,
                 ),
             ],
             metadata={
