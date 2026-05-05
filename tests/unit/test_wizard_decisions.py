@@ -206,19 +206,123 @@ class TestWizardOverrideRecordValidators(unittest.TestCase):
             record.evidence_url, "https://example.com/paper",
         )
 
-    def test_evidence_type_covers_5_canonical_values(self):
-        # AC-F-6 + codex Gate A #15: exactly 5 evidence types.
-        # Future expansion lands in V2-23 polish (additive).
-        # Pin here so an accidental 6th value fails the test.
+    def test_evidence_type_covers_6_canonical_values(self):
+        # Sprint E.1 codex BLOCKER 6 — extends Sprint F's 5-tuple
+        # with ``"other"`` (paired with the
+        # ``evidence_type_other_specify`` companion text field).
+        # A regression that drops "other" or an accidental 7th
+        # value fails the test.
         from typing import get_args
         canonical = set(get_args(EvidenceType))
         self.assertEqual(
             canonical,
             {
                 "local_trial", "irrigation", "cultivar_specific",
-                "citation", "field_observation",
+                "citation", "field_observation", "other",
             },
         )
+
+
+class TestEvidenceTypeOtherSpecify(unittest.TestCase):
+    """Sprint E.1 codex BLOCKER 6 — pin the conditional-required
+    pairing between ``evidence_type == 'other'`` and the
+    ``evidence_type_other_specify`` companion text field."""
+
+    def _base_kwargs(self, **overrides):
+        kwargs = {
+            "rationale": (
+                "Local trial with cultivar ITA-150 yielded 4.2 t/ha "
+                "under irrigated 600 mm/yr regime; data from 2024-2025."
+            ),
+            "evidence_type": "local_trial",
+            "affected_zones": ["BSh"],
+            "verdict_hash": "0" * 64,
+        }
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_other_with_specify_is_accepted(self):
+        record = WizardOverrideRecord(
+            **self._base_kwargs(
+                evidence_type="other",
+                evidence_type_other_specify=(
+                    "Cultural-knowledge basis from local agronomist "
+                    "consultation in 2024 dry season."
+                ),
+            ),
+        )
+        self.assertEqual(record.evidence_type, "other")
+        self.assertIn(
+            "Cultural-knowledge", record.evidence_type_other_specify,
+        )
+
+    def test_other_without_specify_rejects(self):
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError) as cm:
+            WizardOverrideRecord(
+                **self._base_kwargs(
+                    evidence_type="other",
+                    evidence_type_other_specify=None,
+                ),
+            )
+        self.assertIn("required", str(cm.exception).lower())
+
+    def test_other_with_whitespace_only_specify_rejects(self):
+        # Whitespace-only string after trim is empty content;
+        # must reject so the audit trail can't carry a
+        # misleading non-empty marker without real description.
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            WizardOverrideRecord(
+                **self._base_kwargs(
+                    evidence_type="other",
+                    evidence_type_other_specify="   \t  ",
+                ),
+            )
+
+    def test_named_bucket_with_specify_rejects(self):
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError) as cm:
+            WizardOverrideRecord(
+                **self._base_kwargs(
+                    evidence_type="local_trial",
+                    evidence_type_other_specify="should be None",
+                ),
+            )
+        # Validator surfaces the precise pairing rule so a
+        # caller can route the error to the user.
+        self.assertIn("None", str(cm.exception))
+
+    def test_named_bucket_without_specify_is_accepted(self):
+        # Default behavior — the 5 named buckets work without
+        # the companion field, mirroring the pre-Sprint-E.1
+        # contract.
+        record = WizardOverrideRecord(
+            **self._base_kwargs(evidence_type="citation"),
+        )
+        self.assertEqual(record.evidence_type, "citation")
+        self.assertIsNone(record.evidence_type_other_specify)
+
+    def test_specify_max_length_200_chars(self):
+        from pydantic import ValidationError
+        # 200-char limit — exactly 200 accepts; 201 rejects.
+        valid_specify = "x" * 200
+        record = WizardOverrideRecord(
+            **self._base_kwargs(
+                evidence_type="other",
+                evidence_type_other_specify=valid_specify,
+            ),
+        )
+        self.assertEqual(
+            len(record.evidence_type_other_specify), 200,
+        )
+        with self.assertRaises(ValidationError):
+            WizardOverrideRecord(
+                **self._base_kwargs(
+                    evidence_type="other",
+                    evidence_type_other_specify="x" * 201,
+                ),
+            )
 
 
 class TestComputeVerdictHash(unittest.TestCase):

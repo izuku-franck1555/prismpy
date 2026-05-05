@@ -42,7 +42,13 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 # Sprint F AC-F-6 + warning-auditor LOW-4: rationale floor
@@ -97,14 +103,26 @@ _FILLER_PATTERN_PARAMETERS = (
 
 
 # Sprint F AC-F-6 + codex Gate A #15: evidence_type Literal
-# fixed at five categories. Future expansion lands as
-# additive enum-extension under V2-23 polish.
+# fixed at five categories.
+#
+# Sprint E.1 codex BLOCKER 6 + ux-expert verdict additive: a
+# 6th ``"other"`` value with a companion ``evidence_type_other_specify``
+# free-form text field. The persona's evidence may not fit the
+# 5 named buckets (e.g., a cultural-knowledge basis from a
+# local agronomist that doesn't match "citation" or
+# "cultivar_specific"); without ``other`` the user is forced
+# into a misfit category, which corrupts the audit trail.
+# The conditional-required validator on
+# :class:`WizardOverrideRecord` enforces that
+# ``evidence_type_other_specify`` is non-empty when
+# ``evidence_type == "other"`` and empty otherwise.
 EvidenceType = Literal[
     "local_trial",
     "irrigation",
     "cultivar_specific",
     "citation",
     "field_observation",
+    "other",
 ]
 
 
@@ -144,10 +162,29 @@ class WizardOverrideRecord(BaseModel):
         description=(
             "Categorical evidence basis per AC-F-6 + codex "
             "Gate A #15: local_trial / irrigation / "
-            "cultivar_specific / citation / field_observation. "
-            "Pins the evidence shape so the cockpit drawer + "
-            "audit log can render per-category copy."
+            "cultivar_specific / citation / field_observation / "
+            "other. Pins the evidence shape so the cockpit "
+            "drawer + audit log can render per-category copy. "
+            "When ``other`` is selected, the companion "
+            "``evidence_type_other_specify`` text field carries "
+            "the persona's free-form description; the model "
+            "validator below enforces the conditional-required "
+            "pairing."
         ),
+    )
+
+    evidence_type_other_specify: Optional[str] = Field(
+        default=None,
+        description=(
+            "Free-form text required only when ``evidence_type "
+            "== 'other'``. Trimmed; max 200 chars. Empty / "
+            "whitespace-only submissions reject in the model "
+            "validator below. When ``evidence_type`` is one of "
+            "the 5 named buckets, this field MUST be ``None`` "
+            "so a typo'd UI doesn't smuggle a free-form payload "
+            "alongside a categorical pick."
+        ),
+        max_length=200,
     )
 
     affected_zones: List[str] = Field(
@@ -235,6 +272,64 @@ class WizardOverrideRecord(BaseModel):
                 f"{value!r}."
             )
         return value
+
+    @field_validator("evidence_type_other_specify")
+    @classmethod
+    def _strip_other_specify(
+        cls, value: Optional[str],
+    ) -> Optional[str]:
+        """Codex review LOW absorption — the field description
+        promises trimmed text, but the prior implementation
+        only validated whitespace + returned the value
+        verbatim. Strip leading/trailing whitespace before the
+        model-level validator runs so ``model_dump()`` carries
+        the canonical form (no surrounding whitespace) into
+        the audit log.
+        """
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @model_validator(mode="after")
+    def _other_specify_required_iff_other(self) -> "WizardOverrideRecord":
+        """Enforce the conditional-required pairing between
+        ``evidence_type`` and ``evidence_type_other_specify``.
+
+        Sprint E.1 codex BLOCKER 6 — when the persona picks
+        ``other`` from the 6-option select, the companion
+        free-form text field MUST carry a non-empty description;
+        when they pick one of the 5 named buckets, the field
+        MUST be ``None`` so a typo'd UI cannot smuggle a
+        free-form payload alongside a categorical pick (which
+        would corrupt the audit-trail's evidence-type semantics).
+
+        Frozen-Pydantic + extra=forbid would silently reject
+        a free-form value paired with a non-other selection
+        as an unknown field, but the failure mode is a
+        ValidationError on a different field name; the model
+        validator surfaces the precise pairing rule so the
+        wizard banner / cockpit override panel can return
+        a user-facing message that names the issue.
+        """
+        is_other = self.evidence_type == "other"
+        specified = self.evidence_type_other_specify
+        if is_other:
+            if specified is None or not specified.strip():
+                raise ValueError(
+                    "evidence_type_other_specify is required "
+                    "(non-empty after trim) when evidence_type "
+                    "is 'other'; describe the evidence basis "
+                    "in the free-form field."
+                )
+        else:
+            if specified is not None:
+                raise ValueError(
+                    f"evidence_type_other_specify must be None "
+                    f"when evidence_type is {self.evidence_type!r}; "
+                    f"the free-form field is reserved for the "
+                    f"'other' pick."
+                )
+        return self
 
 
 def build_wizard_override_payload(

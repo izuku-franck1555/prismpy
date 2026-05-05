@@ -49,6 +49,26 @@ class DecisionType(str, Enum):
     # canonical payload shape stored at wizard time and replayed
     # into the pipeline tracker at run-start time.
     USER_OVERRIDE = "user_override"
+    # Sprint E.1 additive — cockpit-time decisions on flagged
+    # warnings the user reviews before launching the next
+    # pipeline run. Three discriminators bind to the
+    # ``WARNING_BUCKET_MAP`` semantics:
+    # * ``USER_ACKNOWLEDGE`` — Bucket 2 INFORMATIONAL "I've read
+    #   this and I'm proceeding" affirmation. Non-blocking; the
+    #   methods text catalog references the acknowledgment so a
+    #   reviewer reading the package's Methods section can audit
+    #   which informational warnings the persona saw.
+    # * ``USER_SKIP`` — Bucket 3 TRUE_EXCLUDE "exclude these
+    #   cells from the next pipeline run" decision. Companion to
+    #   the ``Project.cockpit_decisions`` pending-state field on
+    #   the prismweb side; the per-run snapshot at launch is what
+    #   actually feeds the validator's exclude path.
+    # * (``USER_OVERRIDE`` already shipped Sprint F; reused here
+    #   for the cockpit-time Bucket 5 surface with the
+    #   ``override_at_pre_pipeline`` discriminator
+    #   distinguishing wizard-time from cockpit-time entries.)
+    USER_ACKNOWLEDGE = "user_acknowledge"
+    USER_SKIP = "user_skip"
 
 
 @dataclass
