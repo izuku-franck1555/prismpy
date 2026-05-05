@@ -46,6 +46,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from prismpy.koppen.zone_aggregates import label_for as zone_label_for
 from prismpy.validators.base import ValidationIssue
 from prismpy.validators.climate_envelope import (
     CompatibilityVerdict,
@@ -182,10 +183,18 @@ class CropPhysiologicalValidator(InputValidator):
                 # explanation copy ("Rice typically needs..." vs
                 # the validator's lowercased ``crop_name``).
                 pretty_crop = crop_name[:1].upper() + crop_name[1:]
-                # Zone label is informational; the validator does
-                # not yet thread the human-readable label through
-                # zone_aggregates, so the explanation falls back
-                # to "this region" via the helper's default.
+                # Resolve the human-readable zone name from the
+                # ``zone_aggregates_v1.json`` substrate so the
+                # plain-language explanation reads "The Hot
+                # semi-arid climate zone in your region averages
+                # around 400mm/year" rather than leaking the raw
+                # Köppen code "BSh" into persona-facing copy.
+                # ``label_for`` falls back to the zone code itself
+                # when the substrate doesn't carry a label, so a
+                # future zone added without a label still renders
+                # intelligibly (graceful degradation matches the
+                # prior fallback to ``zone_label=zone``).
+                pretty_zone_label = zone_label_for(zone)
                 if precip_incompat:
                     reasons.append(precip_verdict_reason(
                         verdict=precip_verdict,
@@ -197,7 +206,7 @@ class CropPhysiologicalValidator(InputValidator):
                         aggs.p25, aggs.p50, aggs.p75,
                         crop_rmin, crop_rmax,
                         pretty_crop,
-                        zone_label=zone,
+                        zone_label=pretty_zone_label,
                     )
                     if explanation:
                         explanations.append(explanation)
@@ -216,7 +225,7 @@ class CropPhysiologicalValidator(InputValidator):
                         aggs.p90_extreme_tmax,
                         crop_tmin, crop_tmax,
                         pretty_crop,
-                        zone_label=zone,
+                        zone_label=pretty_zone_label,
                     )
                     if explanation:
                         explanations.append(explanation)
@@ -224,6 +233,7 @@ class CropPhysiologicalValidator(InputValidator):
                 issues.append(self._build_mismatch_issue(
                     crop_name=crop_name,
                     zone=zone,
+                    zone_label=pretty_zone_label,
                     variables=variables_in_emit,
                     reason="; ".join(reasons),
                     explanation=" ".join(explanations),
@@ -270,6 +280,7 @@ class CropPhysiologicalValidator(InputValidator):
         envelope_rmin: float,
         envelope_rmax: float,
         explanation: str = "",
+        zone_label: str = "",
     ) -> ValidationIssue:
         """Build a single CROP_REGION_MISMATCH issue per zone.
 
@@ -289,6 +300,16 @@ class CropPhysiologicalValidator(InputValidator):
         disclosure). Both come from the substrate so the copy +
         data stay tightly coupled.
 
+        ``zone_label`` carries the human-readable zone name (e.g.
+        ``"Hot semi-arid"`` for ``"BSh"``) so the cockpit drawer
+        + per-zone technical detail can render a friendly name
+        instead of leaking the raw Köppen code into persona-facing
+        copy. Resolved from
+        :func:`prismpy.koppen.zone_aggregates.label_for` at the
+        validator's call site; defaults to empty string for
+        legacy callers that don't pass the field through, with
+        the wizard banner falling back to ``zone`` in that case.
+
         ``message`` is truncated to ``_MAX_REASON_CHARS`` chars
         with ``...`` to defend the AC-F-2 ≤120-char banner-copy
         budget against unrealistic substrate values (e.g., a
@@ -306,6 +327,7 @@ class CropPhysiologicalValidator(InputValidator):
             message=truncated,
             details={
                 "zone": zone,
+                "zone_label": zone_label,
                 "variables": list(variables),
                 "crop": crop_name,
                 "verdict": CompatibilityVerdict.INCOMPATIBLE.value,

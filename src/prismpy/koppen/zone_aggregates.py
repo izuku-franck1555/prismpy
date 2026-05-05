@@ -32,6 +32,13 @@ Provenance-aware loaders:
   :class:`ZoneAggregate` for one zone code. Raises
   :class:`KeyError` on unknown zone code; raises
   :class:`pydantic.ValidationError` on shape drift.
+* :func:`label_for` returns the user-facing zone label (e.g.
+  ``"Hot semi-arid"`` for ``"BSh"``). Used by the wizard
+  banner's plain-language explanation copy so the persona
+  reads a friendly zone name instead of the Köppen code.
+  Falls back to the zone code itself when the substrate
+  doesn't carry a label, so any future zone added without
+  a label still renders intelligibly.
 
 Anti-mutation drills:
 
@@ -47,7 +54,9 @@ Anti-mutation drills:
 """
 from __future__ import annotations
 
+import functools
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict
 
@@ -85,6 +94,84 @@ def load_zone_aggregates(
     target = Path(path) if path is not None else ZONE_AGGREGATES_PATH
     with open(target, encoding="utf-8") as fp:
         return json.load(fp)
+
+
+# Trailing parenthetical disambiguator (e.g. ``" (Sahel-canonical)"``
+# at the end of ``"Hot semi-arid (Sahel-canonical)"``). The
+# parentheticals are fixture-quality qualifiers — they tell a
+# code reviewer the scientific framing the synthetic values were
+# tuned to, but they aren't user-facing copy. The wizard banner
+# strips them via :func:`label_for` so the persona reads
+# ``"Hot semi-arid"`` rather than ``"Hot semi-arid
+# (Sahel-canonical)"``. When the V2-19.5 Data Bootstrapper
+# ratchets in real data the labels can drop the parentheticals
+# entirely, at which point this strip becomes a no-op.
+_TRAILING_PARENTHETICAL_RE = re.compile(r"\s*\([^)]*\)\s*$")
+
+
+@functools.lru_cache(maxsize=1)
+def _cached_zone_aggregates() -> Dict[str, Any]:
+    """Cache-once wrapper around :func:`load_zone_aggregates`.
+
+    The wizard validator calls :func:`label_for` once per zone in
+    the user's region; reading + parsing the JSON each call would
+    be wasteful when the substrate is read-only at runtime. The
+    LRU cache (size 1) holds the parsed dict in process memory
+    after the first call. Tests that need to swap in a different
+    fixture call ``_cached_zone_aggregates.cache_clear()`` before
+    re-loading.
+    """
+    return load_zone_aggregates()
+
+
+def label_for(
+    zone_code: str,
+    payload: Dict[str, Any] | None = None,
+) -> str:
+    """Return the user-facing label for a Köppen zone code.
+
+    Looks up ``zones[zone_code]["label"]`` in the substrate
+    payload, strips any trailing parenthetical disambiguator
+    (e.g. ``" (Sahel-canonical)"``), and returns the result.
+    Falls back to the zone code itself when the substrate
+    doesn't carry a usable label so a future zone added without
+    a label still renders intelligibly.
+
+    Used by :class:`CropPhysiologicalValidator` to thread the
+    human-readable zone name through to
+    :func:`precip_verdict_explanation` /
+    :func:`thermal_verdict_explanation` so the wizard banner's
+    plain-language copy reads ``"The Hot semi-arid climate zone
+    in your region averages around 400mm/year"`` rather than
+    leaking the Köppen code ``"BSh"`` into the persona-facing
+    paragraph.
+
+    Args:
+        zone_code: Canonical KG zone code (e.g. ``"BSh"``).
+            Case-sensitive — the substrate JSON uses the
+            classifier's canonical keys.
+        payload: Optional pre-parsed top-level dict. When
+            ``None``, the cached substrate fixture is read.
+            Pass an in-memory payload to test alternative
+            fixtures without touching the cache.
+
+    Returns:
+        The cleaned label string for the zone, or the zone code
+        itself when no usable label is present in the payload.
+    """
+    if payload is None:
+        payload = _cached_zone_aggregates()
+    zones = payload.get("zones") if isinstance(payload, dict) else None
+    entry = zones.get(zone_code) if isinstance(zones, dict) else None
+    if not isinstance(entry, dict):
+        return zone_code
+    raw_label = entry.get("label")
+    if not isinstance(raw_label, str):
+        return zone_code
+    cleaned = _TRAILING_PARENTHETICAL_RE.sub("", raw_label).strip()
+    if not cleaned:
+        return zone_code
+    return cleaned
 
 
 def build_zone_aggregate(

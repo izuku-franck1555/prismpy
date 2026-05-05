@@ -255,9 +255,27 @@ class TestCropPhysiologicalValidatorIncompatibleEmit(unittest.TestCase):
         # Sentence ends cleanly without the "the this region"
         # double-mention bug codex review #DIM-2 surfaced.
         self.assertNotIn("the this region", explanation.lower())
-        # Validator passes the canonical KG zone code through
-        # as the zone label until a per-zone label catalog ships.
-        self.assertIn("BSh", explanation)
+        # F-Path-β-1 — validator now resolves the human-readable
+        # zone label via ``koppen.zone_aggregates.label_for`` so
+        # the persona reads "Hot semi-arid" rather than the raw
+        # Köppen code "BSh" leaking into the plain-language copy.
+        self.assertIn("Hot semi-arid", explanation)
+        self.assertNotIn("BSh", explanation)
+
+    def test_emit_carries_human_readable_zone_label_in_details(self):
+        # F-Path-β-1 — alongside the explanation copy, the issue
+        # surfaces the human-readable zone label as a structured
+        # field so the cockpit drawer + per-zone technical detail
+        # block can render "Hot semi-arid:" rather than "BSh:".
+        # The Köppen code stays on ``zone`` for the audit trail
+        # + cockpit filter; ``zone_label`` is the user-facing
+        # name resolved from the zone-aggregates substrate.
+        ctx = _ctx("rice", RICE_ENVELOPE, {"BSh": SAHEL_BSh_DRY})
+        result = self.validator.validate(ctx)
+        self.assertEqual(len(result.issues), 1)
+        issue = result.issues[0]
+        self.assertEqual(issue.details.get("zone"), "BSh")
+        self.assertEqual(issue.details.get("zone_label"), "Hot semi-arid")
 
     def test_combined_precip_and_thermal_emit_one_issue(self):
         # When both precip AND thermal fire INCOMPATIBLE on

@@ -30,7 +30,9 @@ import unittest
 
 from prismpy.koppen.zone_aggregates import (
     ZONE_AGGREGATES_PATH,
+    _cached_zone_aggregates,
     build_zone_aggregate,
+    label_for,
     load_zone_aggregates,
 )
 from prismpy.validators.input_base import ZoneAggregate
@@ -440,6 +442,88 @@ class TestZoneAggregatesPackageData(unittest.TestCase):
             "pyproject.toml must keep 'data/*.txt' under "
             "'prismpy.koppen' for the Beck 2023 raster legend.",
         )
+
+
+class TestLabelFor(unittest.TestCase):
+    """F-Path-β-1 — pin the human-readable zone-label resolver.
+
+    The wizard banner needs ``"Hot semi-arid"`` (not ``"BSh"``)
+    in plain-language explanation copy. ``label_for`` reads the
+    label from the substrate, strips the trailing
+    parenthetical disambiguator (a fixture-quality qualifier
+    like ``" (Sahel-canonical)"``), and falls back to the zone
+    code itself when the substrate doesn't carry a label.
+    """
+
+    def setUp(self):
+        # Clear the LRU cache between tests so an in-memory
+        # payload override doesn't leak across cases.
+        _cached_zone_aggregates.cache_clear()
+
+    def tearDown(self):
+        _cached_zone_aggregates.cache_clear()
+
+    def test_bsh_strips_sahel_canonical_parenthetical(self):
+        # The fixture stores "Hot semi-arid (Sahel-canonical)";
+        # the strip is the user-facing copy contract.
+        self.assertEqual(label_for("BSh"), "Hot semi-arid")
+
+    def test_aw_strips_sudan_savanna_parenthetical(self):
+        self.assertEqual(label_for("Aw"), "Tropical savanna")
+
+    def test_zones_without_parenthetical_round_trip(self):
+        # "Humid subtropical" / "Subtropical highland" /
+        # "Tropical rainforest" carry no parenthetical and
+        # should pass through unchanged.
+        self.assertEqual(label_for("Cfa"), "Humid subtropical")
+        self.assertEqual(label_for("Cwa"), "Subtropical highland")
+        self.assertEqual(label_for("Af"), "Tropical rainforest")
+
+    def test_unknown_zone_falls_back_to_code(self):
+        # Future-proofing — a zone code not in the fixture
+        # falls back to the code itself so the banner stays
+        # intelligible (no empty paragraph).
+        self.assertEqual(label_for("ET"), "ET")
+
+    def test_payload_override_skips_disk_load(self):
+        # Tests can pass an in-memory payload to exercise
+        # alternative fixtures without touching the cached
+        # default substrate.
+        payload = {
+            "zones": {
+                "Xx": {"label": "Imaginary climate (synthetic)"},
+            },
+        }
+        self.assertEqual(
+            label_for("Xx", payload=payload), "Imaginary climate",
+        )
+
+    def test_missing_label_falls_back_to_code(self):
+        # Defensive — a substrate entry without a label key
+        # falls back to the zone code rather than producing an
+        # empty string.
+        payload = {"zones": {"Yy": {"n_cell_days": 100}}}
+        self.assertEqual(label_for("Yy", payload=payload), "Yy")
+
+    def test_empty_label_falls_back_to_code(self):
+        # An empty string after stripping the parenthetical
+        # would otherwise leak through; fall back to the code.
+        payload = {"zones": {"Zz": {"label": "(only-parens)"}}}
+        self.assertEqual(label_for("Zz", payload=payload), "Zz")
+
+    def test_non_string_label_falls_back_to_code(self):
+        # Defensive type-check — a future drift to a non-string
+        # label (e.g., a localized dict) does not break the
+        # validator.
+        payload = {"zones": {"Aa": {"label": 42}}}
+        self.assertEqual(label_for("Aa", payload=payload), "Aa")
+
+    def test_malformed_payload_falls_back_to_code(self):
+        # Top-level shape drift (no ``zones`` key, or a list
+        # instead of a dict) returns the code rather than
+        # raising.
+        self.assertEqual(label_for("BSh", payload={}), "BSh")
+        self.assertEqual(label_for("BSh", payload={"zones": []}), "BSh")
 
 
 if __name__ == "__main__":
