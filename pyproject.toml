@@ -96,6 +96,7 @@ include = ["prismpy*"]
 # FileNotFoundError on a pip-installed prismpy.
 "prismpy.koppen" = [
     "*.json",
+    "data/*.json",
     "data/*.tif",
     "data/*.txt",
 ]
