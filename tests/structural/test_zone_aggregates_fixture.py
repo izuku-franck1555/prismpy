@@ -206,27 +206,239 @@ class TestZoneAggregatesVerdictIntegration(unittest.TestCase):
 
 class TestZoneAggregatesPackageData(unittest.TestCase):
     """Pin the pyproject package-data declaration so the
-    bundled JSON ships in installed wheels. Mirrors the
-    ECOCROP envelope's release-safety pin (Sprint E.0.5)."""
+    bundled JSON ships in installed wheels.
 
-    def test_pyproject_includes_json_pattern(self):
+    Two-stage pin discipline per
+    ``feedback_intermediate_stage_pin_gap.md`` + the wheel-
+    contents lesson learned post-Sprint-F: the SOURCE-side
+    pyproject.toml literal is necessary but NOT sufficient.
+    A pattern at the package root (``*.json``) does not
+    recurse into subdirectories, so a fixture under
+    ``data/`` requires its own ``data/*.json`` glob. The
+    wheel-contents test below catches the gap empirically.
+    """
+
+    @classmethod
+    def setUpClass(cls):
         from pathlib import Path as _P
-        pyproject = (
+        cls._pyproject_text = (
             _P(__file__).resolve().parents[2] / "pyproject.toml"
         ).read_text(encoding="utf-8")
-        # The koppen package-data block already includes
-        # ``"*.json"`` which covers both ECOCROP envelopes and
-        # the new zone-aggregates fixture. Verify the existing
-        # block is still in force (a future refactor that
-        # narrows the include list to e.g. ``"ecocrop_*.json"``
-        # would silently drop the new fixture from wheels).
-        self.assertRegex(
-            pyproject,
-            r'\[tool\.setuptools\.package-data\][\s\S]*?'
-            r'"prismpy\.koppen"[\s\S]*?"\*\.json"',
+        cls._koppen_list = cls._extract_koppen_package_data_list(
+            cls._pyproject_text,
+        )
+
+    @staticmethod
+    def _extract_koppen_package_data_list(pyproject_text: str) -> str:
+        """Return the body of the ``"prismpy.koppen" = [...]``
+        list from ``[tool.setuptools.package-data]``.
+
+        Codex L-2 absorption: each per-pattern test bounds its
+        regex to the koppen list specifically rather than
+        scanning the whole pyproject. A future entry under a
+        different package (e.g.,
+        ``"prismpy.bounds" = ["data/*.json"]``) would
+        otherwise satisfy a koppen-targeted assertion that
+        wasn't bounded.
+        """
+        # Match: "prismpy.koppen" = [<body up to closing ]>]
+        match = re.search(
+            r'"prismpy\.koppen"\s*=\s*\[(?P<body>[\s\S]*?)\]',
+            pyproject_text,
+        )
+        if match is None:
+            raise AssertionError(
+                "Could not locate 'prismpy.koppen' = [...] "
+                "list in pyproject.toml. Verify the "
+                "[tool.setuptools.package-data] section is "
+                "still present.",
+            )
+        return match.group("body")
+
+    def test_pyproject_includes_data_json_pattern(self):
+        # Sprint F Stage 1 fix: the new fixture lives under
+        # ``koppen/data/`` so it needs the ``data/*.json``
+        # glob pattern, not just the package-root ``*.json``.
+        # The original AC-F-3 test mistakenly assumed
+        # ``*.json`` would cover the subdir; the wheel build
+        # proved otherwise.
+        self.assertIn(
+            '"data/*.json"', self._koppen_list,
             "pyproject.toml [tool.setuptools.package-data] "
-            "must include '*.json' under 'prismpy.koppen' so "
-            "zone_aggregates_v1.json ships in wheels.",
+            "must include 'data/*.json' under 'prismpy.koppen' "
+            "so zone_aggregates_v1.json (under data/) ships "
+            "in installed wheels. The package-root '*.json' "
+            "glob does NOT recurse into subdirs.",
+        )
+
+    def test_pyproject_includes_root_json_pattern(self):
+        # Backstop for the existing ECOCROP envelopes file at
+        # ``koppen/ecocrop_envelopes.json`` (package root).
+        self.assertIn(
+            '"*.json"', self._koppen_list,
+            "pyproject.toml must keep '*.json' under "
+            "'prismpy.koppen' for the ECOCROP envelopes file "
+            "at the package root.",
+        )
+
+    def test_pyproject_includes_data_tif_pattern(self):
+        # Backstop for the Beck 2023 raster shipped under
+        # ``data/`` per Sprint E.0.5. The ``data/*.tif``
+        # pattern was the original fix for that file. Pin
+        # here so a future refactor that consolidates the
+        # data globs cannot drop the raster pattern silently.
+        self.assertIn(
+            '"data/*.tif"', self._koppen_list,
+            "pyproject.toml must keep 'data/*.tif' under "
+            "'prismpy.koppen' for the Beck 2023 raster.",
+        )
+
+    # Allowed file extensions under ``koppen/data/`` per the
+    # explicit globs declared in pyproject.toml. Any future
+    # glob change that adds a new extension lands here in the
+    # same commit so the wheel-contents pin stays in sync.
+    _ALLOWED_DATA_EXTENSIONS = frozenset({".json", ".tif", ".txt"})
+
+    def test_built_wheel_carries_zone_aggregates_fixture(self):
+        # Two-stage pin (per team-lead Path-A directive +
+        # ``feedback_intermediate_stage_pin_gap.md`` durable
+        # lesson #22): the source-side ``assertRegex`` checks
+        # above are necessary but NOT sufficient — they pin
+        # the LITERAL text of the package-data list. This
+        # test pins the DOWNSTREAM CONSUMER side: build a
+        # wheel from the local source tree via ``pip wheel``
+        # and assert the synthetic fixture is a member of
+        # the resulting archive.
+        #
+        # Caveat documented for future builders: setuptools
+        # ≥66.x can auto-include data files when invoked from
+        # a local source tree (the ``setuptools.build_meta``
+        # local-build shortcut bypasses the strict
+        # ``package-data`` glob check). The same setuptools
+        # applies the globs STRICTLY when the build is driven
+        # through ``sdist → wheel`` (the path
+        # ``pip install <git-url>`` uses). So in some test
+        # environments this assertion may PASS against a
+        # broken pyproject.toml. The source-side asserts
+        # remain the load-bearing guard; this wheel-contents
+        # test is defense-in-depth for environments where
+        # the strict path applies.
+        #
+        # Skip discipline (codex M-1 absorption): only skip
+        # on environment-unavailability (interpreter outside
+        # the prismpy ``requires-python`` window OR ``pip
+        # wheel`` missing). A genuine ``CalledProcessError``
+        # on a supported interpreter falls through and fails
+        # loudly — that's the regression catch.
+        import subprocess
+        import sys
+        import tempfile
+        import zipfile
+        from pathlib import Path as _P
+
+        # Pre-check interpreter version against the prismpy
+        # ``requires-python`` cap (>=3.10,<3.13). Skip if
+        # outside; otherwise the wheel build will hard-fail
+        # with a "Package 'prismpy' requires a different
+        # Python" diagnostic which is environmental, not a
+        # source defect.
+        py = sys.version_info
+        if py.major != 3 or py.minor < 10 or py.minor >= 13:
+            self.skipTest(
+                f"Wheel-build test requires Python "
+                f">=3.10,<3.13; running on "
+                f"{py.major}.{py.minor}.{py.micro}. Source-"
+                f"side asserts above still pin the package-"
+                f"data declaration.",
+            )
+
+        prismpy_root = _P(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as td:
+            wheel_dir = _P(td)
+            try:
+                subprocess.run(
+                    [
+                        sys.executable, "-m", "pip", "wheel",
+                        "--no-deps", "--no-cache-dir",
+                        "--wheel-dir", str(wheel_dir),
+                        str(prismpy_root),
+                    ],
+                    check=True, capture_output=True, text=True,
+                    timeout=240,
+                )
+            except FileNotFoundError as exc:
+                # pip not installed in the test interpreter —
+                # environmental skip.
+                self.skipTest(
+                    f"pip not available in test env: {exc}.",
+                )
+            except subprocess.TimeoutExpired as exc:
+                # Wheel build hung past 240s — likely a CI
+                # environmental issue (slow network,
+                # contention). Skip with a loud message.
+                self.skipTest(
+                    f"pip wheel timed out (>240s): {exc}.",
+                )
+            # subprocess.CalledProcessError deliberately NOT
+            # caught: a genuine wheel-build failure on a
+            # supported interpreter is the exact regression
+            # this test exists to catch. The exception bubbles
+            # up and fails the test with pip's stdout/stderr
+            # captured, which is what we want.
+            wheels = list(wheel_dir.glob("prismpy-*.whl"))
+            self.assertEqual(
+                len(wheels), 1,
+                f"expected exactly one prismpy wheel in "
+                f"{wheel_dir}; got {wheels}",
+            )
+            with zipfile.ZipFile(wheels[0]) as zf:
+                names = set(zf.namelist())
+            target = "prismpy/koppen/data/zone_aggregates_v1.json"
+            data_only = sorted(n for n in names if "data/" in n)
+            self.assertIn(
+                target, names,
+                f"Two-stage pin failure: wheel does NOT carry "
+                f"{target!r}. The pyproject.toml package-data "
+                f"glob pattern likely doesn't match the file's "
+                f"relative path under data/. Wheel contents "
+                f"under data/: {data_only}",
+            )
+            # Codex L-1 absorption — tightened negative pin.
+            # Every file shipped under ``koppen/data/`` MUST
+            # have an extension in the explicit allow-list.
+            # Catches not just bytecode caches (.pyc /
+            # __pycache__) but also editor swap files
+            # (.DS_Store / .bak / .swp), accidental
+            # large-asset additions, etc. A future glob
+            # broadening like ``data/**`` would over-match
+            # and trip this assertion.
+            data_files = [
+                n for n in data_only
+                if "/data/" in n and not n.endswith("/data/")
+            ]
+            unexpected = sorted(
+                n for n in data_files
+                if _P(n).suffix not in self._ALLOWED_DATA_EXTENSIONS
+                or "__pycache__" in n
+            )
+            self.assertEqual(
+                unexpected, [],
+                f"Wheel under koppen/data/ unexpectedly "
+                f"carries files outside the declared "
+                f"extension allow-list "
+                f"{sorted(self._ALLOWED_DATA_EXTENSIONS)}: "
+                f"{unexpected}. The package-data globs should "
+                f"only include the explicit declared "
+                f"extensions, not a broad recursive match.",
+            )
+
+    def test_pyproject_includes_data_txt_pattern(self):
+        # Backstop for the Beck 2023 legend shipped at
+        # ``koppen/data/beck_2023_v1_legend.txt``.
+        self.assertIn(
+            '"data/*.txt"', self._koppen_list,
+            "pyproject.toml must keep 'data/*.txt' under "
+            "'prismpy.koppen' for the Beck 2023 raster legend.",
         )
 
 
