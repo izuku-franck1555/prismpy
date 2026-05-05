@@ -19,6 +19,11 @@ from prismpy.cockpit.manifest import (
     build_cockpit_warning_manifest,
     compute_manifest_hash,
 )
+from prismpy.cockpit.per_run_snapshot import (
+    compute_snapshot_at_launch_hash,
+    is_snapshot_unavailable,
+    snapshot_for_pipeline_run,
+)
 
 
 __all__ = [
@@ -26,4 +31,7 @@ __all__ = [
     "UnknownCategoryError",
     "build_cockpit_warning_manifest",
     "compute_manifest_hash",
+    "compute_snapshot_at_launch_hash",
+    "is_snapshot_unavailable",
+    "snapshot_for_pipeline_run",
 ]
