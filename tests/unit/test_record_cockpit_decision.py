@@ -80,7 +80,7 @@ class TestRecordCockpitDecisionSkip(unittest.TestCase):
     def test_skip_writes_user_skip_decision(self):
         self.tracker.record_cockpit_decision(
             decision_type=DecisionType.USER_SKIP,
-            category="coverage_climate_cells",
+            category="soil_no_hwsd_coverage",
             bucket=3,
             affected_cells=["c1", "c2", "c3"],
         )
@@ -95,7 +95,7 @@ class TestRecordCockpitDecisionSkip(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.tracker.record_cockpit_decision(
                 decision_type=DecisionType.USER_SKIP,
-                category="coverage_climate_cells",
+                category="soil_no_hwsd_coverage",
                 bucket=3,
                 affected_cells=None,
             )
@@ -217,15 +217,22 @@ class TestRecordCockpitDecisionOverride(unittest.TestCase):
             "Cultural-knowledge", decisions[0].rationale,
         )
 
-    def test_override_at_pre_pipeline_true_stamps_distinct_marker(self):
-        # The discriminator stamps verbatim into the rationale.
+    def test_cockpit_path_hardcodes_false_discriminator(self):
+        # Codex review MEDIUM 2 absorption — the cockpit-time
+        # discriminator is hardcoded ``False``; callers cannot
+        # override it. The wizard-time path stamps ``True`` so
+        # audit-grep against ``override_at_pre_pipeline=True``
+        # surfaces only the wizard entries (and ``=False``
+        # surfaces only the cockpit entries).
         self.tracker.record_cockpit_decision(
-            **self._valid_override_kwargs(
-                override_at_pre_pipeline=True,
-            ),
+            **self._valid_override_kwargs(),
         )
         decisions = [d for d, _ in self.tracker._pending_decisions]
         self.assertIn(
+            "override_at_pre_pipeline=False",
+            decisions[0].rationale,
+        )
+        self.assertNotIn(
             "override_at_pre_pipeline=True",
             decisions[0].rationale,
         )
@@ -259,6 +266,109 @@ class TestRecordCockpitDecisionGuards(unittest.TestCase):
                     bucket=bad_bucket,
                     affected_cells=["c1"],
                 )
+
+    def test_unknown_category_raises(self):
+        # Codex MEDIUM 1 absorption — category MUST resolve
+        # to a WarningCategory enum value. A typo'd caller
+        # ("crop_region_mismatch_typo") fails loud here
+        # rather than landing as a generic decision.
+        with self.assertRaises(ValueError) as cm:
+            self.tracker.record_cockpit_decision(
+                decision_type=DecisionType.USER_ACKNOWLEDGE,
+                category="not_a_real_category",
+                bucket=2,
+                affected_cells=["c1"],
+            )
+        self.assertIn(
+            "WarningCategory", str(cm.exception),
+        )
+
+    def test_bucket_must_match_category_canonical_bucket(self):
+        # Codex MEDIUM 1 absorption — even when both bucket
+        # and category are valid, they must agree per
+        # WARNING_BUCKET_MAP. A caller passing
+        # category=climate_envelope_tail (canonical bucket 2)
+        # with bucket=3 is mis-classifying the warning; the
+        # cockpit's bucket-affordance invariant breaks if this
+        # is allowed.
+        with self.assertRaises(ValueError) as cm:
+            self.tracker.record_cockpit_decision(
+                decision_type=DecisionType.USER_SKIP,
+                category="climate_envelope_tail",
+                bucket=3,  # canonical is 2
+                affected_cells=["c1"],
+            )
+        self.assertIn(
+            "does not match the canonical bucket",
+            str(cm.exception),
+        )
+
+    def test_override_routes_through_wizard_override_record(self):
+        # Codex HIGH 2 absorption — cockpit-time overrides
+        # MUST inherit the same Pydantic invariants the
+        # wizard-time path enforces. A non-hex verdict_hash
+        # would slip through the previous implementation;
+        # WizardOverrideRecord rejects it.
+        tracker = ProvenanceTracker(project_name="t")
+        with self.assertRaises(ValueError) as cm:
+            tracker.record_cockpit_decision(
+                decision_type=DecisionType.USER_OVERRIDE,
+                category="crop_region_mismatch",
+                bucket=5,
+                affected_zones=["BSh"],
+                rationale=(
+                    "Local trial with cultivar ITA-150 yielded "
+                    "4.2 t/ha under irrigated 600 mm/yr regime."
+                ),
+                evidence_type="local_trial",
+                verdict_hash="not-a-valid-hex-hash",
+            )
+        self.assertIn(
+            "WizardOverrideRecord",
+            str(cm.exception),
+        )
+
+    def test_override_rejects_filler_rationale(self):
+        # Codex HIGH 2 absorption — single-char-repeat
+        # rationale that clears the 50-char floor must reject
+        # via the WizardOverrideRecord filler-detector.
+        tracker = ProvenanceTracker(project_name="t")
+        with self.assertRaises(ValueError) as cm:
+            tracker.record_cockpit_decision(
+                decision_type=DecisionType.USER_OVERRIDE,
+                category="crop_region_mismatch",
+                bucket=5,
+                affected_zones=["BSh"],
+                rationale="a" * 60,  # filler — single-char repeat
+                evidence_type="local_trial",
+                verdict_hash="0" * 64,
+            )
+        # WizardOverrideRecord's filler validator surfaces
+        # via the wrapper's HIGH 2 routing.
+        self.assertIn(
+            "WizardOverrideRecord",
+            str(cm.exception),
+        )
+
+    def test_override_rejects_http_evidence_url(self):
+        # Codex HIGH 2 absorption — http:// evidence URL must
+        # reject via WizardOverrideRecord's https-only
+        # validator.
+        tracker = ProvenanceTracker(project_name="t")
+        with self.assertRaises(ValueError):
+            tracker.record_cockpit_decision(
+                decision_type=DecisionType.USER_OVERRIDE,
+                category="crop_region_mismatch",
+                bucket=5,
+                affected_zones=["BSh"],
+                rationale=(
+                    "Local trial with cultivar ITA-150 yielded "
+                    "4.2 t/ha under irrigated 600 mm/yr regime."
+                ),
+                evidence_type="local_trial",
+                verdict_hash="0" * 64,
+                evidence_url="http://insecure.invalid/paper",
+            )
 
     def test_disabled_tracker_silently_returns(self):
         disabled = ProvenanceTracker(project_name="t", enabled=False)

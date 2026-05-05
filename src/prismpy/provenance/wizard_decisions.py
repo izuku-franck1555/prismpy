@@ -273,6 +273,23 @@ class WizardOverrideRecord(BaseModel):
             )
         return value
 
+    @field_validator("evidence_type_other_specify")
+    @classmethod
+    def _strip_other_specify(
+        cls, value: Optional[str],
+    ) -> Optional[str]:
+        """Codex review LOW absorption — the field description
+        promises trimmed text, but the prior implementation
+        only validated whitespace + returned the value
+        verbatim. Strip leading/trailing whitespace before the
+        model-level validator runs so ``model_dump()`` carries
+        the canonical form (no surrounding whitespace) into
+        the audit log.
+        """
+        if value is None:
+            return None
+        return value.strip() or None
+
     @model_validator(mode="after")
     def _other_specify_required_iff_other(self) -> "WizardOverrideRecord":
         """Enforce the conditional-required pairing between

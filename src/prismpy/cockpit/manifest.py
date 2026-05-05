@@ -172,6 +172,77 @@ def _entry_id(
     return hashlib.sha256(payload).hexdigest()
 
 
+def _cells_by_category(
+    cell_summary: Dict[str, Any],
+) -> Dict[str, List[str]]:
+    """Pivot the producer-shape cell summary into a
+    {category_value: [cell_id, ...]} dict.
+
+    Two input shapes accepted:
+
+    1. **Producer shape** — the
+       :func:`prismpy.pipeline.executor._build_cell_summary`
+       output: ``{"cells": [{cell_id, failed_checks:
+       [{check_id, category, ...}, ...]}, ...]}``. Walks each
+       cell's ``failed_checks`` array; every check carries a
+       ``category`` field per V2-22c-PRE.1.2 D34.
+    2. **Pre-pivoted shape** — ``{category_value: {"cells":
+       [...]}}`` (legacy / test fixture form). The fast path
+       for callers that already have the per-category cell-id
+       lists.
+
+    Mixing the two shapes within one call is undefined; the
+    builder picks ``"cells"`` top-level (producer shape) over
+    a per-category dict by inspecting whether ``cell_summary``
+    has a top-level ``cells`` list.
+    """
+    by_category: Dict[str, List[str]] = {}
+    cells_field = (
+        cell_summary.get("cells")
+        if isinstance(cell_summary, dict)
+        else None
+    )
+    if isinstance(cells_field, list):
+        # Producer shape — per-cell failed_checks pivot. Each
+        # cell may carry multiple failed_checks; surface each
+        # category × cell pair into the by_category map.
+        for cell in cells_field:
+            if not isinstance(cell, dict):
+                continue
+            cell_id = cell.get("cell_id") or cell.get("id")
+            if not cell_id:
+                continue
+            failed = cell.get("failed_checks") or []
+            for check in failed:
+                if not isinstance(check, dict):
+                    continue
+                category_value = check.get("category")
+                if not category_value:
+                    continue
+                by_category.setdefault(
+                    category_value, [],
+                ).append(str(cell_id))
+        return by_category
+
+    # Pre-pivoted shape — used by tests + by callers who have
+    # already grouped the cells by category.
+    if isinstance(cell_summary, dict):
+        for category_value, payload in cell_summary.items():
+            if category_value == "cells":
+                continue
+            cells = (
+                payload.get("cells")
+                if isinstance(payload, dict)
+                else None
+            )
+            if not cells:
+                continue
+            by_category.setdefault(
+                category_value, [],
+            ).extend(str(c) for c in cells)
+    return by_category
+
+
 def build_cockpit_warning_manifest(
     parent_run_id: str,
     cell_summary: Optional[Dict[str, Any]] = None,
@@ -190,15 +261,17 @@ def build_cockpit_warning_manifest(
             entry's ``entry_id`` so a refinement run's manifest
             carries fresh ids without drifting against the
             parent's.
-        cell_summary: Optional dict with per-category cell-id
-            lists, shape::
+        cell_summary: Optional dict from the producer at
+            :func:`prismpy.pipeline.executor._build_cell_summary`,
+            shape::
 
-                {"category_value": {"cells": ["c1", ...]}}
+                {"cells": [{cell_id, failed_checks: [{check_id,
+                            category, result}, ...]}, ...]}
 
-            One bucket per category per cockpit's match-
-            disjoint discipline; multi-cell entries collapse
-            to one manifest row with the full ``affected_cells``
-            tuple.
+            Helper :func:`_cells_by_category` pivots into a
+            per-category map; legacy pre-pivoted
+            ``{category_value: {"cells": [...]}}`` shape also
+            accepted for fixture-driven tests.
         stage_1_verdicts: Optional Sprint F snapshot dict per
             :func:`prismweb.core.services.wizard_validation
             .build_stage_1_verdicts_snapshot`. The
@@ -223,11 +296,13 @@ def build_cockpit_warning_manifest(
     """
     entries: List[CockpitManifestEntry] = []
     if cell_summary:
-        for category_value, payload in cell_summary.items():
-            cells = payload.get("cells") if isinstance(payload, dict) else None
-            if not cells:
+        cells_by_category = _cells_by_category(cell_summary)
+        for category_value, cell_ids in cells_by_category.items():
+            if not cell_ids:
                 continue
-            sorted_cells = tuple(sorted(str(c) for c in cells))
+            # De-dupe cell_ids that appear in multiple
+            # failed_checks for the same cell+category.
+            sorted_cells = tuple(sorted(set(cell_ids)))
             bucket = _category_to_bucket_integer(category_value)
             entry_id = _entry_id(
                 parent_run_id, bucket, category_value,

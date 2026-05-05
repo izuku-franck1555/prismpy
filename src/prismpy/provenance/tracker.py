@@ -899,6 +899,15 @@ class ProvenanceTracker:
                 f" methodology_paper_doi="
                 f"{record.methodology_paper_doi}"
             )
+        # Sprint E.1 codex MEDIUM 2 absorption — stamp the
+        # wizard-time discriminator on the rationale verbatim
+        # so audit-grep against ``override_at_pre_pipeline=True``
+        # surfaces every wizard-time entry. The cockpit-time
+        # path stamps ``override_at_pre_pipeline=False`` in
+        # ``record_cockpit_decision`` below; the two markers
+        # are byte-disjoint so a regex grep splits the audit
+        # cleanly.
+        rationale_full += " override_at_pre_pipeline=True"
         self.record_decision(
             decision_type=DecisionType.USER_OVERRIDE,
             description=(
@@ -927,7 +936,6 @@ class ProvenanceTracker:
         evidence_url: Optional[str] = None,
         methodology_paper_doi: Optional[str] = None,
         verdict_hash: Optional[str] = None,
-        override_at_pre_pipeline: bool = False,
         artifact_id: Optional[str] = None,
     ) -> None:
         """Sprint E.1 AC-E1-0 — replay a cockpit-time decision
@@ -994,12 +1002,16 @@ class ProvenanceTracker:
             verdict_hash: 64-char SHA-256 hex pinning the
                 Stage 1 verdict snapshot at decision time —
                 required for ``USER_OVERRIDE``.
-            override_at_pre_pipeline: ``False`` (cockpit-time)
-                stamps the rationale; the discriminator that
-                distinguishes wizard-time from cockpit-time
-                in the audit log per AC-E1-0.
             artifact_id: Optional artifact binding mirroring
                 :meth:`record_decision` semantics.
+
+        The cockpit-time discriminator (``override_at_pre_pipeline=False``)
+        is hardcoded on the rationale here — callers cannot
+        override it. The wizard-time
+        :meth:`record_wizard_decision` stamps the
+        complementary ``True`` marker, so audit-grep against
+        either pattern surfaces only the matching path. Per
+        codex MEDIUM 2.
 
         Raises:
             ValueError: On unsupported decision_type, bad
@@ -1008,6 +1020,14 @@ class ProvenanceTracker:
         """
         if not self.enabled:
             return
+        # Local import keeps the module-import surface lean;
+        # WarningCategory + WizardOverrideRecord are opt-in
+        # consumers per the existing pattern.
+        from prismpy.warnings.categories import (
+            WARNING_BUCKET_MAP,
+            WarningCategory,
+            WarningBucket,
+        )
         # Validate the decision_type early — typed-enum on the
         # caller side is the contract; if a stringly-typed
         # caller slips through, fail loud.
@@ -1022,51 +1042,98 @@ class ProvenanceTracker:
                 f"USER_ACKNOWLEDGE / USER_SKIP / USER_OVERRIDE; "
                 f"got {decision_type!r}."
             )
+        # Codex MEDIUM 1 absorption — cross-check that the
+        # category resolves to a WarningCategory enum value
+        # AND that ``WARNING_BUCKET_MAP[category]`` matches
+        # the supplied bucket integer. Without this, a typo'd
+        # caller could silently record an acknowledge against
+        # a category whose canonical bucket is 3 (TRUE_EXCLUDE),
+        # corrupting the audit-trail's bucket-affordance
+        # invariant.
+        try:
+            category_enum = WarningCategory(category)
+        except ValueError as exc:
+            raise ValueError(
+                f"category {category!r} is not a "
+                f"WarningCategory enum value; reconcile with "
+                f"prismpy.warnings.categories per F25."
+            ) from exc
+        canonical_bucket_enum = WARNING_BUCKET_MAP[category_enum]
+        # Map the WarningBucket enum member to the integer the
+        # caller supplied. The integer surface is the cockpit-
+        # facing convention (bucket 2 / 3 / 5); WarningBucket
+        # is the substrate enum.
+        _bucket_int_map = {
+            WarningBucket.AUTO_FIXABLE: 0,
+            WarningBucket.INFORMATIONAL: 2,
+            WarningBucket.TRUE_EXCLUDE: 3,
+            WarningBucket.INTERPOLATABLE: 4,
+            WarningBucket.MANUAL_OVERRIDE_WITH_EVIDENCE: 5,
+        }
+        canonical_bucket_int = _bucket_int_map[canonical_bucket_enum]
         if bucket not in (2, 3, 5):
             raise ValueError(
                 f"bucket must be 2 / 3 / 5 per "
                 f"WARNING_BUCKET_MAP; got {bucket!r}."
             )
-        # Compose a structured rationale payload that round-
-        # trips through the existing DecisionRecord shape per
-        # Adj-12 from Sprint F. Cockpit-time discriminator
-        # stamped explicitly so audit-grep can split wizard-
-        # time vs cockpit-time entries cleanly.
+        if bucket != canonical_bucket_int:
+            raise ValueError(
+                f"bucket {bucket} does not match the canonical "
+                f"bucket for category {category!r} "
+                f"(WARNING_BUCKET_MAP resolves to "
+                f"{canonical_bucket_int}). The cockpit caller "
+                f"must pass the bucket integer matching the "
+                f"category's WARNING_BUCKET_MAP entry."
+            )
         affected_cells = list(affected_cells or [])
         affected_zones = list(affected_zones or [])
         if decision_type is DecisionType.USER_OVERRIDE:
-            if not affected_zones:
-                raise ValueError(
-                    "USER_OVERRIDE requires non-empty "
-                    "affected_zones."
+            # Codex HIGH 2 absorption — route override
+            # validation through WizardOverrideRecord so the
+            # cockpit-time path inherits the same Pydantic
+            # invariants the wizard-time path enforces:
+            # filler-rejection, https-only evidence_url,
+            # 64-char hex verdict_hash, conditional
+            # evidence_type_other_specify pairing. Without
+            # this, the cockpit caller could persist
+            # malformed-rationale or non-hex-verdict_hash
+            # decisions that the wizard would reject.
+            from prismpy.provenance.wizard_decisions import (
+                WizardOverrideRecord,
+            )
+            try:
+                # The Pydantic validators raise
+                # ValidationError; surface it as ValueError
+                # so the caller's exception-handling stays
+                # uniform. WizardOverrideRecord is the
+                # single source of truth for override-shape
+                # invariants.
+                _validated = WizardOverrideRecord(
+                    rationale=rationale or "",
+                    evidence_type=evidence_type or "",
+                    evidence_type_other_specify=evidence_type_other_specify,
+                    affected_zones=affected_zones,
+                    verdict_hash=verdict_hash or "",
+                    evidence_url=evidence_url,
+                    methodology_paper_doi=methodology_paper_doi,
                 )
-            if not rationale or len(rationale) < 50:
+            except Exception as exc:
                 raise ValueError(
-                    "USER_OVERRIDE requires rationale "
-                    "≥50 chars per WizardOverrideRecord parity."
-                )
-            if not evidence_type:
-                raise ValueError(
-                    "USER_OVERRIDE requires evidence_type."
-                )
-            if not verdict_hash:
-                raise ValueError(
-                    "USER_OVERRIDE requires verdict_hash for "
-                    "stale-rejection per CC-23."
-                )
-            if evidence_type == "other":
-                if not evidence_type_other_specify or not (
-                    evidence_type_other_specify.strip()
-                ):
-                    raise ValueError(
-                        "evidence_type='other' requires "
-                        "non-empty evidence_type_other_specify."
-                    )
-            elif evidence_type_other_specify is not None:
-                raise ValueError(
-                    "evidence_type_other_specify must be None "
-                    "when evidence_type is not 'other'."
-                )
+                    f"USER_OVERRIDE rejected by "
+                    f"WizardOverrideRecord validators: {exc}"
+                ) from exc
+            # Mirror the validated values — the model may have
+            # normalized whitespace (e.g., the
+            # ``_strip_other_specify`` validator).
+            evidence_type = _validated.evidence_type
+            evidence_type_other_specify = (
+                _validated.evidence_type_other_specify
+            )
+            rationale = _validated.rationale
+            verdict_hash = _validated.verdict_hash
+            evidence_url = _validated.evidence_url
+            methodology_paper_doi = _validated.methodology_paper_doi
+            affected_zones = list(_validated.affected_zones)
         else:
             # USER_ACKNOWLEDGE / USER_SKIP require
             # affected_cells.
@@ -1109,9 +1176,11 @@ class ProvenanceTracker:
             rationale_full += (
                 f"methodology_paper_doi={methodology_paper_doi} "
             )
-        rationale_full += (
-            f"override_at_pre_pipeline={override_at_pre_pipeline}"
-        )
+        # Codex MEDIUM 2 — discriminator hardcoded ``False``
+        # for the cockpit-time path; the wizard-time
+        # ``record_wizard_decision`` stamps ``True`` so
+        # audit-grep splits cleanly.
+        rationale_full += "override_at_pre_pipeline=False"
         self.record_decision(
             decision_type=decision_type,
             description=(

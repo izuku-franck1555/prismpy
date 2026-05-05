@@ -44,11 +44,52 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class _RationaleAccessFinder(ast.NodeVisitor):
-    """Collect every `rationale` Name / Attribute access in a
-    parse tree, with line numbers."""
+    """Collect every `rationale` access in a parse tree, with
+    line numbers + access kind. Catches:
+
+    * ``Name`` — bare identifier read (``rationale``).
+    * ``Attribute`` — dotted access (``record.rationale``).
+    * ``Constant`` (string) inside a ``Subscript`` / ``Dict``
+      key / ``Call`` keyword — string-key serialization leaks
+      (``payload["rationale"]``, ``{"rationale": ...}``,
+      ``func(rationale="...")``). Codex MEDIUM 3 absorption.
+
+    Constant-string scan is scoped — module / class / function
+    docstring nodes are excluded so a comment / docstring
+    mention doesn't trip the walker.
+    """
 
     def __init__(self):
         self.hits: list[tuple[int, str]] = []
+        self._docstring_constants: set[int] = set()
+
+    def visit_Module(self, node: ast.Module) -> None:
+        self._mark_docstring(node)
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._mark_docstring(node)
+        self.generic_visit(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._mark_docstring(node)
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._mark_docstring(node)
+        self.generic_visit(node)
+
+    def _mark_docstring(self, node) -> None:
+        body = getattr(node, "body", None)
+        if not body:
+            return
+        first = body[0]
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            self._docstring_constants.add(id(first.value))
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if node.attr == "rationale":
@@ -58,6 +99,13 @@ class _RationaleAccessFinder(ast.NodeVisitor):
     def visit_Name(self, node: ast.Name) -> None:
         if node.id == "rationale":
             self.hits.append((node.lineno, "Name"))
+        self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant) -> None:
+        if id(node) in self._docstring_constants:
+            return
+        if isinstance(node.value, str) and node.value == "rationale":
+            self.hits.append((node.lineno, "Constant"))
         self.generic_visit(node)
 
 
@@ -137,6 +185,68 @@ class TestNoRationaleLeakInCockpitReadinessContract(unittest.TestCase):
                         f"Rationale stays in the audit log "
                         f"only."
                     )
+
+
+class TestF33WalkerCatchesStringKeyLeaks(unittest.TestCase):
+    """Codex MEDIUM 3 absorption — the F33 walker must catch
+    string-key serialization leaks like
+    ``{"rationale": ...}`` or ``payload["rationale"]``, not
+    just bare Name / Attribute access. Constant string scan
+    excludes docstring nodes."""
+
+    def test_walker_flags_dict_key_leak(self):
+        # Build a synthetic AST that includes a dict literal
+        # with a "rationale" key; assert the walker collects
+        # the Constant hit.
+        source = """
+def leak():
+    return {"rationale": "user text"}
+"""
+        finder = _RationaleAccessFinder()
+        finder.visit(ast.parse(source))
+        constant_hits = [
+            (line, kind) for line, kind in finder.hits
+            if kind == "Constant"
+        ]
+        self.assertEqual(
+            len(constant_hits), 1,
+            f"Walker must flag the dict-key string constant; "
+            f"got {finder.hits!r}.",
+        )
+
+    def test_walker_flags_subscript_key_leak(self):
+        source = """
+def leak(payload):
+    return payload["rationale"]
+"""
+        finder = _RationaleAccessFinder()
+        finder.visit(ast.parse(source))
+        constant_hits = [
+            (line, kind) for line, kind in finder.hits
+            if kind == "Constant"
+        ]
+        self.assertEqual(len(constant_hits), 1)
+
+    def test_walker_skips_docstring_mention(self):
+        # A docstring that mentions ``rationale`` must NOT
+        # trigger the walker — only structural code paths.
+        source = '''
+"""Module docstring describing the rationale field."""
+
+def f():
+    """Function docstring mentioning rationale."""
+    pass
+'''
+        finder = _RationaleAccessFinder()
+        finder.visit(ast.parse(source))
+        constant_hits = [
+            (line, kind) for line, kind in finder.hits
+            if kind == "Constant"
+        ]
+        self.assertEqual(
+            constant_hits, [],
+            f"Docstring mentions must not fire; got {finder.hits!r}.",
+        )
 
 
 class TestRationaleAllowedInOverrideRecordStorage(unittest.TestCase):

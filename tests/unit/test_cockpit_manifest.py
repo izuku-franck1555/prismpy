@@ -114,6 +114,130 @@ class TestBuildManifestFromCellSummary(unittest.TestCase):
         )
 
 
+class TestProducerShapeCellSummary(unittest.TestCase):
+    """Codex HIGH 1 absorption — accept the actual producer
+    shape from :func:`prismpy.pipeline.executor._build_cell_summary`:
+    ``{"cells": [{cell_id, failed_checks: [{check_id,
+    category, ...}, ...]}, ...]}``."""
+
+    def test_producer_shape_pivots_per_category(self):
+        cell_summary = {
+            "cells": [
+                {
+                    "cell_id": "c1",
+                    "failed_checks": [
+                        {
+                            "check_id": "climate_envelope_tail",
+                            "category": "climate_envelope_tail",
+                        },
+                    ],
+                },
+                {
+                    "cell_id": "c2",
+                    "failed_checks": [
+                        {
+                            "check_id": "climate_envelope_tail",
+                            "category": "climate_envelope_tail",
+                        },
+                        {
+                            "check_id": "soil_no_hwsd_coverage",
+                            "category": "soil_no_hwsd_coverage",
+                        },
+                    ],
+                },
+            ],
+        }
+        manifest = build_cockpit_warning_manifest(
+            parent_run_id="r1",
+            cell_summary=cell_summary,
+        )
+        # Two manifest rows — Bucket 2 (climate_envelope_tail
+        # with c1+c2) + Bucket 3 (soil_no_hwsd_coverage with c2).
+        by_category = {e.category: e for e in manifest}
+        self.assertEqual(set(by_category), {
+            "climate_envelope_tail",
+            "soil_no_hwsd_coverage",
+        })
+        self.assertEqual(
+            by_category["climate_envelope_tail"].affected_cells,
+            ("c1", "c2"),
+        )
+        self.assertEqual(
+            by_category["soil_no_hwsd_coverage"].affected_cells,
+            ("c2",),
+        )
+        # Buckets correctly resolved per WARNING_BUCKET_MAP.
+        self.assertEqual(
+            by_category["climate_envelope_tail"].bucket, 2,
+        )
+        self.assertEqual(
+            by_category["soil_no_hwsd_coverage"].bucket, 3,
+        )
+
+    def test_producer_shape_dedupes_cells_within_category(self):
+        # If a cell carries duplicate failed_checks for the
+        # same category (e.g., per-variable emit collapse), the
+        # manifest dedupes the cell_id.
+        cell_summary = {
+            "cells": [
+                {
+                    "cell_id": "c1",
+                    "failed_checks": [
+                        {"category": "climate_envelope_tail"},
+                        {"category": "climate_envelope_tail"},
+                    ],
+                },
+            ],
+        }
+        manifest = build_cockpit_warning_manifest(
+            parent_run_id="r1",
+            cell_summary=cell_summary,
+        )
+        self.assertEqual(len(manifest), 1)
+        self.assertEqual(manifest[0].affected_cells, ("c1",))
+
+    def test_producer_shape_empty_failed_checks_skipped(self):
+        cell_summary = {
+            "cells": [
+                {"cell_id": "c1", "failed_checks": []},
+                {"cell_id": "c2"},  # no failed_checks key
+            ],
+        }
+        self.assertEqual(
+            build_cockpit_warning_manifest(
+                parent_run_id="r1",
+                cell_summary=cell_summary,
+            ),
+            [],
+        )
+
+    def test_producer_shape_missing_category_skipped(self):
+        # A failed_check without category is malformed; the
+        # builder skips it rather than failing loud — the
+        # check_id-only paths are documented as legacy and
+        # shouldn't break the manifest builder.
+        cell_summary = {
+            "cells": [
+                {
+                    "cell_id": "c1",
+                    "failed_checks": [
+                        {"check_id": "climate_envelope_tail"},
+                    ],
+                },
+            ],
+        }
+        # No category in the failed_check means we can't bucket
+        # it; the builder skips. Empty manifest is the
+        # documented behavior.
+        self.assertEqual(
+            build_cockpit_warning_manifest(
+                parent_run_id="r1",
+                cell_summary=cell_summary,
+            ),
+            [],
+        )
+
+
 class TestBuildManifestFromStage1Verdicts(unittest.TestCase):
     """Per-zone wizard-time entries (Bucket 5 OVERRIDE)."""
 
