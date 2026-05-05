@@ -252,6 +252,12 @@ class TestCropPhysiologicalValidatorIncompatibleEmit(unittest.TestCase):
         # Names the substrate values for honest-signal trust.
         self.assertIn("1000mm", explanation)
         self.assertIn("280mm", explanation)
+        # Sentence ends cleanly without the "the this region"
+        # double-mention bug codex review #DIM-2 surfaced.
+        self.assertNotIn("the this region", explanation.lower())
+        # Validator passes the canonical KG zone code through
+        # as the zone label until a per-zone label catalog ships.
+        self.assertIn("BSh", explanation)
 
     def test_combined_precip_and_thermal_emit_one_issue(self):
         # When both precip AND thermal fire INCOMPATIBLE on

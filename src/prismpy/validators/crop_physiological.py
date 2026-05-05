@@ -6,8 +6,9 @@ zones in :class:`InputValidationContext.zone_aggregates` for the
 single crop carried on the context, calls the substrate verdict
 functions :func:`compare_precip_iqr` and
 :func:`compare_thermal_extremes`, and emits
-:data:`WarningCategory.CROP_REGION_MISMATCH` (Bucket 3 EXCLUDE)
-on either INCOMPATIBLE branch.
+:data:`WarningCategory.CROP_REGION_MISMATCH` (Bucket 5
+MANUAL_OVERRIDE_WITH_EVIDENCE — wizard-time documented-override
+contract) on either INCOMPATIBLE branch.
 
 What this validator does NOT emit:
 
@@ -192,10 +193,10 @@ class CropPhysiologicalValidator(InputValidator):
                         rmin=crop_rmin, rmax=crop_rmax,
                     ) or "precip INCOMPATIBLE")
                     explanation = precip_verdict_explanation(
-                        verdict=precip_verdict,
-                        p25=aggs.p25, p50=aggs.p50, p75=aggs.p75,
-                        rmin=crop_rmin, rmax=crop_rmax,
-                        crop_name=pretty_crop,
+                        precip_verdict,
+                        aggs.p25, aggs.p50, aggs.p75,
+                        crop_rmin, crop_rmax,
+                        pretty_crop,
                         zone_label=zone,
                     )
                     if explanation:
@@ -210,12 +211,11 @@ class CropPhysiologicalValidator(InputValidator):
                         crop_tmax=crop_tmax,
                     ) or "thermal INCOMPATIBLE")
                     explanation = thermal_verdict_explanation(
-                        verdict=thermal_verdict,
-                        zone_p10_extreme_tmin=aggs.p10_extreme_tmin,
-                        zone_p90_extreme_tmax=aggs.p90_extreme_tmax,
-                        crop_tmin=crop_tmin,
-                        crop_tmax=crop_tmax,
-                        crop_name=pretty_crop,
+                        thermal_verdict,
+                        aggs.p10_extreme_tmin,
+                        aggs.p90_extreme_tmax,
+                        crop_tmin, crop_tmax,
+                        pretty_crop,
                         zone_label=zone,
                     )
                     if explanation:

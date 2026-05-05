@@ -6,10 +6,10 @@ through when classifying or rendering a cockpit warning.
 Sprint E.0 (V2-22c-RESTART Phase 0) ships this foundation;
 Sprint E.0.5 lights up the new INFORMATIONAL category
 (``TRANSITIONAL_ZONE``, ``INSUFFICIENTLY_SAMPLED``,
-``CLIMATE_ENVELOPE_TAIL``) and the new TRUE_EXCLUDE category
-(``CROP_REGION_MISMATCH``); Sprint F lights up
-``CROP_PHYSIOLOGY_VIOLATION`` once the per-cell crop-
-physiological detector ships; Sprint E.2 lights up
+``CLIMATE_ENVELOPE_TAIL``); Sprint F lights up
+``CROP_REGION_MISMATCH`` (Bucket 5 — wizard-time documented
+override) and reserves ``CROP_PHYSIOLOGY_VIOLATION`` for the
+Stage 2 per-cell detector (Bucket 3); Sprint E.2 lights up
 ``SHORT_GAP_INTERPOLATABLE`` for Bucket 4 expansion;
 ``MANUAL_OVERRIDE`` is reserved for V3.
 
@@ -18,9 +18,14 @@ physiological detector ships; Sprint E.2 lights up
 * **Currently in production**: ``SOIL_NO_HWSD_COVERAGE``,
   ``SOIL_TEXTURE_INVALID``, ``CLIMATE_RH_INVALID`` — emitted
   by Sprint D.1 producers since prismpy main `966e21f`.
-* **Near-term (E.0.5 / F)**: ``TRANSITIONAL_ZONE``,
-  ``INSUFFICIENTLY_SAMPLED``, ``CLIMATE_ENVELOPE_TAIL``,
-  ``CROP_REGION_MISMATCH``, ``CROP_PHYSIOLOGY_VIOLATION``.
+* **Near-term (E.0.5)**: ``TRANSITIONAL_ZONE``,
+  ``INSUFFICIENTLY_SAMPLED``, ``CLIMATE_ENVELOPE_TAIL`` —
+  Bucket 2 INFORMATIONAL.
+* **Sprint F (Bucket 5)**: ``CROP_REGION_MISMATCH`` —
+  wizard-time documented-override path with rationale +
+  evidence_type + verdict_hash.
+* **Sprint F (Bucket 3, Stage 2 deferred)**:
+  ``CROP_PHYSIOLOGY_VIOLATION`` — per-cell ECOCROP tolerance.
 * **Near-term (E.2)**: ``SHORT_GAP_INTERPOLATABLE``.
 * **Reserved-only (V3)**: ``MANUAL_OVERRIDE``.
 

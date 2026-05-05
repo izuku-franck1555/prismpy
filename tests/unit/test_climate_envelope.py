@@ -966,9 +966,9 @@ class TestPrecipVerdictExplanation(unittest.TestCase):
         # Rice × Sahel BSh — the canonical Sprint F probe.
         out = self._explain(
             self._Verdict.INCOMPATIBLE,
-            p25=200, p50=400, p75=550,
-            rmin=1000, rmax=4000,
-            crop_name="Rice",
+            200, 400, 550,
+            1000, 4000,
+            "Rice",
             zone_label="Hot semi-arid",
         )
         self.assertIsNotNone(out)
@@ -987,9 +987,9 @@ class TestPrecipVerdictExplanation(unittest.TestCase):
         # Synthetic high-side branch.
         out = self._explain(
             self._Verdict.INCOMPATIBLE,
-            p25=2000, p50=4500, p75=5200,
-            rmin=400, rmax=4000,
-            crop_name="Maize",
+            2000, 4500, 5200,
+            400, 4000,
+            "Maize",
             zone_label="Tropical rainforest",
         )
         self.assertIsNotNone(out)
@@ -1001,29 +1001,75 @@ class TestPrecipVerdictExplanation(unittest.TestCase):
     def test_compatible_returns_none(self):
         out = self._explain(
             self._Verdict.COMPATIBLE,
-            p25=600, p50=900, p75=1200,
-            rmin=400, rmax=1800,
-            crop_name="Maize",
+            600, 900, 1200,
+            400, 1800,
+            "Maize",
         )
         self.assertIsNone(out)
 
     def test_marginal_returns_none(self):
         out = self._explain(
             self._Verdict.MARGINAL_HETEROGENEOUS,
-            p25=350, p50=500, p75=800,
-            rmin=400, rmax=1800,
-            crop_name="Sorghum",
+            350, 500, 800,
+            400, 1800,
+            "Sorghum",
         )
         self.assertIsNone(out)
 
-    def test_falls_back_to_this_region_without_zone_label(self):
+    def test_falls_back_to_your_region_without_zone_label(self):
+        # Codex review #DIM-2 — the prior copy template said
+        # "The this region climate zone in your region" with
+        # the None fallback. The fixed template uses "Your
+        # region averages around..." so the grammar is clean
+        # whether or not a zone label is provided.
         out = self._explain(
             self._Verdict.INCOMPATIBLE,
-            p25=200, p50=400, p75=550,
-            rmin=1000, rmax=4000,
-            crop_name="Rice",
+            200, 400, 550,
+            1000, 4000,
+            "Rice",
         )
-        self.assertIn("this region", out)
+        self.assertIsNotNone(out)
+        self.assertIn("Your region", out)
+        # Must NOT carry the broken double-mention.
+        self.assertNotIn("this region climate", out)
+        self.assertNotIn("the climate zone", out)
+
+    def test_falls_back_to_your_region_with_empty_zone_label(self):
+        # Empty string should fall back the same way None does.
+        out = self._explain(
+            self._Verdict.INCOMPATIBLE,
+            200, 400, 550,
+            1000, 4000,
+            "Rice",
+            zone_label="",
+        )
+        self.assertIn("Your region", out)
+
+    def test_rejects_empty_crop_name(self):
+        # Codex review #DIM-6 — empty crop_name is fail-loud
+        # to surface the programmer error rather than rendering
+        # "averages around 400mm/year — too dry for  without
+        # irrigation." with the empty crop substituted.
+        with self.assertRaises(ValueError):
+            self._explain(
+                self._Verdict.INCOMPATIBLE,
+                200, 400, 550,
+                1000, 4000,
+                "",
+                zone_label="BSh",
+            )
+
+    def test_crop_name_is_positional(self):
+        # Codex review #DIM-3 — crop_name is positional after
+        # the substrate args (matches the reason helper
+        # signature pattern); zone_label remains keyword-only.
+        out = self._explain(
+            self._Verdict.INCOMPATIBLE,
+            200, 400, 550,
+            1000, 4000,
+            "Rice",
+        )
+        self.assertIsNotNone(out)
 
 
 class TestThermalVerdictExplanation(unittest.TestCase):
@@ -1038,14 +1084,13 @@ class TestThermalVerdictExplanation(unittest.TestCase):
         self._explain = thermal_verdict_explanation
         self._Verdict = CompatibilityVerdict
 
-    def test_heat_kill_explains_tolerance_and_grain_fill(self):
+    def test_heat_kill_explains_tolerance_and_yields(self):
         # Maize × Hot desert — heat-kill scenario.
         out = self._explain(
             self._Verdict.INCOMPATIBLE,
-            zone_p10_extreme_tmin=15,
-            zone_p90_extreme_tmax=49,
-            crop_tmin=10, crop_tmax=47,
-            crop_name="Maize",
+            15, 49,
+            10, 47,
+            "Maize",
             zone_label="Hot desert",
         )
         self.assertIsNotNone(out)
@@ -1053,8 +1098,13 @@ class TestThermalVerdictExplanation(unittest.TestCase):
         self.assertIn("47°C", out)
         # Names the zone's peak temperature.
         self.assertIn("49°C", out)
-        # Plain-language phrasing — "heat stress" vocabulary.
+        # Plain-language phrasing — "Heat stress" vocabulary.
         self.assertIn("Heat stress", out)
+        # Codex review #DIM-2 — copy uses "yields" rather than
+        # "grain-fill" because Sprint F's envelope spans
+        # non-grain crops (cowpea, groundnut).
+        self.assertIn("yields", out)
+        self.assertNotIn("grain-fill", out)
         # Names the crop + zone.
         self.assertIn("Maize", out)
         self.assertIn("Hot desert", out)
@@ -1063,10 +1113,9 @@ class TestThermalVerdictExplanation(unittest.TestCase):
         # Rice × Subarctic — cold-kill scenario.
         out = self._explain(
             self._Verdict.INCOMPATIBLE,
-            zone_p10_extreme_tmin=-5,
-            zone_p90_extreme_tmax=30,
-            crop_tmin=10, crop_tmax=36,
-            crop_name="Rice",
+            -5, 30,
+            10, 36,
+            "Rice",
             zone_label="Subarctic",
         )
         self.assertIsNotNone(out)
@@ -1079,10 +1128,9 @@ class TestThermalVerdictExplanation(unittest.TestCase):
     def test_compatible_returns_none(self):
         out = self._explain(
             self._Verdict.COMPATIBLE,
-            zone_p10_extreme_tmin=15,
-            zone_p90_extreme_tmax=40,
-            crop_tmin=10, crop_tmax=47,
-            crop_name="Maize",
+            15, 40,
+            10, 47,
+            "Maize",
         )
         self.assertIsNone(out)
 
@@ -1091,22 +1139,34 @@ class TestThermalVerdictExplanation(unittest.TestCase):
         # → no explanation (already covered by Bucket 2 INFO).
         out = self._explain(
             self._Verdict.MARGINAL_THERMAL_SEASONAL,
-            zone_p10_extreme_tmin=-5,
-            zone_p90_extreme_tmax=48,
-            crop_tmin=10, crop_tmax=36,
-            crop_name="Rice",
+            -5, 48,
+            10, 36,
+            "Rice",
         )
         self.assertIsNone(out)
 
-    def test_falls_back_to_this_region_without_zone_label(self):
+    def test_falls_back_to_your_region_without_zone_label(self):
+        # Codex review #DIM-2 fix — the None fallback now
+        # produces "your region" without a broken
+        # "the this region climate zone" double-mention.
         out = self._explain(
             self._Verdict.INCOMPATIBLE,
-            zone_p10_extreme_tmin=15,
-            zone_p90_extreme_tmax=49,
-            crop_tmin=10, crop_tmax=47,
-            crop_name="Maize",
+            15, 49,
+            10, 47,
+            "Maize",
         )
-        self.assertIn("this region", out)
+        self.assertIn("your region", out)
+        self.assertNotIn("this region climate", out)
+
+    def test_rejects_empty_crop_name(self):
+        with self.assertRaises(ValueError):
+            self._explain(
+                self._Verdict.INCOMPATIBLE,
+                15, 49,
+                10, 47,
+                "",
+                zone_label="BSh",
+            )
 
 
 if __name__ == "__main__":
