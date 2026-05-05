@@ -255,9 +255,64 @@ class TestCropPhysiologicalValidatorIncompatibleEmit(unittest.TestCase):
         # Sentence ends cleanly without the "the this region"
         # double-mention bug codex review #DIM-2 surfaced.
         self.assertNotIn("the this region", explanation.lower())
-        # Validator passes the canonical KG zone code through
-        # as the zone label until a per-zone label catalog ships.
-        self.assertIn("BSh", explanation)
+        # F-Path-β-1 — validator now resolves the human-readable
+        # zone label via ``koppen.zone_aggregates.label_for`` so
+        # the persona reads "Hot semi-arid" rather than the raw
+        # Köppen code "BSh" leaking into the plain-language copy.
+        self.assertIn("Hot semi-arid", explanation)
+        self.assertNotIn("BSh", explanation)
+
+    def test_emit_carries_human_readable_zone_label_in_details(self):
+        # F-Path-β-1 — alongside the explanation copy, the issue
+        # surfaces the human-readable zone label as a structured
+        # field so the cockpit drawer + per-zone technical detail
+        # block can render "Hot semi-arid:" rather than "BSh:".
+        # The Köppen code stays on ``zone`` for the audit trail
+        # + cockpit filter; ``zone_label`` is the user-facing
+        # name resolved from the zone-aggregates substrate.
+        ctx = _ctx("rice", RICE_ENVELOPE, {"BSh": SAHEL_BSh_DRY})
+        result = self.validator.validate(ctx)
+        self.assertEqual(len(result.issues), 1)
+        issue = result.issues[0]
+        self.assertEqual(issue.details.get("zone"), "BSh")
+        self.assertEqual(issue.details.get("zone_label"), "Hot semi-arid")
+
+    def test_thermal_only_emit_threads_zone_label_through_explanation(self):
+        # F-Path-β-1 codex follow-up — the precip-path test pins
+        # absence of the Köppen code in the explanation, but a
+        # regression that drops ``zone_label=pretty_zone_label``
+        # from ``thermal_verdict_explanation`` alone would slip
+        # past it (the precip explanation would still pass). This
+        # case fires thermal INCOMPAT against a substrate-real
+        # zone (``BSh``) so the explanation pulls "Hot semi-arid"
+        # via ``label_for`` and the assertion surface is the
+        # thermal helper specifically.
+        thermal_only_envelope = CropEnvelope(
+            RMIN=200.0, RMAX=600.0,    # BSh P50=280 → COMPATIBLE precip
+            TMIN=20.0, TMAX=40.0,       # BSh P10=15 < TMIN=20 → cold-kill
+        )
+        ctx = _ctx(
+            "thermal_only_test_crop",
+            thermal_only_envelope,
+            {"BSh": SAHEL_BSh_DRY},
+        )
+        result = self.validator.validate(ctx)
+        self.assertEqual(len(result.issues), 1)
+        issue = result.issues[0]
+        self.assertEqual(issue.details["variables"], ["thermal"])
+        explanation = issue.details["explanation"]
+        self.assertIn(
+            "Hot semi-arid", explanation,
+            "Thermal explanation must carry the human-readable "
+            "zone label per F-Path-β-1; a regression that drops "
+            "``zone_label=pretty_zone_label`` from "
+            "``thermal_verdict_explanation`` would surface here.",
+        )
+        self.assertNotIn(
+            "BSh", explanation,
+            "Thermal explanation must NOT leak the Köppen code "
+            "into persona-facing copy.",
+        )
 
     def test_combined_precip_and_thermal_emit_one_issue(self):
         # When both precip AND thermal fire INCOMPATIBLE on
