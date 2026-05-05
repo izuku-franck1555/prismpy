@@ -939,5 +939,235 @@ class TestThermalVerdictReason(unittest.TestCase):
         self.assertLessEqual(len(out), 80)
 
 
+class TestPrecipVerdictExplanation(unittest.TestCase):
+    """Sprint F (post-Gate-B ux-expert) — plain-language sibling
+    to ``precip_verdict_reason``.
+
+    Anti-mutation drills:
+
+    * Drop the helper or revert to the technical reason → wizard
+      banner shows only "P50 = 400mm/yr below RMIN = 1000mm/yr"
+      (opaque to Aminata/Moussa/Ibrahim) → Persona-readable
+      copy contract broken.
+    * Hard-code the explanation copy → substrate ratchet that
+      bumps RMIN values would not propagate to the user-facing
+      copy → data + UI drift.
+    """
+
+    def setUp(self):
+        from prismpy.validators.climate_envelope import (
+            CompatibilityVerdict,
+            precip_verdict_explanation,
+        )
+        self._explain = precip_verdict_explanation
+        self._Verdict = CompatibilityVerdict
+
+    def test_too_dry_explains_water_need_and_zone_average(self):
+        # Rice × Sahel BSh — the canonical Sprint F probe.
+        out = self._explain(
+            self._Verdict.INCOMPATIBLE,
+            200, 400, 550,
+            1000, 4000,
+            "Rice",
+            zone_label="Hot semi-arid",
+        )
+        self.assertIsNotNone(out)
+        # Names the crop's water need.
+        self.assertIn("1000mm", out)
+        # Names the zone's realized precip.
+        self.assertIn("400mm", out)
+        # Names the zone label.
+        self.assertIn("Hot semi-arid", out)
+        # Names the crop.
+        self.assertIn("Rice", out)
+        # Plain-language phrasing — "too dry" vocabulary.
+        self.assertIn("too dry", out.lower())
+
+    def test_too_wet_explains_tolerance_and_waterlogging(self):
+        # Synthetic high-side branch.
+        out = self._explain(
+            self._Verdict.INCOMPATIBLE,
+            2000, 4500, 5200,
+            400, 4000,
+            "Maize",
+            zone_label="Tropical rainforest",
+        )
+        self.assertIsNotNone(out)
+        self.assertIn("4000mm", out)
+        self.assertIn("4500mm", out)
+        # Plain-language phrasing — "waterlogging" vocabulary.
+        self.assertIn("waterlogging", out.lower())
+
+    def test_compatible_returns_none(self):
+        out = self._explain(
+            self._Verdict.COMPATIBLE,
+            600, 900, 1200,
+            400, 1800,
+            "Maize",
+        )
+        self.assertIsNone(out)
+
+    def test_marginal_returns_none(self):
+        out = self._explain(
+            self._Verdict.MARGINAL_HETEROGENEOUS,
+            350, 500, 800,
+            400, 1800,
+            "Sorghum",
+        )
+        self.assertIsNone(out)
+
+    def test_falls_back_to_your_region_without_zone_label(self):
+        # Codex review #DIM-2 — the prior copy template said
+        # "The this region climate zone in your region" with
+        # the None fallback. The fixed template uses "Your
+        # region averages around..." so the grammar is clean
+        # whether or not a zone label is provided.
+        out = self._explain(
+            self._Verdict.INCOMPATIBLE,
+            200, 400, 550,
+            1000, 4000,
+            "Rice",
+        )
+        self.assertIsNotNone(out)
+        self.assertIn("Your region", out)
+        # Must NOT carry the broken double-mention.
+        self.assertNotIn("this region climate", out)
+        self.assertNotIn("the climate zone", out)
+
+    def test_falls_back_to_your_region_with_empty_zone_label(self):
+        # Empty string should fall back the same way None does.
+        out = self._explain(
+            self._Verdict.INCOMPATIBLE,
+            200, 400, 550,
+            1000, 4000,
+            "Rice",
+            zone_label="",
+        )
+        self.assertIn("Your region", out)
+
+    def test_rejects_empty_crop_name(self):
+        # Codex review #DIM-6 — empty crop_name is fail-loud
+        # to surface the programmer error rather than rendering
+        # "averages around 400mm/year — too dry for  without
+        # irrigation." with the empty crop substituted.
+        with self.assertRaises(ValueError):
+            self._explain(
+                self._Verdict.INCOMPATIBLE,
+                200, 400, 550,
+                1000, 4000,
+                "",
+                zone_label="BSh",
+            )
+
+    def test_crop_name_is_positional(self):
+        # Codex review #DIM-3 — crop_name is positional after
+        # the substrate args (matches the reason helper
+        # signature pattern); zone_label remains keyword-only.
+        out = self._explain(
+            self._Verdict.INCOMPATIBLE,
+            200, 400, 550,
+            1000, 4000,
+            "Rice",
+        )
+        self.assertIsNotNone(out)
+
+
+class TestThermalVerdictExplanation(unittest.TestCase):
+    """Sprint F (post-Gate-B ux-expert) — plain-language sibling
+    to ``thermal_verdict_reason``."""
+
+    def setUp(self):
+        from prismpy.validators.climate_envelope import (
+            CompatibilityVerdict,
+            thermal_verdict_explanation,
+        )
+        self._explain = thermal_verdict_explanation
+        self._Verdict = CompatibilityVerdict
+
+    def test_heat_kill_explains_tolerance_and_yields(self):
+        # Maize × Hot desert — heat-kill scenario.
+        out = self._explain(
+            self._Verdict.INCOMPATIBLE,
+            15, 49,
+            10, 47,
+            "Maize",
+            zone_label="Hot desert",
+        )
+        self.assertIsNotNone(out)
+        # Names the crop's heat tolerance.
+        self.assertIn("47°C", out)
+        # Names the zone's peak temperature.
+        self.assertIn("49°C", out)
+        # Plain-language phrasing — "Heat stress" vocabulary.
+        self.assertIn("Heat stress", out)
+        # Codex review #DIM-2 — copy uses "yields" rather than
+        # "grain-fill" because Sprint F's envelope spans
+        # non-grain crops (cowpea, groundnut).
+        self.assertIn("yields", out)
+        self.assertNotIn("grain-fill", out)
+        # Names the crop + zone.
+        self.assertIn("Maize", out)
+        self.assertIn("Hot desert", out)
+
+    def test_cold_kill_explains_minimum_and_cold_damage(self):
+        # Rice × Subarctic — cold-kill scenario.
+        out = self._explain(
+            self._Verdict.INCOMPATIBLE,
+            -5, 30,
+            10, 36,
+            "Rice",
+            zone_label="Subarctic",
+        )
+        self.assertIsNotNone(out)
+        self.assertIn("10°C", out)
+        self.assertIn("-5°C", out)
+        # Plain-language phrasing — "Cold damage" vocabulary.
+        self.assertIn("Cold damage", out)
+        self.assertIn("Rice", out)
+
+    def test_compatible_returns_none(self):
+        out = self._explain(
+            self._Verdict.COMPATIBLE,
+            15, 40,
+            10, 47,
+            "Maize",
+        )
+        self.assertIsNone(out)
+
+    def test_marginal_thermal_seasonal_returns_none(self):
+        # Both cold-kill AND heat-kill route to MARGINAL_THERMAL_*
+        # → no explanation (already covered by Bucket 2 INFO).
+        out = self._explain(
+            self._Verdict.MARGINAL_THERMAL_SEASONAL,
+            -5, 48,
+            10, 36,
+            "Rice",
+        )
+        self.assertIsNone(out)
+
+    def test_falls_back_to_your_region_without_zone_label(self):
+        # Codex review #DIM-2 fix — the None fallback now
+        # produces "your region" without a broken
+        # "the this region climate zone" double-mention.
+        out = self._explain(
+            self._Verdict.INCOMPATIBLE,
+            15, 49,
+            10, 47,
+            "Maize",
+        )
+        self.assertIn("your region", out)
+        self.assertNotIn("this region climate", out)
+
+    def test_rejects_empty_crop_name(self):
+        with self.assertRaises(ValueError):
+            self._explain(
+                self._Verdict.INCOMPATIBLE,
+                15, 49,
+                10, 47,
+                "",
+                zone_label="BSh",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

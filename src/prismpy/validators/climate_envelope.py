@@ -340,6 +340,187 @@ def thermal_verdict_reason(
     return None
 
 
+def precip_verdict_explanation(
+    verdict: CompatibilityVerdict,
+    p25: float, p50: float, p75: float,
+    rmin: float, rmax: float,
+    crop_name: str,
+    *,
+    zone_label: Optional[str] = None,
+) -> Optional[str]:
+    """Return a 2-sentence plain-language explanation for a precip
+    INCOMPATIBLE verdict, or ``None`` for any non-INCOMPATIBLE
+    state.
+
+    Sibling to :func:`precip_verdict_reason`. Where the reason
+    helper produces a data-bound technical string ("P50 = 400mm/yr
+    below RMIN = 1000mm/yr"), this helper produces persona-readable
+    copy that names the crop's typical water need + the region's
+    realized precip, then explains why that gap matters in plain
+    language. The wizard banner surfaces both: technical reason
+    in the disclosed details, plain-language explanation visible
+    by default per ux-expert verdict.
+
+    Args:
+        verdict: result of :func:`compare_precip_iqr` for the
+            same (p25, p50, p75, rmin, rmax) tuple.
+        p25, p50, p75: zone P25/P50/P75 of per-cell annual mean
+            precip (mm/yr).
+        rmin, rmax: ECOCROP RMIN/RMAX envelope (mm/yr).
+        crop_name: human-readable crop label (e.g. "Rice").
+            Used verbatim in the output sentence. Required —
+            empty string raises ValueError so a programmer
+            error is fail-loud rather than producing
+            "averages around ... — too dry for  without
+            irrigation." with the empty crop substituted.
+        zone_label: optional human-readable zone label
+            (e.g. "Hot semi-arid"). Keyword-only. When None
+            or empty, the second-sentence subject becomes
+            "your region" and avoids the "the this region
+            climate zone" double-mention case.
+
+    Returns:
+        ``None`` if verdict is COMPATIBLE / MARGINAL_*. For
+        INCOMPATIBLE, a 2-sentence string. With zone label::
+
+            "Rice typically needs at least 1000mm of annual
+             rainfall to grow well. The Hot semi-arid climate
+             zone in your region averages around 400mm/year —
+             too dry for rice without irrigation."
+
+        Without zone label (graceful fallback)::
+
+            "Rice typically needs at least 1000mm of annual
+             rainfall to grow well. Your region averages
+             around 400mm/year — too dry for rice without
+             irrigation."
+
+    i18n-future TODO (V2-23): explanation strings are
+    hardcoded English. A locale rollout will need to map the
+    template tokens through gettext at the wizard banner
+    layer; the substrate stays free-text to avoid pinning a
+    template syntax that would break at translate-time.
+    """
+    if verdict is not CompatibilityVerdict.INCOMPATIBLE:
+        return None
+    if not crop_name:
+        raise ValueError(
+            "precip_verdict_explanation requires a non-empty "
+            "crop_name; the persona copy depends on naming the "
+            "crop verbatim.",
+        )
+    location_subject = (
+        f"The {zone_label} climate zone in your region"
+        if zone_label
+        else "Your region"
+    )
+    if p50 < rmin:
+        return (
+            f"{crop_name} typically needs at least {rmin:.0f}mm of "
+            f"annual rainfall to grow well. {location_subject} "
+            f"averages around {p50:.0f}mm/year — too dry for "
+            f"{crop_name.lower()} without irrigation."
+        )
+    if p50 > rmax:
+        return (
+            f"{crop_name} tolerates up to {rmax:.0f}mm of annual "
+            f"rainfall. {location_subject} averages around "
+            f"{p50:.0f}mm/year, which exceeds the crop's "
+            f"tolerance and risks waterlogging."
+        )
+    return None
+
+
+def thermal_verdict_explanation(
+    verdict: CompatibilityVerdict,
+    zone_p10_extreme_tmin: float,
+    zone_p90_extreme_tmax: float,
+    crop_tmin: float,
+    crop_tmax: float,
+    crop_name: str,
+    *,
+    zone_label: Optional[str] = None,
+) -> Optional[str]:
+    """Return a 2-sentence plain-language explanation for a thermal
+    INCOMPATIBLE verdict, or ``None`` for any non-INCOMPATIBLE
+    state.
+
+    Sibling to :func:`thermal_verdict_reason`. The wizard banner
+    pairs both — technical reason in the disclosed details
+    block, plain-language explanation visible by default — so
+    Aminata, Moussa, and Ibrahim see WHY the crop will struggle,
+    not just the substrate's diagnostic line.
+
+    Args:
+        verdict: result of :func:`compare_thermal_extremes`.
+        zone_p10_extreme_tmin: zone P10 of per-cell minimum-of-
+            daily-tmin across the substrate window (°C).
+        zone_p90_extreme_tmax: zone P90 of per-cell maximum-of-
+            daily-tmax across the substrate window (°C).
+        crop_tmin, crop_tmax: ECOCROP TMIN/TMAX envelope (°C).
+        crop_name: human-readable crop label. Required — empty
+            raises ValueError per the precip helper's contract.
+        zone_label: optional human-readable zone label
+            (keyword-only). Falls back to "your region" when
+            None or empty so the copy stays grammatical.
+
+    Returns:
+        ``None`` if verdict is COMPATIBLE / MARGINAL_*. For
+        INCOMPATIBLE, either:
+
+        thermal-heat-kill::
+
+            "Maize tolerates daytime highs up to 47°C, but the
+             Hot desert climate zone sees peaks above 49°C
+             during the hottest days of the year. Heat stress
+             will significantly reduce yields."
+
+        thermal-cold-kill::
+
+            "Rice needs minimum temperatures above 10°C to
+             grow, but the Subarctic climate zone drops below
+             -5°C during the coldest days of the year. Cold
+             damage will kill the crop."
+
+    Heat-kill copy uses "yields" rather than "grain-fill"
+    because Sprint F's 6-crop ECOCROP envelope spans non-grain
+    crops (cowpea, groundnut). Generic "yields" remains
+    accurate across the full envelope per codex review #DIM-2.
+    """
+    if verdict is not CompatibilityVerdict.INCOMPATIBLE:
+        return None
+    if not crop_name:
+        raise ValueError(
+            "thermal_verdict_explanation requires a non-empty "
+            "crop_name; the persona copy depends on naming the "
+            "crop verbatim.",
+        )
+    location_subject = (
+        f"the {zone_label} climate zone"
+        if zone_label
+        else "your region"
+    )
+    cold_kill = zone_p10_extreme_tmin < crop_tmin
+    heat_kill = zone_p90_extreme_tmax > crop_tmax
+    if cold_kill:
+        return (
+            f"{crop_name} needs minimum temperatures above "
+            f"{crop_tmin:.0f}°C to grow, but {location_subject} "
+            f"drops below {zone_p10_extreme_tmin:.0f}°C during "
+            f"the coldest days of the year. Cold damage will "
+            f"kill the crop."
+        )
+    if heat_kill:
+        return (
+            f"{crop_name} tolerates daytime highs up to "
+            f"{crop_tmax:.0f}°C, but {location_subject} sees "
+            f"peaks above {zone_p90_extreme_tmax:.0f}°C during "
+            f"the hottest days of the year. Heat stress will "
+            f"significantly reduce yields."
+        )
+    return None
+
+
 def aggregate_verdicts(
     verdicts: Iterable[CompatibilityVerdict],
 ) -> CompatibilityVerdict:
