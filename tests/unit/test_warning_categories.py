@@ -175,13 +175,21 @@ class TestBucketAssignments(unittest.TestCase):
                     bucket_for(cat), WarningBucket.INFORMATIONAL,
                 )
 
-    def test_crop_region_mismatch_routes_to_true_exclude(self):
+    def test_crop_region_mismatch_routes_to_manual_override_with_evidence(self):
+        # Sprint F bucket reclassification: the wizard offers a
+        # documented-override path on Stage 1 INCOMPATIBLE
+        # verdicts, so the category belongs in Bucket 5 not
+        # Bucket 3. The data + UI classification must match.
         self.assertEqual(
             bucket_for(WarningCategory.CROP_REGION_MISMATCH),
-            WarningBucket.TRUE_EXCLUDE,
+            WarningBucket.MANUAL_OVERRIDE_WITH_EVIDENCE,
         )
 
     def test_crop_physiology_violation_routes_to_true_exclude(self):
+        # Stage 2 per-cell ECOCROP tolerance violations remain
+        # TRUE_EXCLUDE; the cockpit cannot meaningfully accept an
+        # override on every individual cell, only at the wizard /
+        # zone level (which is the Stage 1 → Bucket 5 path above).
         self.assertEqual(
             bucket_for(WarningCategory.CROP_PHYSIOLOGY_VIOLATION),
             WarningBucket.TRUE_EXCLUDE,
@@ -271,10 +279,26 @@ class TestHelperAccessors(unittest.TestCase):
         self.assertEqual(len(result), 3)
 
     def test_categories_in_bucket_true_exclude_count(self):
-        """Bucket 3 has 5 categories: 3 Sprint D.1 + 2 reserved
-        for Sprint E.0.5 / Sprint F."""
+        """Bucket 3 has 4 categories: 3 Sprint D.1 + 1 reserved
+        for Sprint F (CROP_PHYSIOLOGY_VIOLATION). Sprint F
+        bucket reclassification dropped the count from 5 to 4
+        when CROP_REGION_MISMATCH moved to Bucket 5
+        (MANUAL_OVERRIDE_WITH_EVIDENCE) per ux-expert verdict +
+        honest-signal review.
+        """
         result = categories_in_bucket(WarningBucket.TRUE_EXCLUDE)
-        self.assertEqual(len(result), 5)
+        self.assertEqual(len(result), 4)
+
+    def test_categories_in_bucket_manual_override_with_evidence_count(self):
+        """Bucket 5 has 2 categories: CROP_REGION_MISMATCH (Sprint
+        F wizard-time override) + MANUAL_OVERRIDE (V3 reserve).
+        Sprint F bucket reclassification grew the count from 1
+        to 2 when CROP_REGION_MISMATCH moved here.
+        """
+        result = categories_in_bucket(
+            WarningBucket.MANUAL_OVERRIDE_WITH_EVIDENCE,
+        )
+        self.assertEqual(len(result), 2)
 
 
 class TestSprintD1BackwardCompat(unittest.TestCase):

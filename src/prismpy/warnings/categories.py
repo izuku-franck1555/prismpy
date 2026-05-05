@@ -65,14 +65,28 @@ class WarningCategory(str, Enum):
     INSUFFICIENTLY_SAMPLED = "insufficiently_sampled"
     CLIMATE_ENVELOPE_TAIL = "climate_envelope_tail"
 
-    # ── Reserved for Sprint E.0.5 + Sprint F — Bucket 3 ──
+    # ── Sprint F — Bucket 5 MANUAL_OVERRIDE_WITH_EVIDENCE ──
+    # CROP_REGION_MISMATCH is a Stage 1 wizard-time emit that the
+    # user can override with documented evidence (rationale +
+    # evidence_type + verdict_hash) per Sprint F AC-F-6 +
+    # AC-F-10. Promoted from Bucket 3 (TRUE_EXCLUDE) to Bucket 5
+    # so the data + UI classification matches the implementation
+    # behavior — the cockpit and wizard banner both offer the
+    # documented-override flow, which is the Bucket 5 contract.
     CROP_REGION_MISMATCH = "crop_region_mismatch"
+    # ── Reserved for Sprint F (V2-23) — Bucket 3 TRUE_EXCLUDE ──
+    # Stage 2 per-cell ECOCROP tolerance violations stay in
+    # Bucket 3; the cockpit cannot meaningfully accept an
+    # override on every individual cell, only at the wizard /
+    # zone level (Stage 1 → Bucket 5).
     CROP_PHYSIOLOGY_VIOLATION = "crop_physiology_violation"
 
     # ── Reserved for Sprint E.2 — Bucket 4 INTERPOLATABLE ──
     SHORT_GAP_INTERPOLATABLE = "short_gap_interpolatable"
 
     # ── Reserved for V3 — Bucket 5 MANUAL_OVERRIDE_WITH_EVIDENCE ──
+    # The user-driven manual-override category beyond Stage 1
+    # crop-region (which already uses Bucket 5 per Sprint F).
     MANUAL_OVERRIDE = "manual_override"
 
 
@@ -119,9 +133,15 @@ WARNING_BUCKET_MAP: dict[WarningCategory, WarningBucket] = {
     WarningCategory.TRANSITIONAL_ZONE: WarningBucket.INFORMATIONAL,
     WarningCategory.INSUFFICIENTLY_SAMPLED: WarningBucket.INFORMATIONAL,
     WarningCategory.CLIMATE_ENVELOPE_TAIL: WarningBucket.INFORMATIONAL,
-    # Sprint E.0.5 / Sprint F — TRUE_EXCLUDE for crop-region
-    # / per-cell crop-physiological mismatches
-    WarningCategory.CROP_REGION_MISMATCH: WarningBucket.TRUE_EXCLUDE,
+    # Sprint F — Stage 1 wizard-time crop-region mismatch is
+    # MANUAL_OVERRIDE_WITH_EVIDENCE: the wizard offers a
+    # documented-override path (rationale + evidence_type +
+    # verdict_hash). Promoted from TRUE_EXCLUDE per ux-expert
+    # verdict + honest-signal review (data + UI must match).
+    WarningCategory.CROP_REGION_MISMATCH: WarningBucket.MANUAL_OVERRIDE_WITH_EVIDENCE,
+    # Sprint F (V2-23) — per-cell crop-physiological violations
+    # remain TRUE_EXCLUDE: the cockpit cannot meaningfully accept
+    # an override on every individual cell.
     WarningCategory.CROP_PHYSIOLOGY_VIOLATION: WarningBucket.TRUE_EXCLUDE,
     # Sprint E.2 — INTERPOLATABLE for short data gaps
     WarningCategory.SHORT_GAP_INTERPOLATABLE: WarningBucket.INTERPOLATABLE,

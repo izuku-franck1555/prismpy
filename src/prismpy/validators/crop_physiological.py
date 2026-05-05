@@ -50,7 +50,9 @@ from prismpy.validators.climate_envelope import (
     CompatibilityVerdict,
     compare_precip_iqr,
     compare_thermal_extremes,
+    precip_verdict_explanation,
     precip_verdict_reason,
+    thermal_verdict_explanation,
     thermal_verdict_reason,
 )
 from prismpy.validators.input_base import (
@@ -173,13 +175,31 @@ class CropPhysiologicalValidator(InputValidator):
             )
             if precip_incompat or thermal_incompat:
                 reasons: list[str] = []
+                explanations: list[str] = []
                 variables_in_emit: list[str] = []
+                # Capitalize crop name for the plain-language
+                # explanation copy ("Rice typically needs..." vs
+                # the validator's lowercased ``crop_name``).
+                pretty_crop = crop_name[:1].upper() + crop_name[1:]
+                # Zone label is informational; the validator does
+                # not yet thread the human-readable label through
+                # zone_aggregates, so the explanation falls back
+                # to "this region" via the helper's default.
                 if precip_incompat:
                     reasons.append(precip_verdict_reason(
                         verdict=precip_verdict,
                         p25=aggs.p25, p50=aggs.p50, p75=aggs.p75,
                         rmin=crop_rmin, rmax=crop_rmax,
                     ) or "precip INCOMPATIBLE")
+                    explanation = precip_verdict_explanation(
+                        verdict=precip_verdict,
+                        p25=aggs.p25, p50=aggs.p50, p75=aggs.p75,
+                        rmin=crop_rmin, rmax=crop_rmax,
+                        crop_name=pretty_crop,
+                        zone_label=zone,
+                    )
+                    if explanation:
+                        explanations.append(explanation)
                     variables_in_emit.append("precip")
                 if thermal_incompat:
                     reasons.append(thermal_verdict_reason(
@@ -189,12 +209,24 @@ class CropPhysiologicalValidator(InputValidator):
                         crop_tmin=crop_tmin,
                         crop_tmax=crop_tmax,
                     ) or "thermal INCOMPATIBLE")
+                    explanation = thermal_verdict_explanation(
+                        verdict=thermal_verdict,
+                        zone_p10_extreme_tmin=aggs.p10_extreme_tmin,
+                        zone_p90_extreme_tmax=aggs.p90_extreme_tmax,
+                        crop_tmin=crop_tmin,
+                        crop_tmax=crop_tmax,
+                        crop_name=pretty_crop,
+                        zone_label=zone,
+                    )
+                    if explanation:
+                        explanations.append(explanation)
                     variables_in_emit.append("thermal")
                 issues.append(self._build_mismatch_issue(
                     crop_name=crop_name,
                     zone=zone,
                     variables=variables_in_emit,
                     reason="; ".join(reasons),
+                    explanation=" ".join(explanations),
                     aggs=aggs,
                     envelope_tmin=crop_tmin,
                     envelope_tmax=crop_tmax,
@@ -237,6 +269,7 @@ class CropPhysiologicalValidator(InputValidator):
         envelope_tmax: float,
         envelope_rmin: float,
         envelope_rmax: float,
+        explanation: str = "",
     ) -> ValidationIssue:
         """Build a single CROP_REGION_MISMATCH issue per zone.
 
@@ -249,6 +282,12 @@ class CropPhysiologicalValidator(InputValidator):
         list of ``variables`` (precip / thermal) that fired so
         the drawer can break the row down per variable when the
         user opens it.
+
+        Per ux-expert verdict: the wizard banner now surfaces a
+        plain-language ``explanation`` field (visible by default)
+        in addition to the technical ``reason`` (collapsed in a
+        disclosure). Both come from the substrate so the copy +
+        data stay tightly coupled.
 
         ``message`` is truncated to ``_MAX_REASON_CHARS`` chars
         with ``...`` to defend the AC-F-2 ≤120-char banner-copy
@@ -271,6 +310,7 @@ class CropPhysiologicalValidator(InputValidator):
                 "crop": crop_name,
                 "verdict": CompatibilityVerdict.INCOMPATIBLE.value,
                 "reason_full": reason,
+                "explanation": explanation,
                 "n_cell_days_in_zone": aggs.n_cell_days,
                 "p25": aggs.p25,
                 "p50": aggs.p50,

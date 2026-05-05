@@ -233,6 +233,26 @@ class TestCropPhysiologicalValidatorIncompatibleEmit(unittest.TestCase):
             "skipped_insufficient_sample",
         )
 
+    def test_emit_carries_plain_language_explanation_in_details(self):
+        # Per ux-expert verdict, the wizard banner surfaces a
+        # plain-language explanation (visible by default)
+        # alongside the technical reason (collapsed in a
+        # disclosure). The validator must thread the
+        # explanation through ``details["explanation"]`` so the
+        # wizard banner reads it without recomputing.
+        ctx = _ctx("rice", RICE_ENVELOPE, {"BSh": SAHEL_BSh_DRY})
+        result = self.validator.validate(ctx)
+        self.assertEqual(len(result.issues), 1)
+        issue = result.issues[0]
+        self.assertIn("explanation", issue.details)
+        explanation = issue.details["explanation"]
+        # Plain-language vocabulary, not the technical reason.
+        self.assertIn("Rice", explanation)
+        self.assertIn("too dry", explanation.lower())
+        # Names the substrate values for honest-signal trust.
+        self.assertIn("1000mm", explanation)
+        self.assertIn("280mm", explanation)
+
     def test_combined_precip_and_thermal_emit_one_issue(self):
         # When both precip AND thermal fire INCOMPATIBLE on
         # the same zone, Sprint F emits ONE
