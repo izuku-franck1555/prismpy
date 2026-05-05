@@ -914,6 +914,221 @@ class ProvenanceTracker:
             label="user_override",
         )
 
+    def record_cockpit_decision(
+        self,
+        decision_type: "DecisionType",
+        category: str,
+        bucket: int,
+        affected_cells: Optional[List[str]] = None,
+        affected_zones: Optional[List[str]] = None,
+        rationale: Optional[str] = None,
+        evidence_type: Optional[str] = None,
+        evidence_type_other_specify: Optional[str] = None,
+        evidence_url: Optional[str] = None,
+        methodology_paper_doi: Optional[str] = None,
+        verdict_hash: Optional[str] = None,
+        override_at_pre_pipeline: bool = False,
+        artifact_id: Optional[str] = None,
+    ) -> None:
+        """Sprint E.1 AC-E1-0 — replay a cockpit-time decision
+        into the run's provenance trail.
+
+        Mirror of :meth:`record_wizard_decision` (Sprint F AC-F-6)
+        for the three cockpit-time decision-types per the
+        :data:`WARNING_BUCKET_MAP` semantics:
+
+        * :data:`DecisionType.USER_ACKNOWLEDGE` — Bucket 2 INFO
+          "I've read this and I'm proceeding" affirmation.
+        * :data:`DecisionType.USER_SKIP` — Bucket 3 EXCLUDE
+          "exclude these cells from the next run" decision.
+        * :data:`DecisionType.USER_OVERRIDE` — Bucket 5 cockpit-
+          time override. Distinct from the wizard-time path
+          (which uses :meth:`record_wizard_decision`) by the
+          ``override_at_pre_pipeline=False`` discriminator
+          stamped onto the rationale; the wizard path stamps
+          ``override_at_pre_pipeline=True``.
+
+        The single validated entry-point matches the
+        :meth:`record_wizard_decision` precedent — caller +
+        replay path both route through this helper rather than
+        constructing :meth:`record_decision` payloads ad-hoc.
+
+        Args:
+            decision_type: One of ``USER_ACKNOWLEDGE``,
+                ``USER_SKIP``, ``USER_OVERRIDE``. Other values
+                raise :class:`ValueError` so a typo'd caller
+                fails loud rather than landing as a
+                generic decision.
+            category: Lowercase :class:`WarningCategory` enum
+                value (e.g., ``"climate_envelope_tail"``,
+                ``"crop_region_mismatch"``). Pinned at the
+                canonical-string level per F25.
+            bucket: Bucket number from
+                :data:`WARNING_BUCKET_MAP` — 2, 3, or 5. Other
+                values raise :class:`ValueError`.
+            affected_cells: Cell-id list for
+                ``USER_SKIP`` / ``USER_ACKNOWLEDGE``. Required
+                non-empty for those types.
+            affected_zones: Zone-code list for
+                ``USER_OVERRIDE``. Required non-empty for that
+                type per :class:`WizardOverrideRecord` parity.
+            rationale: Required free-form text for
+                ``USER_OVERRIDE``; optional for
+                ``USER_ACKNOWLEDGE``/``USER_SKIP``. The
+                ``WizardOverrideRecord`` ≥50-char filler-
+                rejection enforced for ``USER_OVERRIDE`` per
+                wizard-parity (CC-33).
+            evidence_type: Required for ``USER_OVERRIDE``; one
+                of the 6 :data:`EvidenceType` values
+                (``local_trial`` / ``irrigation`` /
+                ``cultivar_specific`` / ``citation`` /
+                ``field_observation`` / ``other``).
+            evidence_type_other_specify: Required (non-empty
+                after trim) when ``evidence_type == "other"``;
+                must be ``None`` otherwise. Mirrors the
+                :class:`WizardOverrideRecord` conditional-
+                required validator.
+            evidence_url: Optional citation URL (must be
+                ``https://``).
+            methodology_paper_doi: Optional DOI.
+            verdict_hash: 64-char SHA-256 hex pinning the
+                Stage 1 verdict snapshot at decision time —
+                required for ``USER_OVERRIDE``.
+            override_at_pre_pipeline: ``False`` (cockpit-time)
+                stamps the rationale; the discriminator that
+                distinguishes wizard-time from cockpit-time
+                in the audit log per AC-E1-0.
+            artifact_id: Optional artifact binding mirroring
+                :meth:`record_decision` semantics.
+
+        Raises:
+            ValueError: On unsupported decision_type, bad
+                bucket, or missing required field per the
+                decision-type contract above.
+        """
+        if not self.enabled:
+            return
+        # Validate the decision_type early — typed-enum on the
+        # caller side is the contract; if a stringly-typed
+        # caller slips through, fail loud.
+        allowed = (
+            DecisionType.USER_ACKNOWLEDGE,
+            DecisionType.USER_SKIP,
+            DecisionType.USER_OVERRIDE,
+        )
+        if decision_type not in allowed:
+            raise ValueError(
+                f"record_cockpit_decision only accepts "
+                f"USER_ACKNOWLEDGE / USER_SKIP / USER_OVERRIDE; "
+                f"got {decision_type!r}."
+            )
+        if bucket not in (2, 3, 5):
+            raise ValueError(
+                f"bucket must be 2 / 3 / 5 per "
+                f"WARNING_BUCKET_MAP; got {bucket!r}."
+            )
+        # Compose a structured rationale payload that round-
+        # trips through the existing DecisionRecord shape per
+        # Adj-12 from Sprint F. Cockpit-time discriminator
+        # stamped explicitly so audit-grep can split wizard-
+        # time vs cockpit-time entries cleanly.
+        affected_cells = list(affected_cells or [])
+        affected_zones = list(affected_zones or [])
+        if decision_type is DecisionType.USER_OVERRIDE:
+            if not affected_zones:
+                raise ValueError(
+                    "USER_OVERRIDE requires non-empty "
+                    "affected_zones."
+                )
+            if not rationale or len(rationale) < 50:
+                raise ValueError(
+                    "USER_OVERRIDE requires rationale "
+                    "≥50 chars per WizardOverrideRecord parity."
+                )
+            if not evidence_type:
+                raise ValueError(
+                    "USER_OVERRIDE requires evidence_type."
+                )
+            if not verdict_hash:
+                raise ValueError(
+                    "USER_OVERRIDE requires verdict_hash for "
+                    "stale-rejection per CC-23."
+                )
+            if evidence_type == "other":
+                if not evidence_type_other_specify or not (
+                    evidence_type_other_specify.strip()
+                ):
+                    raise ValueError(
+                        "evidence_type='other' requires "
+                        "non-empty evidence_type_other_specify."
+                    )
+            elif evidence_type_other_specify is not None:
+                raise ValueError(
+                    "evidence_type_other_specify must be None "
+                    "when evidence_type is not 'other'."
+                )
+        else:
+            # USER_ACKNOWLEDGE / USER_SKIP require
+            # affected_cells.
+            if not affected_cells:
+                raise ValueError(
+                    f"{decision_type.value} requires "
+                    f"non-empty affected_cells."
+                )
+        # Build the rationale free-text payload per the existing
+        # DecisionRecord shape. The cockpit-time discriminator
+        # ``override_at_pre_pipeline=False`` is stamped verbatim
+        # so audit-grep can split wizard-time vs cockpit-time.
+        cells_part = (
+            f"affected_cells={len(affected_cells)} "
+            if affected_cells
+            else ""
+        )
+        zones_part = (
+            f"affected_zones=[{', '.join(affected_zones)}] "
+            if affected_zones
+            else ""
+        )
+        rationale_full = (
+            f"Cockpit-time {decision_type.value} on bucket "
+            f"{bucket} category {category}. {cells_part}{zones_part}"
+        )
+        if rationale:
+            rationale_full += f"Rationale: {rationale} "
+        if evidence_type:
+            rationale_full += f"evidence_type={evidence_type} "
+        if evidence_type_other_specify:
+            rationale_full += (
+                f"evidence_type_other_specify={evidence_type_other_specify} "
+            )
+        if verdict_hash:
+            rationale_full += f"verdict_hash={verdict_hash} "
+        if evidence_url:
+            rationale_full += f"evidence_url={evidence_url} "
+        if methodology_paper_doi:
+            rationale_full += (
+                f"methodology_paper_doi={methodology_paper_doi} "
+            )
+        rationale_full += (
+            f"override_at_pre_pipeline={override_at_pre_pipeline}"
+        )
+        self.record_decision(
+            decision_type=decision_type,
+            description=(
+                f"Cockpit decision: {decision_type.value} on "
+                f"bucket {bucket} ({category})"
+            ),
+            rationale=rationale_full,
+            reference=evidence_url or methodology_paper_doi,
+            artifact_id=artifact_id,
+            severity=(
+                "warning"
+                if decision_type is DecisionType.USER_OVERRIDE
+                else "info"
+            ),
+            label=decision_type.value,
+        )
+
     def record_bound_gen_provenance(
         self,
         provenance: "BoundGenProvenance",
