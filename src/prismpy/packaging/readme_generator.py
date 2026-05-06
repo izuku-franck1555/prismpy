@@ -1099,6 +1099,212 @@ def get_readme_template(platform: str = "sarra_py") -> str:
     return templates.get(platform, SARRA_PY_README_TEMPLATE)
 
 
+def _coalesce(*values: Any, default: Any = None) -> Any:
+    """Return the first value that is neither ``None`` nor an empty
+    string. Falls through to ``default`` when every candidate is
+    empty.
+
+    The README generator and its callers used to chain
+    ``getattr(obj, name, default_str)`` and ``config.get(key,
+    default_str)`` to populate the management table. Both forms
+    return the actual ``None`` value when the attribute or key
+    exists but its value is ``None``, which is exactly what the
+    upstream wizard writes when a field is left at its platform-
+    specific default. The resulting README rendered ``None`` as
+    a literal string in the management rows. ``_coalesce``
+    treats ``None`` and empty strings as "not set" so the
+    fallback chain reaches the actual default.
+    """
+    for v in values:
+        if v is None:
+            continue
+        if isinstance(v, str) and not v.strip():
+            continue
+        return v
+    return default
+
+
+def _safe_get(config: Dict[str, Any], key: str, default: Any) -> Any:
+    """Return ``config[key]`` when it's a real value (non-None,
+    non-empty-string); otherwise return ``default``.
+
+    Plain ``dict.get(key, default)`` returns the actual value
+    when the key is present, even if that value is ``None``.
+    Upstream callers now write ``None`` to many keys when the
+    wizard pins at a platform-specific config path, which lets
+    the literal string ``"None"`` leak into the rendered README
+    cells. ``_safe_get`` plugs that gap so every value the
+    README template formats is a real fallback.
+    """
+    return _coalesce(config.get(key), default=default)
+
+
+def _resolve_cultivar_from_disk(package_dir: Optional[Path]) -> Optional[str]:
+    """Per the F-AF-v2 canonical-source contract: the on-disk
+    ``management/cultivar_data.txt`` is the truth for the
+    cultivar the package will run with. The README inherits
+    from the file rather than from one of N possible config
+    paths so the table always agrees with what DSSAT loads.
+
+    Returns the CultivarID column from the first data row, or
+    ``None`` if the file is absent or unreadable. Callers fall
+    back to the config chain on ``None``.
+    """
+    if package_dir is None:
+        return None
+    cultivar_file = Path(package_dir) / "management" / "cultivar_data.txt"
+    if not cultivar_file.exists():
+        return None
+    try:
+        text = cultivar_file.read_text(encoding="utf-8")
+    except (IOError, OSError):
+        return None
+    for line in text.splitlines()[1:]:  # skip header row
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            return parts[1]  # CellID, CultivarID, ...
+    return None
+
+
+def _resolve_planting_date(config: Dict[str, Any]) -> str:
+    """Render a calendar date for the README management table.
+
+    Priority chain:
+    1. ``config['planting_date']`` if it's a real MMDD string
+       (e.g. ``"0531"``) and not the placeholder ``"MMDD"``.
+    2. Computed from ``crop.calendar.planting_doy`` +
+       ``temporal.start_year``: doy=152, year=2018 →
+       ``"May 31, 2018"``.
+    3. Fallback ``"date not specified"`` so the table never
+       renders ``None``.
+
+    The DOY+year computation matches the in-pipeline render at
+    ``CraftTranslator._generate_planting_data`` so the README
+    surfaces the same date the actual planting_data.txt encodes.
+    """
+    raw_pdate = config.get('planting_date')
+    if raw_pdate and isinstance(raw_pdate, str) and raw_pdate not in ('MMDD', 'None'):
+        return raw_pdate
+    doy = config.get('planting_doy')
+    if doy is None:
+        crop_block = config.get('crop')
+        if isinstance(crop_block, dict):
+            cal = crop_block.get('calendar')
+            if isinstance(cal, dict):
+                doy = cal.get('planting_doy')
+    year = config.get('start_year')
+    if year is None:
+        temporal = config.get('temporal')
+        if isinstance(temporal, dict):
+            year = temporal.get('start_year')
+    if doy is not None and year is not None:
+        try:
+            from datetime import date, timedelta
+            d = date(int(year), 1, 1) + timedelta(days=int(doy) - 1)
+            return d.strftime("%b %d, %Y")
+        except (ValueError, TypeError):
+            return "date not specified"
+    return "date not specified"
+
+
+def _resolve_management_table(
+    config: Dict[str, Any],
+    package_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Return the management-table values for the CRAFT README,
+    coalescing every field through a non-None fallback chain so
+    the table never renders ``"None"`` for a real package.
+
+    The on-disk ``cultivar_data.txt`` is the canonical source
+    for cultivar (matches what DSSAT loads). Plant population,
+    row spacing, and total nitrogen coalesce through the
+    config chain to a sensible default. Planting date computes
+    from doy+year when the upstream MMDD string is the
+    placeholder.
+    """
+    cultivar = _coalesce(
+        _resolve_cultivar_from_disk(package_dir),
+        config.get('cultivar'),
+        default='cultivar not specified',
+    )
+    plant_pop = _coalesce(
+        config.get('plant_pop'),
+        default=5.5,
+    )
+    row_spacing = _coalesce(
+        config.get('row_spacing'),
+        default=75,
+    )
+    total_n = _coalesce(
+        config.get('total_n'),
+        default=40.0,
+    )
+    planting_date = _resolve_planting_date(config)
+    n_split_ratio = _coalesce(
+        config.get('n_split_ratio'),
+        default='0.25/0.75',
+    )
+    return {
+        'cultivar': cultivar,
+        'plant_pop': plant_pop,
+        'row_spacing': row_spacing,
+        'total_n': total_n,
+        'planting_date': planting_date,
+        'n_split_ratio': n_split_ratio,
+    }
+
+
+def _resolve_admin_names(config: Dict[str, Any]) -> str:
+    """Build the ``{admin_names}`` placeholder used by the
+    README dir-tree to label the schema files. The CRAFT
+    translator joins level1, level2, and (for craft_level > 2)
+    level3 admin names with underscores; any of those parts
+    can be ``None`` when the wizard pinned a coarser admin
+    level than the package's craft_level. The README rendered
+    ``"Madarounfa_None"`` (level2 missing) or
+    ``"Region_None_District"`` (level2 missing under a
+    level3-aware schema) while the actual on-disk file dropped
+    the ``None`` segment entirely.
+
+    The fix splits the raw ``admin_names`` on the underscore
+    delimiter and rebuilds it from the surviving non-empty
+    parts, which matches the shape every CRAFT companion
+    writer emits on disk.
+    """
+    raw = _coalesce(config.get('admin_names'))
+    if isinstance(raw, str) and raw:
+        # Drop any segment that's literally ``None`` or empty.
+        # Handles the trailing case (``Madarounfa_None``) and
+        # the interior case (``Region_None_District``) the
+        # level3-aware schema can produce when the wizard
+        # only resolved a level1 and the schema was upgraded
+        # to level3.
+        parts = [
+            p for p in raw.split('_')
+            if p and p.lower() != 'none'
+        ]
+        if parts:
+            return '_'.join(parts)
+    # Reconstruct from parts if the raw form was empty or
+    # collapsed to nothing after filtering.
+    level1 = _coalesce(config.get('admin_level1_name'))
+    level2 = _coalesce(config.get('admin_level2_name'))
+    level3 = _coalesce(config.get('admin_level3_name'))
+    region_name = _coalesce(
+        config.get('region_name'),
+        config.get('region', {}).get('name') if isinstance(config.get('region'), dict) else None,
+    )
+    parts = [p for p in (level1, level2, level3) if p]
+    if parts:
+        return '_'.join(parts)
+    if region_name:
+        return region_name
+    return 'admin_names_unavailable'
+
+
 def generate_readme(
     output_path: Union[str, Path],
     config: Dict[str, Any],
@@ -1137,109 +1343,182 @@ def generate_readme(
     else:
         admin_level_label = f"Admin Level {raw_gadm_level}"
 
-    # Common values for all platforms
+    # Common values for all platforms — every entry passes
+    # through ``_safe_get`` (or its inline equivalent) so a
+    # present-but-None key cannot leak the literal "None" into
+    # the rendered template.
+    region_block = config.get('region') if isinstance(config.get('region'), dict) else {}
+    crop_block = config.get('crop') if isinstance(config.get('crop'), dict) else {}
+    temporal_block = config.get('temporal') if isinstance(config.get('temporal'), dict) else {}
+    data_sources = config.get('data_sources') if isinstance(config.get('data_sources'), dict) else {}
     values = {
-        'project_name': config.get('project_name', package_name),
+        'project_name': _safe_get(config, 'project_name', package_name),
         'package_name': package_name,
         'region_name': region_name,
-        'country': config.get('country', config.get('region', {}).get('country', 'Unknown')),
-        'crop_name': config.get('crop_name', config.get('crop', {}).get('name', 'Unknown')),
-        'start_year': config.get('start_year', config.get('temporal', {}).get('start_year', 2017)),
-        'end_year': config.get('end_year', config.get('temporal', {}).get('end_year', 2017)),
+        'country': _coalesce(
+            config.get('country'),
+            region_block.get('country'),
+            default='Unknown',
+        ),
+        'crop_name': _coalesce(
+            config.get('crop_name'),
+            crop_block.get('name'),
+            default='Unknown',
+        ),
+        'start_year': _coalesce(
+            config.get('start_year'),
+            temporal_block.get('start_year'),
+            default=2017,
+        ),
+        'end_year': _coalesce(
+            config.get('end_year'),
+            temporal_block.get('end_year'),
+            default=2017,
+        ),
         'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'gadm_level': raw_gadm_level if raw_gadm_level is not None else 'N/A',
         'admin_level_label': admin_level_label,
-        'boundary_source': config.get('data_sources', {}).get('boundaries', 'GADM v4.1'),
-        'rainfall_source': config.get('data_sources', {}).get('rainfall', 'TAMSAT v3.1'),
-        'temperature_source': config.get('data_sources', {}).get('temperature', 'AgERA5'),
-        'soil_source': config.get('data_sources', {}).get('soil', 'iSDA'),
+        'boundary_source': _coalesce(
+            data_sources.get('boundaries'),
+            default='GADM v4.1',
+        ),
+        'rainfall_source': _coalesce(
+            data_sources.get('rainfall'),
+            default='TAMSAT v3.1',
+        ),
+        'temperature_source': _coalesce(
+            data_sources.get('temperature'),
+            default='AgERA5',
+        ),
+        'soil_source': _coalesce(
+            data_sources.get('soil'),
+            default='iSDA',
+        ),
     }
 
     # CRAFT-specific values
     if platform == "craft":
+        # F-AF-v2 + F-AN absorption — derive the package directory
+        # from the README path so the management-table resolvers
+        # can read ``management/cultivar_data.txt`` (the canonical
+        # source) and the dir-tree resolver can emit a filename
+        # that matches the on-disk schema files. The README path
+        # is always at the package-root, so its parent is the
+        # package directory the resolvers walk.
+        package_dir = Path(output_path).parent
+        management_values = _resolve_management_table(config, package_dir)
+        admin_names = _resolve_admin_names(config)
+
         values.update({
             # Package metadata
-            'n_cells': config.get('n_cells', 0),
-            'n_soil_profiles': config.get('n_soil_profiles', 0),
-            'craft_level': config.get('craft_level', config.get('schema_level', 2)),
-            'admin_names': config.get('admin_names', f"{config.get('country', 'Unknown')}_{region_name}"),
-            'country_code': config.get('country_code', 'ML'),
+            'n_cells': _safe_get(config, 'n_cells', 0),
+            'n_soil_profiles': _safe_get(config, 'n_soil_profiles', 0),
+            'craft_level': _coalesce(
+                config.get('craft_level'),
+                config.get('schema_level'),
+                default=2,
+            ),
+            'admin_names': admin_names,
+            'country_code': _safe_get(config, 'country_code', 'ML'),
 
             # Data sources with descriptions
             # V2-19b-fix Finding 7: default to "source unavailable" not
             # "HWSD v2.0" — the caller must set soil_source explicitly
             # from the actual SoilProfile.source field.
-            'soil_source': config.get('soil_source', 'source unavailable'),
-            'soil_description': config.get('soil_description', 'Soil source not specified'),
-            'crop_mask_source': config.get('crop_mask_source', 'SPAM 2020'),
-            'crop_mask_description': config.get('crop_mask_description', 'Harvested area fractions'),
-            'boundary_source': config.get('boundary_source', 'GADM v4.1'),
-            'boundary_description': config.get('boundary_description', 'Administrative boundaries'),
+            'soil_source': _safe_get(config, 'soil_source', 'source unavailable'),
+            'soil_description': _safe_get(config, 'soil_description', 'Soil source not specified'),
+            'crop_mask_source': _safe_get(config, 'crop_mask_source', 'SPAM 2020'),
+            'crop_mask_description': _safe_get(config, 'crop_mask_description', 'Harvested area fractions'),
+            'boundary_source': _safe_get(config, 'boundary_source', 'GADM v4.1'),
+            'boundary_description': _safe_get(config, 'boundary_description', 'Administrative boundaries'),
 
-            # Management parameters
-            'cultivar': config.get('cultivar', 'GH0010'),
-            'plant_pop': config.get('plant_pop', 5.5),
-            'row_spacing': config.get('row_spacing', 75),
-            'total_n': config.get('total_n', 40.0),
-            'planting_date': config.get('planting_date', 'MMDD'),
-            'n_split_ratio': config.get('n_split_ratio', '0.25/0.75'),
+            # Management parameters — F-AF-v2: every field passes
+            # through ``_resolve_management_table`` so a None
+            # value upstream (wizard pinned at platform_config
+            # while management.default_cultivar stayed None, etc.)
+            # never reaches the rendered string.
+            'cultivar': management_values['cultivar'],
+            'plant_pop': management_values['plant_pop'],
+            'row_spacing': management_values['row_spacing'],
+            'total_n': management_values['total_n'],
+            'planting_date': management_values['planting_date'],
+            'n_split_ratio': management_values['n_split_ratio'],
         })
 
-    # ACEA-specific values
+    # ACEA-specific values — H6 absorption: every value coalesces
+    # through a non-None chain so the rendered table never carries
+    # the literal "None" cell.
     if platform == "acea":
-        gridcells = config.get('gridcells', [])
+        gridcells = _coalesce(config.get('gridcells'), default=[])
         gridcells_preview = str(gridcells[:5]) + '...' if len(gridcells) > 5 else str(gridcells)
+        start_year_safe = _safe_get(config, 'start_year', 2016)
+        end_year_safe = _safe_get(config, 'end_year', 2020)
 
         values.update({
             # Package metadata
-            'n_cells': config.get('n_cells', len(gridcells)),
-            'n_climate_files': config.get('n_climate_files', 0),
-            'fao_code': config.get('fao_code', 56),
+            'n_cells': _coalesce(config.get('n_cells'), default=len(gridcells)),
+            'n_climate_files': _safe_get(config, 'n_climate_files', 0),
+            'fao_code': _safe_get(config, 'fao_code', 56),
 
             # Climate
-            'climate_name': config.get('climate_name', f"{region_name.lower()}_nasapower"),
-            'climate_source': config.get('climate_source', 'NASA POWER'),
+            'climate_name': _safe_get(
+                config, 'climate_name',
+                f"{region_name.lower()}_nasapower",
+            ),
+            'climate_source': _safe_get(config, 'climate_source', 'NASA POWER'),
 
             # Data sources
             # V2-19b-fix Finding 7: same fix as CRAFT — honest default.
-            'soil_source': config.get('soil_source', 'source unavailable'),
-            'spam_source': config.get('spam_source', 'Dummy (placeholder)'),
-            'gaez_source': config.get('gaez_source', 'FAO GAEZ v4'),
+            'soil_source': _safe_get(config, 'soil_source', 'source unavailable'),
+            'spam_source': _safe_get(config, 'spam_source', 'Dummy (placeholder)'),
+            'gaez_source': _safe_get(config, 'gaez_source', 'FAO GAEZ v4'),
 
             # Grid cells
             'gridcells_preview': gridcells_preview,
 
             # Config parameters
-            'clock_start': config.get('clock_start', f"{config.get('start_year', 2016)}/01/01"),
-            'clock_end': config.get('clock_end', f"{config.get('end_year', 2020)}/12/31"),
-            'resolution': config.get('resolution', 1),
-            'scenarios': config.get('scenarios', [1]),
+            'clock_start': _safe_get(
+                config, 'clock_start', f"{start_year_safe}/01/01",
+            ),
+            'clock_end': _safe_get(
+                config, 'clock_end', f"{end_year_safe}/12/31",
+            ),
+            'resolution': _safe_get(config, 'resolution', 1),
+            'scenarios': _coalesce(config.get('scenarios'), default=[1]),
         })
 
-    # PYTHIA-specific values
+    # PYTHIA-specific values — H6 absorption: every value
+    # coalesces through ``_safe_get`` so present-but-None
+    # config keys can't render the literal "None".
     if platform == "pythia":
+        end_year_p = _safe_get(config, 'end_year', 2019)
+        start_year_p = _safe_get(config, 'start_year', 2010)
+        try:
+            default_n_years = int(end_year_p) - int(start_year_p) + 1
+        except (TypeError, ValueError):
+            default_n_years = 10
         values.update({
             # Package metadata
-            'package_dir': config.get('package_dir', 'pythia'),
-            'n_sites': config.get('n_sites', 0),
-            'n_weather_files': config.get('n_weather_files', 0),
-            'n_years': config.get('n_years', config.get('end_year', 2019) - config.get('start_year', 2010) + 1),
-            'n_sol_files': config.get('n_sol_files', 0),
-            'wsta_prefix': config.get('wsta_prefix', 'MLKO'),
-            'template_name': config.get('template_name', 'KOMZ8001.SNX'),
+            'package_dir': _safe_get(config, 'package_dir', 'pythia'),
+            'n_sites': _safe_get(config, 'n_sites', 0),
+            'n_weather_files': _safe_get(config, 'n_weather_files', 0),
+            'n_years': _safe_get(config, 'n_years', default_n_years),
+            'n_sol_files': _safe_get(config, 'n_sol_files', 0),
+            'wsta_prefix': _safe_get(config, 'wsta_prefix', 'MLKO'),
+            'template_name': _safe_get(config, 'template_name', 'KOMZ8001.SNX'),
 
             # Crop parameters
-            'cultivar_code': config.get('cultivar_code', '990002'),
-            'cultivar_name': config.get('cultivar_name', 'MEDIUM_SEASON'),
-            'total_gdd': config.get('total_gdd', 'N/A'),
-            'pfrst': config.get('pfrst', 'N/A'),
-            'plast': config.get('plast', 'N/A'),
+            'cultivar_code': _safe_get(config, 'cultivar_code', '990002'),
+            'cultivar_name': _safe_get(config, 'cultivar_name', 'MEDIUM_SEASON'),
+            'total_gdd': _safe_get(config, 'total_gdd', 'N/A'),
+            'pfrst': _safe_get(config, 'pfrst', 'N/A'),
+            'plast': _safe_get(config, 'plast', 'N/A'),
 
             # Management settings
-            'fen_tot': config.get('fen_tot', 60),
-            'plant_pop': config.get('plant_pop', 5.0),
-            'row_spacing': config.get('row_spacing', 70),
-            'irrigation': config.get('irrigation', 'Rainfed'),
+            'fen_tot': _safe_get(config, 'fen_tot', 60),
+            'plant_pop': _safe_get(config, 'plant_pop', 5.0),
+            'row_spacing': _safe_get(config, 'row_spacing', 70),
+            'irrigation': _safe_get(config, 'irrigation', 'Rainfed'),
         })
 
     # Format template

@@ -3107,7 +3107,29 @@ class CraftTranslator(CraftTranslatorBase):
         admin_level2 = getattr(platform_config, 'admin_level2_name', data.region.name) if platform_config else data.region.name
         admin_names = f"{admin_level1}_{admin_level2}"
 
-        # Get management parameters
+        # Get management parameters. Per F-AF-v2 absorption:
+        # ``getattr(obj, name, default)`` returns ``None`` when
+        # the attribute exists but is None (the wizard now pins
+        # at platform_config.craft and leaves
+        # management.default_cultivar=None). The README
+        # generator's resolver chain recovers, but hardening
+        # here too keeps the package_config dict semantically
+        # clean and stops the None values from leaking into
+        # any future consumer that reads the dict directly.
+        def _attr_or(obj, name, fallback):
+            """Return ``getattr(obj, name)`` only when the
+            attribute exists AND its value is not None / not
+            an empty string. Any None or empty result falls
+            through to ``fallback``."""
+            if obj is None:
+                return fallback
+            value = getattr(obj, name, None)
+            if value is None:
+                return fallback
+            if isinstance(value, str) and not value.strip():
+                return fallback
+            return value
+
         cultivar = "GH0010"
         plant_pop = 5.5
         row_spacing = 75
@@ -3116,17 +3138,17 @@ class CraftTranslator(CraftTranslatorBase):
         n_split_ratio = "0.25/0.75"
 
         if platform_config:
-            cultivar = getattr(platform_config, 'default_cultivar', cultivar)
-            plant_pop = getattr(platform_config, 'plant_population', plant_pop)
-            row_spacing = getattr(platform_config, 'row_spacing_cm', row_spacing)
-            total_n = getattr(platform_config, 'default_fertilizer_n', total_n)
-            planting_date = getattr(platform_config, 'planting_date_mmdd', planting_date)
-            split_ratio = getattr(platform_config, 'fertilizer_split_ratio', 0.25)
+            cultivar = _attr_or(platform_config, 'default_cultivar', cultivar)
+            plant_pop = _attr_or(platform_config, 'plant_population', plant_pop)
+            row_spacing = _attr_or(platform_config, 'row_spacing_cm', row_spacing)
+            total_n = _attr_or(platform_config, 'default_fertilizer_n', total_n)
+            planting_date = _attr_or(platform_config, 'planting_date_mmdd', planting_date)
+            split_ratio = _attr_or(platform_config, 'fertilizer_split_ratio', 0.25)
             n_split_ratio = f"{split_ratio}/{1-split_ratio}"
 
         if management:
-            cultivar = getattr(management, 'default_cultivar', cultivar)
-            total_n = getattr(management, 'fertilizer_n_total', total_n)
+            cultivar = _attr_or(management, 'default_cultivar', cultivar)
+            total_n = _attr_or(management, 'fertilizer_n_total', total_n)
 
         # Build config dict for manifest/README
         country_code = getattr(
