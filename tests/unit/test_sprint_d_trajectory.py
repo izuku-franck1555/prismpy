@@ -39,6 +39,20 @@ Sprint D.1 band rationale:
     constant + AC-Q2-A1-b dual-date-filter negative grep.
     Headroom of ~80 tests reserved for commit 10 bound-gen.
     yml + Gate B anti-mutation drill additions.
+  - 1300 → 1500 (Sprint F + bucket-fix train + #227 fix) to
+    absorb per-crop physiology bounds + Köppen substrate +
+    cell-id companion-file pins + cockpit-dimension-bucket
+    map structural pin.
+  - 1500 → 1750 (Sprint G AC-G-2.0 cache primitive
+    extraction + remaining Sprint G ACs) to absorb the
+    sibling-sweep ``test_cache_base.py`` + per-AC pins for
+    AC-G-1 ISIMIP3b client (typed exceptions) + AC-G-3
+    ScenarioBlock schema bounds + AC-G-7a/7b/7c/7d
+    per-translator projection-climate + AC-G-9 3-layer
+    canonical CO₂ + AC-G-12 14-fixture mutation-drill matrix
+    + AC-G-13 4 paired-set deliverable hash pins. Headroom
+    sized for the ~150-225 Sprint G test additions per
+    SPRINT-G-VERIFICATION-STRATEGY.md §10.
 
 Re-anchor this pin by updating ``_LOWER`` / ``_UPPER`` after a
 new sprint deliberately changes the trajectory.
@@ -58,10 +72,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _LOWER = 815
 # Sprint S re-anchor: bumped 1500 -> 1700 to absorb the per-package eGHR
 # substrate builder's new tests (AC-1 byte-pin + AC-2 substrate-builder
-# integration + headroom reserved for AC-3 through AC-13). Kept in sync
-# with ``test_sprint_c_trajectory.py`` since both pins measure the same
-# ``pytest tests/ --collect-only`` count.
-_UPPER = 1700
+# integration + headroom reserved for AC-3 through AC-13). Sprint G
+# (this commit) further bumps 1700 -> 1750 to absorb the cache-primitive
+# extraction. Kept in sync with ``test_sprint_c_trajectory.py`` since
+# both pins measure the same ``pytest tests/ --collect-only`` count.
+_UPPER = 1750
 
 
 class TestSprintDTrajectory(TestCase):

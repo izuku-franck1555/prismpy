@@ -36,10 +36,13 @@ from prismpy.models.region import Region
 from prismpy.provenance.tracker import ProvenanceTracker
 from prismpy.sources.base import DataSource, RetrievalResult
 from prismpy.sources.climate._cancel import PipelineCancelled, raise_if_cancelled
-# V2-22a B2: cache-isolation helpers (canonical home is tamsat.py;
-# imported here to keep the manifest + filelock contract identical
-# across both climate sources).
-from prismpy.sources.climate.tamsat import (
+# Cache-isolation helpers — canonical home post-Sprint-G AC-G-2.0:
+# ``prismpy.sources._cache_base``. Climate sources (TAMSAT, AgERA5)
+# share the same implementation; ISIMIP3b uses the same generic
+# ``cache_lock_path`` with its own (product/scenario/gcm/variable/bbox)
+# string key. Per durable #24 canonical-source-or-pin: ONE cache
+# substrate, three callers.
+from prismpy.sources._cache_base import (
     DOWNLOAD_LOCK_TIMEOUT_SECONDS,
     MANIFEST_FILENAME,
     MARKER_FILENAME,
@@ -53,7 +56,10 @@ from prismpy.sources.climate.tamsat import (
     write_cache_manifest,
     write_marker,
 )
-from prismpy.utils.sanitization import normalize_region_name
+from prismpy.utils.sanitization import (
+    normalize_region_name,
+    region_cache_key_from_region,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -479,7 +485,11 @@ class AgERA5Source(DataSource):
             # .agera5-<region>.lock) keep a single SARRA-Py run from
             # self-blocking when it sequences TAMSAT then AgERA5.
             self.cache_dir.mkdir(parents=True, exist_ok=True)
-            lock_path = cache_lock_path(self.cache_dir, source=self.NAME, region_name=region)
+            lock_path = cache_lock_path(
+                self.cache_dir,
+                source=self.NAME,
+                key=region_cache_key_from_region(region),
+            )
             lock = FileLock(str(lock_path))
 
             try:

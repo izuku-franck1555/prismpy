@@ -25,7 +25,17 @@ tests from commit 5). Re-anchored to [815, 1300] in Sprint
 E.0.5 commit 9 to absorb the walker family (F24 + F26 + F27),
 cross-platform numpy.quantile reproducibility unit tests,
 and the AC-Q2-A1-a public constant + AC-Q2-A1-b negative-
-grep structural pins.
+grep structural pins. Re-anchored to [815, 1500] in Sprint
+F + bucket-fix train + #227 fix to absorb per-crop physiology
+bounds + Köppen substrate + cell-id companion-file pins +
+cockpit-dimension-bucket map structural pin. Re-anchored to
+[815, 1750] in Sprint G AC-G-2.0 cache primitive extraction
++ remaining Sprint G ACs to size headroom for ``test_cache_base.py``
+sibling-sweep + per-AC pins (AC-G-1 typed exceptions, AC-G-3
+ScenarioBlock schema, AC-G-7a/7b/7c/7d per-translator
+projection-climate, AC-G-9 3-layer canonical CO₂, AC-G-12
+14-fixture mutation-drill matrix, AC-G-13 4 paired-set
+deliverable hash pins) per SPRINT-G-VERIFICATION-STRATEGY.md §10.
 Kept in sync with ``test_sprint_d_trajectory.py`` since both
 pins measure the same ``pytest tests/ --collect-only`` count.
 
@@ -51,10 +61,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _LOWER = 815
 # Sprint S re-anchor: bumped 1500 -> 1700 to absorb the per-package eGHR
 # substrate builder's new tests (AC-1 byte-pin + AC-2 substrate-builder
-# integration + headroom reserved for AC-3 through AC-13). Pin re-runs
-# automatically once Sprint S lands; further bumps required only if
-# subsequent sprints exceed the headroom.
-_UPPER = 1700
+# integration + headroom reserved for AC-3 through AC-13). Sprint G
+# (this commit) further bumps 1700 -> 1750 to absorb the cache-primitive
+# extraction's new sibling-sweep ``test_cache_base.py`` per AC-G-2.0 +
+# headroom for the remaining Sprint G AC tests.
+_UPPER = 1750
 
 
 class TestSprintCTrajectory(TestCase):
