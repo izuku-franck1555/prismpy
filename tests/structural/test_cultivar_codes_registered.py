@@ -96,9 +96,13 @@ EXPECTED_LITERAL_PAIRS: FrozenSet[Tuple[str, str]] = frozenset({
     ("translators/pythia/translator.py", "990001"),  # NORTH VARIETY (CERES-Maize)
     ("translators/pythia/translator.py", "990002"),  # MIDDLE VARIETY (CERES-Maize / CERES-Millet)
     ("translators/pythia/translator.py", "990003"),  # SOUTH VARIETY
-    # README generator — package-config defaults
-    ("packaging/readme_generator.py", "GH0010"),    # maize OBATANPA
-    ("packaging/readme_generator.py", "990002"),    # MEDIUM SEASON
+    # README generator — package-config defaults. Per F-AF-v2:
+    # the cultivar field now reads from the on-disk
+    # ``management/cultivar_data.txt`` first and falls through
+    # to a non-cultivar-literal "cultivar not specified" string,
+    # so the GH0010 / 990002 hardcoded defaults are gone.
+    # Other ACEA-side defaults remain.
+    ("packaging/readme_generator.py", "990002"),    # MEDIUM SEASON (ACEA cultivar_code default)
 })
 
 
