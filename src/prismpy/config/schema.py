@@ -1219,12 +1219,26 @@ class CraftConfig(BaseModel):
     # =========================================================================
     # CULTIVAR CONFIGURATION
     # =========================================================================
-    # DSSAT cultivar codes vary by crop. Common examples:
-    #   Maize: GH0010 (OBATANPA), IB0001 (PIO3382)
-    #   Wheat: IB0001 (NEWTON), IB0002 (KATEPWA)
-    #   Sorghum: IB0001 (ATX623 x MARTINZ), IB0002 (DK28E)
-    #   Rice: IB0001 (IR 64), IB0002 (IR 72)
-    #   Millet: IB0001 (HHB67), IB0002 (WC75)
+    # DSSAT cultivar codes vary by crop. Each example below was verified
+    # against the DSSAT 4.8 cultivar files (``Genotype/<MODEL>048.CUL``)
+    # so the variety name matches the column-2 entry exactly. The
+    # structural test
+    # ``tests/structural/test_cultivar_defaults_against_registry.py``
+    # pins these examples plus every translator-side default against the
+    # registry, catching any drift toward unregistered codes. Sahel-
+    # relevant choices are flagged in line so an ops reader can pick the
+    # closest default for the persona at hand.
+    #
+    # Examples (cultivar code — variety name from column 2):
+    #   Maize:    990002 (MEDIUM SEASON)         · MZCER048.CUL
+    #   Sorghum:  IB0001 (RIO)                   · SGCER048.CUL
+    #   Rice:     IB0001 (IR 8)                  · RICER048.CUL
+    #   Millet:   IB0149 (Sadore-Local, Sahel)   · MLCER048.CUL
+    #             IB0044 (CIVT, Sahel)           · MLCER048.CUL
+    #             990002 (MIDDLE VARIETY)        · MLCER048.CUL
+    #   Cowpea:   II0003 (IT90K-277-2, IITA)     · CPGRO048.CUL
+    #             CP0005 (TVU3644, Nigeria)      · CPGRO048.CUL
+    #   Groundnut: IB0001 (STARR, v tamnut)      · PNGRO048.CUL
     # =========================================================================
     default_cultivar: Optional[str] = Field(
         default=None,

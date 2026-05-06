@@ -2379,12 +2379,52 @@ class CraftTranslator(CraftTranslatorBase):
             # Use a generic DSSAT cultivar code as fallback so the pipeline can complete.
             # The researcher should set a region-specific cultivar for actual simulations.
             crop_name = (self.config.crop.name or "").lower()
+            # Each entry pairs the prismpy crop key with a cultivar
+            # code that is verified-present in DSSAT's column-1 of the
+            # corresponding ``.CUL`` file. The choices favor Sahel
+            # personas (Aminata in Niamey, Salif in Burkina/Mali) when
+            # there is a defensible regional variant in the registry;
+            # otherwise the regional fallback variety is used. The
+            # structural test ``test_cultivar_defaults_against_registry``
+            # pins each (crop, code) tuple against the ``.CUL`` file so
+            # a future contributor cannot silently drift to an
+            # unregistered code.
             generic_cultivars = {
+                # MZCER048.CUL: "990002 MEDIUM SEASON" — DSSAT regional fallback.
                 "maize": "990002",
+                # SGCER048.CUL: "IB0001 RIO" — generic sorghum cultivar.
                 "sorghum": "IB0001",
-                "millet": "IB0001",
+                # MLCER048.CUL: "IB0149 Sadore-Local" — ICRISAT Sadore-station
+                # local variety, native to the Niamey region. Replaces the
+                # prior IB0001 default which is an ECOTYPE pointer in
+                # MLCER048.CUL, not a column-1 cultivar code; CRAFT and
+                # PYTHIA both reject loads against unregistered cultivars.
+                # Cross-repo drift note: prismweb's crop_mappings.py
+                # currently returns millet → "990002" from its
+                # wizard-side default mapping, so a fall-through that
+                # bypasses both prismweb's wizard cultivar_ingeno selection
+                # AND its crop_mappings default lands here on IB0149. The
+                # resulting prismweb-vs-prismpy split is intentional for
+                # the rare double-fallthrough case (Sahel-fit > legacy
+                # parity) and is tracked for a companion prismweb PR that
+                # will reconcile the wizard default to IB0149 once the
+                # cross-repo cultivar contract is locked.
+                "millet": "IB0149",
+                # RICER048.CUL: "IB0001 IR 8" — IRRI generic rice cultivar.
                 "rice": "IB0001",
-                "cowpea": "IB0001",
+                # CPGRO048.CUL: "II0003 IT90K-277-2" — IITA Nigeria cowpea.
+                # Replaces the prior IB0001 default (not in CPGRO048.CUL
+                # column 1) and aligns with prismweb's wizard-side default
+                # so the cross-repo cultivar contract stays consistent.
+                # II0003 was chosen over CP0005 (TVU3644 - Nigeria, a
+                # similarly-Sahel-relevant TVU-series cowpea) because
+                # II0003 is the IITA-released IT90K-277-2 line — modern,
+                # widely-cultivated, and the prismweb wizard already
+                # serves this code as its default. Picking CP0005 would
+                # break the cross-repo wizard-vs-fallback parity for a
+                # marginal varietal-vintage gain.
+                "cowpea": "II0003",
+                # PNGRO048.CUL: "IB0001 STARR, v tamnut" — generic groundnut.
                 "groundnut": "IB0001",
             }
             default_cultivar = generic_cultivars.get(crop_name, "990002")
