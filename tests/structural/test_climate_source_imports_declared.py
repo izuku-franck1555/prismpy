@@ -56,29 +56,61 @@ _STDLIB_PACKAGES = frozenset({
 # test only fires on hard-required imports.
 def _import_under_optional_guard(node: ast.AST, ancestors: list[ast.AST]) -> bool:
     """True iff ``node`` (an ``ast.Import`` / ``ast.ImportFrom``) sits
-    inside a ``try: ... except (ImportError | ModuleNotFoundError): ...``
-    block. The walker treats such imports as optional / degrade-on-absent
-    and exempts them from the pyproject.toml declaration requirement —
-    e.g., agera5.py's ``SARRA_data_download`` import is gated by
-    ``except ImportError: self._sarra_download_available = False``.
+    in the ``body`` of a ``try: ... except (ImportError |
+    ModuleNotFoundError): ...`` block AND is not nested inside a
+    function / lambda / comprehension scope between the import and the
+    try statement.
+
+    Tightening the check to ``try.body`` only (not ``orelse``,
+    ``finalbody``, or any handler bodies) matches the graceful-degrade
+    semantics: an import in the try body fires ImportError → the
+    handler runs → the package degrades. An import in ``orelse`` runs
+    only AFTER the try body succeeds (so it is not actually guarded by
+    that try). An import inside a nested function runs at call time,
+    which the enclosing try did not bracket.
+
+    The function-scope guard prevents the false-exemption case where a
+    helper defined inside a try body imports a third-party module — the
+    function body executes when the helper is called, not when the
+    enclosing try runs, so the import is effectively unguarded.
     """
+    # Walk ancestors from the import outward. The first try we hit
+    # whose ``body`` contains the import (with no intervening function
+    # / lambda / comprehension scope) is the guard candidate. Anything
+    # farther out is irrelevant — Python's ``except`` only catches
+    # exceptions raised in the immediately-enclosing try body.
+    last = node
     for parent in reversed(ancestors):
-        if not isinstance(parent, ast.Try):
-            continue
-        for handler in parent.handlers:
-            exc = handler.type
-            if exc is None:
-                # bare ``except:`` is broad enough to cover ImportError.
-                return True
-            names = []
-            if isinstance(exc, ast.Name):
-                names = [exc.id]
-            elif isinstance(exc, ast.Tuple):
-                names = [
-                    e.id for e in exc.elts if isinstance(e, ast.Name)
-                ]
-            if "ImportError" in names or "ModuleNotFoundError" in names:
-                return True
+        # If a function / lambda / comprehension intervenes between
+        # the import and an outer try, the import runs at the inner
+        # call/eval site and is NOT bracketed by the outer try.
+        if isinstance(parent, (
+            ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
+            ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp,
+        )):
+            return False
+        if isinstance(parent, ast.Try):
+            # Only ``try.body`` carries the graceful-degrade semantics.
+            # Imports in ``orelse`` / ``finalbody`` / handler bodies
+            # are NOT exempt.
+            if last not in parent.body:
+                return False
+            for handler in parent.handlers:
+                exc = handler.type
+                if exc is None:
+                    # bare ``except:`` is broad enough to cover ImportError.
+                    return True
+                names = []
+                if isinstance(exc, ast.Name):
+                    names = [exc.id]
+                elif isinstance(exc, ast.Tuple):
+                    names = [
+                        e.id for e in exc.elts if isinstance(e, ast.Name)
+                    ]
+                if "ImportError" in names or "ModuleNotFoundError" in names:
+                    return True
+            return False
+        last = parent
     return False
 
 

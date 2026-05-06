@@ -55,8 +55,13 @@ dependencies = [
     # rioxarray surfaces as a fail-loud ``ModuleNotFoundError`` that
     # the climate retrieve broad-except path captures and reports as
     # a TAMSAT download failure. Declaring it here keeps fresh venv
-    # installs from inheriting the silent-swallow path.
-    "rioxarray>=0.15.0",
+    # installs from inheriting the silent-swallow path. The upper
+    # bound caps below the rioxarray 0.20 cutover that requires
+    # ``numpy>=2`` (incompatible with the existing
+    # ``numpy>=1.24,<2.0`` pin) so a free upgrade cannot silently
+    # break the byte-identical bound-gen substrate that paired
+    # numpy + rasterio + xarray locked in Sprint E.0.5.
+    "rioxarray>=0.15,<0.20",
     "requests>=2.31.0",
     "filelock>=3.12.0",
     "tqdm>=4.65.0",
