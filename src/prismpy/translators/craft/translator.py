@@ -560,6 +560,46 @@ class CraftTranslator(CraftTranslatorBase):
             )
 
             if craft_schema_rows:
+                # F-AK substrate fix: intersect the GADM-resolved schema
+                # rows with the canonical post-harmonize grid.cells
+                # roster so the schema file emits exactly the same cell
+                # set every CRAFT companion writer uses (and every
+                # cell_summary.json reader downstream observes). The
+                # GADM resolver legitimately surfaces admin-boundary
+                # cells that fall outside the grid bounding box, but
+                # those cells carry no real climate or soil data; the
+                # F-AK audit found they leaked into the schema file
+                # while the management files (now correctly routed
+                # through grid.cells) carried the smaller set, and a
+                # CRAFT load that JOIN'ed schema × management would
+                # silently drop the 13-28% per-package mismatched
+                # cells or substitute placeholders for them. Filtering
+                # the schema rows here keeps every companion file in
+                # the package in lockstep with cell_summary.json.
+                canonical_craft_ids = {
+                    self._to_craft_cellid(cell.cell_id)
+                    for cell in grid.cells
+                }
+                rows_before_intersect = len(craft_schema_rows)
+                craft_schema_rows = [
+                    row for row in craft_schema_rows
+                    if row['cellid'] in canonical_craft_ids
+                ]
+                python_schema_rows = [
+                    row for row in python_schema_rows
+                    if row['cellid'] in canonical_craft_ids
+                ]
+                rows_dropped = rows_before_intersect - len(craft_schema_rows)
+                if rows_dropped:
+                    logger.info(
+                        f"GADM resolver returned {rows_before_intersect} "
+                        f"rows; {rows_dropped} cells lay outside the "
+                        f"canonical grid.cells roster (admin-boundary "
+                        f"cells with no real data) and were dropped "
+                        f"from the schema file to keep it in lockstep "
+                        f"with the management files."
+                    )
+
                 # Store valid cell IDs for use by management files
                 # This ensures all output files use the same GADM-filtered cells
                 self._valid_cellids = {row['cellid'] for row in craft_schema_rows}
@@ -629,6 +669,36 @@ class CraftTranslator(CraftTranslatorBase):
                 )
 
                 if craft_schema_rows:
+                    # F-AK substrate fix (Option 1b path mirror):
+                    # intersect the pygadm-geometry schema rows with
+                    # the canonical grid.cells roster — same rationale
+                    # as the GADM-shapefile path above. Without this
+                    # filter the pygadm-geometry path could re-introduce
+                    # the same drift class on regions resolved via the
+                    # WKT geometry fallback.
+                    canonical_craft_ids = {
+                        self._to_craft_cellid(cell.cell_id)
+                        for cell in grid.cells
+                    }
+                    rows_before_intersect = len(craft_schema_rows)
+                    craft_schema_rows = [
+                        row for row in craft_schema_rows
+                        if row['cellid'] in canonical_craft_ids
+                    ]
+                    python_schema_rows = [
+                        row for row in python_schema_rows
+                        if row['cellid'] in canonical_craft_ids
+                    ]
+                    rows_dropped = rows_before_intersect - len(craft_schema_rows)
+                    if rows_dropped:
+                        logger.info(
+                            f"pygadm geometry returned {rows_before_intersect} "
+                            f"rows; {rows_dropped} cells lay outside the "
+                            f"canonical grid.cells roster and were dropped "
+                            f"to keep the schema in lockstep with the "
+                            f"management files."
+                        )
+
                     self._valid_cellids = {row['cellid'] for row in craft_schema_rows}
                     self._gadm_cells = python_schema_rows
 

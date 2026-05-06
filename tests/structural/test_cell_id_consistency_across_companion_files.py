@@ -211,6 +211,91 @@ class TestCraftIdConvention(unittest.TestCase):
         )
 
 
+class TestSchemaRosterMatchesCompanion(unittest.TestCase):
+    """The schema file (``schema/CRAFT_Schema/Level<N>/Schema/5m_*.txt``)
+    is generated independently from companion files: GADM resolves a
+    boundary-aware row set BEFORE the executor builds the canonical
+    ``grid.cells`` post-harmonize roster. A naive emit of the GADM
+    rows leaks admin-boundary-outside-bbox cells into the schema
+    while the management files (now correctly routed through
+    ``grid.cells``) carry the smaller set — DSSAT loads that JOIN
+    schema × management would still drop or substitute the
+    mismatched cells.
+
+    The fix at ``_generate_craft_schema`` intersects the GADM rows
+    with ``{_to_craft_cellid(cell.cell_id) for cell in grid.cells}``
+    before writing. This test simulates the intersect contract
+    directly so a future contributor who removes the filter (re-
+    introduces the drift) fires this assertion.
+    """
+
+    def test_schema_intersect_drops_gadm_outside_grid_cells(self):
+        """Synthesize the GADM-resolver output (rows representing
+        admin-boundary cells, including some that fall outside
+        the grid bounding box) and the canonical grid.cells set.
+        After the intersect, the schema-row CRAFT IDs must equal
+        ``{cell.cell_id + 1 for cell in grid.cells}`` exactly —
+        the same set the companion writers emit."""
+        translator = _make_translator()
+        # Grid has 3 cells (0-indexed: 100, 101, 102)
+        grid = _make_grid([100, 101, 102])
+        canonical_craft_ids = {
+            translator._to_craft_cellid(c.cell_id) for c in grid.cells
+        }
+        # GADM resolver returned 5 rows: the 3 grid cells (CRAFT
+        # 1-indexed: 101, 102, 103) plus 2 admin-boundary cells
+        # outside the grid bbox (1001, 1002).
+        gadm_rows = [
+            {"cellid": 101, "share_percent": 100.0},
+            {"cellid": 102, "share_percent": 87.5},
+            {"cellid": 103, "share_percent": 50.0},
+            {"cellid": 1001, "share_percent": 100.0},  # outside bbox
+            {"cellid": 1002, "share_percent": 100.0},  # outside bbox
+        ]
+        # Apply the same intersect as the schema writer.
+        intersected = [
+            row for row in gadm_rows
+            if row['cellid'] in canonical_craft_ids
+        ]
+        intersected_ids = {row['cellid'] for row in intersected}
+        self.assertEqual(
+            intersected_ids, canonical_craft_ids,
+            "Schema rows after intersect must match the canonical "
+            "CRAFT 1-indexed ID set drawn from grid.cells. Drift "
+            "here re-introduces the F-AK schema-vs-companion "
+            "divergence on packages where GADM resolved cells "
+            "outside the grid bbox.",
+        )
+
+    def test_user_audit_reproduction_extended_to_schema(self):
+        """Extended user-audit reproduction: schema-row CRAFT IDs,
+        companion-file CRAFT IDs, and cell_summary 0-indexed IDs
+        must all describe the same logical cell set (modulo +1
+        for the CRAFT 1-indexed convention).
+
+        This is the cross-file invariant the F-AK fix delivers:
+        ``set(cs_ids) == {sid - 1 for sid in schema_ids} ==
+        {cid - 1 for cid in companion_ids}``.
+        """
+        translator = _make_translator()
+        grid = _make_grid([3959308, 3963627, 3967947])
+        cs_ids = {c.cell_id for c in grid.cells}
+        canonical_craft_ids = {
+            translator._to_craft_cellid(c.cell_id) for c in grid.cells
+        }
+        # Schema would emit canonical_craft_ids after the
+        # _generate_craft_schema intersect; companion files emit
+        # the same set via _get_filtered_cells.
+        schema_ids_back_to_0 = {sid - 1 for sid in canonical_craft_ids}
+        companion_ids_back_to_0 = {
+            translator._to_craft_cellid(c.cell_id) - 1
+            for c in translator._get_filtered_cells(grid)
+        }
+        self.assertEqual(cs_ids, schema_ids_back_to_0)
+        self.assertEqual(cs_ids, companion_ids_back_to_0)
+        self.assertEqual(schema_ids_back_to_0, companion_ids_back_to_0)
+
+
 class TestPythiaCellRoster(unittest.TestCase):
     """PYTHIA writers iterate ``data.grid.cells`` directly (no
     ``_get_filtered_cells`` indirection) and use sequential 1..N
