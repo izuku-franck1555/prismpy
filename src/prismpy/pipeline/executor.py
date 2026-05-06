@@ -677,12 +677,6 @@ class TranslationPipeline:
             if climate_data:
                 data["climate"] = climate_data
                 self.logger.info(f"Loaded climate data for {len(climate_data)} locations")
-                self.logger.info(
-                    "[climate-flow-debug] climate assigned to unified_data "
-                    f"climate_keys={list(climate_data.keys()) if isinstance(climate_data, dict) else 'non-dict'} "
-                    f"climate_len={len(climate_data) if hasattr(climate_data, '__len__') else 'no-len'} "
-                    f"is_file_based={isinstance(climate_data, dict) and ('rainfall_dir' in climate_data or 'agera5_dir' in climate_data)}"
-                )
             else:
                 # CRAFT/PYTHIA/ACEA download weather at translate time — not a warning
                 # Only warn if a platform needs pre-loaded climate (currently none do)
@@ -691,11 +685,6 @@ class TranslationPipeline:
                 if not enabled.issubset(platforms_that_self_download):
                     warnings.append("Climate data not available - using placeholder")
                 # Create minimal placeholder climate data
-                self.logger.info(
-                    "[climate-flow-debug] climate_data falsy at retrieve-stage; "
-                    "creating placeholder via _create_placeholder_climate "
-                    f"climate_data_value={climate_data!r}"
-                )
                 data["climate"] = self._create_placeholder_climate(region)
 
             # Load soil data
@@ -1014,21 +1003,11 @@ class TranslationPipeline:
 
         # Return if we found data
         if climate_data["rainfall_dir"] or climate_data["agera5_dir"]:
-            self.logger.info(
-                "[climate-flow-debug] return-site=preconfigured-paths "
-                f"keys={list(climate_data.keys())} len={len(climate_data)} "
-                f"rainfall_dir_set={climate_data['rainfall_dir'] is not None} "
-                f"agera5_dir_set={climate_data['agera5_dir'] is not None}"
-            )
             return climate_data
 
         # No configured paths — try TAMSAT/AgERA5 download for SARRA-Py
         enabled_platforms = self.config.get_enabled_platforms()
         has_sarra_py = any(p == Platform.SARRA_PY for p in enabled_platforms)
-        self.logger.info(
-            f"[climate-flow-debug] entered fallthrough enabled_platforms="
-            f"{[p.value for p in enabled_platforms]} has_sarra_py={has_sarra_py}"
-        )
 
         if has_sarra_py:
             cache_dir = Path(self.config.data_sources.cache_dir) if hasattr(self.config.data_sources, 'cache_dir') and self.config.data_sources.cache_dir else Path("data/cache")
@@ -1060,11 +1039,6 @@ class TranslationPipeline:
                         # Phase 2 observe user cancel.
                         cancel_check=getattr(self, '_cancel_check', None),
                         run_id=_extract_run_id(self._progress_callback),
-                    )
-                    self.logger.info(
-                        f"[climate-flow-debug] tamsat_result success="
-                        f"{tamsat_result.success} has_data={tamsat_result.data is not None} "
-                        f"errors={tamsat_result.errors!r}"
                     )
                     if tamsat_result.success and tamsat_result.data:
                         climate_data["rainfall_dir"] = tamsat_result.data.data_dir
@@ -1118,11 +1092,6 @@ class TranslationPipeline:
                         cancel_check=getattr(self, '_cancel_check', None),
                         run_id=_extract_run_id(self._progress_callback),
                     )
-                    self.logger.info(
-                        f"[climate-flow-debug] agera5_result success="
-                        f"{agera5_result.success} has_data={agera5_result.data is not None} "
-                        f"errors={agera5_result.errors!r}"
-                    )
                     if agera5_result.success and agera5_result.data:
                         climate_data["agera5_dir"] = agera5_result.data.data_dir
                         climate_data["agera5_variables"] = agera5_result.data.variables
@@ -1145,23 +1114,9 @@ class TranslationPipeline:
                 self._report_partial_agera5(cache_dir, region, climate_data)
 
             if got_data:
-                self.logger.info(
-                    "[climate-flow-debug] return-site=sarra-py-download-success "
-                    f"keys={list(climate_data.keys())} len={len(climate_data)} "
-                    f"rainfall_dir_set={climate_data['rainfall_dir'] is not None} "
-                    f"agera5_dir_set={climate_data['agera5_dir'] is not None} "
-                    f"got_data={got_data}"
-                )
                 return climate_data
 
         self.logger.warning("No pre-configured climate data paths found.")
-        self.logger.info(
-            "[climate-flow-debug] return-site=fallthrough-none "
-            f"has_sarra_py={has_sarra_py if 'has_sarra_py' in dir() else 'unset'} "
-            f"got_data={got_data if 'got_data' in dir() else 'unset'} "
-            f"climate_data_keys_at_fallthrough={list(climate_data.keys())} "
-            f"climate_data_len={len(climate_data)}"
-        )
         return None
 
     def _report_partial_agera5(
