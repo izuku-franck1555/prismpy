@@ -1760,6 +1760,17 @@ class AceaTranslator(AceaTranslatorBase):
                     input_levels=['High', 'Low'],
                 )
                 logger.info(f"Downloaded and copied {len(output_files)} GAEZ files")
+            except (ImportError, ModuleNotFoundError):
+                # Mirror the climate-source carve-outs (executor.py +
+                # tamsat.py + agera5.py): an undeclared / vendor-build-
+                # broken transitive dep is a configuration error, not
+                # a runtime data error. Letting it surface as ``GAEZ
+                # download failed: {e}`` would re-create the silent-
+                # skip class the F-AL substrate-hardening sweep
+                # closed at the GAEZDownloader.._download_with_retry
+                # entry. Per durable lesson #6 + #20, propagate so
+                # pip / CI / startup surfaces the missing dep loudly.
+                raise
             except Exception as e:
                 logger.warning(f"GAEZ download failed: {e}")
 

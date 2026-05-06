@@ -1051,6 +1051,16 @@ class TranslationPipeline:
                 # V2-22b L: cancel unwinds past the broad except so the
                 # pipeline.execute boundary can run handler-local cleanup.
                 raise
+            except (ImportError, ModuleNotFoundError):
+                # Mirror the carve-out at tamsat.py:832 + agera5.py:564:
+                # an undeclared / vendor-build-broken transitive dep is
+                # a configuration error, not a runtime data error.
+                # Letting it surface as ``TAMSAT download error: {e}``
+                # masks the gap until a downstream validator reports
+                # zero per-cell climate coverage. Per durable lesson
+                # #6 + #20, propagate so pip / CI / startup surfaces
+                # the missing dep loudly.
+                raise
             except Exception as e:
                 self.logger.warning(f"TAMSAT download error: {e}")
 
@@ -1108,6 +1118,16 @@ class TranslationPipeline:
                 # the carve-out, user cancel inside AgERA5 gets logged
                 # as a generic "download error" and the pipeline
                 # continues into translate. Propagate.
+                raise
+            except (ImportError, ModuleNotFoundError):
+                # Mirror the carve-out at agera5.py:564 + the TAMSAT
+                # block above: an undeclared / vendor-build-broken
+                # transitive dep is a configuration error, not a
+                # runtime data error. Letting it surface as ``AgERA5
+                # download error: {e}`` masks the gap until a
+                # downstream validator reports zero per-cell climate
+                # coverage. Per durable lesson #6 + #20, propagate so
+                # pip / CI / startup surfaces the missing dep loudly.
                 raise
             except Exception as e:
                 self.logger.warning(f"AgERA5 download error: {e}")

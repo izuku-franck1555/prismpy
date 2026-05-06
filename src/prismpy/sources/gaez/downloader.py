@@ -127,8 +127,18 @@ class GAEZDownloader:
         """
         try:
             import requests
-        except ImportError:
-            return False, "requests library not installed"
+        except ImportError as e:
+            # Fail-loud: ``requests`` is declared in pyproject.toml
+            # [project] dependencies. A missing import means the venv
+            # is broken — surfacing it loudly at first call beats
+            # returning ``(False, "...")`` and silently skipping the
+            # download stage.
+            raise ModuleNotFoundError(
+                "requests is required for GAEZ downloads but did not "
+                "import. The package is declared in pyproject.toml "
+                "[project] dependencies; reinstall prismpy with "
+                "`pip install -e .` to refresh the venv."
+            ) from e
 
         if output_path.exists() and not overwrite:
             logger.debug(f"Using cached: {output_path}")

@@ -228,24 +228,60 @@ class AgERA5Source(DataSource):
 
     @property
     def sarra_download_available(self) -> bool:
-        """Check if SARRA_data_download library is available."""
+        """Confirm the vendored SARRA_data_download module is importable.
+
+        Post-vendor (prismpy.vendor.sarra_data_download), the import
+        always succeeds because the package ships with the prismpy
+        wheel. The previous silent-skip pattern returned ``False`` on
+        ImportError, which let a missing-library install fall through
+        to a 1/4-climate-variables outcome on fresh venvs that had not
+        re-applied the local editable install. The current pattern
+        raises ``ModuleNotFoundError`` if the vendor goes missing
+        (e.g., wheel-build dropped the subpackage) so the configuration
+        error surfaces loudly at first call, rather than soft-failing
+        into the partial-climate code path. Mirrors the broad-except
+        carve-out discipline at the property surface.
+        """
         if self._sarra_download_available is None:
             try:
-                from SARRA_data_download.get_AgERA5_data import download_AgERA5_year
+                from prismpy.vendor.sarra_data_download.get_AgERA5_data import (  # noqa: F401
+                    download_AgERA5_year,
+                )
                 self._sarra_download_available = True
-            except ImportError:
-                self._sarra_download_available = False
+            except ImportError as e:
+                raise ModuleNotFoundError(
+                    "prismpy.vendor.sarra_data_download is required for "
+                    "AgERA5 retrieval but did not import. The package "
+                    "ships with prismpy; if this raised, the wheel "
+                    "build is missing the vendored subpackage. "
+                    "Reinstall prismpy or check "
+                    "[tool.setuptools.packages.find] in pyproject.toml."
+                ) from e
         return self._sarra_download_available
 
     @property
     def cdsapi_available(self) -> bool:
-        """Check if cdsapi library is available."""
+        """Confirm cdsapi is importable.
+
+        cdsapi is a required dependency declared in pyproject.toml
+        (per the prior partial-climate substrate fix). The previous
+        silent-skip pattern would return ``False`` on ImportError; the
+        current pattern raises ``ModuleNotFoundError`` so a broken
+        install surfaces loudly at first call rather than soft-failing
+        into the partial-climate code path.
+        """
         if self._cdsapi_available is None:
             try:
-                import cdsapi
+                import cdsapi  # noqa: F401
                 self._cdsapi_available = True
-            except ImportError:
-                self._cdsapi_available = False
+            except ImportError as e:
+                raise ModuleNotFoundError(
+                    "cdsapi is required for AgERA5 retrieval but did "
+                    "not import. The package is declared in "
+                    "pyproject.toml [project] dependencies; reinstall "
+                    "prismpy with `pip install -e .` to refresh the "
+                    "venv."
+                ) from e
         return self._cdsapi_available
 
     def retrieve(
@@ -731,7 +767,9 @@ class AgERA5Source(DataSource):
             progress_callback: Optional callback(current, total) for progress
         """
         import shutil
-        from SARRA_data_download.get_AgERA5_data import download_AgERA5_year
+        from prismpy.vendor.sarra_data_download.get_AgERA5_data import (
+            download_AgERA5_year,
+        )
 
         output_dir.mkdir(parents=True, exist_ok=True)
 
