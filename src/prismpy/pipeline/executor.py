@@ -594,6 +594,17 @@ class TranslationPipeline:
                                 f"pygadm: '{filter_value}' not found at level {gadm_level}"
                             )
 
+                    except (ImportError, ModuleNotFoundError):
+                        # ``pygadm`` is now declared in pyproject.toml
+                        # [project] dependencies; a missing import
+                        # here means the venv is broken (the same
+                        # silent-skip class that produced 1/4 climate
+                        # variables on fresh py312 installs). Per
+                        # durable lesson #6 + #20, propagate so
+                        # pip / CI / startup surfaces the missing
+                        # dep loudly rather than soft-failing into
+                        # the manual-bounds fallback path.
+                        raise
                     except Exception as e:
                         self.logger.warning(f"pygadm fallback failed: {e}")
 

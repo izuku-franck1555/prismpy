@@ -360,8 +360,11 @@ class TestCarveOutRegression:
         # 1879 → 1899 after the F-AL substrate-hardening sweep
         # added ``except (ImportError, ModuleNotFoundError)``
         # carve-outs to the TAMSAT + AgERA5 download blocks in
-        # ``_load_climate_data`` (~10 lines apiece).
-        ("src/prismpy/pipeline/executor.py", 1899),
+        # ``_load_climate_data`` (~10 lines apiece). Then
+        # 1899 → 1910 after the F-AL scope-extension added an
+        # ``except (ImportError, ModuleNotFoundError)`` carve-out
+        # to the pygadm fallback in ``_execute_retrieve`` (~11 lines).
+        ("src/prismpy/pipeline/executor.py", 1910),
         # HWSD per-cell sampling inside CRAFT translator
         ("src/prismpy/translators/craft/translator.py", 1692),
         # pygadm fallback inside _execute_retrieve: local pygadm import
@@ -401,8 +404,11 @@ class TestCarveOutRegression:
         # sweep added ``except (ImportError, ModuleNotFoundError)``
         # carve-outs to the TAMSAT + AgERA5 download blocks in
         # ``_load_climate_data`` (~10 lines apiece, ~20 lines
-        # cumulative shift forward).
-        ("src/prismpy/pipeline/executor.py", 2695),
+        # cumulative shift forward). Then 2695 → 2706 after the
+        # F-AL scope-extension added an ``except (ImportError,
+        # ModuleNotFoundError)`` carve-out to the pygadm fallback
+        # in ``_execute_retrieve`` (~11 lines).
+        ("src/prismpy/pipeline/executor.py", 2706),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed
