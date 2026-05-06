@@ -438,7 +438,9 @@ class GADMDataSource:
                 # Formula from legacy: area_km² = area_deg² * 12364 * cos(lat)
                 area_km2 = intersection_area_deg2 * DEG2_TO_KM2 * math.cos(math.radians(cell_center_lat))
 
-                # Calculate CellID (CRAFT formula: 1-indexed)
+                # Calculate CellID matching the canonical 0-indexed roster
+                # used by SpatialGrid + cell_summary.json + every CRAFT
+                # companion writer routed through _to_craft_cellid.
                 cellid = self._calculate_cellid(cell_center_lon, cell_center_lat, resolution_deg)
 
                 # CRAFT schema row
@@ -473,11 +475,20 @@ class GADMDataSource:
         return craft_schema_rows, python_schema_rows
 
     def _calculate_cellid(self, lon: float, lat: float, resolution_deg: float) -> int:
-        """Calculate CRAFT CellID for a grid cell at given coordinates.
+        """Calculate the canonical CellID for a grid cell at given coordinates.
 
-        Matches CRAFT/R raster convention (top-left origin, 1-indexed).
+        Matches the top-left-origin raster convention prismpy uses
+        across SpatialGrid + cell_summary.json + every CRAFT companion
+        writer routed through ``_to_craft_cellid``. The formula is
+        ``row_from_top * ncols + col`` — the canonical 0-indexed form.
 
-        Formula: CellID = (row_from_top * ncols) + col + 1
+        Earlier versions added ``+1`` to match a presumed CRAFT 1-indexed
+        convention. The CRAFT operator-team smoke test confirmed CRAFT
+        treats CellID as an opaque string key, so the engine only
+        requires intra-package consistency. Aligning the GADM emission
+        to the same 0-indexed canonical the executor + companion writers
+        already use closes the row-boundary drift the user surfaced
+        empirically (cell_summary 0-indexed vs companions 1-indexed).
 
         Args:
             lon: Longitude of cell center
@@ -485,7 +496,8 @@ class GADMDataSource:
             resolution_deg: Grid resolution in degrees
 
         Returns:
-            1-indexed CellID
+            0-indexed canonical CellID matching ``cell.cell_id`` for
+            the SpatialGrid cell at ``(lat, lon)``.
         """
         ncols = int(360 / resolution_deg)
         nrows = int(180 / resolution_deg)
@@ -494,14 +506,14 @@ class GADMDataSource:
         row_from_bottom = int((lat + 90) / resolution_deg)
         row_from_top = nrows - 1 - row_from_bottom
 
-        cellid = (row_from_top * ncols) + col + 1
+        cellid = (row_from_top * ncols) + col
         return cellid
 
     def get_cell_center_from_cellid(self, cellid: int, resolution_deg: float = 5/60) -> Tuple[float, float]:
         """Calculate cell center lat/lon from CellID (reverse of _calculate_cellid).
 
         Args:
-            cellid: Grid cell ID (1-indexed)
+            cellid: 0-indexed canonical CellID matching cell_summary.json
             resolution_deg: Grid resolution in degrees
 
         Returns:
@@ -510,10 +522,10 @@ class GADMDataSource:
         ncols = int(360 / resolution_deg)
         nrows = int(180 / resolution_deg)
 
-        # Reverse calculation (convert to 0-indexed)
-        cellid_0 = cellid - 1
-        row_from_top = cellid_0 // ncols
-        col = cellid_0 % ncols
+        # Cell ids are already 0-indexed canonical so the
+        # row/col split runs against the value directly.
+        row_from_top = cellid // ncols
+        col = cellid % ncols
 
         # Convert row from top to row from bottom
         row_from_bottom = nrows - 1 - row_from_top

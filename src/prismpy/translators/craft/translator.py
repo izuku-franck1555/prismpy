@@ -390,18 +390,34 @@ class CraftTranslator(CraftTranslatorBase):
             return []
 
     def _to_craft_cellid(self, cell_id_0: int) -> int:
-        """Convert 0-indexed cell ID to CRAFT 1-indexed format.
+        """Return the canonical 0-indexed cell ID for CRAFT companion files.
 
-        CRAFT uses 1-indexed CellIDs: row * 4320 + col + 1
-        Our internal representation is 0-indexed: row * 4320 + col
+        Earlier versions of this helper added ``+1`` to match a presumed
+        1-indexed CRAFT CellID convention. An empirical smoke test with
+        the CRAFT operator team confirmed that CRAFT treats CellID as
+        an opaque string key — either convention runs as long as it stays
+        consistent within one package. The ``+1`` offset introduced a
+        cross-file drift between ``cell_summary.json`` (0-indexed, written
+        by the executor) and the CRAFT companions (1-indexed via this
+        helper); the drift surfaced at every multi-row bbox row boundary
+        because each row's start id collides with the previous row's
+        end+1, producing a small but persistent xor mismatch when
+        reconciling cell_summary against the companions.
+
+        Aligning to the 0-indexed canonical roster eliminates the drift
+        at the source: cell_summary.json is the canonical cell-id source
+        for the package, and every CRAFT companion writer inherits the
+        same id without offset. The package-internal consistency the
+        engine actually checks is preserved.
 
         Args:
-            cell_id_0: 0-indexed cell ID from SpatialGrid
+            cell_id_0: 0-indexed cell ID from SpatialGrid (canonical).
 
         Returns:
-            1-indexed CellID for CRAFT format
+            The same 0-indexed cell id; the CRAFT companions now match
+            cell_summary.json entry-for-entry.
         """
-        return cell_id_0 + 1
+        return cell_id_0
 
     def _get_filtered_cells(self, grid: SpatialGrid) -> List:
         """Get the canonical cell roster every CRAFT companion file
@@ -2409,15 +2425,24 @@ class CraftTranslator(CraftTranslatorBase):
             cells_sorted = sorted(filtered_cells, key=lambda c: self._to_craft_cellid(c.cell_id), reverse=True)
 
             for cell in cells_sorted:
-                # Use 1-indexed CRAFT CellID
+                # Use the canonical 0-indexed cell id for the
+                # CellID column so the soil-mask file matches
+                # cell_summary.json + every other CRAFT companion
+                # writer in the package.
                 craft_cellid = self._to_craft_cellid(cell.cell_id)
 
                 # Get profile name from mapping or use fallback formula
                 if cell_to_profile and cell.cell_id in cell_to_profile:
                     soil_profile = cell_to_profile[cell.cell_id]
                 else:
-                    # Fallback: formula-based (for backward compatibility)
-                    soil_profile = f"{country_code}0{craft_cellid - 1}"
+                    # Fallback: formula-based profile name keyed off
+                    # the canonical 0-indexed cell id. The earlier
+                    # ``craft_cellid - 1`` form was a back-shift that
+                    # paired with the prior +1 ``_to_craft_cellid``
+                    # to recover the canonical id; with the helper
+                    # now identity, the back-shift would land on
+                    # the wrong cell.
+                    soil_profile = f"{country_code}0{cell.cell_id}"
 
                 share_pct = 1  # 100% coverage
 

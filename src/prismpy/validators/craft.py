@@ -498,7 +498,9 @@ class CraftValidator(BaseValidator):
         """Validate CRAFT_Schema file (5m_*.txt format).
 
         Expected format: CELLID\\tSHAREPERCENT (tab-separated, 2 columns)
-        - CELLID: integer, 1-indexed global grid cell ID
+        - CELLID: integer, canonical 0-indexed global grid cell ID
+          (matches cell_summary.json + every CRAFT companion writer
+          routed through ``_to_craft_cellid``).
         - SHAREPERCENT: 0-100, percentage of cell covered by admin boundary
 
         Args:
