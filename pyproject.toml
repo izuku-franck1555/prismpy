@@ -75,6 +75,27 @@ dependencies = [
     # ``~/.cdsapirc`` runtime credential remains a runtime concern;
     # only declaring the import-time dep is a configuration concern.
     "cdsapi>=0.6.0",
+    # pygadm provides the GADM administrative-boundary download
+    # fallback that the executor invokes when a region's local GADM
+    # shapefile cannot load (executor.py invokes ``pygadm.Names`` /
+    # ``pygadm.Items`` to resolve country + admin level). Previously
+    # undeclared — present in the dev OUTER venv via an editable
+    # install but missing from the CI-isolated venv that surfaced
+    # the silent-skip class. Declaring it required keeps fresh
+    # installs from inheriting the silent-fallback path.
+    "pygadm>=0.5,<1.0",
+    # pyodbc is the platform-portable Microsoft Access ODBC driver
+    # the ACEA HWSD path uses to read ``.mdb`` files when the
+    # preferred ``mdbtools`` system package is absent. Promoted to a
+    # required dep (was previously gated by an opt-in extras-group)
+    # so a ``pip install prismpy`` on a fresh venv never silently
+    # skips the ACEA fallback. The Python wheel install is universal;
+    # the corresponding system package (``brew install unixodbc`` on
+    # macOS, ``apt-get install -y unixodbc-dev`` on Linux) is
+    # documented in prismweb's ``DEPLOY.md`` pre-launch checklist
+    # and pinned in the production Dockerfile so prod deploys carry
+    # both halves.
+    "pyodbc>=5.0,<6.0",
 ]
 
 [project.optional-dependencies]
@@ -118,6 +139,29 @@ include = ["prismpy*"]
     "data/*.json",
     "data/*.tif",
     "data/*.txt",
+]
+# The vendored ``SARRA_data_download`` library ships under
+# ``prismpy/src/prismpy/vendor/sarra_data_download/`` with the
+# upstream MIT LICENSE preserved verbatim alongside the source.
+# Without this glob the LICENSE drops out of the wheel and the
+# attribution record gets lost on a pip-installed prismpy. Per
+# durable lesson #22 (wheel-contents pin discipline), the
+# structural test ``test_climate_source_imports_declared.py``
+# verifies the vendored files exist on disk; this glob keeps
+# them inside the wheel artifact.
+"prismpy.vendor.sarra_data_download" = [
+    "LICENSE",
+]
+# The vendored ``hwsd_extraction`` helper ships under
+# ``prismpy/src/prismpy/vendor/hwsd_extraction/`` with a project-
+# authored open-access non-commercial LICENSE (the ACEA Data-to-
+# Model Translation Framework is the project's own toolkit). The
+# Python source is picked up by the ``include = ["prismpy*"]``
+# package finder automatically; this glob keeps the LICENSE inside
+# the wheel artifact alongside the source so the attribution record
+# does not drop out of pip-installed prismpy.
+"prismpy.vendor.hwsd_extraction" = [
+    "LICENSE",
 ]
 
 [tool.black]

@@ -395,9 +395,18 @@ class SPAMSource(DataSource):
         try:
             import rasterio
             from rasterio.windows import from_bounds
-        except ImportError:
-            logger.error("rasterio required for SPAM clipping")
-            return None
+        except ImportError as e:
+            # Fail-loud: ``rasterio`` is declared in pyproject.toml
+            # [project] dependencies. A missing import means the venv
+            # is broken — surfacing it loudly at first call beats
+            # logging ``error`` and returning ``None`` (which lets the
+            # caller silently treat the SPAM clip as a no-op).
+            raise ModuleNotFoundError(
+                "rasterio is required for SPAM clipping but did not "
+                "import. The package is declared in pyproject.toml "
+                "[project] dependencies; reinstall prismpy with "
+                "`pip install -e .` to refresh the venv."
+            ) from e
 
         if not input_path.exists():
             logger.error(f"Input SPAM file not found: {input_path}")

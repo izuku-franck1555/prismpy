@@ -1262,16 +1262,17 @@ class AceaTranslator(AceaTranslatorBase):
         Returns:
             Path to generated soil CSV, or None if extraction fails
         """
-        # Add ACEA utils to path for hwsd_extraction import
-        acea_utils_path = Path(__file__).parent.parent.parent.parent / "ACEA" / "utils"
-        if str(acea_utils_path) not in sys.path:
-            sys.path.insert(0, str(acea_utils_path))
-
-        try:
-            from hwsd_extraction import extract_hwsd_soil_data
-        except ImportError:
-            logger.warning("hwsd_extraction module not found, skipping HWSD extraction")
-            return None
+        # The HWSD v2.0 BIL+MDB extraction helper used to live at
+        # ../../../../ACEA/utils/hwsd_extraction.py and was reached via
+        # a runtime ``sys.path.insert`` shim. The shim silently fell
+        # through to ``return None`` whenever the ACEA toolkit was not
+        # co-located with prismpy on disk. The helper now lives under
+        # ``prismpy.vendor.hwsd_extraction`` so the import resolves
+        # deterministically across environments. The broad-except
+        # carve-out at the executor / translator layer surfaces a
+        # vendor-build-broken state as fail-loud
+        # ``ModuleNotFoundError`` rather than as a silent skip.
+        from prismpy.vendor.hwsd_extraction import extract_hwsd_soil_data
 
         if not bil_path.exists():
             logger.warning(f"HWSD BIL file not found: {bil_path}")
@@ -1408,24 +1409,75 @@ class AceaTranslator(AceaTranslatorBase):
                 logger.warning(f"mdb-export failed: {result.stderr}")
         except FileNotFoundError:
             logger.warning("mdb-export not found, trying pyodbc...")
-            # Fallback to pyodbc
+            # Fallback to pyodbc. ``pyodbc`` is an opt-in extras-group
+            # dependency declared in pyproject [project.optional-
+            # dependencies] under ``acea-mdb``; it is platform-specific
+            # (Windows + Microsoft Access ODBC driver, or Linux with
+            # MDBTools system driver). The previous silent-skip path
+            # caught ``Exception as e`` and logged a warning, which
+            # left the user with no actionable next step. The
+            # current pattern raises ``ModuleNotFoundError`` when the
+            # extras-group is not installed so the install remediation
+            # surfaces fail-loud at first call. Genuine ODBC
+            # connection / driver errors still log a warning because
+            # those are runtime data-availability issues, not
+            # configuration ones.
             try:
                 import pyodbc
-                conn_str = f'DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={mdb_path}'
+            except ImportError as e:
+                raise ModuleNotFoundError(
+                    "pyodbc is a required prismpy dependency but did "
+                    "not import. The Python wheel ships with prismpy; "
+                    "the matching ODBC system package must also be "
+                    "available — install ``brew install unixodbc`` on "
+                    "macOS, ``apt-get install -y unixodbc-dev`` on "
+                    "Linux. The ACEA HWSD MDB fallback also accepts "
+                    "the ``mdbtools`` system package as the preferred "
+                    "primary path (``brew install mdbtools`` / "
+                    "``apt-get install -y mdbtools``)."
+                ) from e
+
+            try:
+                conn_str = (
+                    "DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};"
+                    f"DBQ={mdb_path}"
+                )
                 try:
                     conn = pyodbc.connect(conn_str)
-                except:
-                    conn_str = f'DRIVER={{MDBTools}};DBQ={mdb_path}'
+                except pyodbc.Error:
+                    conn_str = f"DRIVER={{MDBTools}};DBQ={mdb_path}"
                     conn = pyodbc.connect(conn_str)
                 cursor = conn.cursor()
-                cursor.execute("SELECT HWSD2_SMU_ID, SAND, CLAY FROM HWSD2_LAYERS WHERE LAYER = 'D1'")
+                cursor.execute(
+                    "SELECT HWSD2_SMU_ID, SAND, CLAY FROM HWSD2_LAYERS "
+                    "WHERE LAYER = 'D1'"
+                )
                 for row in cursor.fetchall():
                     if row[1] is not None and row[2] is not None:
-                        hwsd_lookup[int(row[0])] = (float(row[1]), float(row[2]))
+                        hwsd_lookup[int(row[0])] = (
+                            float(row[1]),
+                            float(row[2]),
+                        )
                 conn.close()
-                logger.info(f"Loaded {len(hwsd_lookup)} soil mapping units via pyodbc")
-            except Exception as e:
-                logger.warning(f"pyodbc also failed: {e}")
+                logger.info(
+                    f"Loaded {len(hwsd_lookup)} soil mapping units "
+                    "via pyodbc"
+                )
+            except pyodbc.Error as e:
+                logger.warning(
+                    f"pyodbc connection / query failed: {e}"
+                )
+            except Exception as e:  # noqa: BLE001
+                # Row coercion / cleanup / unexpected runtime errors
+                # (float parse failures, malformed cursor rows, etc.).
+                # The original silent-skip caught these under a single
+                # ``except Exception`` and continued with default soil
+                # values; preserve that behavior so a row-parse failure
+                # does not abort the whole HWSD extraction. The
+                # narrower ``pyodbc.Error`` carve-out above still
+                # captures connection / driver issues with a more
+                # specific log line.
+                logger.warning(f"pyodbc fallback runtime error: {e}")
         except Exception as e:
             logger.warning(f"HWSD database loading failed: {e}")
 
@@ -1760,6 +1812,17 @@ class AceaTranslator(AceaTranslatorBase):
                     input_levels=['High', 'Low'],
                 )
                 logger.info(f"Downloaded and copied {len(output_files)} GAEZ files")
+            except (ImportError, ModuleNotFoundError):
+                # Mirror the climate-source carve-outs (executor.py +
+                # tamsat.py + agera5.py): an undeclared / vendor-build-
+                # broken transitive dep is a configuration error, not
+                # a runtime data error. Letting it surface as ``GAEZ
+                # download failed: {e}`` would re-create the silent-
+                # skip class the F-AL substrate-hardening sweep
+                # closed at the GAEZDownloader.._download_with_retry
+                # entry. Per durable lesson #6 + #20, propagate so
+                # pip / CI / startup surfaces the missing dep loudly.
+                raise
             except Exception as e:
                 logger.warning(f"GAEZ download failed: {e}")
 

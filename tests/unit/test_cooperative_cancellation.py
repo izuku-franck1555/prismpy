@@ -356,8 +356,15 @@ class TestCarveOutRegression:
         # 1866 → 1878 after Sprint D.1 commit 9 extended the
         # ``_retrieve_hwsd_for_grid`` docstring with the AC-4
         # tuple-return contract. Then 1878 → 1879 after Sprint
-        # E.0 imported WarningCategory at module top.
-        ("src/prismpy/pipeline/executor.py", 1879),
+        # E.0 imported WarningCategory at module top. Then
+        # 1879 → 1899 after the F-AL substrate-hardening sweep
+        # added ``except (ImportError, ModuleNotFoundError)``
+        # carve-outs to the TAMSAT + AgERA5 download blocks in
+        # ``_load_climate_data`` (~10 lines apiece). Then
+        # 1899 → 1910 after the F-AL scope-extension added an
+        # ``except (ImportError, ModuleNotFoundError)`` carve-out
+        # to the pygadm fallback in ``_execute_retrieve`` (~11 lines).
+        ("src/prismpy/pipeline/executor.py", 1910),
         # HWSD per-cell sampling inside CRAFT translator
         ("src/prismpy/translators/craft/translator.py", 1692),
         # pygadm fallback inside _execute_retrieve: local pygadm import
@@ -393,7 +400,15 @@ class TestCarveOutRegression:
         # commit 2 site-migrated the HWSD remap default-cause
         # to ``WarningCategory.SOIL_NO_HWSD_COVERAGE.value``
         # (multi-line argument + WarningCategory import on top).
-        ("src/prismpy/pipeline/executor.py", 2675),
+        # Then 2675 → 2695 after the F-AL substrate-hardening
+        # sweep added ``except (ImportError, ModuleNotFoundError)``
+        # carve-outs to the TAMSAT + AgERA5 download blocks in
+        # ``_load_climate_data`` (~10 lines apiece, ~20 lines
+        # cumulative shift forward). Then 2695 → 2706 after the
+        # F-AL scope-extension added an ``except (ImportError,
+        # ModuleNotFoundError)`` carve-out to the pygadm fallback
+        # in ``_execute_retrieve`` (~11 lines).
+        ("src/prismpy/pipeline/executor.py", 2706),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed

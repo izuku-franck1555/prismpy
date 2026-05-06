@@ -291,21 +291,26 @@ def test_count_agera5_stage_files_handles_missing_dirs(tmp_path, monkeypatch):
     }
 
 
-def test_phase_monitor_does_not_reference_output_dir():
-    """V2-22a 1.5 route-back — structural negative assertion.
+def test_phase_monitor_reads_from_output_dir():
+    """Post-vendor save_path forwarding — structural positive
+    assertion.
 
-    `_phase_monitor`'s body must NOT reference the `output_dir` Name at
-    all. The SARRA_data_download library writes to CWD-relative paths
-    (`../data/`) regardless of the save_path argument, so file counts
-    that read from `output_dir / ...` always return zero. The pre-fix
-    code had `dl_dir = output_dir / '0_downloads'` (plus ext_dir and
-    conv_dir variants), which is exactly the bug this test locks
-    against.
+    The vendored ``download_AgERA5_year`` now propagates ``save_path``
+    through every nested call, so each pipeline stage writes under the
+    per-region ``output_dir`` instead of the CWD-relative ``../data/``
+    tree the upstream copy used. ``_phase_monitor`` must read file
+    counts from the same ``output_dir`` the executor passed in;
+    binding to the legacy ``Path("../data")`` would read zeros and pin
+    the var counter at 1/6 for the entire download phase the way the
+    pre-vendor code did before the V2-22a 1.5 route-back.
 
-    This is a negative structural check — it catches a refactor that
-    reintroduces `output_dir / '...stage_subdir...'` inside
-    `_phase_monitor`, even if the refactor happens to pass the
-    positive binding test above by accident."""
+    The previous V2-22a 1.5 route-back test (locked against
+    ``output_dir`` references) is inverted here because the
+    underlying bug it guarded against — the vendor ignoring
+    ``save_path`` and writing to ``../data/`` — has been fixed at the
+    vendor layer. ``stages_base = output_dir`` is the new ground
+    truth.
+    """
     src_path = _agera5_source_path()
     assert src_path.exists(), f'agera5.py not found at {src_path}'
     tree = ast.parse(src_path.read_text())
@@ -319,18 +324,31 @@ def test_phase_monitor_does_not_reference_output_dir():
         '_phase_monitor FunctionDef not found in agera5.py'
     )
 
-    offenders = []
+    references = []
     for node in ast.walk(phase_monitor_node):
         if isinstance(node, ast.Name) and node.id == 'output_dir':
-            offenders.append(node.lineno)
+            references.append(node.lineno)
 
-    if offenders:
-        raise AssertionError(
-            'V2-22a 1.5 route-back violation — _phase_monitor references '
-            f'`output_dir` at agera5.py lines {offenders}. The '
-            'SARRA_data_download library writes to CWD-relative paths; '
-            '_phase_monitor must read file counts from Path("../data") '
-            '(via _count_agera5_stage_files), not from the per-run '
-            'output_dir. Reading from output_dir returns zeros and pins '
-            'the var counter at 1/6 for the entire download phase.'
-        )
+    assert references, (
+        'Post-vendor save_path forwarding violation — _phase_monitor '
+        'no longer references `output_dir`. The vendored '
+        '``download_AgERA5_year`` now writes under the per-region '
+        '``output_dir``, and the monitor must read from the same '
+        'directory; binding to ``Path("../data")`` reads zeros for '
+        'every stage. Restore ``stages_base = output_dir`` (or an '
+        'equivalent reference) inside _phase_monitor.'
+    )
+
+    legacy_string_offenders = []
+    for node in ast.walk(phase_monitor_node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if node.value == '../data' or node.value.startswith('../data/'):
+                legacy_string_offenders.append((node.lineno, node.value))
+
+    assert not legacy_string_offenders, (
+        'Post-vendor save_path forwarding violation — _phase_monitor '
+        f'still references the legacy CWD-relative path: '
+        f'{legacy_string_offenders}. The vendored library no longer '
+        'writes to ``../data/``; the monitor should read from '
+        '``output_dir`` instead.'
+    )
