@@ -75,6 +75,15 @@ dependencies = [
     # ``~/.cdsapirc`` runtime credential remains a runtime concern;
     # only declaring the import-time dep is a configuration concern.
     "cdsapi>=0.6.0",
+    # pygadm provides the GADM administrative-boundary download
+    # fallback that the executor invokes when a region's local GADM
+    # shapefile cannot load (executor.py invokes ``pygadm.Names`` /
+    # ``pygadm.Items`` to resolve country + admin level). Previously
+    # undeclared — present in the dev OUTER venv via an editable
+    # install but missing from the CI-isolated venv that surfaced
+    # the silent-skip class. Declaring it required keeps fresh
+    # installs from inheriting the silent-fallback path.
+    "pygadm>=0.5,<1.0",
 ]
 
 [project.optional-dependencies]
@@ -88,8 +97,20 @@ dev = [
 viz = [
     "matplotlib>=3.7.0",
 ]
+# pyodbc is the platform-specific Microsoft Access ODBC fallback the
+# ACEA translator uses to read HWSD v2.0 ``.mdb`` files when the
+# preferred ``mdbtools`` system package is absent. Default installs
+# rely on ``mdbtools`` (``brew install mdbtools`` on macOS,
+# ``apt-get install mdbtools`` on Linux). Users who run on Windows or
+# in environments without mdbtools opt into the fallback via
+# ``pip install prismpy[acea-mdb]``; the ACEA translator surfaces a
+# fail-loud ``ModuleNotFoundError`` naming both options when neither
+# is available, replacing the previous silent-skip path.
+acea-mdb = [
+    "pyodbc>=5.0,<6.0",
+]
 all = [
-    "prismpy[dev,viz]",
+    "prismpy[dev,viz,acea-mdb]",
 ]
 
 [project.scripts]
@@ -131,6 +152,12 @@ include = ["prismpy*"]
 "prismpy.vendor.sarra_data_download" = [
     "LICENSE",
 ]
+# The vendored ``hwsd_extraction`` helper has no upstream LICENSE
+# (internal CIRAD ACEA toolkit, not on PyPI). The Python source
+# ships under ``prismpy/src/prismpy/vendor/hwsd_extraction/`` and
+# is picked up by the ``include = ["prismpy*"]`` package finder
+# automatically; no additional ``package-data`` glob is required
+# unless future revisions add non-Python data alongside the source.
 
 [tool.black]
 line-length = 100
