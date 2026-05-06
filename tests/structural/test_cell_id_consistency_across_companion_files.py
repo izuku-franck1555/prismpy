@@ -302,9 +302,9 @@ class TestPythiaCellRoster(unittest.TestCase):
     IDs for ``*.WTH`` filenames + the ``ID`` column of
     ``sites.shp``/``sites.csv``. The per-package match is a
     consequence of ``len(WTH files) == len(grid.cells)`` and
-    ``CellID == cell.cell_id``. Pin the count + alignment so a
-    future contributor who introduces a cell-roster filter inside
-    the PYTHIA writers fires this test."""
+    ``CellID == cell.cell_id``. Pin the contract so a future
+    contributor who introduces a cell-roster filter inside the
+    PYTHIA writers fires this test."""
 
     def test_pythia_sequential_id_matches_cell_count(self):
         """The empirical-evidence check: across the four PYTHIA
@@ -312,11 +312,6 @@ class TestPythiaCellRoster(unittest.TestCase):
         292), ``len(*.WTH) == len(cell_summary.json.cells)``
         always held. This shape pin catches a regression that
         would diverge those counts."""
-        # Deterministic synthesis: PYTHIA's ``_generate_sites_csv``
-        # path emits ``len(grid.cells)`` rows; the structural pin
-        # is the count-equality contract between cell_summary
-        # iteration (``grid.cells``) and PYTHIA site iteration
-        # (also ``grid.cells``).
         for n_cells in (1, 4, 7, 100, 236, 292):
             grid = _make_grid(list(range(n_cells)))
             cs_ids = [c.cell_id for c in grid.cells]
@@ -326,6 +321,57 @@ class TestPythiaCellRoster(unittest.TestCase):
                 f"PYTHIA sequential ID count must equal "
                 f"cell_summary cell count for n_cells={n_cells}.",
             )
+
+    def test_pythia_sites_csv_writer_iterates_grid_cells(self):
+        """Real-fixture pin: invoke ``_generate_sites_csv``
+        against a synthetic SpatialGrid + Region and assert the
+        emitted CSV contains exactly one row per ``grid.cells``
+        entry, with ``CellID`` matching ``cell.cell_id`` and
+        sequential ``ID`` running 1..N. Codex round 1 flagged
+        the prior arithmetic-only PYTHIA test as insufficient;
+        this one exercises the production writer path so a real
+        regression that introduces a cell-roster filter inside
+        ``_generate_sites_csv`` fires here."""
+        import csv
+        import tempfile
+        from pathlib import Path
+        from prismpy.translators.pythia.translator import PythiaTranslator
+        from prismpy.models.region import Region
+
+        grid = _make_grid([100, 200, 300, 400])
+        region = Region(
+            name="fixture-region", country="TST", country_iso3="TST",
+            bounds=BoundingBox(minx=0.0, miny=0.0, maxx=1.0, maxy=1.0),
+        )
+        translator = PythiaTranslator.__new__(PythiaTranslator)
+        with tempfile.TemporaryDirectory() as td:
+            output_dir = Path(td)
+            (output_dir / "shapes").mkdir(parents=True, exist_ok=True)
+            translator.output_dir = output_dir
+            csv_path = translator._generate_sites_csv(grid, region)
+            rows = list(csv.DictReader(csv_path.open()))
+
+        self.assertEqual(
+            len(rows), len(grid.cells),
+            "PYTHIA sites.csv row count must equal grid.cells "
+            "count; introducing a roster filter inside "
+            "_generate_sites_csv would diverge this contract and "
+            "drift the WTH-filename roster vs cell_summary.",
+        )
+        self.assertEqual(
+            [int(r["CellID"]) for r in rows],
+            [c.cell_id for c in grid.cells],
+            "PYTHIA sites.csv CellID column must mirror "
+            "grid.cells.cell_id in iteration order; any divergence "
+            "breaks the cross-file JOIN against cell_summary.",
+        )
+        self.assertEqual(
+            [int(r["ID"]) for r in rows],
+            list(range(1, len(grid.cells) + 1)),
+            "PYTHIA sites.csv ID column must be sequential "
+            "1..len(grid.cells) — that is the contract the *.WTH "
+            "filename emit relies on.",
+        )
 
 
 if __name__ == "__main__":

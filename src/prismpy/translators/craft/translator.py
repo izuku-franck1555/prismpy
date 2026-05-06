@@ -2967,10 +2967,17 @@ class CraftTranslator(CraftTranslatorBase):
         # Get management config
         management = getattr(self.config, 'management', None)
 
-        # Count cells and soil profiles
-        n_cells = len(self._valid_cellids) if self._valid_cellids else (
-            len(data.grid.cells) if data.grid else 0
-        )
+        # Count cells and soil profiles. F-AK: read from data.grid.cells
+        # (the canonical post-harmonize roster the schema, soil mask,
+        # crop mask, cultivar, and cell_summary writers all iterate
+        # post-fix) rather than from self._valid_cellids. The latter
+        # was populated from the GADM resolver's pre-intersect output
+        # and could over-report by the same 13-28% the F-AK audit
+        # surfaced — the README would advertise the GADM-padded count
+        # while the package itself shipped the smaller intersected
+        # set. Routing through data.grid.cells keeps the README's
+        # "Grid Cells" tile in lockstep with the actual file count.
+        n_cells = len(data.grid.cells) if data.grid else 0
         n_soil_profiles = len(data.soil) if data.soil else 0
 
         # V2-19b-fix Finding 7: determine soil source from ACTUAL data, not
