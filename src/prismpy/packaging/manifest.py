@@ -3,6 +3,29 @@ Manifest Generation for prismpy packages.
 
 Creates manifest.json files with file inventory and SHA256 checksums
 for reproducibility and integrity verification.
+
+Manifest content is deterministic: no datetime stamps inside
+``manifest.json`` content, no host-specific paths, no build-epoch
+fields, no random-seed-dependent values. The same package, generated
+twice on the same pinned prismpy code, produces byte-identical
+``manifest.json`` files. Filesystem mtimes are still recorded by the
+OS on the actual files — that's a filesystem concern, distinct from
+manifest CONTENT.
+
+Determinism details:
+
+* ``json.dump`` is called with ``sort_keys=True`` and
+  ``ensure_ascii=False``. Keys appear in canonical order; UTF-8 region
+  names (e.g., ``"Ménoua"``) round-trip without ``\\uXXXX`` escapes.
+* Output is written via ``Path.write_bytes`` so platforms with
+  CRLF text-mode translation (Windows) emit LF newlines too. No BOM.
+* Per-file entries omit the ``modified`` filesystem mtime — content
+  vs. filesystem separation. SHA-256 + relative path + size identify
+  the file unambiguously without tying the manifest to wall-clock
+  metadata that drifts every regeneration.
+* The top-level ``generated_at`` field is omitted. The package's
+  reproducibility story rests on the SHA hashes, not on a wall-clock
+  stamp.
 """
 
 import hashlib
@@ -104,11 +127,13 @@ def get_file_info(
     file_path = Path(file_path)
     rel_path = str(file_path.relative_to(base_path)) if base_path else str(file_path)
 
+    # Filesystem mtime is intentionally NOT recorded — it's a
+    # filesystem concern, not manifest content. Including it would
+    # break byte-identical regeneration (mtime advances every write).
     return {
         "path": rel_path,
         "sha256": compute_sha256(file_path),
         "size_bytes": file_path.stat().st_size,
-        "modified": datetime.fromtimestamp(file_path.stat().st_mtime).isoformat()
     }
 
 
@@ -184,7 +209,10 @@ def create_manifest(
         "generator": "prismpy",
         "generator_version": "1.0.0",
         "platform": platform,
-        "generated_at": datetime.now().isoformat(),
+        # ``generated_at`` is intentionally omitted — wall-clock stamps
+        # break byte-identical regeneration (every run has a different
+        # ``datetime.now()``). The package's reproducibility story
+        # rests on the per-file SHA-256 + the manifest's own SHA-256.
 
         # Project info from config
         "project_name": project_config.get("project_name", "unknown"),
@@ -246,7 +274,22 @@ def save_manifest(
     output_path: Union[str, Path]
 ) -> Path:
     """
-    Save manifest to JSON file.
+    Save manifest to JSON file with deterministic byte output.
+
+    The serialization is fully canonicalized:
+
+    * Top-level keys and every nested object are sorted lexicographically
+      (``sort_keys=True``).
+    * Non-ASCII characters round-trip natively (``ensure_ascii=False``).
+      Region names like ``"Ménoua"`` appear unescaped, and the bytes are
+      stable — no ``\\u00e9`` vs. ``é`` drift between Python versions.
+    * Output is written via ``Path.write_bytes`` so platforms with
+      automatic newline translation (Windows text mode) still emit LF
+      newlines. UTF-8 encoding without BOM.
+
+    Combined with ``create_manifest`` omitting wall-clock stamps and
+    filesystem mtimes, the result is byte-identical across re-runs on
+    identical inputs and identical pinned prismpy code.
 
     Args:
         manifest: Manifest dictionary
@@ -258,8 +301,13 @@ def save_manifest(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(output_path, 'w') as f:
-        json.dump(manifest, f, indent=2)
+    body = json.dumps(
+        manifest,
+        indent=2,
+        sort_keys=True,
+        ensure_ascii=False,
+    ).encode("utf-8")
+    output_path.write_bytes(body)
 
     return output_path
 
