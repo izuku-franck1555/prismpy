@@ -59,12 +59,63 @@ _BUCKET_INTEGER_MAP: Dict[WarningBucket, int] = {
 }
 
 
+# The pipeline's per-cell warning emit at
+# ``executor.py:_category_for_check_id`` populates
+# ``cell_summary.cells[i].failed_checks[j].category`` with one of
+# six dimension-toggle category strings declared in
+# ``executor.py::_CATEGORY_FROM_PREFIX``. Those strings are NOT
+# members of :class:`WarningCategory` (which carries a
+# tighter-semantics 10-member taxonomy used at the zone-level +
+# Sprint F+ paths) — they're a parallel, looser vocabulary
+# intended for the cockpit's left-rail dimension filter.
+#
+# Both vocabularies coexist intentionally: the dimension-toggle
+# names are coarse UI buckets ("value_range" covers tmax-tmin
+# inversions and unit-of-measure outliers under one umbrella);
+# :class:`WarningCategory` enum values are precise causes
+# ("climate_envelope_tail" vs "physiological_bound_violation").
+# The cockpit consumes both — per-cell rows arrive via the
+# dimension-toggle vocabulary, zone-level rows via the
+# enum vocabulary.
+#
+# Each dimension-toggle category routes to bucket 3
+# (TRUE_EXCLUDE) by default — every per-cell dimension-toggle
+# category indicates the cell carries a defect that disqualifies
+# it from analysis. Refinement to bucket 4 (INTERPOLATABLE) for
+# short-gap variants of ``temporal`` / ``coverage_per_cell`` is
+# Sprint E.2 scope; until then, the conservative default is to
+# exclude (the no-data-cooking honest-signal posture per
+# ``feedback_no_data_cooking.md`` — silent reclassification to
+# a less-severe bucket would surface fewer warnings to the user
+# at the cost of trust).
+#
+# A structural pin at
+# ``tests/structural/test_cockpit_dimension_categories_pinned.py``
+# AST-walks ``_CATEGORY_FROM_PREFIX`` + asserts every emitted
+# category value is a key here, so a future executor edit that
+# adds a new dimension-toggle category without updating this
+# map fails loud at structural-test time rather than silently
+# falling back to ``UnknownCategoryError`` on the first
+# real-data project that emits the new category.
+_DIMENSION_BUCKET_MAP: Dict[str, int] = {
+    "value_range": 3,
+    "cross_variable": 3,
+    "temporal": 3,
+    "soil_completeness": 3,
+    "region_specific_bounds": 3,
+    "coverage_per_cell": 3,
+}
+
+
 class UnknownCategoryError(ValueError):
     """A category emitted by the producer is not in
-    :data:`WARNING_BUCKET_MAP`. Indicates substrate drift
-    between Sprint E.0's enum declaration and the validator
-    emit; surfaces here at manifest-build time rather than
-    silently dropping the entry from the cockpit."""
+    :data:`WARNING_BUCKET_MAP` AND not in
+    :data:`_DIMENSION_BUCKET_MAP`. Indicates substrate drift
+    between Sprint E.0's enum declaration, the executor's
+    dimension-toggle vocabulary at ``_CATEGORY_FROM_PREFIX``,
+    and the validator emit; surfaces here at manifest-build
+    time rather than silently dropping the entry from the
+    cockpit."""
 
 
 @dataclass(frozen=True)
@@ -119,19 +170,48 @@ class CockpitManifestEntry:
 def _category_to_bucket_integer(category_value: str) -> int:
     """Resolve the bucket integer for a category value.
 
-    Raises :class:`UnknownCategoryError` when the category
-    is not declared in :data:`WARNING_BUCKET_MAP`. Caller
-    decides whether to skip the entry or fail the build.
+    Two vocabularies coexist (intentionally — see
+    :data:`_DIMENSION_BUCKET_MAP` docstring for why):
+
+    1. The dimension-toggle vocabulary at
+       ``executor.py::_CATEGORY_FROM_PREFIX`` — six coarse UI
+       categories the cockpit's left-rail dimension filter
+       reads. Per-cell warnings carry these.
+    2. :class:`WarningCategory` enum — the tighter
+       Sprint E.0 taxonomy. Zone-level + Sprint F+ warnings
+       carry these.
+
+    Look up the dimension-toggle vocabulary first (it covers
+    the per-cell pivot path that produces the bulk of cockpit
+    rows on real projects — pre-fix, every per-cell warning
+    from a fresh project tripped the
+    :class:`UnknownCategoryError` path because the
+    dimension-toggle category strings are not enum members,
+    triggering the cockpit's pre-E.0 fallback banner on
+    valid projects).
+
+    Fall back to :class:`WarningCategory` for the zone-level
+    path. Raise :class:`UnknownCategoryError` only when
+    neither vocabulary recognizes the category — surfaces
+    substrate drift at manifest-build time rather than
+    silently dropping the entry.
     """
+    if category_value in _DIMENSION_BUCKET_MAP:
+        return _DIMENSION_BUCKET_MAP[category_value]
     try:
         category_enum = WarningCategory(category_value)
     except ValueError as exc:
         raise UnknownCategoryError(
-            f"Category {category_value!r} is not a "
-            f"WarningCategory enum value; the producer side "
-            f"emitted an unrecognized warning. Reconcile with "
-            f"prismpy.warnings.categories.WarningCategory + "
-            f"WARNING_BUCKET_MAP."
+            f"Category {category_value!r} is neither a "
+            f"WarningCategory enum value nor a per-cell "
+            f"dimension-toggle category. Reconcile with "
+            f"prismpy.warnings.categories.WarningCategory "
+            f"and prismpy.pipeline.executor."
+            f"_CATEGORY_FROM_PREFIX (the structural pin at "
+            f"tests/structural/"
+            f"test_cockpit_dimension_categories_pinned.py "
+            f"keeps the dimension vocabulary in sync with "
+            f"_DIMENSION_BUCKET_MAP)."
         ) from exc
     bucket = WARNING_BUCKET_MAP.get(category_enum)
     if bucket is None:  # pragma: no cover — guarded by enum

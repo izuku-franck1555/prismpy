@@ -436,5 +436,134 @@ class TestEmptyManifestPaths(unittest.TestCase):
         )
 
 
+class TestDimensionToggleVocabulary(unittest.TestCase):
+    """The pipeline's per-cell pivot at
+    ``executor.py:_category_for_check_id`` populates
+    ``cell_summary.cells[i].failed_checks[j].category`` with
+    the six dimension-toggle category strings declared in
+    ``executor.py::_CATEGORY_FROM_PREFIX``. Those strings are
+    NOT members of :class:`prismpy.warnings.WarningCategory`;
+    the cockpit's ``_category_to_bucket_integer`` lookup must
+    recognize them via :data:`_DIMENSION_BUCKET_MAP` (and
+    route to bucket 3 TRUE_EXCLUDE) instead of raising
+    :class:`UnknownCategoryError`. Pre-fix, every per-cell
+    warning on a fresh project tripped the unknown-category
+    path; the user saw the pre-E.0 fallback banner on a
+    valid project.
+    """
+
+    def _producer_shape(self, category: str, cells: list[str]) -> dict:
+        """Build a ``cell_summary`` payload that mirrors the
+        executor's per-cell pivot output: each cell carries a
+        ``failed_checks`` list, each check carries the
+        dimension-toggle ``category`` string."""
+        return {
+            "cells": [
+                {
+                    "cell_id": cid,
+                    "failed_checks": [
+                        {
+                            "check_id": f"{category}_check",
+                            "category": category,
+                        },
+                    ],
+                }
+                for cid in cells
+            ],
+        }
+
+    def test_value_range_routes_to_bucket_3(self):
+        manifest = build_cockpit_warning_manifest(
+            parent_run_id="r1",
+            cell_summary=self._producer_shape(
+                "value_range", ["c1", "c2"],
+            ),
+        )
+        self.assertEqual(len(manifest), 1)
+        self.assertEqual(manifest[0].bucket, 3)
+        self.assertEqual(manifest[0].category, "value_range")
+        self.assertEqual(
+            manifest[0].affected_cells, ("c1", "c2"),
+        )
+
+    def test_cross_variable_routes_to_bucket_3(self):
+        manifest = build_cockpit_warning_manifest(
+            parent_run_id="r1",
+            cell_summary=self._producer_shape(
+                "cross_variable", ["c1"],
+            ),
+        )
+        self.assertEqual(manifest[0].bucket, 3)
+        self.assertEqual(manifest[0].category, "cross_variable")
+
+    def test_temporal_routes_to_bucket_3(self):
+        manifest = build_cockpit_warning_manifest(
+            parent_run_id="r1",
+            cell_summary=self._producer_shape(
+                "temporal", ["c1"],
+            ),
+        )
+        self.assertEqual(manifest[0].bucket, 3)
+        self.assertEqual(manifest[0].category, "temporal")
+
+    def test_soil_completeness_routes_to_bucket_3(self):
+        manifest = build_cockpit_warning_manifest(
+            parent_run_id="r1",
+            cell_summary=self._producer_shape(
+                "soil_completeness", ["c1"],
+            ),
+        )
+        self.assertEqual(manifest[0].bucket, 3)
+        self.assertEqual(
+            manifest[0].category, "soil_completeness",
+        )
+
+    def test_region_specific_bounds_routes_to_bucket_3(self):
+        manifest = build_cockpit_warning_manifest(
+            parent_run_id="r1",
+            cell_summary=self._producer_shape(
+                "region_specific_bounds", ["c1"],
+            ),
+        )
+        self.assertEqual(manifest[0].bucket, 3)
+        self.assertEqual(
+            manifest[0].category, "region_specific_bounds",
+        )
+
+    def test_coverage_per_cell_routes_to_bucket_3(self):
+        manifest = build_cockpit_warning_manifest(
+            parent_run_id="r1",
+            cell_summary=self._producer_shape(
+                "coverage_per_cell", ["c1"],
+            ),
+        )
+        self.assertEqual(manifest[0].bucket, 3)
+        self.assertEqual(
+            manifest[0].category, "coverage_per_cell",
+        )
+
+    def test_unknown_category_diagnostic_names_both_vocabularies(self):
+        """Negative case: a category string that is neither a
+        :class:`WarningCategory` member NOR a
+        :data:`_DIMENSION_BUCKET_MAP` key MUST still raise
+        :class:`UnknownCategoryError`. The diagnostic must
+        name BOTH vocabularies so a substrate-drift fix
+        knows which side to update."""
+        with self.assertRaises(UnknownCategoryError) as cm:
+            build_cockpit_warning_manifest(
+                parent_run_id="r1",
+                cell_summary=self._producer_shape(
+                    "snowpack_completeness_BOGUS",
+                    ["c1"],
+                ),
+            )
+        diag = str(cm.exception)
+        self.assertIn("snowpack_completeness_BOGUS", diag)
+        # Diagnostic must reference both vocabularies so
+        # the contributor knows the surfaces to reconcile.
+        self.assertIn("WarningCategory", diag)
+        self.assertIn("dimension-toggle", diag)
+
+
 if __name__ == "__main__":
     unittest.main()
