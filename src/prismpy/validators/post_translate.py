@@ -773,10 +773,25 @@ def _validate_sarra_py_geotiffs(
         checks.append({
             "check": "post_translate_completeness_sarra_py",
             "scope": "platform",
-            "result": "warning",
+            # SARRA-Py needs all four climate variables (rainfall +
+            # tmean / tmax / tmin + solar radiation) to drive a
+            # simulation; missing any one leaves the package
+            # unrunnable. Surface as fail rather than warning so the
+            # ``scientific.overall_result`` rolls up to ``fail``,
+            # the cert--fail honest-signal banner fires on the
+            # /results/ page, and a researcher does not download a
+            # package that DSSAT/CRAFT cannot consume. The
+            # severity-bump replaces the prior warning emit; the
+            # only consumer of the check that reads severity is the
+            # methods-text generator
+            # (``methods_text_placeholder_catalog._post_translate_n_flagged_records``)
+            # which keys on ``check_id`` + ``details.missing_variables``,
+            # not on severity.
+            "result": "fail",
             "summary": (
                 f"Partial climate data: {found_vars}/{expected_vars} "
-                f"variables present ({total_files} files)"
+                f"variables present ({total_files} files); SARRA-Py "
+                "cannot run without all four variables"
             ),
             "details": {
                 "platform": "sarra_py",
