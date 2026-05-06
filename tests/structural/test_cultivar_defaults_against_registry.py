@@ -124,6 +124,17 @@ def _extract_dict_assignment(
     value type and returns the dict; a non-literal value raises so
     the test fails loudly with the line number rather than silently
     skipping a drifted entry.
+
+    **Single-literal-assignment assumption**: the walker stops at the
+    first matching assignment and does NOT inspect later subscript
+    mutations (``D[k] = v``), augmented assignments (``D |= ...``),
+    walrus operators (``(D := {...})``), or aliased rewrites
+    (``other_name = D; other_name['x'] = ...``). The translator dicts
+    rely on the literal-only style; a future refactor that mutates a
+    default-cultivar dict post-declaration will need to extend the
+    walker to model those forms. Documenting the assumption here so
+    a future contributor sees the limitation before relying on the
+    walker as a stronger safety net than it is.
     """
     tree = ast.parse(py_file.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
