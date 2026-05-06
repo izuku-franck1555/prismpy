@@ -45,6 +45,13 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CLIMATE_SOURCE_DIR = _REPO_ROOT / "src" / "prismpy" / "sources" / "climate"
 _SOURCES_DIR = _REPO_ROOT / "src" / "prismpy" / "sources"
+# Whole-tree AST scan target. The previous ``_SOURCES_DIR`` scope
+# missed undeclared imports in ``pipeline/`` and ``translators/``
+# (pygadm at ``executor.py``, hwsd_extraction + pyodbc at
+# ``acea/translator.py``). The expanded scope covers every retrieve /
+# fallback / extraction path regardless of which directory it lives
+# in.
+_SRC_PRISMPY_DIR = _REPO_ROOT / "src" / "prismpy"
 _VENDOR_DIR = _REPO_ROOT / "src" / "prismpy" / "vendor"
 _PYPROJECT = _REPO_ROOT / "pyproject.toml"
 
@@ -443,17 +450,30 @@ class TestSourceImportsDeclared(unittest.TestCase):
         cls.optional = _optional_dep_names()
 
     def test_every_try_except_import_in_sources_is_declared(self):
-        """Walk every ``.py`` module under ``sources/`` and assert the
-        top-level package of each guarded external import is declared
-        in pyproject.toml. Vendored prismpy.vendor.* imports are
-        internal and pass the ``_is_external`` filter automatically."""
+        """Walk every ``.py`` module under ``src/prismpy/`` and assert
+        the top-level package of each guarded external import is
+        declared in pyproject.toml. Vendored prismpy.vendor.* imports
+        are internal and pass the ``_is_external`` filter
+        automatically.
+
+        The scope includes ``pipeline/`` and ``translators/`` so that
+        undeclared guarded imports in non-``sources/`` directories
+        (pygadm, hwsd_extraction, pyodbc) are caught by the same pin.
+        Without this whole-tree scope an audit of the OLD-vs-NEW
+        venv diff missed three packages that prismpy imports outside
+        ``sources/``.
+        """
         acceptable = self.declared | self.optional
 
         problems: list[str] = []
-        py_files = sorted(_SOURCES_DIR.rglob("*.py"))
+        py_files = sorted(_SRC_PRISMPY_DIR.rglob("*.py"))
+        # Skip the vendored tree itself — vendored modules are part of
+        # prismpy's distribution and their internal imports are
+        # upstream's concern, not declared in prismpy's pyproject.
+        py_files = [p for p in py_files if _VENDOR_DIR not in p.parents]
         self.assertGreater(
             len(py_files), 0,
-            f"expected at least one .py file under {_SOURCES_DIR}",
+            f"expected at least one .py file under {_SRC_PRISMPY_DIR}",
         )
         for py_file in py_files:
             for ext in sorted(_collect_guarded_imports(py_file)):
@@ -482,9 +502,10 @@ class TestSourceImportsDeclared(unittest.TestCase):
 
 class TestVendoredPackagesPresent(unittest.TestCase):
     """Each vendored package under ``prismpy/vendor/`` must have the
-    expected source files (and LICENSE) on disk. Without this pin a
-    refactor that deletes the vendored source would be caught only at
-    runtime — at first AgERA5 call — instead of at structural-test
+    expected source files (and LICENSE where one was provided
+    upstream) on disk. Without this pin a refactor that deletes the
+    vendored source would be caught only at runtime — at first
+    AgERA5 / HWSD-extraction call — instead of at structural-test
     time. Per durable lesson #22, the wheel-contents pin lives in
     pyproject.toml ``[tool.setuptools.package-data]``; this test is
     its source-tree counterpart."""
@@ -515,6 +536,33 @@ class TestVendoredPackagesPresent(unittest.TestCase):
             "executor.py + agera5.py + tamsat.py would surface a "
             "missing module as a fail-loud ModuleNotFoundError at "
             "first AgERA5 call. Restore the missing files:\n  "
+            + "\n  ".join(missing),
+        )
+
+    def test_hwsd_extraction_vendor_files_present(self):
+        """The vendored hwsd_extraction package must include
+        ``__init__.py`` (re-exporter) and ``_module.py`` (helper
+        source). The upstream ACEA toolkit shipped without a LICENSE
+        file, so no LICENSE pin here; the attribution rationale lives
+        in the package ``__init__.py`` docstring instead."""
+        vendor_root = _VENDOR_DIR / "hwsd_extraction"
+        expected_files = [
+            "__init__.py",
+            "_module.py",
+        ]
+        missing: list[str] = []
+        for name in expected_files:
+            path = vendor_root / name
+            if not path.exists():
+                missing.append(str(path.relative_to(_REPO_ROOT)))
+        self.assertEqual(
+            missing, [],
+            "Vendored hwsd_extraction package is incomplete. "
+            "acea/translator.py imports `from "
+            "prismpy.vendor.hwsd_extraction import "
+            "extract_hwsd_soil_data` and the previous "
+            "sys.path-shim fallback was removed when the helper was "
+            "vendored. Restore the missing files:\n  "
             + "\n  ".join(missing),
         )
 
