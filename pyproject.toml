@@ -49,6 +49,14 @@ dependencies = [
     "rasterio>=1.3,<2.0",
     "netCDF4>=1.6.0",
     "xarray>=2023.1,<2025.0",
+    # rioxarray registers the ``.rio`` accessor on xarray DataArrays
+    # via import side-effect; the TAMSAT Phase 2 ``.nc → .tif`` step
+    # consumes the accessor (``ds.rio.to_raster(...)``) and a missing
+    # rioxarray surfaces as a fail-loud ``ModuleNotFoundError`` that
+    # the climate retrieve broad-except path captures and reports as
+    # a TAMSAT download failure. Declaring it here keeps fresh venv
+    # installs from inheriting the silent-swallow path.
+    "rioxarray>=0.15.0",
     "requests>=2.31.0",
     "filelock>=3.12.0",
     "tqdm>=4.65.0",
