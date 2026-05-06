@@ -92,10 +92,14 @@ def download_AgERA5_data(area, selected_area, variables, mode="month", query=dt.
                 zip_path)
 
             print("Download OK")
-    # capture exception and display error and year
+    # post-vendor 2026-05-06 deviation: same fail-loud rationale as
+    # the ``download_AgERA5_data_alt`` retrieve catch — the upstream
+    # version printed and continued, hiding CDS-side errors. Re-raise
+    # so the caller observes the actual failure honestly.
     except Exception as e:
-        print("/!\ Download NOT OK for year",query_year)
+        print("/!\\ Download NOT OK for year",query_year)
         print(e)
+        raise
 
 
 
@@ -176,6 +180,15 @@ def download_AgERA5_data_alt(area, selected_area, variables, mode="month", query
             continue
 
         # Perform the download
+        # post-vendor 2026-05-06 deviation: the upstream version
+        # printed the CDS error and continued the loop, leaving the
+        # caller with no zip on disk and no exception to catch. The
+        # downstream extract/convert/calculate cascade then raised a
+        # FileNotFoundError 5 levels removed from the real cause,
+        # masking CDS-side issues (rate limit / bad bbox / queue
+        # timeout). Re-raising surfaces the actual failure honestly so
+        # prismpy's executor broad-except path can report it as the
+        # configuration error it is.
         try:
             c.retrieve(
                 'sis-agrometeorological-indicators',
@@ -185,6 +198,7 @@ def download_AgERA5_data_alt(area, selected_area, variables, mode="month", query
             print(f"Download completed: {zip_path}")
         except Exception as e:
             print(f"Download failed for {zip_path}. Error: {e}")
+            raise
 
 
 
@@ -214,16 +228,20 @@ def extract_AgERA5_data(area, selected_area, variables, mode="month", query=dt.t
             
             extraction_path = os.path.join(save_path,'1_extraction/AgERA5_'+selected_area+'/'+str(query_year)+"/"+variable[0]+'_'+variable[1]+'/')
             
-            try:
-                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                    zip_ref.extractall(extraction_path)
-            except:
-                pass
-        
+            # post-vendor 2026-05-06 deviation: the upstream version
+            # had ``except: pass`` here and printed "Extraction NOT
+            # OK" in the outer handler, swallowing the real
+            # FileNotFoundError when the zip never landed (because
+            # the retrieve step swallowed the CDS error). Re-raising
+            # both branches surfaces the actual failure.
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extraction_path)
+
         print("Extraction OK")
 
-    except :
-        print("/!\ Extraction NOT OK")
+    except Exception:
+        print("/!\\ Extraction NOT OK")
+        raise
 
 
 
@@ -263,8 +281,15 @@ def convert_AgERA5_netcdf_to_geotiff(area, selected_area, variables, query=dt.to
                 bT.rio.to_raster(os.path.join(conversion_path, filename))
 
 
-    except :
-        print("/!\ Conversion to GeoTIFFs NOT OK")
+    except Exception:
+        # post-vendor 2026-05-06 deviation: the upstream version had a
+        # bare ``except: print(...)`` here, which silently no-op'd the
+        # whole conversion stage when the upstream extraction had
+        # already failed. The downstream ET0 step then raised a
+        # FileNotFoundError 2 levels removed from the real cause.
+        # Re-raising preserves the failure chain.
+        print("/!\\ Conversion to GeoTIFFs NOT OK")
+        raise
 
 
 
@@ -505,9 +530,18 @@ variables = [
 ]
 
 def download_AgERA5_year(query_year, area, selected_area, save_path, version):
+    # post-vendor 2026-05-06 deviation: the upstream version of this
+    # helper accepts ``save_path`` and silently drops it before calling
+    # the four pipeline stages, so each stage falls back to its
+    # ``save_path="../data/"`` default and the whole pipeline writes to
+    # a CWD-relative tree regardless of where the caller asked. After
+    # vendoring, prismpy's per-region cache directory must be honored
+    # so concurrent regions do not contaminate each other and so the
+    # post-fail filesystem state matches the manifest. Forwarding
+    # ``save_path`` to every nested call closes that gap.
     query_date = datetime.date(query_year,1,1)
-    download_AgERA5_data_alt(area, selected_area, variables, mode="year", query=query_date)
-    extract_AgERA5_data(area, selected_area, variables, mode="year", query=query_date)
-    convert_AgERA5_netcdf_to_geotiff(area, selected_area, variables, query=query_date) 
-    calculate_AgERA5_ET0_and_save(area, selected_area, variables, query=query_date, version=version)
+    download_AgERA5_data_alt(area, selected_area, variables, mode="year", query=query_date, save_path=save_path)
+    extract_AgERA5_data(area, selected_area, variables, mode="year", query=query_date, save_path=save_path)
+    convert_AgERA5_netcdf_to_geotiff(area, selected_area, variables, query=query_date, save_path=save_path)
+    calculate_AgERA5_ET0_and_save(area, selected_area, variables, query=query_date, save_path=save_path, version=version)
     print("===== Query date",query_date,"all done ! =====")

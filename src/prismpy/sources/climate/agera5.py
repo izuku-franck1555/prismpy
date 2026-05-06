@@ -867,15 +867,17 @@ class AgERA5Source(DataSource):
             def _phase_monitor():
                 """Scan all 4 library stages + CDS state every 8s."""
                 prev_zips = 0
-                # V2-22a 1.5 route-back — the SARRA_data_download library
-                # writes stage files to a CWD-relative path regardless of
-                # the save_path argument, so file counts must read from
-                # Path("../data/"), not from the pipeline's per-run
-                # output_dir (which receives files only after the explicit
-                # relocation at retrieve_sarra_py's tail). Reading from
-                # output_dir returned zeros and pinned the var counter at
-                # 1/6 for the entire download phase in V2-22a/A verification.
-                stages_base = _P("../data")
+                # Post-vendor save_path forwarding — the vendored
+                # ``download_AgERA5_year`` now propagates ``save_path``
+                # through every nested call, so each stage writes
+                # under the per-region ``output_dir`` instead of a
+                # CWD-relative ``../data/`` tree. The previous binding
+                # was ``stages_base = Path("../data")`` to match the
+                # upstream-verbatim quirk where ``save_path`` was
+                # silently dropped; that quirk is fixed at the vendor
+                # layer now, so the monitor reads from the same
+                # ``output_dir`` the executor already passed in.
+                stages_base = output_dir
                 while not stop_monitor.wait(8):
                     try:
                         counts = _count_agera5_stage_files(
@@ -997,20 +999,18 @@ class AgERA5Source(DataSource):
 
             self.logger.info(f"AgERA5 {year} download complete.")
 
-        # SARRA_data_download writes final GeoTIFFs to a hardcoded path
-        # (../data/3_output/AgERA5_{region}/ relative to CWD, or under save_path).
-        # Check both locations and relocate to our cache directory.
+        # Post-vendor save_path forwarding — the vendored
+        # ``download_AgERA5_year`` writes stage outputs under the
+        # per-region ``output_dir`` instead of the CWD-relative
+        # ``../data/`` tree the upstream copy used. The relocated
+        # final GeoTIFFs land at ``output_dir / "3_output" /
+        # f"AgERA5_{region_name}"``; the legacy ``Path("../data/3_output")``
+        # fallback that previously bridged the CWD-relative quirk is
+        # retired.
         target_dir = output_dir / f"AgERA5_{region_name}"
-        hardcoded_dir = None
-        for candidate in [
-            output_dir / "3_output" / f"AgERA5_{region_name}",
-            Path("../data/3_output") / f"AgERA5_{region_name}",
-        ]:
-            if candidate.exists():
-                hardcoded_dir = candidate
-                break
+        hardcoded_dir = output_dir / "3_output" / f"AgERA5_{region_name}"
 
-        if hardcoded_dir:
+        if hardcoded_dir.exists():
             target_dir.mkdir(parents=True, exist_ok=True)
             total_relocated = 0
             for var_dir in hardcoded_dir.iterdir():
@@ -1024,14 +1024,15 @@ class AgERA5Source(DataSource):
                 self.logger.info(
                     f"Relocated {total_relocated} AgERA5 .tif files to {target_dir}"
                 )
-            # Clean up hardcoded directories
-            try:
-                shutil.rmtree(output_dir / "3_output", ignore_errors=True)
-                shutil.rmtree(output_dir / "2_conversion", ignore_errors=True)
-                shutil.rmtree(output_dir / "1_extraction", ignore_errors=True)
-                shutil.rmtree(output_dir / "0_downloads", ignore_errors=True)
-            except OSError:
-                pass
+            # Clean up the per-region stage directories so the cache
+            # only carries the relocated final outputs. ``ignore_errors``
+            # covers the case where one of the four stage dirs was
+            # never created (e.g., the vendor short-circuited before
+            # the conversion or output stage ran).
+            shutil.rmtree(output_dir / "3_output", ignore_errors=True)
+            shutil.rmtree(output_dir / "2_conversion", ignore_errors=True)
+            shutil.rmtree(output_dir / "1_extraction", ignore_errors=True)
+            shutil.rmtree(output_dir / "0_downloads", ignore_errors=True)
 
     def _validate_local_files(
         self,

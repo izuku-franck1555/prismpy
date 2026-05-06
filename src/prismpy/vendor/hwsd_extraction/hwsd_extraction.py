@@ -102,7 +102,11 @@ def export_mdb_table(mdb_path: str, table_name: str, output_csv: str = None) -> 
         if output_csv and os.path.exists(output_csv):
             try:
                 os.unlink(output_csv)
-            except:
+            except:  # noqa: E722  vendor-no-bare-except: allow-listed
+                # Best-effort cleanup of the mdb-export staging file.
+                # A failure here leaves a temp file behind but does
+                # not affect correctness of the parsed DataFrame; the
+                # operating system reaper handles the leftover.
                 pass
 
 

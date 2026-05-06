@@ -31,4 +31,51 @@ which depended on an editable install of the local clone at
 That arrangement silently broke after a venv migration when the
 editable install was not re-applied, so AgERA5 retrieval skipped 1/4
 climate variables on every fresh run. Vendoring closes that gap.
+
+DEVIATIONS FROM UPSTREAM (post-vendor 2026-05-06)
+=================================================
+
+The vendored ``get_AgERA5_data.py`` carries two corrections from the
+upstream SARRA-cropmodels copy. Both are documented at the
+modification site with an explanatory comment so a future side-by-
+side diff makes the deviations obvious. Authorization for these
+modifications was recorded under the project's open-access non-
+commercial mission directive (2026-05-06).
+
+1. ``download_AgERA5_year`` now forwards ``save_path`` to every
+   nested call (``download_AgERA5_data_alt``, ``extract_AgERA5_data``,
+   ``convert_AgERA5_netcdf_to_geotiff``,
+   ``calculate_AgERA5_ET0_and_save``). The upstream copy accepted
+   ``save_path`` and silently dropped it, so each stage fell back to
+   the default ``save_path="../data/"`` and the whole pipeline wrote
+   to a CWD-relative tree regardless of where the caller asked.
+   Forwarding lets prismpy's per-region cache directory survive the
+   handoff so concurrent regions do not contaminate each other.
+
+2. Three bare-except / broad-except sites that swallowed pipeline
+   errors now re-raise after their diagnostic ``print`` so the
+   caller observes the actual failure honestly:
+
+   - ``download_AgERA5_data_alt`` — the CDS retrieve catch raises
+     after printing.
+   - ``extract_AgERA5_data`` — the inner zip-extraction catch is
+     replaced with the unguarded extraction call; the outer broad
+     catch raises after printing.
+   - ``convert_AgERA5_netcdf_to_geotiff`` — the outer broad catch
+     raises after printing.
+
+   The upstream silent-skip chain produced a misleading
+   ``FileNotFoundError`` deep in ``calculate_AgERA5_ET0_and_save``
+   five levels removed from the real cause (typically a CDS-side
+   error such as a rate limit, malformed bbox, or queue timeout).
+   Re-raising at each stage preserves the failure chain so prismpy's
+   executor reports the first real error instead of the cascading
+   conversion-path symptom.
+
+The canonical un-deviated upstream remains at
+https://github.com/SARRA-cropmodels/SARRA_data-download (commit
+``e019a35``). Future contributors who want to refresh the vendor from
+upstream should diff against the upstream copy and re-apply the two
+modifications above by hand; they are deliberate substrate fixes,
+not vendor drift.
 """
