@@ -119,6 +119,18 @@ include = ["prismpy*"]
     "data/*.tif",
     "data/*.txt",
 ]
+# The vendored ``SARRA_data_download`` library ships under
+# ``prismpy/src/prismpy/vendor/sarra_data_download/`` with the
+# upstream MIT LICENSE preserved verbatim alongside the source.
+# Without this glob the LICENSE drops out of the wheel and the
+# attribution record gets lost on a pip-installed prismpy. Per
+# durable lesson #22 (wheel-contents pin discipline), the
+# structural test ``test_climate_source_imports_declared.py``
+# verifies the vendored files exist on disk; this glob keeps
+# them inside the wheel artifact.
+"prismpy.vendor.sarra_data_download" = [
+    "LICENSE",
+]
 
 [tool.black]
 line-length = 100
