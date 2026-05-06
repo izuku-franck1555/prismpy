@@ -20,6 +20,8 @@ Re-export ``extract_hwsd_soil_data`` so callers can use a stable
 ``from prismpy.vendor.hwsd_extraction import extract_hwsd_soil_data``
 import path.
 """
-from prismpy.vendor.hwsd_extraction._module import extract_hwsd_soil_data  # noqa: F401
+from prismpy.vendor.hwsd_extraction.hwsd_extraction import (  # noqa: F401
+    extract_hwsd_soil_data,
+)
 
 __all__ = ["extract_hwsd_soil_data"]

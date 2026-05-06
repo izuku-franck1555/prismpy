@@ -1426,13 +1426,15 @@ class AceaTranslator(AceaTranslatorBase):
                 import pyodbc
             except ImportError as e:
                 raise ModuleNotFoundError(
-                    "ACEA HWSD v2.0 MDB extraction needs either the "
-                    "``mdbtools`` system package (preferred: ``brew "
-                    "install mdbtools`` on macOS or ``apt-get install "
-                    "mdbtools`` on Linux) OR the ``pyodbc`` Python "
-                    "package via ``pip install prismpy[acea-mdb]`` "
-                    "(Windows or Linux with the MDBTools ODBC "
-                    "driver). Neither was available."
+                    "pyodbc is a required prismpy dependency but did "
+                    "not import. The Python wheel ships with prismpy; "
+                    "the matching ODBC system package must also be "
+                    "available — install ``brew install unixodbc`` on "
+                    "macOS, ``apt-get install -y unixodbc-dev`` on "
+                    "Linux. The ACEA HWSD MDB fallback also accepts "
+                    "the ``mdbtools`` system package as the preferred "
+                    "primary path (``brew install mdbtools`` / "
+                    "``apt-get install -y mdbtools``)."
                 ) from e
 
             try:

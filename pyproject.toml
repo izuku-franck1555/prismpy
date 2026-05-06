@@ -84,6 +84,18 @@ dependencies = [
     # the silent-skip class. Declaring it required keeps fresh
     # installs from inheriting the silent-fallback path.
     "pygadm>=0.5,<1.0",
+    # pyodbc is the platform-portable Microsoft Access ODBC driver
+    # the ACEA HWSD path uses to read ``.mdb`` files when the
+    # preferred ``mdbtools`` system package is absent. Promoted to a
+    # required dep (was previously gated by an opt-in extras-group)
+    # so a ``pip install prismpy`` on a fresh venv never silently
+    # skips the ACEA fallback. The Python wheel install is universal;
+    # the corresponding system package (``brew install unixodbc`` on
+    # macOS, ``apt-get install -y unixodbc-dev`` on Linux) is
+    # documented in prismweb's ``DEPLOY.md`` pre-launch checklist
+    # and pinned in the production Dockerfile so prod deploys carry
+    # both halves.
+    "pyodbc>=5.0,<6.0",
 ]
 
 [project.optional-dependencies]
@@ -97,20 +109,8 @@ dev = [
 viz = [
     "matplotlib>=3.7.0",
 ]
-# pyodbc is the platform-specific Microsoft Access ODBC fallback the
-# ACEA translator uses to read HWSD v2.0 ``.mdb`` files when the
-# preferred ``mdbtools`` system package is absent. Default installs
-# rely on ``mdbtools`` (``brew install mdbtools`` on macOS,
-# ``apt-get install mdbtools`` on Linux). Users who run on Windows or
-# in environments without mdbtools opt into the fallback via
-# ``pip install prismpy[acea-mdb]``; the ACEA translator surfaces a
-# fail-loud ``ModuleNotFoundError`` naming both options when neither
-# is available, replacing the previous silent-skip path.
-acea-mdb = [
-    "pyodbc>=5.0,<6.0",
-]
 all = [
-    "prismpy[dev,viz,acea-mdb]",
+    "prismpy[dev,viz]",
 ]
 
 [project.scripts]
@@ -152,12 +152,17 @@ include = ["prismpy*"]
 "prismpy.vendor.sarra_data_download" = [
     "LICENSE",
 ]
-# The vendored ``hwsd_extraction`` helper has no upstream LICENSE
-# (internal CIRAD ACEA toolkit, not on PyPI). The Python source
-# ships under ``prismpy/src/prismpy/vendor/hwsd_extraction/`` and
-# is picked up by the ``include = ["prismpy*"]`` package finder
-# automatically; no additional ``package-data`` glob is required
-# unless future revisions add non-Python data alongside the source.
+# The vendored ``hwsd_extraction`` helper ships under
+# ``prismpy/src/prismpy/vendor/hwsd_extraction/`` with a project-
+# authored open-access non-commercial LICENSE (the ACEA Data-to-
+# Model Translation Framework is the project's own toolkit). The
+# Python source is picked up by the ``include = ["prismpy*"]``
+# package finder automatically; this glob keeps the LICENSE inside
+# the wheel artifact alongside the source so the attribution record
+# does not drop out of pip-installed prismpy.
+"prismpy.vendor.hwsd_extraction" = [
+    "LICENSE",
+]
 
 [tool.black]
 line-length = 100

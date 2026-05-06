@@ -65,11 +65,12 @@ _STDLIB_PACKAGES = frozenset({
     "__future__", "abc", "argparse", "ast", "calendar", "collections",
     "concurrent", "contextlib", "copy", "csv", "dataclasses", "datetime",
     "decimal", "enum", "functools", "glob", "gzip", "hashlib", "io",
-    "itertools", "json", "logging", "math", "multiprocessing", "os",
-    "pathlib", "pickle", "platform", "queue", "re", "shutil", "signal",
-    "socket", "ssl", "stat", "string", "struct", "subprocess", "sys",
-    "tempfile", "textwrap", "threading", "time", "traceback", "tomllib",
-    "types", "typing", "unittest", "urllib", "uuid", "warnings",
+    "itertools", "json", "locale", "logging", "math",
+    "multiprocessing", "os", "pathlib", "pickle", "platform", "queue",
+    "re", "shutil", "signal", "socket", "sqlite3", "ssl", "stat",
+    "string", "struct", "subprocess", "sys", "tempfile", "textwrap",
+    "threading", "time", "traceback", "tomllib", "types", "typing",
+    "unicodedata", "unittest", "urllib", "uuid", "warnings",
     "weakref", "xml", "zipfile",
 })
 
@@ -273,6 +274,14 @@ _KNOWN_LOCAL_ONLY_OPTIONAL_IMPORTS: dict[str, str] = {
         "Imported only inside cache_paths.py as a prismweb-side "
         "shim; declaring django in prismpy would invert the "
         "library dependency direction. Not in any retrieve path."
+    ),
+    "core": (
+        "Imported only inside cache_paths.py — refers to prismweb's "
+        "``core`` Django app (``from core.services.cache_path_registry"
+        " import register_cache_writer``). The import is a type-only "
+        "shim that resolves at prismweb runtime; declaring it in "
+        "prismpy would invert the library dependency direction. Not "
+        "in any retrieve path."
     ),
 }
 
@@ -500,6 +509,110 @@ class TestSourceImportsDeclared(unittest.TestCase):
         )
 
 
+def _collect_all_external_imports(py_file: Path) -> set[str]:
+    """Return every external top-level package name imported in
+    ``py_file``, regardless of whether the import is inside a
+    ``try/except ImportError`` guard.
+
+    Mirrors ``_collect_external_imports`` from the climate-only
+    test, but does NOT filter out guarded imports. The combined
+    set is the canonical "what does prismpy actually import"
+    enumeration that the OLD-vs-NEW venv parity audit needs.
+    Relative imports (``from . import X``) are skipped because
+    ``ImportFrom.module is None`` in that case.
+    """
+    tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+    externals: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".", 1)[0]
+                if _is_external(top):
+                    externals.add(top)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level and node.level > 0:
+                continue
+            if node.module is None:
+                continue
+            top = node.module.split(".", 1)[0]
+            if _is_external(top):
+                externals.add(top)
+    return externals
+
+
+class TestPyProjectCoversAllImports(unittest.TestCase):
+    """Universal substrate-parity discipline. Every top-level
+    external package imported anywhere in ``src/prismpy/`` (whether
+    guarded or not) must resolve to one of:
+
+    - ``pyproject.toml`` ``[project] dependencies`` (universal —
+      pulled by every install)
+    - ``pyproject.toml`` ``[project.optional-dependencies]`` (opt-in
+      extras, with documented rationale at the call site)
+    - ``_KNOWN_LOCAL_ONLY_OPTIONAL_IMPORTS`` allow-list with explicit
+      rationale (e.g., the django shim in ``cache_paths.py``)
+    - The internal ``prismpy.*`` namespace (filtered automatically
+      by ``_is_external``).
+
+    The OLD-vs-NEW venv audit that surfaced pygadm + pyodbc +
+    hwsd_extraction was the kind of empirical check this
+    structural pin replaces. After the pin lands, any future
+    ``import phantom_pkg`` (guarded or not) in ``src/prismpy/``
+    fails CI before the silent-skip class can re-emerge.
+
+    Anti-mutation drill: introduce ``import phantom_xyz`` in any
+    translator / pipeline / source module — the scan below must
+    list the file path + the package name in the failure message.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.declared = {
+            _normalize_for_match(d) for d in _declared_dep_names()
+        }
+        cls.optional = _optional_dep_names()
+
+    def test_every_external_import_is_declared(self):
+        acceptable = self.declared | self.optional
+
+        problems: list[str] = []
+        py_files = sorted(_SRC_PRISMPY_DIR.rglob("*.py"))
+        # Skip the vendored tree — vendored modules' upstream imports
+        # are not prismpy's pyproject responsibility (e.g., the
+        # vendored SARRA_data_download module imports ``cdsapi``,
+        # which is declared via prismpy's own pyproject; the
+        # vendored hwsd_extraction module imports stdlib + numpy +
+        # pandas, also declared via prismpy's own pyproject).
+        py_files = [p for p in py_files if _VENDOR_DIR not in p.parents]
+        self.assertGreater(
+            len(py_files), 0,
+            f"expected at least one .py file under {_SRC_PRISMPY_DIR}",
+        )
+        for py_file in py_files:
+            for ext in sorted(_collect_all_external_imports(py_file)):
+                normalized = _normalize_for_match(ext)
+                if normalized in acceptable:
+                    continue
+                if normalized in _KNOWN_LOCAL_ONLY_OPTIONAL_IMPORTS:
+                    continue
+                problems.append(
+                    f"{py_file.relative_to(_REPO_ROOT)}: imports "
+                    f"{ext!r} but pyproject.toml does not declare it "
+                    "(neither in [project] dependencies nor in "
+                    "[project.optional-dependencies], and it is not "
+                    "in the documented local-only allow-list)"
+                )
+        self.assertEqual(
+            problems, [],
+            "Every external import in prismpy/src/prismpy/ must be "
+            "declared in pyproject.toml or covered by the "
+            "documented allow-list. The OLD-vs-NEW venv audit that "
+            "surfaced pygadm + pyodbc + hwsd_extraction was the "
+            "kind of manual check this structural pin replaces:\n  "
+            + "\n  ".join(problems),
+        )
+
+
 class TestVendoredPackagesPresent(unittest.TestCase):
     """Each vendored package under ``prismpy/vendor/`` must have the
     expected source files (and LICENSE where one was provided
@@ -541,14 +654,16 @@ class TestVendoredPackagesPresent(unittest.TestCase):
 
     def test_hwsd_extraction_vendor_files_present(self):
         """The vendored hwsd_extraction package must include
-        ``__init__.py`` (re-exporter) and ``_module.py`` (helper
-        source). The upstream ACEA toolkit shipped without a LICENSE
-        file, so no LICENSE pin here; the attribution rationale lives
-        in the package ``__init__.py`` docstring instead."""
+        ``__init__.py`` (re-exporter), ``hwsd_extraction.py`` (helper
+        source preserved under its original filename), and
+        ``LICENSE`` (open-access non-commercial notice authored by
+        the project for the ACEA Data-to-Model Translation Framework
+        bundle). Mirrors the SARRA_data_download check."""
         vendor_root = _VENDOR_DIR / "hwsd_extraction"
         expected_files = [
             "__init__.py",
-            "_module.py",
+            "hwsd_extraction.py",
+            "LICENSE",
         ]
         missing: list[str] = []
         for name in expected_files:

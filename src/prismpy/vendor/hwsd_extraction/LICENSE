@@ -1,0 +1,25 @@
+ACEA Data-to-Model Translation Framework — open-access, non-commercial
+use license
+
+Copyright (c) PRISMPY / PRISMWEB project authors.
+
+This file vendors the ``hwsd_extraction.py`` HWSD v2.0 BIL+MDB
+extraction helper from the ACEA Data-to-Model Translation Framework
+(``DATA-TO-MODEL-TRANSLATION/ACEA/utils/hwsd_extraction.py``). The
+ACEA toolkit is the project authors' own open-access framework; the
+helper is bundled into prismpy under this notice with the original
+authors' authorization (recorded 2026-05-06) so that ``pip install
+prismpy`` carries the ACEA HWSD path without requiring the toolkit
+to live alongside the prismpy install on disk.
+
+Permission is granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the
+"Software"), to use, copy, modify, merge, publish, and distribute
+the Software for non-commercial purposes (research, teaching,
+public-good agricultural modelling, and similar). The Software is
+provided "as is" without warranty of any kind, express or implied;
+in no event shall the authors be liable for any claim, damages, or
+other liability arising from the use of the Software.
+
+Commercial redistribution requires written permission from the
+PRISMPY / PRISMWEB project authors.
