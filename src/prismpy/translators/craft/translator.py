@@ -2425,15 +2425,24 @@ class CraftTranslator(CraftTranslatorBase):
             cells_sorted = sorted(filtered_cells, key=lambda c: self._to_craft_cellid(c.cell_id), reverse=True)
 
             for cell in cells_sorted:
-                # Use 1-indexed CRAFT CellID
+                # Use the canonical 0-indexed cell id for the
+                # CellID column so the soil-mask file matches
+                # cell_summary.json + every other CRAFT companion
+                # writer in the package.
                 craft_cellid = self._to_craft_cellid(cell.cell_id)
 
                 # Get profile name from mapping or use fallback formula
                 if cell_to_profile and cell.cell_id in cell_to_profile:
                     soil_profile = cell_to_profile[cell.cell_id]
                 else:
-                    # Fallback: formula-based (for backward compatibility)
-                    soil_profile = f"{country_code}0{craft_cellid - 1}"
+                    # Fallback: formula-based profile name keyed off
+                    # the canonical 0-indexed cell id. The earlier
+                    # ``craft_cellid - 1`` form was a back-shift that
+                    # paired with the prior +1 ``_to_craft_cellid``
+                    # to recover the canonical id; with the helper
+                    # now identity, the back-shift would land on
+                    # the wrong cell.
+                    soil_profile = f"{country_code}0{cell.cell_id}"
 
                 share_pct = 1  # 100% coverage
 

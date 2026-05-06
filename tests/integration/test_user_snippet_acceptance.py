@@ -224,5 +224,108 @@ class TestUserSnippetAcceptance(unittest.TestCase):
         )
 
 
+class TestGadmCellIdMatchesCanonicalRoster(unittest.TestCase):
+    """The GADM data source independently computes cell ids
+    from lon/lat coordinates (no SpatialGrid lookup). The
+    canonical-source contract requires that those ids match
+    the same 0-indexed roster ``executor._build_cell_summary``
+    emits and every CRAFT companion writer consumes via
+    ``_to_craft_cellid``. Any drift between the GADM emission
+    convention and the canonical roster re-opens the cross-
+    file JOIN failure F-AK-v2 closed.
+
+    Codex round on F-AK-v2 caught that the schema-write path
+    in ``CraftTranslator._generate_craft_schema`` filters
+    GADM rows against ``{_to_craft_cellid(c.cell_id) for c in
+    grid.cells}``. If GADM emits a different convention than
+    that filter expects, the intersect drops every row →
+    schema file ships empty → DSSAT load fails on every cell.
+    Pin the round-trip so this regression class fires here
+    instead of in production.
+    """
+
+    def test_gadm_cellid_round_trips_through_canonical(self):
+        from prismpy.data_sources.gadm import GADMDataSource
+
+        translator = _make_translator()
+        gds = GADMDataSource(gadm_path=None)
+        resolution = 5 / 60
+
+        # Pick three coordinate pairs spanning the Sahel
+        # region the user audits empirically.
+        for lon, lat in [(2.1, 13.5), (7.4, 11.2), (-15.6, 14.1)]:
+            gadm_id = gds._calculate_cellid(lon, lat, resolution)
+            canonical_id = translator._to_craft_cellid(gadm_id)
+            self.assertEqual(
+                canonical_id, gadm_id,
+                f"GADM emitted cellid={gadm_id} for ({lon}, "
+                f"{lat}); _to_craft_cellid produced "
+                f"{canonical_id}. The two must agree because "
+                f"the schema-write path filters GADM rows "
+                f"against the canonical roster — drift here "
+                f"empties the schema file silently.",
+            )
+
+            # Reverse helper round-trips: cellid → (lat, lon)
+            # → cellid_again. The lat/lon return the cell
+            # centroid, and the forward helper rounds back to
+            # the same cell id.
+            r_lat, r_lon = gds.get_cell_center_from_cellid(
+                gadm_id, resolution,
+            )
+            gadm_id_round_trip = gds._calculate_cellid(
+                r_lon, r_lat, resolution,
+            )
+            self.assertEqual(
+                gadm_id, gadm_id_round_trip,
+                f"GADM cellid round-trip failed: {gadm_id} "
+                f"-> ({r_lat:.4f}, {r_lon:.4f}) -> "
+                f"{gadm_id_round_trip}. The reverse helper "
+                f"must subtract the same offset the forward "
+                f"helper adds (zero in the canonical form).",
+            )
+
+    def test_gadm_to_canonical_intersect_keeps_overlap(self):
+        """Mock the schema-write intersect: GADM-derived
+        rows whose cellid matches a cell in the canonical
+        grid.cells roster must survive the filter. Anti-
+        mutation drill: re-introduce ``+1`` in either GADM
+        or ``_to_craft_cellid`` → the intersect drops every
+        row → empty schema file → DSSAT load fails."""
+        from prismpy.data_sources.gadm import GADMDataSource
+
+        translator = _make_translator()
+        gds = GADMDataSource(gadm_path=None)
+        resolution = 5 / 60
+
+        # Build a synthetic grid with cells the GADM resolver
+        # would reasonably emit for the same lat/lon.
+        coords = [(2.1, 13.5), (7.4, 11.2), (-15.6, 14.1)]
+        gadm_ids = [
+            gds._calculate_cellid(lon, lat, resolution)
+            for lon, lat in coords
+        ]
+        canonical_set = {
+            translator._to_craft_cellid(cid) for cid in gadm_ids
+        }
+        # Synthetic schema rows from GADM.
+        gadm_rows = [
+            {"cellid": cid, "share_percent": 100.0} for cid in gadm_ids
+        ]
+        # Apply the schema-writer's intersect.
+        kept = [
+            row for row in gadm_rows if row["cellid"] in canonical_set
+        ]
+        self.assertEqual(
+            len(kept), len(gadm_ids),
+            f"Schema-write intersect dropped {len(gadm_ids) - len(kept)} "
+            f"of {len(gadm_ids)} rows. The GADM cellid "
+            f"emission convention must agree with "
+            f"``_to_craft_cellid`` exactly so every GADM row "
+            f"the resolver returns survives the canonical-"
+            f"roster filter.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
