@@ -404,42 +404,54 @@ class CraftTranslator(CraftTranslatorBase):
         return cell_id_0 + 1
 
     def _get_filtered_cells(self, grid: SpatialGrid) -> List:
-        """Get cells filtered by GADM boundary if available.
+        """Get the canonical cell roster every CRAFT companion file
+        must iterate.
 
-        If GADM filtering was used during schema generation, returns the
-        authoritative GADM cell list (with lat/lon). This ensures ALL GADM
-        cells are used, even those outside the grid bounding box.
+        Returns ``grid.cells`` directly. ``grid.cells`` is the
+        canonical post-harmonize roster — the same roster
+        ``executor._build_cell_summary`` writes into
+        ``cell_summary.json``. By routing every CRAFT writer (schema,
+        soil mask, crop mask, cultivar data, planting data) through
+        this single source, every companion file in the package
+        carries the same set of cell IDs the cockpit, the per-cell
+        coverage validators, and the ``cell_summary.json`` consumer
+        all agree on.
 
-        This ensures consistency between schema and management files:
-        - Schema: 149 cells (GADM-filtered)
-        - Management files: 149 cells (same GADM-filtered cells)
+        Earlier versions of this helper preferred a GADM-resolved
+        cell list stored at ``self._gadm_cells`` and would include
+        admin-boundary cells that fell outside the grid bounding
+        box. That deliberately introduced cells which had no real
+        climate or soil data attached — a silent data-cooking
+        pattern that the post-Sprint-F audit surfaced empirically:
+        ``cell_summary.json`` and ``soil/soil_mask.txt`` could
+        differ by 13-28% of the cell count on the same package
+        because the soil mask was iterating
+        ``self._gadm_cells`` while the summary was iterating
+        ``grid.cells``. CRAFT and DSSAT's downstream JOIN across
+        these companion files would then either drop the
+        mismatched cells silently (best case) or substitute
+        placeholder values (worst case). Per
+        ``feedback_no_data_cooking.md``: every cell in the package
+        is a real cell with real data; admin-region completeness
+        is the cockpit's surface, not a synthetic-cell pad in the
+        package.
+
+        ``self._valid_cellids`` is also retired here — it was a
+        secondary GADM-filter index that pointed at the same
+        roster, and routing through ``grid.cells`` makes it
+        redundant. The attribute remains assigned during schema
+        generation for any external caller that still reads it
+        for diagnostics; it does not influence the canonical
+        roster the writers iterate.
 
         Args:
             grid: SpatialGrid with all cells
 
         Returns:
-            List of cell-like objects to use (GADM cells if available, grid cells if not)
+            ``list(grid.cells)`` — the canonical post-harmonize
+            roster matching ``cell_summary.json``.
         """
-        if self._gadm_cells is not None:
-            # Use authoritative GADM cells (includes cells outside grid bounding box)
-            # Convert dict format to cell-like objects for consistency
-            class GadmCell:
-                def __init__(self, data):
-                    self.cell_id = data['cellid'] - 1  # Convert back to 0-indexed
-                    self.lat = data['lat']
-                    self.lon = data['lon']
-
-            return [GadmCell(cell_data) for cell_data in self._gadm_cells]
-        elif self._valid_cellids is not None:
-            # Fallback: Filter grid cells by valid IDs (may miss some cells)
-            filtered = [
-                cell for cell in grid.cells
-                if self._to_craft_cellid(cell.cell_id) in self._valid_cellids
-            ]
-            return filtered
-        else:
-            # No GADM filtering - use all grid cells
-            return list(grid.cells)
+        return list(grid.cells)
 
     def _generate_craft_schema(self, grid: SpatialGrid, region: Region) -> List[Path]:
         """Generate CRAFT schema files in proper hierarchical structure.
