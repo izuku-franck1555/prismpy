@@ -250,6 +250,18 @@ _CATEGORY_MAP = {
     "post_translate_range_": "ranges",
     "post_translate_date_continuity_": "completeness",
     "post_translate_climate_": "ranges",
+    # F-AJ severity-bump fix: the partial-climate
+    # post_translate_completeness_sarra_py check now emits result
+    # ``fail`` (was ``warning``) when fewer than the four required
+    # SARRA-Py climate variables are present. Without this prefix
+    # mapping, _get_check_category falls back to ``"schema"`` and
+    # the cockpit's category rollup mis-attributes the climate
+    # completeness failure to the schema chip. Routing to
+    # ``"completeness"`` keeps the failure on the chip the
+    # researcher already associates with "missing data" — same
+    # discipline as ``soil_completeness_`` and
+    # ``temporal_completeness`` above.
+    "post_translate_completeness_": "completeness",
 }
 
 _CATEGORY_META = {
