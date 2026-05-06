@@ -29,6 +29,7 @@ import unittest
 from pathlib import Path
 
 from prismpy.validators.post_translate import _validate_sarra_py_geotiffs
+from prismpy.validators.scientific import _get_check_category
 
 
 def _write_minimal_tif(path: Path) -> None:
@@ -108,6 +109,31 @@ class TestPostTranslateCompletenessSeverity(unittest.TestCase):
             completeness["details"].get("expected_variables"), 4,
             "SARRA-Py expects four climate variables; the validator "
             "should report expected=4.",
+        )
+
+    def test_partial_climate_routes_to_completeness_category(self):
+        """The bumped-severity check must route to the
+        ``"completeness"`` category (not the default ``"schema"``)
+        so the cockpit's category rollup attributes the failure to
+        the chip the researcher associates with "missing data".
+
+        Without the ``"post_translate_completeness_"`` prefix in
+        ``_CATEGORY_MAP``, ``_get_check_category`` falls through to
+        the ``"schema"`` default and a missing-climate-variables
+        failure surfaces on the Schema Conformance chip — the wrong
+        cockpit affordance. Codex round 1 caught this; pin the
+        routing alongside the severity so a future contributor who
+        retires the prefix mapping fires this assertion.
+        """
+        category = _get_check_category(
+            "post_translate_completeness_sarra_py",
+        )
+        self.assertEqual(
+            category, "completeness",
+            "post_translate_completeness_sarra_py must route to the "
+            "'completeness' category, not the 'schema' fallback. "
+            "Add 'post_translate_completeness_' to _CATEGORY_MAP "
+            "in scientific.py to fix.",
         )
 
 
