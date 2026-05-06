@@ -390,18 +390,34 @@ class CraftTranslator(CraftTranslatorBase):
             return []
 
     def _to_craft_cellid(self, cell_id_0: int) -> int:
-        """Convert 0-indexed cell ID to CRAFT 1-indexed format.
+        """Return the canonical 0-indexed cell ID for CRAFT companion files.
 
-        CRAFT uses 1-indexed CellIDs: row * 4320 + col + 1
-        Our internal representation is 0-indexed: row * 4320 + col
+        Earlier versions of this helper added ``+1`` to match a presumed
+        1-indexed CRAFT CellID convention. An empirical smoke test with
+        the CRAFT operator team confirmed that CRAFT treats CellID as
+        an opaque string key — either convention runs as long as it stays
+        consistent within one package. The ``+1`` offset introduced a
+        cross-file drift between ``cell_summary.json`` (0-indexed, written
+        by the executor) and the CRAFT companions (1-indexed via this
+        helper); the drift surfaced at every multi-row bbox row boundary
+        because each row's start id collides with the previous row's
+        end+1, producing a small but persistent xor mismatch when
+        reconciling cell_summary against the companions.
+
+        Aligning to the 0-indexed canonical roster eliminates the drift
+        at the source: cell_summary.json is the canonical cell-id source
+        for the package, and every CRAFT companion writer inherits the
+        same id without offset. The package-internal consistency the
+        engine actually checks is preserved.
 
         Args:
-            cell_id_0: 0-indexed cell ID from SpatialGrid
+            cell_id_0: 0-indexed cell ID from SpatialGrid (canonical).
 
         Returns:
-            1-indexed CellID for CRAFT format
+            The same 0-indexed cell id; the CRAFT companions now match
+            cell_summary.json entry-for-entry.
         """
-        return cell_id_0 + 1
+        return cell_id_0
 
     def _get_filtered_cells(self, grid: SpatialGrid) -> List:
         """Get the canonical cell roster every CRAFT companion file

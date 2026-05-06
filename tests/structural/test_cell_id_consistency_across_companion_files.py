@@ -6,8 +6,8 @@ prismweb cockpit both JOIN on cell ID:
 * ``cell_summary.json`` — written by ``executor._build_cell_summary``;
   iterates ``unified_data.grid.cells``; emits 0-indexed cell IDs.
 * ``soil/soil_mask.txt`` — written by ``craft.translator.
-  _generate_soil_mask`` via ``_get_filtered_cells``; emits CRAFT
-  1-indexed cell IDs (i.e. ``cell.cell_id + 1``).
+  _generate_soil_mask`` via ``_get_filtered_cells``; emits the
+  same 0-indexed cell IDs.
 * ``crop_mask/mask.txt`` — written by ``_generate_crop_mask``;
   same source + convention.
 * ``management/cultivar_data.txt`` — written by
@@ -36,10 +36,15 @@ Empirically reproduced on six packages across two distinct
 symptom families:
 
 * Family 1 — count matches, off-by-1 ID drift only (e.g. 12 vs
-  12 cells; 6 cells differ raw, 0 differ after CRAFT 1-indexed
-  → 0-indexed correction). Same logical cells, convention drift.
+  12 cells; same logical cells, convention drift). Originally
+  read as a CRAFT 1-indexed convention; the empirical operator-
+  team smoke test confirmed CRAFT treats CellID as an opaque
+  string key — either convention runs as long as it stays
+  consistent within one package. The fix aligns every CRAFT
+  companion writer to the canonical 0-indexed roster the
+  executor's ``cell_summary.json`` already uses.
 * Family 2 — count mismatch, genuine roster drift (e.g. 114 vs
-  149 cells; 35 cells differ even after convention correction).
+  149 cells; 35 cells differ even after the family-1 alignment).
   Companion files carry GADM cells the cell_summary doesn't.
 
 Anti-mutation drills:
@@ -48,8 +53,10 @@ Anti-mutation drills:
   ``_get_filtered_cells`` (substitute ``self._gadm_cells`` for
   ``grid.cells``) → ``test_filter_returns_grid_cells_when_gadm_present``
   fires.
-* Change ``_to_craft_cellid`` to drop the +1 (or to apply +2)
-  → ``test_craft_id_convention_is_off_by_one`` fires.
+* Re-introduce a non-identity transform in ``_to_craft_cellid``
+  (e.g. ``cell_id_0 + 1``) → ``test_craft_id_matches_canonical_roster``
+  fires + ``test_user_audit_reproduction_pattern_closed`` fires
+  with the actual symdiff.
 
 PYTHIA's writer pattern is structurally different — it iterates
 ``data.grid.cells`` directly (no ``_get_filtered_cells``
@@ -163,51 +170,57 @@ class TestCellIdRosterContract(unittest.TestCase):
 
 
 class TestCraftIdConvention(unittest.TestCase):
-    """``_to_craft_cellid`` converts the 0-indexed cell.cell_id to
-    CRAFT's 1-indexed companion-file convention. Pin the +1
-    transform so a future contributor cannot silently drift the
-    convention (the off-by-N user audit reproduction would re-fire
-    if the +1 were dropped)."""
+    """``_to_craft_cellid`` returns the 0-indexed ``cell.cell_id``
+    unchanged so every CRAFT companion writer emits the same id
+    ``cell_summary.json`` carries. Earlier versions added ``+1``
+    to match a presumed 1-indexed CRAFT convention; the operator-
+    team empirical smoke test surfaced that CRAFT treats CellID as
+    an opaque string key, so the cross-file JOIN only requires
+    intra-package consistency. Aligning to the canonical 0-indexed
+    roster eliminates the row-boundary drift the prior offset
+    introduced.
 
-    def test_craft_id_convention_is_off_by_one(self):
-        """``_to_craft_cellid(N) == N + 1``. The structural-pin
-        consequence: ``cs_id_set == {craft_id - 1 for craft_id in
-        companion_file_ids}`` always holds when ``_get_filtered_cells``
-        is the single canonical roster."""
+    Pin the identity transform so a future contributor cannot
+    silently re-introduce the offset (the user-audit reproduction
+    snippet would re-fire on every multi-row bbox)."""
+
+    def test_craft_id_matches_canonical_roster(self):
+        """``_to_craft_cellid(N) == N``. The structural-pin
+        consequence: ``cs_id_set == companion_file_id_set`` always
+        holds when ``_get_filtered_cells`` is the single canonical
+        roster — no offset correction needed at the consumer."""
         translator = _make_translator()
         for raw in (0, 1, 100, 3959308, 3963627, 3967947):
             self.assertEqual(
-                translator._to_craft_cellid(raw), raw + 1,
-                f"_to_craft_cellid must be the +1 transform; "
+                translator._to_craft_cellid(raw), raw,
+                f"_to_craft_cellid must be the identity transform; "
                 f"got {translator._to_craft_cellid(raw)} for raw "
-                f"input {raw}.",
+                f"input {raw}. Re-introducing an offset re-opens "
+                f"the row-boundary drift the F-AK-v2 fix closed.",
             )
 
     def test_user_audit_reproduction_pattern_closed(self):
         """Pin the user-audit reproduction snippet: when both
-        sides go through the canonical roster + convention, the
-        symmetric difference between cell_summary IDs (0-indexed)
-        and CRAFT companion IDs (1-indexed) — after subtracting 1
-        from the companion side — is exactly empty."""
+        sides go through the canonical roster, the symmetric
+        difference between ``cell_summary`` ids and the CRAFT
+        companion ids is exactly empty — no offset correction
+        applied on either side."""
         translator = _make_translator()
         grid = _make_grid([3959308, 3963627, 3967947])
         cs_ids = {c.cell_id for c in grid.cells}
-        # Simulate companion file: every CRAFT writer iterates
+        # Simulate a companion file: every CRAFT writer iterates
         # _get_filtered_cells + emits _to_craft_cellid(cell_id).
-        companion_ids_1indexed = {
+        companion_ids = {
             translator._to_craft_cellid(c.cell_id)
             for c in translator._get_filtered_cells(grid)
         }
-        companion_ids_back_to_0indexed = {
-            cid - 1 for cid in companion_ids_1indexed
-        }
-        symmetric_diff = cs_ids ^ companion_ids_back_to_0indexed
+        symmetric_diff = cs_ids ^ companion_ids
         self.assertEqual(
             symmetric_diff, set(),
             "User-audit reproduction must show empty symdiff: "
-            "every cell_summary id maps 1:1 to a CRAFT companion "
-            "id (modulo +1). Non-empty symdiff is the F-AK "
-            f"failure shape; got {symmetric_diff!r}.",
+            "every cell_summary id appears verbatim in the CRAFT "
+            "companion id set. Non-empty symdiff is the F-AK / "
+            f"F-AK-v2 failure shape; got {symmetric_diff!r}.",
         )
 
 
@@ -234,21 +247,21 @@ class TestSchemaRosterMatchesCompanion(unittest.TestCase):
         admin-boundary cells, including some that fall outside
         the grid bounding box) and the canonical grid.cells set.
         After the intersect, the schema-row CRAFT IDs must equal
-        ``{cell.cell_id + 1 for cell in grid.cells}`` exactly —
-        the same set the companion writers emit."""
+        ``{cell.cell_id for cell in grid.cells}`` exactly — the
+        same set the companion writers emit, no offset applied."""
         translator = _make_translator()
         # Grid has 3 cells (0-indexed: 100, 101, 102)
         grid = _make_grid([100, 101, 102])
         canonical_craft_ids = {
             translator._to_craft_cellid(c.cell_id) for c in grid.cells
         }
-        # GADM resolver returned 5 rows: the 3 grid cells (CRAFT
-        # 1-indexed: 101, 102, 103) plus 2 admin-boundary cells
+        # GADM resolver returned 5 rows: the 3 grid cells (now
+        # 0-indexed: 100, 101, 102) plus 2 admin-boundary cells
         # outside the grid bbox (1001, 1002).
         gadm_rows = [
-            {"cellid": 101, "share_percent": 100.0},
-            {"cellid": 102, "share_percent": 87.5},
-            {"cellid": 103, "share_percent": 50.0},
+            {"cellid": 100, "share_percent": 100.0},
+            {"cellid": 101, "share_percent": 87.5},
+            {"cellid": 102, "share_percent": 50.0},
             {"cellid": 1001, "share_percent": 100.0},  # outside bbox
             {"cellid": 1002, "share_percent": 100.0},  # outside bbox
         ]
@@ -261,21 +274,20 @@ class TestSchemaRosterMatchesCompanion(unittest.TestCase):
         self.assertEqual(
             intersected_ids, canonical_craft_ids,
             "Schema rows after intersect must match the canonical "
-            "CRAFT 1-indexed ID set drawn from grid.cells. Drift "
-            "here re-introduces the F-AK schema-vs-companion "
-            "divergence on packages where GADM resolved cells "
-            "outside the grid bbox.",
+            "0-indexed ID set drawn from grid.cells. Drift here "
+            "re-introduces the F-AK schema-vs-companion divergence "
+            "on packages where GADM resolved cells outside the "
+            "grid bbox.",
         )
 
     def test_user_audit_reproduction_extended_to_schema(self):
         """Extended user-audit reproduction: schema-row CRAFT IDs,
         companion-file CRAFT IDs, and cell_summary 0-indexed IDs
-        must all describe the same logical cell set (modulo +1
-        for the CRAFT 1-indexed convention).
+        must all describe the same logical cell set, with NO
+        offset applied to any side.
 
-        This is the cross-file invariant the F-AK fix delivers:
-        ``set(cs_ids) == {sid - 1 for sid in schema_ids} ==
-        {cid - 1 for cid in companion_ids}``.
+        This is the cross-file invariant F-AK-v2 delivers:
+        ``set(cs_ids) == set(schema_ids) == set(companion_ids)``.
         """
         translator = _make_translator()
         grid = _make_grid([3959308, 3963627, 3967947])
@@ -283,17 +295,17 @@ class TestSchemaRosterMatchesCompanion(unittest.TestCase):
         canonical_craft_ids = {
             translator._to_craft_cellid(c.cell_id) for c in grid.cells
         }
-        # Schema would emit canonical_craft_ids after the
+        # Schema emits canonical_craft_ids after the
         # _generate_craft_schema intersect; companion files emit
         # the same set via _get_filtered_cells.
-        schema_ids_back_to_0 = {sid - 1 for sid in canonical_craft_ids}
-        companion_ids_back_to_0 = {
-            translator._to_craft_cellid(c.cell_id) - 1
+        schema_ids = canonical_craft_ids
+        companion_ids = {
+            translator._to_craft_cellid(c.cell_id)
             for c in translator._get_filtered_cells(grid)
         }
-        self.assertEqual(cs_ids, schema_ids_back_to_0)
-        self.assertEqual(cs_ids, companion_ids_back_to_0)
-        self.assertEqual(schema_ids_back_to_0, companion_ids_back_to_0)
+        self.assertEqual(cs_ids, schema_ids)
+        self.assertEqual(cs_ids, companion_ids)
+        self.assertEqual(schema_ids, companion_ids)
 
 
 class TestPythiaCellRoster(unittest.TestCase):
