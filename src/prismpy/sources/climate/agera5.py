@@ -561,6 +561,13 @@ class AgERA5Source(DataSource):
                 # this broad except instead of being rewritten as
                 # "Download failed: {e}".
                 raise
+            except (ImportError, ModuleNotFoundError):
+                # Mirror the tamsat carve-out: an undeclared
+                # transitive dep is a configuration error and must
+                # propagate so pip / CI / startup surfaces it loudly
+                # rather than soft-failing into the placeholder
+                # climate dict.
+                raise
             except Exception as e:
                 return self.create_result(
                     success=False,

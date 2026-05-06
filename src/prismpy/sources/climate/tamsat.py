@@ -829,6 +829,17 @@ class TAMSATSource(DataSource):
                 # failure (AC L.9). pipeline.execute catches at the
                 # boundary and runs handler-local cleanup.
                 raise
+            except (ImportError, ModuleNotFoundError):
+                # An undeclared transitive dependency (rioxarray,
+                # rasterio plugin, pyproj data file binding, ...)
+                # is a configuration error, not a runtime data
+                # error. Letting it surface as ``Download failed:
+                # {e}`` masked the gap until a fresh py312 venv
+                # hit the missing-rioxarray case end-to-end. Per
+                # durable lesson #6 (broad-except carve-out), let
+                # the ImportError propagate so pip / CI / startup
+                # surfaces the missing dep loudly.
+                raise
             except Exception as e:
                 return self.create_result(
                     success=False,
