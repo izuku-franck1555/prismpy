@@ -39,6 +39,56 @@ Sprint D.1 band rationale:
     constant + AC-Q2-A1-b dual-date-filter negative grep.
     Headroom of ~80 tests reserved for commit 10 bound-gen.
     yml + Gate B anti-mutation drill additions.
+  - 1300 → 1500 (Sprint F + bucket-fix train + #227 fix) to
+    absorb per-crop physiology bounds + Köppen substrate +
+    cell-id companion-file pins + cockpit-dimension-bucket
+    map structural pin.
+  - 1500 → 1700 (Sprint S) to absorb the per-package eGHR
+    substrate builder's new tests (AC-1 byte-pin + AC-2
+    substrate-builder integration + headroom reserved for
+    AC-3 through AC-13 of Sprint S).
+  - 1500 → 1750 (Sprint G AC-G-2.0 cache primitive
+    extraction + remaining Sprint G ACs) to absorb the
+    sibling-sweep ``test_cache_base.py`` + per-AC pins for
+    AC-G-1 ISIMIP3b client (typed exceptions) + AC-G-3
+    ScenarioBlock schema bounds + AC-G-7a/7b/7c/7d
+    per-translator projection-climate + AC-G-9 3-layer
+    canonical CO₂ + AC-G-12 14-fixture mutation-drill matrix
+    + AC-G-13 4 paired-set deliverable hash pins. Headroom
+    sized for the ~150-225 Sprint G test additions per
+    SPRINT-G-VERIFICATION-STRATEGY.md §10.
+  - 1750 → 1900 (Sprint G boundary 3/7 close, post-AC-G-7c
+    SARRA-Py GeoTIFF projection-climate path) to absorb the
+    realised counts from boundary 3/7 sub-checkpoints A–E
+    (calendar conversion + Tetens TDEW + CRAFT/PYTHIA WTH
+    + ACEA pickle + SARRA-Py GeoTIFF — ~155 tests across the
+    5 boundaries already landed; pre-bump 3× zero-flake
+    measured 1765 collected) plus headroom for the remaining
+    boundary 4/7 (AC-G-9 3-layer canonical CO₂ enforcement)
+    + boundary 5/7 (AC-G-10/11 provenance + bias-correction
+    provenance string) + boundary 6/7 (AC-G-12 14-fixture
+    mutation-drill matrix) + boundary 7/7 (AC-G-13 4
+    paired-set deliverables + SHA hash pins).
+  - 1900 → 2000 (Sprint G boundary 7/7 absorption,
+    post-codex-round-2 P1 ISIMIP→SARRA mapping + unit
+    conversions) to absorb 17 absorption tests in
+    ``test_isimip_to_sarra_mapping.py`` covering the 4 structural
+    pins (mapping completeness + unit conversion correctness
+    + two-vocabulary AST walker per
+    ``feedback_two_vocabulary_substrate_drift.md`` +
+    sibling-sweep over SARRA-Py translator). Pre-bump count 1906.
+  - 2000 → 2200 (Sprint G/Sprint S rebase reconciliation) —
+    Sprint G branch (anchored at 1894 + 106 headroom = 5.6%
+    pre-rebase) replayed onto post-Sprint-S main reveals the
+    combined trajectory exceeds the prior Sprint G cap. Empirical
+    post-rebase count: 1982 collected. New cap 2200 = 1982 +
+    218 headroom = ~11% (matches the historical 5–15% pattern
+    documented across Sprint D.1, E.0, E.0.5, F, G stages, and
+    Sprint S). Per the pin's contract requirement of "after a
+    new sprint deliberately changes the trajectory" — both
+    Sprint S (200-unit delta from common base 1500) and Sprint G
+    (500-unit delta) are deliberate; the rebased branch reflects
+    both.
 
 Re-anchor this pin by updating ``_LOWER`` / ``_UPPER`` after a
 new sprint deliberately changes the trajectory.
@@ -56,12 +106,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 _LOWER = 815
-# Sprint S re-anchor: bumped 1500 -> 1700 to absorb the per-package eGHR
-# substrate builder's new tests (AC-1 byte-pin + AC-2 substrate-builder
-# integration + headroom reserved for AC-3 through AC-13). Kept in sync
-# with ``test_sprint_c_trajectory.py`` since both pins measure the same
-# ``pytest tests/ --collect-only`` count.
-_UPPER = 1700
+# Sprint S re-anchor: 1500 -> 1700 (per-package eGHR substrate).
+# Sprint G replay: 1700 -> 1750 (cache-primitive extraction)
+# -> 1900 (boundary 3/7 close) -> 2000 (boundary 7/7 absorption).
+# Sprint G/S rebase reconciliation: 2000 -> 2200 (empirical
+# post-rebase count 1982 + ~11% headroom; matches historical
+# 5-15% pattern). Kept in sync with ``test_sprint_c_trajectory.py``.
+_UPPER = 2200
 
 
 class TestSprintDTrajectory(TestCase):

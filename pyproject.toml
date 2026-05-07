@@ -96,6 +96,18 @@ dependencies = [
     # and pinned in the production Dockerfile so prod deploys carry
     # both halves.
     "pyodbc>=5.0,<6.0",
+    # isimip-client wraps the public ISIMIP3b data API used by the
+    # climate-scenario-package generator (paired baseline + projection
+    # WTH/pickle/GeoTIFF outputs). No API key is required for read
+    # access. Public release: https://github.com/ISI-MIP/isimip-client
+    # The 2.x line is the current canonical API; the upper bound caps
+    # below 3.0 so a future major-version refactor surfaces at sprint
+    # time rather than as a silent contract drift in cached_cutout
+    # parameters or dataset-version metadata. Promoting from optional
+    # to required keeps fresh installs from silently skipping the
+    # scenario-package code path the way agera5/cdsapi did before
+    # being promoted.
+    "isimip-client>=2.0,<3.0",
 ]
 
 [project.optional-dependencies]
@@ -105,6 +117,11 @@ dev = [
     "black>=23.0.0",
     "isort>=5.12.0",
     "mypy>=1.0.0",
+    # Sprint G structural tests for the ISIMIP3b client substrate use
+    # the ``responses`` library to mock HTTP cutout responses without
+    # touching the live API. Locally installed transitively in some
+    # dev envs but not declared by manifest, so CI couldn't find it.
+    "responses>=0.26.0",
 ]
 viz = [
     "matplotlib>=3.7.0",

@@ -3,6 +3,29 @@ Manifest Generation for prismpy packages.
 
 Creates manifest.json files with file inventory and SHA256 checksums
 for reproducibility and integrity verification.
+
+Manifest content is deterministic: no datetime stamps inside
+``manifest.json`` content, no host-specific paths, no build-epoch
+fields, no random-seed-dependent values. The same package, generated
+twice on the same pinned prismpy code, produces byte-identical
+``manifest.json`` files. Filesystem mtimes are still recorded by the
+OS on the actual files — that's a filesystem concern, distinct from
+manifest CONTENT.
+
+Determinism details:
+
+* ``json.dump`` is called with ``sort_keys=True`` and
+  ``ensure_ascii=False``. Keys appear in canonical order; UTF-8 region
+  names (e.g., ``"Ménoua"``) round-trip without ``\\uXXXX`` escapes.
+* Output is written via ``Path.write_bytes`` so platforms with
+  CRLF text-mode translation (Windows) emit LF newlines too. No BOM.
+* Per-file entries omit the ``modified`` filesystem mtime — content
+  vs. filesystem separation. SHA-256 + relative path + size identify
+  the file unambiguously without tying the manifest to wall-clock
+  metadata that drifts every regeneration.
+* The top-level ``generated_at`` field is omitted. The package's
+  reproducibility story rests on the SHA hashes, not on a wall-clock
+  stamp.
 """
 
 import hashlib
@@ -104,11 +127,13 @@ def get_file_info(
     file_path = Path(file_path)
     rel_path = str(file_path.relative_to(base_path)) if base_path else str(file_path)
 
+    # Filesystem mtime is intentionally NOT recorded — it's a
+    # filesystem concern, not manifest content. Including it would
+    # break byte-identical regeneration (mtime advances every write).
     return {
         "path": rel_path,
         "sha256": compute_sha256(file_path),
         "size_bytes": file_path.stat().st_size,
-        "modified": datetime.fromtimestamp(file_path.stat().st_mtime).isoformat()
     }
 
 
@@ -157,7 +182,8 @@ def create_manifest(
     package_dir: Union[str, Path],
     project_config: Dict[str, Any],
     platform: str = "sarra_py",
-    additional_metadata: Optional[Dict[str, Any]] = None
+    additional_metadata: Optional[Dict[str, Any]] = None,
+    scenario: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     Create a complete manifest for a package.
@@ -167,6 +193,12 @@ def create_manifest(
         project_config: Project configuration dictionary
         platform: Target platform name
         additional_metadata: Optional additional metadata to include
+        scenario: Optional ``prismpy.models.scenario.ScenarioBlock``
+            instance describing a paired baseline+projection scenario
+            package. When provided, the model's serialized fields are
+            embedded at the manifest's ``scenario`` key. When omitted,
+            no ``scenario`` key is added — existing observed-climate
+            manifests without a scenario continue to validate cleanly.
 
     Returns:
         Complete manifest dictionary
@@ -184,7 +216,10 @@ def create_manifest(
         "generator": "prismpy",
         "generator_version": "1.0.0",
         "platform": platform,
-        "generated_at": datetime.now().isoformat(),
+        # ``generated_at`` is intentionally omitted — wall-clock stamps
+        # break byte-identical regeneration (every run has a different
+        # ``datetime.now()``). The package's reproducibility story
+        # rests on the per-file SHA-256 + the manifest's own SHA-256.
 
         # Project info from config
         "project_name": project_config.get("project_name", "unknown"),
@@ -238,6 +273,28 @@ def create_manifest(
     if additional_metadata:
         manifest.update(additional_metadata)
 
+    # Optional scenario block per Sprint G AC-G-3. The block is OPTIONAL
+    # outside scenario package contexts (codex H3 absorption); existing
+    # observed-climate manifests do not carry a scenario key today and
+    # continue to round-trip cleanly. When provided, the ScenarioBlock's
+    # serialized form is embedded at the ``scenario`` key.
+    if scenario is not None:
+        # Late import to avoid pulling pydantic at every manifest call;
+        # ``ScenarioBlock`` exposes ``model_dump`` (pydantic v2 API).
+        if hasattr(scenario, "model_dump"):
+            manifest["scenario"] = scenario.model_dump()
+        elif isinstance(scenario, dict):
+            # Allow raw dicts for callers that already serialized; the
+            # validator will catch any shape errors when validate_manifest
+            # runs.
+            manifest["scenario"] = dict(scenario)
+        else:
+            raise TypeError(
+                "scenario argument must be a ScenarioBlock instance or "
+                "an already-serialized dict; got "
+                f"{type(scenario).__name__}"
+            )
+
     return manifest
 
 
@@ -246,7 +303,22 @@ def save_manifest(
     output_path: Union[str, Path]
 ) -> Path:
     """
-    Save manifest to JSON file.
+    Save manifest to JSON file with deterministic byte output.
+
+    The serialization is fully canonicalized:
+
+    * Top-level keys and every nested object are sorted lexicographically
+      (``sort_keys=True``).
+    * Non-ASCII characters round-trip natively (``ensure_ascii=False``).
+      Region names like ``"Ménoua"`` appear unescaped, and the bytes are
+      stable — no ``\\u00e9`` vs. ``é`` drift between Python versions.
+    * Output is written via ``Path.write_bytes`` so platforms with
+      automatic newline translation (Windows text mode) still emit LF
+      newlines. UTF-8 encoding without BOM.
+
+    Combined with ``create_manifest`` omitting wall-clock stamps and
+    filesystem mtimes, the result is byte-identical across re-runs on
+    identical inputs and identical pinned prismpy code.
 
     Args:
         manifest: Manifest dictionary
@@ -258,8 +330,13 @@ def save_manifest(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(output_path, 'w') as f:
-        json.dump(manifest, f, indent=2)
+    body = json.dumps(
+        manifest,
+        indent=2,
+        sort_keys=True,
+        ensure_ascii=False,
+    ).encode("utf-8")
+    output_path.write_bytes(body)
 
     return output_path
 
@@ -277,11 +354,32 @@ def validate_manifest(
 
     Returns:
         Validation results dictionary
+
+    Raises:
+        pydantic.ValidationError: when the manifest carries a
+            ``scenario`` key that does not match the ``ScenarioBlock``
+            schema (Sprint G AC-G-3 + AC-G-10). Manifests without a
+            ``scenario`` key validate normally — the schema is OPTIONAL
+            outside scenario contexts per codex H3 absorption.
     """
     with open(manifest_path, 'r') as f:
         manifest = json.load(f)
 
     package_dir = Path(package_dir)
+
+    # Sprint G AC-G-3 + AC-G-10: when the manifest carries a scenario
+    # block, validate it against the ScenarioBlock schema. The model's
+    # post-validators enforce time-slice ordering and the AC-G-10
+    # co2_ppm/co2_ppm_provenance pairing. Manifests without a scenario
+    # key skip this branch — the schema is optional outside scenario
+    # contexts.
+    scenario_payload = manifest.get("scenario")
+    if scenario_payload is not None:
+        # Late import keeps pydantic out of the manifest module's
+        # import-time path for non-scenario callers.
+        from prismpy.models.scenario import ScenarioBlock
+
+        ScenarioBlock.model_validate(scenario_payload)
 
     results = {
         "valid": True,

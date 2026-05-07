@@ -778,20 +778,62 @@ class AceaTranslator(AceaTranslatorBase):
         climate_data: Dict[int, ClimateTimeSeries],
         cell_ids_30arcmin: List[int],
         climate_name: str = "climate",
+        *,
+        climate_kind: "ClimateKind" = None,
+        projection_meta: "ProjectionClimateMeta" = None,
     ) -> List[Path]:
         """Generate ACEA climate pickle files.
 
         ACEA format: pickle.dump((tmax, tmin, prec, et0), f)
         Each element is a numpy float32 array of daily values.
 
+        Per Sprint G AC-G-7b, the writer accepts a ``climate_kind``
+        discriminator. The pickle binary format is identical between
+        observed and projection paths (same 4-array tuple, same
+        protocol); the only difference is the projection path
+        additionally writes a sidecar ``<climate_name>_<cell_id_30>.meta.json``
+        next to each pickle, capturing ``gcm_source`` /
+        ``bias_correction_method`` / ``time_slice`` per cell. The
+        sidecar uses the canonical
+        :class:`prismpy.models.scenario.ProjectionClimateMeta` schema
+        so producer + reader agree on shape (durable §24).
+
         Args:
             climate_data: Dictionary of location_id to ClimateTimeSeries
             cell_ids_30arcmin: List of 30-arcmin cell IDs
             climate_name: Name prefix for climate pickle files
+            climate_kind: Source provenance discriminator. Defaults to
+                ``ClimateKind.OBSERVED`` (backward-compat).
+            projection_meta: Required when ``climate_kind ==
+                PROJECTION``. The per-cell sidecar gets ``cell_id``
+                set to each emitted pickle's 30-arcmin cell id; the
+                rest of the metadata (``gcm_source``,
+                ``bias_correction_method``, ``time_slice_*``) comes
+                from this argument.
 
         Returns:
-            List of generated pickle file paths
+            List of generated pickle file paths.
         """
+        # Late import: keeps harmonize/ + models.scenario off the
+        # translator's import-time path for callers that don't touch
+        # projection climate.
+        import json
+
+        from prismpy.harmonize.climate_kind import ClimateKind as _ClimateKind
+        from prismpy.models.scenario import ProjectionClimateMeta as _Meta
+
+        if climate_kind is None:
+            climate_kind = _ClimateKind.OBSERVED
+        is_projection = climate_kind == _ClimateKind.PROJECTION
+
+        if is_projection and projection_meta is None:
+            raise ValueError(
+                "climate_kind=PROJECTION requires projection_meta. The "
+                "sidecar .meta.json file cannot be written without "
+                "gcm_source / bias_correction_method / time_slice "
+                "fields. Pass a ProjectionClimateMeta instance."
+            )
+
         output_files = []
         climate_dir = self.output_dir / "climate"
 
@@ -825,15 +867,44 @@ class AceaTranslator(AceaTranslatorBase):
                     et0_values.append(et0)
             et0 = np.array(et0_values, dtype=np.float32)
 
-            # Save pickle
+            # Save pickle (deterministic shape — tuple of 4 numpy
+            # float32 arrays of fixed dtype + length is byte-identical
+            # for byte-identical input under any pickle protocol).
             pickle_path = climate_dir / f"{climate_name}_{cell_id_30}.pckl"
             with open(pickle_path, 'wb') as f:
                 pickle.dump((tmax, tmin, prec, et0), f)
 
             output_files.append(pickle_path)
+
+            if is_projection:
+                # Per AC-G-7b: emit the sidecar `.meta.json` per cell
+                # so a downstream consumer can introspect the
+                # projection-source provenance without re-reading
+                # the parent manifest.
+                per_cell_meta = _Meta(
+                    gcm_source=projection_meta.gcm_source,
+                    bias_correction_method=projection_meta.bias_correction_method,
+                    time_slice_start=projection_meta.time_slice_start,
+                    time_slice_end=projection_meta.time_slice_end,
+                    cell_id=int(cell_id_30),
+                    scenario_label=projection_meta.scenario_label,
+                )
+                meta_path = climate_dir / f"{climate_name}_{cell_id_30}.meta.json"
+                meta_payload = json.dumps(
+                    per_cell_meta.model_dump(exclude_none=True),
+                    indent=2,
+                    sort_keys=True,
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                meta_path.write_bytes(meta_payload)
+                output_files.append(meta_path)
+
             logger.debug(f"Generated climate pickle: {pickle_path}")
 
-        logger.info(f"Generated {len(output_files)} ACEA climate pickles")
+        logger.info(
+            f"Generated {len(output_files)} ACEA climate artifacts "
+            f"(climate_kind={climate_kind.value})"
+        )
         return output_files
 
     def _estimate_et0_hargreaves(
