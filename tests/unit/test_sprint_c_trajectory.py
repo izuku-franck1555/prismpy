@@ -36,6 +36,16 @@ ScenarioBlock schema, AC-G-7a/7b/7c/7d per-translator
 projection-climate, AC-G-9 3-layer canonical CO₂, AC-G-12
 14-fixture mutation-drill matrix, AC-G-13 4 paired-set
 deliverable hash pins) per SPRINT-G-VERIFICATION-STRATEGY.md §10.
+Re-anchored to [815, 1900] at Sprint G boundary 3/7 close
+(post-AC-G-7c SARRA-Py GeoTIFF projection-climate path) to
+absorb the realised counts from sub-checkpoints A–E (calendar
+conversion + Tetens TDEW + CRAFT/PYTHIA WTH + ACEA pickle +
+SARRA-Py GeoTIFF — ~155 tests across the 5 boundaries already
+landed) plus headroom for the remaining boundary 4/7 (AC-G-9
+3-layer canonical CO₂ enforcement) + boundary 5/7 (AC-G-10/11
+provenance + bias-correction provenance string) + boundary 6/7
+(AC-G-12 14-fixture mutation-drill matrix) + boundary 7/7
+(AC-G-13 4 paired-set deliverables + SHA hash pins).
 Kept in sync with ``test_sprint_d_trajectory.py`` since both
 pins measure the same ``pytest tests/ --collect-only`` count.
 
@@ -59,13 +69,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 _LOWER = 815
-# Sprint S re-anchor: bumped 1500 -> 1700 to absorb the per-package eGHR
-# substrate builder's new tests (AC-1 byte-pin + AC-2 substrate-builder
-# integration + headroom reserved for AC-3 through AC-13). Sprint G
-# (this commit) further bumps 1700 -> 1750 to absorb the cache-primitive
-# extraction's new sibling-sweep ``test_cache_base.py`` per AC-G-2.0 +
-# headroom for the remaining Sprint G AC tests.
-_UPPER = 1750
+# Sprint S re-anchor: 1500 -> 1700 (per-package eGHR substrate
+# builder's new tests). Sprint G replay continues: 1700 -> 1750
+# (cache-primitive extraction) -> 1900 (boundary 3/7 close, this
+# commit, post-AC-G-7c SARRA-Py GeoTIFF projection-climate path).
+_UPPER = 1900
 
 
 class TestSprintCTrajectory(TestCase):

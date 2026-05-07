@@ -53,6 +53,18 @@ Sprint D.1 band rationale:
     + AC-G-13 4 paired-set deliverable hash pins. Headroom
     sized for the ~150-225 Sprint G test additions per
     SPRINT-G-VERIFICATION-STRATEGY.md §10.
+  - 1750 → 1900 (Sprint G boundary 3/7 close, post-AC-G-7c
+    SARRA-Py GeoTIFF projection-climate path) to absorb the
+    realised counts from boundary 3/7 sub-checkpoints A–E
+    (calendar conversion + Tetens TDEW + CRAFT/PYTHIA WTH
+    + ACEA pickle + SARRA-Py GeoTIFF — ~155 tests across the
+    5 boundaries already landed; pre-bump 3× zero-flake
+    measured 1765 collected) plus headroom for the remaining
+    boundary 4/7 (AC-G-9 3-layer canonical CO₂ enforcement)
+    + boundary 5/7 (AC-G-10/11 provenance + bias-correction
+    provenance string) + boundary 6/7 (AC-G-12 14-fixture
+    mutation-drill matrix) + boundary 7/7 (AC-G-13 4
+    paired-set deliverables + SHA hash pins).
 
 Re-anchor this pin by updating ``_LOWER`` / ``_UPPER`` after a
 new sprint deliberately changes the trajectory.
@@ -70,13 +82,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 _LOWER = 815
-# Sprint S re-anchor: bumped 1500 -> 1700 to absorb the per-package eGHR
-# substrate builder's new tests (AC-1 byte-pin + AC-2 substrate-builder
-# integration + headroom reserved for AC-3 through AC-13). Sprint G
-# (this commit) further bumps 1700 -> 1750 to absorb the cache-primitive
-# extraction. Kept in sync with ``test_sprint_c_trajectory.py`` since
-# both pins measure the same ``pytest tests/ --collect-only`` count.
-_UPPER = 1750
+# Sprint S re-anchor: 1500 -> 1700 (per-package eGHR substrate
+# builder's new tests). Sprint G replay continues: 1700 -> 1750
+# (cache-primitive extraction) -> 1900 (boundary 3/7 close, this
+# commit). Kept in sync with ``test_sprint_c_trajectory.py``.
+_UPPER = 1900
 
 
 class TestSprintDTrajectory(TestCase):

@@ -617,6 +617,9 @@ class SarraPyTranslator(SarraPyTranslatorBase):
         self,
         climate_data: Any,
         region: Region,
+        *,
+        climate_kind: "ClimateKind" = None,
+        projection_meta: "ProjectionClimateMeta" = None,
     ) -> List[Path]:
         """Generate or copy climate data files for SARRA-Py.
 
@@ -624,17 +627,56 @@ class SarraPyTranslator(SarraPyTranslatorBase):
         - Rainfall from TAMSAT as GeoTIFF files
         - Temperature/radiation from AgERA5 as GeoTIFF files
 
-        Handles two input formats:
-        1. Dict with 'rainfall_dir' and 'agera5_dir' paths - copies existing files
-        2. Dict[int, ClimateTimeSeries] - generates NetCDF from in-memory data
+        Handles three input formats:
+        1. Dict with 'rainfall_dir' and 'agera5_dir' paths — copies existing
+           observed-climate GeoTIFFs (default OBSERVED path).
+        2. Dict[int, ClimateTimeSeries] — generates NetCDF from in-memory
+           observed-climate data (default OBSERVED path).
+        3. ``climate_kind=ClimateKind.PROJECTION`` + Dict[str, xr.DataArray] —
+           generates per-variable GeoTIFF directories from ISIMIP3b xarray
+           data (Sprint G AC-G-7c).
+
+        Per Sprint G AC-G-7c, the projection path additionally writes
+        a sidecar ``<variable>/.meta.json`` per variable directory
+        capturing ``gcm_source`` / ``bias_correction_method`` /
+        ``time_slice`` so downstream consumers can introspect
+        provenance without re-reading the parent manifest. The same
+        ``ProjectionClimateMeta`` schema as ACEA's per-cell sidecar
+        (per durable §24 canonical-source).
 
         Args:
-            climate_data: Either path dict or Dict of location_id to ClimateTimeSeries
-            region: Region for metadata
+            climate_data: Either path dict, ClimateTimeSeries dict, or
+                (when ``climate_kind=PROJECTION``) Dict[variable_name, xr.DataArray].
+            region: Region for metadata.
+            climate_kind: Source provenance discriminator. Defaults to
+                ``ClimateKind.OBSERVED`` (backward-compat).
+            projection_meta: Required when ``climate_kind=PROJECTION``;
+                emitted into the per-variable sidecars.
 
         Returns:
-            List of generated/copied file paths
+            List of generated/copied file paths.
         """
+        # Late import — keeps harmonize/ + models.scenario off the
+        # translator's import-time path for callers that don't touch
+        # projection climate.
+        from prismpy.harmonize.climate_kind import ClimateKind as _ClimateKind
+
+        if climate_kind is None:
+            climate_kind = _ClimateKind.OBSERVED
+
+        if climate_kind == _ClimateKind.PROJECTION:
+            if projection_meta is None:
+                raise ValueError(
+                    "climate_kind=PROJECTION requires projection_meta. The "
+                    "per-variable sidecar .meta.json files cannot be "
+                    "written without gcm_source / bias_correction_method "
+                    "/ time_slice fields. Pass a ProjectionClimateMeta "
+                    "instance."
+                )
+            return self._generate_projection_climate_geotiffs(
+                climate_data, projection_meta
+            )
+
         import shutil
         output_files = []
 
@@ -673,6 +715,177 @@ class SarraPyTranslator(SarraPyTranslatorBase):
                 csv_file = self._create_climate_csv(ts, loc_id)
                 output_files.append(csv_file)
 
+        return output_files
+
+    def _generate_projection_climate_geotiffs(
+        self,
+        climate_by_variable: Dict[str, Any],
+        projection_meta: "ProjectionClimateMeta",
+    ) -> List[Path]:
+        """Emit projection-climate per-variable GeoTIFF directories (AC-G-7c).
+
+        Per Sprint G AC-G-7c: SARRA-Py's projection-climate path takes a
+        ``Dict[variable_name, xarray.DataArray]`` produced by AC-G-7d
+        calendar conversion + AC-G-2 cached_cutout, and writes one
+        directory per variable under
+        ``<output_dir>/data/climate/<variable>/`` containing one GeoTIFF
+        per day plus a sidecar ``.meta.json`` per directory carrying
+        ``ProjectionClimateMeta``.
+
+        Determinism contract per CC-G-7 + the AC-G-13 deliverable hash
+        precondition. GeoTIFF byte-identity requires explicit pinning of:
+
+        * ``crs``: explicitly EPSG:4326 (WGS84) so default-from-env can't
+          drift.
+        * ``dtype``: explicitly ``float32`` (matches ISIMIP3b atmospheric
+          data; smaller than float64 without precision loss for the
+          variables in scope).
+        * ``nodata``: explicitly ``-9999.0`` (the SARRA-Py canonical
+          missing-value sentinel).
+        * ``compress='lzw'``: lossless, deterministic across rasterio
+          versions.
+        * ``tiled=True`` + ``blockxsize=256`` + ``blockysize=256``:
+          tiled output with explicit block size so internal layout
+          doesn't drift on different GDAL builds.
+        * GDAL ``.aux.xml`` sidecars disabled via ``GDAL_PAM_ENABLED=NO``
+          process-env lock during the write.
+
+        The helper does NOT modify the global GDAL_PAM_ENABLED setting
+        for the whole process — it scopes the override to the write
+        block via ``rasterio.Env``.
+
+        Args:
+            climate_by_variable: Dict of variable name (e.g., ``"tasmax"``,
+                ``"pr"``) to xarray DataArray. Each DataArray must have
+                ``time``, ``lat``, ``lon`` dims and a CRS attached via
+                ``rio.write_crs``.
+            projection_meta: Per-package projection metadata. Each
+                variable's sidecar inherits this; the sidecar's
+                ``variable`` field is set to the per-variable name.
+
+        Returns:
+            List of paths emitted (every per-day GeoTIFF + every
+            per-variable sidecar).
+        """
+        import json
+
+        import rasterio
+        from rasterio.transform import from_bounds
+
+        from prismpy.models.scenario import ProjectionClimateMeta as _Meta
+
+        output_files: List[Path] = []
+        climate_root = self.output_dir / "data" / "climate"
+
+        # Pin GDAL options for byte-identical output.
+        gdal_env = {
+            "GDAL_PAM_ENABLED": "NO",  # No .aux.xml sidecars
+        }
+
+        for variable, data_array in climate_by_variable.items():
+            var_dir = climate_root / variable
+            var_dir.mkdir(parents=True, exist_ok=True)
+
+            # Resolve geospatial layout. The DataArray must carry a CRS
+            # (caller's responsibility); we read the lat/lon edges to
+            # compute the affine transform explicitly so rasterio can't
+            # drift on auto-derivation.
+            try:
+                lat_values = data_array["lat"].values
+                lon_values = data_array["lon"].values
+                time_values = data_array["time"].values
+            except (KeyError, AttributeError) as exc:
+                raise ValueError(
+                    f"Projection climate DataArray for {variable!r} must have "
+                    "'time', 'lat', 'lon' dims; missing one or more"
+                ) from exc
+
+            # Pixel size (assumes regular grid; ISIMIP3b is 0.5°)
+            lat_pixel = abs(float(lat_values[1]) - float(lat_values[0])) if len(lat_values) > 1 else 0.5
+            lon_pixel = abs(float(lon_values[1]) - float(lon_values[0])) if len(lon_values) > 1 else 0.5
+
+            west = float(lon_values.min()) - lon_pixel / 2
+            east = float(lon_values.max()) + lon_pixel / 2
+            south = float(lat_values.min()) - lat_pixel / 2
+            north = float(lat_values.max()) + lat_pixel / 2
+            height, width = len(lat_values), len(lon_values)
+            transform = from_bounds(west, south, east, north, width, height)
+
+            with rasterio.Env(**gdal_env):
+                for time_idx, time_val in enumerate(time_values):
+                    # Format the date stable as YYYY-MM-DD for filename
+                    if hasattr(time_val, "strftime"):
+                        date_str = time_val.strftime("%Y-%m-%d")
+                    else:
+                        # numpy datetime64 → str
+                        date_str = str(time_val).split("T")[0][:10]
+
+                    band = data_array.isel(time=time_idx).values.astype("float32")
+                    # Lat axis is typically descending in geospatial convention
+                    # (north → south); flip if the source is ascending so
+                    # the GeoTIFF's row 0 is the northernmost row.
+                    if len(lat_values) > 1 and lat_values[0] < lat_values[-1]:
+                        band = band[::-1, :]
+
+                    tif_path = var_dir / f"{date_str}.tif"
+                    # GeoTIFF tiled-output requires block dims to be
+                    # multiples of 16; small ISIMIP3b cutouts (Niamey
+                    # area is ~6 × 6 pixels at 0.5°) fall below that
+                    # threshold and fall back to stripped output.
+                    write_kwargs = {
+                        "driver": "GTiff",
+                        "height": height,
+                        "width": width,
+                        "count": 1,
+                        "dtype": "float32",
+                        "crs": "EPSG:4326",
+                        "transform": transform,
+                        "nodata": -9999.0,
+                        "compress": "lzw",
+                    }
+                    if width >= 16 and height >= 16:
+                        # Tiled output requires block dims as multiples
+                        # of 16. Always use 16x16 blocks regardless of
+                        # image size — small ISIMIP3b cutouts (~6 × 6
+                        # pixels at 0.5° over Niamey) skip this branch
+                        # entirely; larger images get 16x16 tiles
+                        # consistently. Performance-optimal would be
+                        # 256x256 for large global outputs, but that
+                        # would require a separate "single-tile-vs-
+                        # multi-tile" branch and the deterministic-
+                        # output contract is the priority.
+                        write_kwargs["tiled"] = True
+                        write_kwargs["blockxsize"] = 16
+                        write_kwargs["blockysize"] = 16
+                    with rasterio.open(tif_path, "w", **write_kwargs) as dst:
+                        dst.write(band, 1)
+
+                    output_files.append(tif_path)
+
+            # Per-variable sidecar — one .meta.json per directory.
+            per_var_meta = _Meta(
+                gcm_source=projection_meta.gcm_source,
+                bias_correction_method=projection_meta.bias_correction_method,
+                time_slice_start=projection_meta.time_slice_start,
+                time_slice_end=projection_meta.time_slice_end,
+                variable=str(variable),
+                scenario_label=projection_meta.scenario_label,
+            )
+            sidecar_path = var_dir / ".meta.json"
+            sidecar_payload = json.dumps(
+                per_var_meta.model_dump(exclude_none=True),
+                indent=2,
+                sort_keys=True,
+                ensure_ascii=False,
+            ).encode("utf-8")
+            sidecar_path.write_bytes(sidecar_payload)
+            output_files.append(sidecar_path)
+
+        logger.info(
+            f"Generated SARRA-Py projection climate: "
+            f"{len(climate_by_variable)} variables, "
+            f"{len(output_files)} files total"
+        )
         return output_files
 
     def _copy_climate_geotiffs(self, climate_data: Dict[str, Any]) -> List[Path]:
