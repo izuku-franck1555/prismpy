@@ -57,6 +57,8 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -65,6 +67,7 @@ from filelock import FileLock, Timeout
 
 from prismpy.sources._cache_base import (
     DOWNLOAD_LOCK_TIMEOUT_SECONDS,
+    TMPFILE_PREFIX,
     cache_lock_path,
     cleanup_orphan_tmpfiles,
     write_atomic_json,
@@ -320,6 +323,19 @@ def discover_datasets(
     # The discovery surface returns the first match for now; AC-G-2's
     # ``cached_cutout`` is responsible for the time-slice filtering on
     # the dataset's per-file timestamps.
+    #
+    # Consumer contract (per durable lesson #24 canonical-source-or-pin
+    # + F-AV regression net): the returned dict carries the upstream
+    # API shape verbatim — ``product`` / ``climate_forcing`` /
+    # ``climate_scenario`` / ``climate_variable`` live nested under
+    # ``specifiers`` in the live API and at the top level in older
+    # responses. Consumers MUST route extraction through the
+    # ``_*_from_dataset`` helper family (or :func:`cached_cutout`,
+    # which uses them); reading ``dataset["climate_scenario"]``
+    # directly silently reintroduces F-AV against live data. A future
+    # boundary-flatten redesign (see Sprint H+ ISIMIP3b client
+    # redesign) is the canonical-source alternative; until that lands
+    # the helpers are the only sanctioned consumer path.
     return results[0]
 
 
@@ -469,37 +485,70 @@ def _is_cache_fresh(
     return True
 
 
+def _dataset_specifiers(dataset: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the dataset's ``specifiers`` sub-dict, or ``{}`` if absent.
+
+    The live ISIMIP3b API nests the (product / climate_forcing /
+    climate_scenario / climate_variable) fields under a ``specifiers``
+    sub-dict (e.g., ``dataset["specifiers"]["climate_scenario"] =
+    "ssp585"``). Older response shapes — and the synthetic dicts the
+    internal harness constructs — carry the same fields at the top
+    level. Each accessor below checks both layers so the helper family
+    is shape-tolerant.
+    """
+    nested = dataset.get("specifiers")
+    if isinstance(nested, dict):
+        return nested
+    return {}
+
+
 def _scenario_from_dataset(dataset: Dict[str, Any]) -> str:
     """Extract the climate scenario from the upstream dataset dict.
 
     Uses ``climate_scenario`` (the ISIMIP API field) with a fallback to
-    ``scenario`` for older response shapes.
+    ``scenario`` for older response shapes. Each name is tried at the
+    top level first, then under ``specifiers`` to cover the live API's
+    nested response shape.
     """
+    specs = _dataset_specifiers(dataset)
     return str(
         dataset.get("climate_scenario")
+        or specs.get("climate_scenario")
         or dataset.get("scenario")
+        or specs.get("scenario")
         or ""
     )
 
 
 def _gcm_from_dataset(dataset: Dict[str, Any]) -> str:
+    specs = _dataset_specifiers(dataset)
     return str(
         dataset.get("climate_forcing")
+        or specs.get("climate_forcing")
         or dataset.get("gcm")
+        or specs.get("gcm")
         or ""
     )
 
 
 def _variable_from_dataset(dataset: Dict[str, Any]) -> str:
+    specs = _dataset_specifiers(dataset)
     return str(
         dataset.get("climate_variable")
+        or specs.get("climate_variable")
         or dataset.get("variable")
+        or specs.get("variable")
         or ""
     )
 
 
 def _product_from_dataset(dataset: Dict[str, Any]) -> str:
-    return str(dataset.get("product") or "")
+    specs = _dataset_specifiers(dataset)
+    return str(
+        dataset.get("product")
+        or specs.get("product")
+        or ""
+    )
 
 
 def _dataset_paths(dataset: Dict[str, Any]) -> List[str]:
@@ -623,6 +672,86 @@ def _download_to_staging(
             pass
         raise CacheWriteError(
             f"Cache write to staging path {staging_path} failed: {exc!r}"
+        ) from exc
+
+
+def _unwrap_zip_cutout_if_needed(staging_path: Path) -> None:
+    """Replace ``staging_path`` with the inner NetCDF when the body is ZIP.
+
+    The live ISIMIP3b cutout API wraps the result in a ZIP archive
+    (first 4 bytes ``PK\\x03\\x04``). Upstream ``isimip_client``'s
+    ``download(extract=True)`` helper unzips for the caller, but
+    :func:`cached_cutout` uses its own streaming download path so the
+    unwrap has to live here. After this returns, ``staging_path``
+    carries the extracted NetCDF body — :func:`_validate_netcdf_magic`
+    runs against the inner file, not the ZIP container.
+
+    A ZIP body that contains zero or more than one NetCDF entry, or
+    that has the ZIP magic prefix but is not a readable archive,
+    surfaces as :class:`InvalidIsimipResponseError` so the caller can
+    discriminate this from a network failure.
+    """
+    try:
+        with staging_path.open("rb") as fh:
+            magic = fh.read(4)
+    except OSError as exc:
+        raise InvalidIsimipResponseError(
+            f"Cannot read staging file {staging_path}: {exc!r}"
+        ) from exc
+    if magic != b"PK\x03\x04":
+        return  # Not a ZIP body — leave for the NetCDF magic check.
+
+    try:
+        with zipfile.ZipFile(staging_path, "r") as zf:
+            members = [
+                name
+                for name in zf.namelist()
+                if name.lower().endswith((".nc", ".nc4"))
+            ]
+            if not members:
+                raise InvalidIsimipResponseError(
+                    f"ISIMIP cutout response at {staging_path} is a ZIP "
+                    f"but contains no NetCDF entries (members: "
+                    f"{zf.namelist()!r})."
+                )
+            if len(members) > 1:
+                raise InvalidIsimipResponseError(
+                    f"ISIMIP cutout response at {staging_path} is a ZIP "
+                    f"with multiple NetCDF entries; expected exactly 1: "
+                    f"{members!r}."
+                )
+            extracted = zf.read(members[0])
+    except zipfile.BadZipFile as exc:
+        raise InvalidIsimipResponseError(
+            f"ISIMIP cutout response at {staging_path} has ZIP magic "
+            f"but is not a readable ZIP archive: {exc!r}"
+        ) from exc
+
+    # Atomic-replace the staging file with the inner NetCDF so the
+    # downstream ``os.replace(staging, cache)`` step lands a NetCDF in
+    # the cache, not a ZIP. Per AC-G-2 §2.11 the staging-rename-meta
+    # discipline must hold; an unwrap-write failure mid-flight is a
+    # cache-write error, not an upstream invalid-response error.
+    #
+    # The tmp file uses the canonical ``.writing-*.tmp`` naming pattern
+    # so a SIGKILL between ``write_bytes`` and ``os.replace`` leaves an
+    # orphan that the next caller's ``cleanup_orphan_tmpfiles`` sweep
+    # removes — the cleanup glob in ``_cache_base.py`` matches this
+    # exact prefix.
+    tmp_path = staging_path.with_name(
+        f"{TMPFILE_PREFIX}unwrap-{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        tmp_path.write_bytes(extracted)
+        os.replace(str(tmp_path), str(staging_path))
+    except OSError as exc:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise CacheWriteError(
+            f"Cannot write unzipped NetCDF over staging path "
+            f"{staging_path}: {exc!r}"
         ) from exc
 
 
@@ -775,6 +904,10 @@ def cached_cutout(
             staging_path = staging_dir / f"{nc_path.name}.partial"
             try:
                 _download_to_staging(file_url, staging_path)
+                # Live ISIMIP cutout responses arrive ZIP-wrapped; the
+                # unwrap is a no-op when the body is already a plain
+                # NetCDF (synthetic test fixtures + older API shapes).
+                _unwrap_zip_cutout_if_needed(staging_path)
                 _validate_netcdf_magic(staging_path)
                 # Atomic rename. ``os.replace`` is atomic on the same
                 # filesystem; staging is a sibling of nc_path so the

@@ -34,10 +34,12 @@ empirically exercised.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import threading
 import time
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import patch
@@ -784,3 +786,378 @@ def test_bbox_missing_keys_raises_typed_error(
             bbox={"south": 13.0, "north": 14.5},  # missing west / east
             cache_dir=cache_root,
         )
+
+
+# ── F-AV: live ISIMIP3b API nests specifiers under ``specifiers`` ────
+
+
+def _stub_dataset_nested_specifiers() -> Dict[str, Any]:
+    """Return a synthetic dataset whose ``specifiers`` keys (product /
+    climate_forcing / climate_scenario / climate_variable) are nested
+    under a ``specifiers`` sub-dict, matching the live ISIMIP3b API
+    response shape (per the public data.isimip.org schema).
+
+    Compared to ``_stub_dataset()``: top-level ``id`` / ``name`` /
+    ``path`` / ``version`` / ``doi`` mirror the live shape; the four
+    extractor-relevant fields move under ``specifiers``.
+    """
+    return {
+        "id": "isimip3b/InputData/gfdl-esm4/ssp585/tasmax/v1",
+        "name": "gfdl-esm4_w5e5_ssp585_tasmax_global_daily",
+        "path": "ISIMIP3b/InputData/climate/atmosphere/bias-adjusted/global/daily/ssp585/GFDL-ESM4/tasmax",
+        "version": "20240101",
+        "doi": "10.5281/zenodo.fake",
+        "files": [],
+        "specifiers": {
+            "product": "InputData",
+            "climate_scenario": "ssp585",
+            "climate_forcing": "gfdl-esm4",
+            "climate_variable": "tasmax",
+        },
+    }
+
+
+class TestSpecifiersNestedShapeAccessors:
+    """F-AV regression net: the four extractor helpers MUST recognize
+    the live ISIMIP3b API's nested ``specifiers`` shape, not just the
+    flat shape the internal harness constructs by hand. The pre-fix
+    helpers walked top-level keys only and rejected every live response
+    with ``IsimipDatasetNotFoundError: missing required fields``.
+    """
+
+    def test_dataset_specifiers_returns_nested_dict_when_present(self) -> None:
+        dataset = _stub_dataset_nested_specifiers()
+        assert isimip3b._dataset_specifiers(dataset) == dataset["specifiers"]
+
+    def test_dataset_specifiers_returns_empty_when_absent(self) -> None:
+        assert isimip3b._dataset_specifiers({"id": "x"}) == {}
+
+    def test_dataset_specifiers_returns_empty_for_non_dict_value(self) -> None:
+        # Defensive: hostile API drift (specifiers as list / null / scalar)
+        # should not raise; downstream helpers fall through to top-level.
+        assert isimip3b._dataset_specifiers({"specifiers": None}) == {}
+        assert isimip3b._dataset_specifiers({"specifiers": ["a", "b"]}) == {}
+        assert isimip3b._dataset_specifiers({"specifiers": "ssp585"}) == {}
+
+    @pytest.mark.parametrize(
+        "stub_factory",
+        [_stub_dataset, _stub_dataset_nested_specifiers],
+        ids=["flat-shape", "nested-specifiers-shape"],
+    )
+    def test_each_helper_extracts_from_both_shapes(
+        self, stub_factory
+    ) -> None:
+        # Same expected values for both shapes — proves the helpers
+        # recognize either layout. The nested fixture's specifiers
+        # carry IDENTICAL field values to the flat fixture so a single
+        # set of assertions covers both.
+        dataset = stub_factory()
+        assert isimip3b._product_from_dataset(dataset) == "InputData"
+        assert isimip3b._scenario_from_dataset(dataset) == "ssp585"
+        assert isimip3b._gcm_from_dataset(dataset) == "gfdl-esm4"
+        assert isimip3b._variable_from_dataset(dataset) == "tasmax"
+
+    def test_top_level_wins_when_both_layers_present(self) -> None:
+        # Mixed-shape datasets in the wild are unlikely but defensive
+        # priority is well-defined: top-level wins over specifiers.
+        # Locks the priority so a future refactor cannot silently
+        # invert it.
+        dataset = {
+            "id": "x",
+            "product": "InputData",
+            "climate_scenario": "ssp585",
+            "climate_forcing": "gfdl-esm4",
+            "climate_variable": "tasmax",
+            "specifiers": {
+                "product": "SecondaryInputData",  # would lose
+                "climate_scenario": "ssp245",
+                "climate_forcing": "ipsl-cm6a-lr",
+                "climate_variable": "tasmin",
+            },
+        }
+        assert isimip3b._product_from_dataset(dataset) == "InputData"
+        assert isimip3b._scenario_from_dataset(dataset) == "ssp585"
+        assert isimip3b._gcm_from_dataset(dataset) == "gfdl-esm4"
+        assert isimip3b._variable_from_dataset(dataset) == "tasmax"
+
+    def test_short_name_fallbacks_at_both_layers(self) -> None:
+        # Older API shapes used ``scenario`` / ``gcm`` / ``variable``;
+        # the helpers MUST still find them whether they sit at the top
+        # level OR nested under ``specifiers``. Ordering: top-level
+        # canonical name → nested canonical name → top-level short →
+        # nested short → empty.
+        dataset_top_short = {
+            "scenario": "ssp585",
+            "gcm": "gfdl-esm4",
+            "variable": "tasmax",
+            "product": "InputData",
+        }
+        assert isimip3b._scenario_from_dataset(dataset_top_short) == "ssp585"
+        assert isimip3b._gcm_from_dataset(dataset_top_short) == "gfdl-esm4"
+        assert isimip3b._variable_from_dataset(dataset_top_short) == "tasmax"
+
+        dataset_nested_short = {
+            "specifiers": {
+                "scenario": "ssp245",
+                "gcm": "ipsl-cm6a-lr",
+                "variable": "tasmin",
+                "product": "SecondaryInputData",
+            }
+        }
+        assert isimip3b._scenario_from_dataset(dataset_nested_short) == "ssp245"
+        assert isimip3b._gcm_from_dataset(dataset_nested_short) == "ipsl-cm6a-lr"
+        assert isimip3b._variable_from_dataset(dataset_nested_short) == "tasmin"
+        assert (
+            isimip3b._product_from_dataset(dataset_nested_short)
+            == "SecondaryInputData"
+        )
+
+    def test_missing_in_both_layers_returns_empty(self) -> None:
+        # Regression: cached_cutout's required-fields check at line ~714
+        # depends on these helpers returning empty so the typed error
+        # fires. This pin documents that the helpers MUST return ""
+        # (not None / KeyError / "None") when nothing is found.
+        dataset = {"id": "incomplete"}
+        assert isimip3b._scenario_from_dataset(dataset) == ""
+        assert isimip3b._gcm_from_dataset(dataset) == ""
+        assert isimip3b._variable_from_dataset(dataset) == ""
+        assert isimip3b._product_from_dataset(dataset) == ""
+
+
+def test_cached_cutout_works_with_nested_specifiers_dataset(
+    cache_root: Path,
+    http_responses: responses.RequestsMock,
+) -> None:
+    """End-to-end F-AV regression: cached_cutout with a live-shape
+    dataset MUST resolve the cache key and write the artifact, NOT
+    raise IsimipDatasetNotFoundError. Pre-fix this test would fail at
+    line ~714's ``if not all([product, scenario, gcm, variable])``
+    guard because every helper returned "" against the nested shape.
+    """
+    http_responses.add(responses.GET, _FAKE_FILE_URL, body=_FAKE_NETCDF_BODY)
+    client = _FakeISIMIP3bClient()
+    nested_dataset = _stub_dataset_nested_specifiers()
+    nc_path = cached_cutout(
+        client,  # type: ignore[arg-type]
+        nested_dataset,
+        bbox={"south": 13.0, "north": 14.5, "west": 1.5, "east": 3.0},
+        cache_dir=cache_root,
+    )
+    # Cache key derives from the four nested specifiers; if the
+    # accessors couldn't read them the path would be empty/malformed
+    # rather than the contract layout.
+    rel = nc_path.relative_to(cache_root)
+    parts = rel.parts
+    assert parts[0] == "ISIMIP3b"
+    assert parts[1] == "InputData"
+    assert parts[2] == "ssp585"
+    assert parts[3] == "gfdl-esm4"
+    assert parts[4] == "tasmax"
+    assert parts[5].endswith(".nc")
+
+
+def test_helpers_skip_falsy_top_level_to_specifiers() -> None:
+    """Codex round-1 LOW absorption: a falsy-but-present top-level
+    value (e.g., ``""``) does NOT take priority over a non-empty
+    nested specifiers value. The documented "top-level wins" priority
+    refers to PRESENT non-empty values; the ``or``-chain semantics
+    fall through on falsy entries. Production fields are never
+    legitimately falsy so this is latent-only, but pinning the
+    behaviour keeps the priority ladder observable for future
+    maintainers.
+    """
+    dataset_empty_top = {
+        "id": "x",
+        "climate_scenario": "",
+        "climate_forcing": "",
+        "climate_variable": "",
+        "product": "",
+        "specifiers": {
+            "climate_scenario": "ssp585",
+            "climate_forcing": "gfdl-esm4",
+            "climate_variable": "tasmax",
+            "product": "InputData",
+        },
+    }
+    assert isimip3b._scenario_from_dataset(dataset_empty_top) == "ssp585"
+    assert isimip3b._gcm_from_dataset(dataset_empty_top) == "gfdl-esm4"
+    assert isimip3b._variable_from_dataset(dataset_empty_top) == "tasmax"
+    assert isimip3b._product_from_dataset(dataset_empty_top) == "InputData"
+
+
+# ── F-AV expanded scope: live cutout responses arrive ZIP-wrapped ────
+
+
+def _make_zip_with_netcdf(
+    nc_body: bytes = _FAKE_NETCDF_BODY,
+    nc_name: str = "cutout.nc",
+) -> bytes:
+    """Build a minimal ZIP archive carrying a single NetCDF entry.
+
+    Mirrors the live ISIMIP3b cutout API's ZIP-wrapped response shape.
+    The synthetic NetCDF body inside is the same magic-prefixed stub
+    the existing tests use, so the regression net for the unwrapped
+    artifact is identical to the existing happy-path assertions.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(nc_name, nc_body)
+    return buf.getvalue()
+
+
+def _make_zip_with_no_netcdf() -> bytes:
+    """Build a ZIP whose only entry is a non-NetCDF file."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("README.txt", b"not a netcdf")
+    return buf.getvalue()
+
+
+def _make_zip_with_two_netcdfs() -> bytes:
+    """Build a ZIP carrying two NetCDF entries (an over-match shape
+    the cutout API never returns; pinned so a future change can't
+    silently start picking arbitrary inner files)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("cutout_1.nc", _FAKE_NETCDF_BODY)
+        zf.writestr("cutout_2.nc", _FAKE_NETCDF_BODY)
+    return buf.getvalue()
+
+
+def test_cached_cutout_unzips_zip_wrapped_response(
+    cache_root: Path,
+    fake_dataset: Dict[str, Any],
+    http_responses: responses.RequestsMock,
+) -> None:
+    """Live ISIMIP3b cutout responses are ZIP archives carrying a
+    single NetCDF file. cached_cutout MUST unwrap the ZIP, persist
+    only the inner NetCDF body in the cache, and validate the magic
+    bytes against the extracted file (NOT the ZIP container). Pre-fix
+    this raised ``InvalidIsimipResponseError`` on the ZIP magic
+    ``PK\\x03\\x04``.
+    """
+    zipped_body = _make_zip_with_netcdf()
+    http_responses.add(responses.GET, _FAKE_FILE_URL, body=zipped_body)
+    client = _FakeISIMIP3bClient()
+    nc_path = cached_cutout(
+        client,  # type: ignore[arg-type]
+        fake_dataset,
+        bbox={"south": 13.0, "north": 14.5, "west": 1.5, "east": 3.0},
+        cache_dir=cache_root,
+    )
+    # The cache file must hold the unwrapped NetCDF body, not the ZIP.
+    persisted = nc_path.read_bytes()
+    assert persisted[:4] == b"CDF\x01", (
+        f"Cache holds ZIP container instead of inner NetCDF; "
+        f"first 8 bytes: {persisted[:8]!r}"
+    )
+    assert persisted == _FAKE_NETCDF_BODY
+
+
+def test_cached_cutout_rejects_zip_with_no_netcdf_entries(
+    cache_root: Path,
+    fake_dataset: Dict[str, Any],
+    http_responses: responses.RequestsMock,
+) -> None:
+    """A ZIP body without any NetCDF members surfaces as
+    InvalidIsimipResponseError — this is malformed cutout output, NOT
+    a network failure or cache-write error."""
+    http_responses.add(
+        responses.GET, _FAKE_FILE_URL, body=_make_zip_with_no_netcdf()
+    )
+    client = _FakeISIMIP3bClient()
+    with pytest.raises(InvalidIsimipResponseError, match="no NetCDF entries"):
+        cached_cutout(
+            client,  # type: ignore[arg-type]
+            fake_dataset,
+            bbox={"south": 13.0, "north": 14.5, "west": 1.5, "east": 3.0},
+            cache_dir=cache_root,
+        )
+
+
+def test_cached_cutout_rejects_zip_with_multiple_netcdf_entries(
+    cache_root: Path,
+    fake_dataset: Dict[str, Any],
+    http_responses: responses.RequestsMock,
+) -> None:
+    """A ZIP body with more than one NetCDF entry surfaces as
+    InvalidIsimipResponseError. The cutout API always returns exactly
+    one NetCDF; an over-match is malformed output that must NOT be
+    silently picking the first entry."""
+    http_responses.add(
+        responses.GET, _FAKE_FILE_URL, body=_make_zip_with_two_netcdfs()
+    )
+    client = _FakeISIMIP3bClient()
+    with pytest.raises(
+        InvalidIsimipResponseError, match="multiple NetCDF entries"
+    ):
+        cached_cutout(
+            client,  # type: ignore[arg-type]
+            fake_dataset,
+            bbox={"south": 13.0, "north": 14.5, "west": 1.5, "east": 3.0},
+            cache_dir=cache_root,
+        )
+
+
+def test_cached_cutout_rejects_corrupt_zip_archive(
+    cache_root: Path,
+    fake_dataset: Dict[str, Any],
+    http_responses: responses.RequestsMock,
+) -> None:
+    """A response body whose first 4 bytes are the ZIP magic prefix
+    but whose remainder is not a readable archive surfaces as
+    InvalidIsimipResponseError (not a generic OSError leaking out)."""
+    corrupt_zip = b"PK\x03\x04" + b"\x00" * 64  # ZIP magic + garbage
+    http_responses.add(responses.GET, _FAKE_FILE_URL, body=corrupt_zip)
+    client = _FakeISIMIP3bClient()
+    with pytest.raises(
+        InvalidIsimipResponseError, match="not a readable ZIP archive"
+    ):
+        cached_cutout(
+            client,  # type: ignore[arg-type]
+            fake_dataset,
+            bbox={"south": 13.0, "north": 14.5, "west": 1.5, "east": 3.0},
+            cache_dir=cache_root,
+        )
+
+
+def test_cached_cutout_passes_through_plain_netcdf_response(
+    cache_root: Path,
+    fake_dataset: Dict[str, Any],
+    http_responses: responses.RequestsMock,
+) -> None:
+    """The unwrap step MUST be a no-op when the body is already a
+    plain NetCDF — synthetic test fixtures + older API shapes still
+    return raw NetCDF directly. Regression net: the existing happy
+    path stays green."""
+    http_responses.add(responses.GET, _FAKE_FILE_URL, body=_FAKE_NETCDF_BODY)
+    client = _FakeISIMIP3bClient()
+    nc_path = cached_cutout(
+        client,  # type: ignore[arg-type]
+        fake_dataset,
+        bbox={"south": 13.0, "north": 14.5, "west": 1.5, "east": 3.0},
+        cache_dir=cache_root,
+    )
+    assert nc_path.read_bytes() == _FAKE_NETCDF_BODY
+
+
+def test_cached_cutout_unzips_nc4_extension_member(
+    cache_root: Path,
+    fake_dataset: Dict[str, Any],
+    http_responses: responses.RequestsMock,
+) -> None:
+    """The ZIP-member filter recognises both ``.nc`` and ``.nc4`` so a
+    NetCDF-4 cutout (HDF5-magic body inside a ``.nc4`` member) is
+    unwrapped the same way as a NetCDF-classic ``.nc`` member."""
+    zipped = _make_zip_with_netcdf(nc_body=_FAKE_NETCDF_HDF5, nc_name="cutout.nc4")
+    http_responses.add(responses.GET, _FAKE_FILE_URL, body=zipped)
+    client = _FakeISIMIP3bClient()
+    nc_path = cached_cutout(
+        client,  # type: ignore[arg-type]
+        fake_dataset,
+        bbox={"south": 13.0, "north": 14.5, "west": 1.5, "east": 3.0},
+        cache_dir=cache_root,
+    )
+    persisted = nc_path.read_bytes()
+    assert persisted[:4] == b"\x89HDF"
+    assert persisted == _FAKE_NETCDF_HDF5
