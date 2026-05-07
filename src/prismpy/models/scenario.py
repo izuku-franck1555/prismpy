@@ -240,9 +240,93 @@ class ScenarioBlock(BaseModel):
         return self
 
 
+# ── AC-G-7b ProjectionClimateMeta (per-cell sidecar) ─────────────────
+
+
+class ProjectionClimateMeta(BaseModel):
+    """Per-cell sidecar metadata for the ACEA / SARRA-Py projection path.
+
+    Sprint G AC-G-7b emits a ``.meta.json`` file alongside each per-cell
+    climate artifact (ACEA pickle or SARRA-Py per-variable directory).
+    The sidecar carries the projection-source provenance fields a
+    consumer needs to read off-disk without re-loading the parent
+    package's ``manifest.scenario`` block.
+
+    Per Draft 5 line 174 + LOW-Pass4-6 in
+    ``SPRINT-G-IMPLEMENTATION-DISCIPLINE-NOTES.md``: the schema lives
+    in ``prismpy.models.scenario`` parallel to ``ScenarioBlock``; both
+    writer + reader route through this model so a typo at the producer
+    side surfaces as ``ValidationError`` rather than silently dropping
+    at consumer read time.
+
+    Cell vs variable identifier:
+
+    * AC-G-7b ACEA writer populates ``cell_id`` (one sidecar per
+      30-arcmin cell pickle).
+    * AC-G-7c SARRA-Py writer populates ``variable`` (one sidecar per
+      per-variable GeoTIFF directory).
+
+    Both are optional; at least one MUST be set for the sidecar to be
+    semantically meaningful, but the schema permits both empty for
+    edge-case constructor flexibility (the writers themselves enforce
+    the AC-specific constraint at emission time).
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        validate_assignment=True,
+        use_enum_values=True,
+    )
+
+    gcm_source: str = Field(
+        ..., min_length=1, description="GCM identifier (e.g., 'gfdl-esm4')."
+    )
+    bias_correction_method: BiasCorrectionMethod = Field(
+        ..., description="Bias-correction algorithm applied."
+    )
+    time_slice_start: int = Field(
+        ..., ge=_TIME_SLICE_MIN_YEAR, le=_TIME_SLICE_MAX_YEAR
+    )
+    time_slice_end: int = Field(
+        ..., ge=_TIME_SLICE_MIN_YEAR, le=_TIME_SLICE_MAX_YEAR
+    )
+    cell_id: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="ACEA per-cell sidecar — 30-arcmin cell ID.",
+    )
+    variable: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "SARRA-Py per-variable sidecar — variable name "
+            "(e.g., 'tasmax', 'pr')."
+        ),
+    )
+    scenario_label: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Optional pairing reference back to the parent scenario "
+            "block. When set, must equal the parent manifest's "
+            "scenario.scenario_label."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_time_slice_ordering(self) -> "ProjectionClimateMeta":
+        if self.time_slice_end < self.time_slice_start:
+            raise ValueError(
+                f"time_slice_end ({self.time_slice_end}) must be >= "
+                f"time_slice_start ({self.time_slice_start})"
+            )
+        return self
+
+
 __all__ = [
     "ScenarioRole",
     "BiasCorrectionMethod",
     "ScenarioBlock",
+    "ProjectionClimateMeta",
     "MissingProvenanceError",
 ]

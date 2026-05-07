@@ -13,6 +13,7 @@ from prismpy.models.provenance import ProvenanceRecord, TransformationRecord, De
 from prismpy.models.scenario import (
     BiasCorrectionMethod,
     MissingProvenanceError,
+    ProjectionClimateMeta,
     ScenarioBlock,
     ScenarioRole,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "DecisionRecord",
     "BiasCorrectionMethod",
     "MissingProvenanceError",
+    "ProjectionClimateMeta",
     "ScenarioBlock",
     "ScenarioRole",
 ]
