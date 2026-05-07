@@ -39,6 +39,13 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from prismpy.standards.co2_ppm import (
+    CO2_PPM_BY_SCENARIO_PERIOD,
+    CO2ProvenanceMismatchError,
+    co2_ppm_matches_canonical,
+    get_co2_ppm_with_provenance,
+)
+
 
 # ── AC-G-4 closed enums ──────────────────────────────────────────────
 
@@ -239,6 +246,71 @@ class ScenarioBlock(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _check_co2_canonical_agreement(self) -> "ScenarioBlock":
+        """AC-G-9 Layer 2 — semantic check against the canonical
+        lookup at :data:`prismpy.standards.co2_ppm.CO2_PPM_BY_SCENARIO_PERIOD`.
+
+        For a registered ``(rcp_or_ssp, time_slice)`` tuple, asserts:
+
+        * ``math.isclose(co2_ppm, canonical_value, rel_tol=1e-9)`` —
+          per pass-2 MEDIUM-Rebase-3 the tolerance catches deliberate
+          cooking while absorbing JSON-roundtrip rounding noise.
+        * ``co2_ppm_provenance == canonical_provenance`` — exact
+          string match. Paraphrased citations fail loud.
+
+        The lookup key is built from ``rcp_or_ssp.upper()`` so
+        ``"ssp245"`` (the field description's lowercase example) maps
+        to ``"SSP245"`` (the canonical table's uppercase key) without
+        the user-input case becoming a silent Layer 2 bypass.
+
+        When ``(rcp_or_ssp, time_slice)`` is NOT in the canonical
+        table (e.g., a non-primary-core-ensemble scenario shipped via
+        ``ValidationMode.LEGACY``), Layer 2 skips silently — Layer 1
+        substrate enforcement + AC-G-10 provenance-pairing still apply,
+        and the validator's ``mode=SHIP`` rejects unregistered
+        scenarios at the ship-validation boundary.
+        """
+        scenario_key = self.rcp_or_ssp.upper()
+        time_slice_key = (self.time_slice_start, self.time_slice_end)
+        lookup_key = (scenario_key, time_slice_key)
+        if lookup_key not in CO2_PPM_BY_SCENARIO_PERIOD:
+            # Not a primary-core-ensemble scenario — Layer 2 does not
+            # apply. Layer 1 + AC-G-10 still enforce the substrate-
+            # and-pairing invariants.
+            return self
+        expected_ppm, expected_provenance = CO2_PPM_BY_SCENARIO_PERIOD[
+            lookup_key
+        ]
+        if not co2_ppm_matches_canonical(self.co2_ppm, expected_ppm):
+            raise CO2ProvenanceMismatchError(
+                f"co2_ppm={self.co2_ppm} disagrees with canonical "
+                f"value {expected_ppm} for scenario {scenario_key} "
+                f"time_slice {time_slice_key}. Per AC-G-9 Layer 2, "
+                "the value MUST match the canonical lookup at "
+                "prismpy.standards.co2_ppm within rel_tol=1e-9.",
+                scenario=scenario_key,
+                time_slice=time_slice_key,
+                observed_co2_ppm=self.co2_ppm,
+                expected_co2_ppm=expected_ppm,
+                observed_provenance=self.co2_ppm_provenance,
+                expected_provenance=expected_provenance,
+            )
+        if self.co2_ppm_provenance != expected_provenance:
+            raise CO2ProvenanceMismatchError(
+                f"co2_ppm_provenance does not match canonical "
+                f"citation for scenario {scenario_key} time_slice "
+                f"{time_slice_key}. Paraphrased / approximate "
+                "provenance fails loud per AC-G-9 Layer 2.",
+                scenario=scenario_key,
+                time_slice=time_slice_key,
+                observed_co2_ppm=self.co2_ppm,
+                expected_co2_ppm=expected_ppm,
+                observed_provenance=self.co2_ppm_provenance,
+                expected_provenance=expected_provenance,
+            )
+        return self
+
 
 # ── AC-G-7b ProjectionClimateMeta (per-cell sidecar) ─────────────────
 
@@ -329,4 +401,5 @@ __all__ = [
     "ScenarioBlock",
     "ProjectionClimateMeta",
     "MissingProvenanceError",
+    "CO2ProvenanceMismatchError",
 ]

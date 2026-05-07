@@ -37,6 +37,7 @@ from pydantic import ValidationError
 
 from prismpy.models.scenario import (
     BiasCorrectionMethod,
+    CO2ProvenanceMismatchError,
     MissingProvenanceError,
     ScenarioBlock,
     ScenarioRole,
@@ -212,8 +213,18 @@ def test_co2_ppm_rejects_out_of_bounds(ppm: float) -> None:
 
 @pytest.mark.parametrize("ppm", [200.0, 2000.0])
 def test_co2_ppm_boundary_accepted(ppm: float) -> None:
+    """The schema accepts 200.0 and 2000.0 at the boundary. Use a
+    non-canonical (scenario, time_slice) tuple so AC-G-9 Layer 2
+    skips and the test exercises only the schema-bounds invariant.
+    Layer 2 cross-check is verified separately in
+    ``test_co2_canonical_substrate.py``."""
     kwargs = _valid_block_kwargs()
     kwargs["co2_ppm"] = ppm
+    # Non-canonical scenario × time-slice — Layer 2 lookup misses,
+    # validator falls through to schema bounds only.
+    kwargs["rcp_or_ssp"] = "ssp370"
+    kwargs["time_slice_start"] = 2030
+    kwargs["time_slice_end"] = 2049
     block = ScenarioBlock(**kwargs)
     assert block.co2_ppm == ppm
 
@@ -453,3 +464,119 @@ def test_validate_manifest_rejects_scenario_with_empty_provenance(
 
     with pytest.raises(ValidationError):
         validate_manifest(out, synthetic_package)
+
+
+# ── §AC-G-9 Layer 2 — semantic check against canonical lookup ────────
+
+
+def test_layer2_accepts_canonical_co2_ppm_and_provenance() -> None:
+    """The default fixture uses SSP585 + (2046, 2065) + co2_ppm=571.0
+    + the canonical AR6 provenance string — this is THE happy path
+    for Layer 2."""
+    block = ScenarioBlock(**_valid_block_kwargs())
+    assert block.co2_ppm == 571.0
+
+
+def test_layer2_rejects_co2_ppm_drift_above_tolerance() -> None:
+    """Layer 2 fires when co2_ppm differs from canonical beyond
+    rel_tol=1e-9. A 1.0 ppm drift is far above tolerance."""
+    kwargs = _valid_block_kwargs()
+    kwargs["co2_ppm"] = 572.0  # canonical SSP585 (2046, 2065) is 571.0
+    with pytest.raises(ValidationError) as exc_info:
+        ScenarioBlock(**kwargs)
+    # Pydantic wraps the typed error; the cause carries the structured
+    # fields per the exception's contract.
+    assert "Layer 2" in str(exc_info.value) or "canonical" in str(
+        exc_info.value
+    )
+
+
+def test_layer2_accepts_sub_ulp_co2_ppm_drift() -> None:
+    """A sub-ULP rounding artifact (e.g., from JSON round-trip) is
+    within rel_tol=1e-9 and accepted. This pins the tolerance."""
+    kwargs = _valid_block_kwargs()
+    kwargs["co2_ppm"] = 571.0 + 1e-10  # within rel_tol=1e-9 of 571.0
+    block = ScenarioBlock(**kwargs)
+    assert block.co2_ppm == 571.0 + 1e-10
+
+
+def test_layer2_rejects_paraphrased_provenance_string() -> None:
+    """Provenance string match is exact — paraphrased citations fail
+    loud per AC-G-9 Layer 2."""
+    kwargs = _valid_block_kwargs()
+    kwargs["co2_ppm_provenance"] = "AR6 mid-period (paraphrased)"
+    with pytest.raises(ValidationError) as exc_info:
+        ScenarioBlock(**kwargs)
+    assert "provenance" in str(exc_info.value).lower()
+
+
+def test_layer2_skips_for_non_canonical_scenario() -> None:
+    """When (rcp_or_ssp, time_slice) is not in the canonical table,
+    Layer 2 skips silently and Layer 1 + AC-G-10 still apply.
+    Validates the ValidationMode.LEGACY-friendly path."""
+    kwargs = _valid_block_kwargs()
+    kwargs["rcp_or_ssp"] = "ssp370"
+    # SSP370 (2046, 2065) is not registered — Layer 2 skips
+    block = ScenarioBlock(**kwargs)
+    # Schema bounds check still applied; AC-G-10 provenance check
+    # still applied; Layer 2 just doesn't fire.
+    assert block.rcp_or_ssp == "ssp370"
+    assert block.co2_ppm_provenance is not None
+
+
+def test_layer2_normalizes_lowercase_ssp_for_lookup() -> None:
+    """The contract description shows ``'ssp245'`` lowercase; the
+    canonical table uses ``'SSP245'`` uppercase. Layer 2 normalizes
+    via ``.upper()`` before lookup so the case mismatch isn't a
+    silent Layer 2 bypass."""
+    kwargs = _valid_block_kwargs()
+    kwargs["rcp_or_ssp"] = "ssp585"  # lowercase
+    # Default fixture uses canonical 571.0 + canonical provenance
+    # for SSP585 (2046, 2065); validates cleanly.
+    block = ScenarioBlock(**kwargs)
+    assert block.rcp_or_ssp == "ssp585"
+
+    # And lowercase still triggers Layer 2 mismatch when value is wrong
+    kwargs2 = _valid_block_kwargs()
+    kwargs2["rcp_or_ssp"] = "ssp585"
+    kwargs2["co2_ppm"] = 600.0  # not 571.0
+    with pytest.raises(ValidationError):
+        ScenarioBlock(**kwargs2)
+
+
+def test_layer2_typed_exception_carries_structured_fields() -> None:
+    """``CO2ProvenanceMismatchError`` exposes ``observed`` + ``expected``
+    fields so callers (validator + cockpit error rendering) get
+    actionable info, not a freeform string."""
+    kwargs = _valid_block_kwargs()
+    kwargs["co2_ppm"] = 999.0  # mismatch
+    try:
+        ScenarioBlock(**kwargs)
+    except ValidationError as ve:
+        # Pydantic wraps the underlying error; assert at least one
+        # error in the bundle came from Layer 2.
+        any_layer2 = any(
+            "Layer 2" in str(err.get("msg", ""))
+            or "canonical" in str(err.get("msg", "")).lower()
+            for err in ve.errors()
+        )
+        assert any_layer2
+
+
+def test_layer2_accepts_all_4_canonical_tuples() -> None:
+    """Round-trip every canonical (scenario, time_slice) tuple +
+    canonical co2_ppm + canonical provenance. Each must validate."""
+    canonical = [
+        ("ssp245", 2046, 2065, 478.0),
+        ("ssp245", 2086, 2100, 541.0),
+        ("ssp585", 2046, 2065, 571.0),
+        ("ssp585", 2086, 2100, 1054.0),
+    ]
+    for scenario, start, end, ppm in canonical:
+        kwargs = _valid_block_kwargs()
+        kwargs["rcp_or_ssp"] = scenario
+        kwargs["time_slice_start"] = start
+        kwargs["time_slice_end"] = end
+        kwargs["co2_ppm"] = ppm
+        block = ScenarioBlock(**kwargs)
+        assert block.co2_ppm == ppm

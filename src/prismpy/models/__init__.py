@@ -12,6 +12,7 @@ from prismpy.models.crop import CropParameters, CropCalendar
 from prismpy.models.provenance import ProvenanceRecord, TransformationRecord, DecisionRecord
 from prismpy.models.scenario import (
     BiasCorrectionMethod,
+    CO2ProvenanceMismatchError,
     MissingProvenanceError,
     ProjectionClimateMeta,
     ScenarioBlock,
@@ -33,6 +34,7 @@ __all__ = [
     "TransformationRecord",
     "DecisionRecord",
     "BiasCorrectionMethod",
+    "CO2ProvenanceMismatchError",
     "MissingProvenanceError",
     "ProjectionClimateMeta",
     "ScenarioBlock",
