@@ -1393,6 +1393,44 @@ class PythiaTranslator(PythiaTranslatorBase):
         'potato': 'PT', 'cassava': 'CS',
     }
 
+    @staticmethod
+    def _ascii_fold_for_dssat(value: str) -> str:
+        """Strip diacritics and non-ASCII chars from a DSSAT identifier.
+
+        DSSAT v4.8 reads experiment-file names + weather-station codes
+        as fixed-width byte strings. Multi-byte UTF-8 (e.g., ``É`` =
+        ``0xC3 0x89``, 2 bytes per glyph) shifts the byte boundaries
+        and truncates the read at the wrong offset — a project named
+        ``"Bénoué"`` produces ``"BÉSG8001.SNX"`` whose 12-char prefix
+        gets truncated mid-byte to ``"BÉSG8001.SN"``, and DSSAT logs
+        ``WARNING.OUT: File not found: BÉSG8001.SN``.
+
+        The fix is to ASCII-fold the source string at the boundary
+        before any slicing or formatting downstream. NFKD decomposes
+        the diacritic into base+combining-mark; the ``encode("ASCII",
+        "ignore")`` step drops the non-ASCII combining mark; the result
+        is single-byte-per-char ASCII that DSSAT's fixed-width byte
+        reads handle correctly.
+
+        Apply this ONLY to DSSAT-byte-consumed strings (SNX filename,
+        wsta prefix, INSI, batch labels). Display strings on
+        ``manifest.region.name`` keep their diacritics — only the
+        DSSAT-consumed surface needs ASCII.
+
+        Args:
+            value: Source string (may contain non-ASCII characters).
+
+        Returns:
+            ASCII-only equivalent. Empty input returns empty string.
+        """
+        import unicodedata
+
+        if not value:
+            return value
+        return unicodedata.normalize("NFKD", value).encode(
+            "ASCII", "ignore"
+        ).decode("ASCII")
+
     def _get_dssat_crop_code(self) -> str:
         """Get 2-character DSSAT crop code for experiment filenames."""
         crop_lower = self.config.crop.name.lower()
@@ -1402,11 +1440,16 @@ class PythiaTranslator(PythiaTranslatorBase):
         """Get the actual template filename based on region and crop.
 
         DSSAT convention: exactly 8 characters (e.g., KACP8001.SNX).
+        ASCII-folded so non-ASCII region names (e.g., ``Bénoué``) do
+        not produce multi-byte SNX filenames that DSSAT truncates
+        mid-byte (see :meth:`_ascii_fold_for_dssat` for the byte-
+        boundary failure mode).
 
         Returns:
             Template filename
         """
-        region_code = self.config.region.name[:2].upper()
+        region_ascii = self._ascii_fold_for_dssat(self.config.region.name)
+        region_code = region_ascii[:2].upper()
         crop_code = self._get_dssat_crop_code()
         return f"{region_code}{crop_code}8001.SNX"
 
@@ -1473,18 +1516,26 @@ class PythiaTranslator(PythiaTranslatorBase):
         """Get the weather station prefix for PYTHIA lookup.
 
         PYTHIA's lookup_wth function uses this prefix for output symlink naming.
-        Format: 4-character code like "MLKO" (country + region).
+        Format: 4-character code like "MLKO" (country + region). The region
+        portion is ASCII-folded so non-ASCII region names (e.g., ``Bénoué``)
+        produce single-byte-per-char prefixes; DSSAT consumes these as
+        fixed-width byte strings and truncates multi-byte glyphs mid-byte
+        otherwise (see :meth:`_ascii_fold_for_dssat`).
 
         Returns:
-            4-character weather station prefix (e.g., MLKO for Mali Koutiala)
+            4-character weather station prefix (e.g., MLKO for Mali Koutiala,
+            CMBE for Cameroon Bénoué).
         """
         country_iso3 = self.config.region.country_iso3 or ""
         region_name = self.config.region.name or ""
 
         country_code = self._iso3_to_iso2(country_iso3)
 
-        # Build 4-char prefix: 2 chars country + 2 chars region
-        region_code = region_name[:2].upper() if region_name else "XX"
+        # Build 4-char prefix: 2 chars country + 2 chars region.
+        # ASCII-fold the region BEFORE slicing so non-ASCII glyphs do not
+        # land in the DSSAT-byte-consumed prefix.
+        region_ascii = self._ascii_fold_for_dssat(region_name)
+        region_code = region_ascii[:2].upper() if region_ascii else "XX"
         prefix = f"{country_code}{region_code}"[:4]
 
         return prefix
@@ -2540,16 +2591,29 @@ class PythiaTranslator(PythiaTranslatorBase):
     def _generate_snx_template(self, data: UnifiedData) -> Path:
         """Generate DSSAT SNX experiment template with Jinja2 variables.
 
+        Both ``exp_id`` and the on-disk write path derive from
+        :meth:`_get_template_filename` so the SNX file written here
+        agrees byte-for-byte with the template name referenced by
+        ``pythia_config["default_setup"]["template"]`` written by
+        :meth:`_generate_pythia_json`. This prevents the cross-
+        write-site drift class where one site folds a non-ASCII
+        region name while the other writes the raw multi-byte form
+        — DSSAT then opens the folded path, finds nothing, and
+        logs ``WARNING.OUT: File not found``.
+
         Args:
             data: UnifiedData with region and config info
 
         Returns:
             Path to generated SNX template
         """
-        # Generate experiment ID (DSSAT: exactly 8 chars)
-        region_code = data.region.name[:2].upper()
-        crop_code = self._get_dssat_crop_code()
-        exp_id = f"{region_code}{crop_code}8001"
+        # Single source of truth for the SNX filename. The helper
+        # ASCII-folds DSSAT-byte-consumed identifiers so non-ASCII
+        # region names (e.g., "Bénoué") write byte-clean filenames
+        # ("BESG8001.SNX") that DSSAT's fixed-width Fortran reads
+        # handle correctly.
+        template_filename = self._get_template_filename()
+        exp_id = template_filename[:-4]  # strip ".SNX"
 
         # Get mapped parameters
         config_params = self._map_generic_to_pythia_config()
@@ -2581,8 +2645,11 @@ class PythiaTranslator(PythiaTranslatorBase):
         templates_dir = self.output_dir / "templates"
         templates_dir.mkdir(parents=True, exist_ok=True)
 
-        # Write template
-        template_path = templates_dir / f"{exp_id}.SNX"
+        # Write template using the SAME filename the config references,
+        # not a re-derived raw region.name slice. Cross-write-site pin
+        # at tests/unit/test_pythia_dssat_ascii_fold.py asserts these
+        # two surfaces never drift.
+        template_path = templates_dir / template_filename
         with open(template_path, 'w') as f:
             f.write(template_content)
 
@@ -2761,6 +2828,14 @@ class PythiaTranslator(PythiaTranslatorBase):
     def _generate_manifest(self, data: UnifiedData) -> Path:
         """Generate manifest.json with file inventory and checksums.
 
+        The manifest carries a non-null ``scenario`` block populated
+        from the project's temporal + region + crop config via
+        :func:`prismpy.packaging.scenario_helpers.build_baseline_scenario_block_for_period`.
+        Every PYTHIA baseline package emits the block — UC2 climate-
+        scenarios consumers (and any future scenario-set workflow)
+        read ``manifest.scenario.scenario_role`` from EVERY package
+        in the comparison set, including the baseline anchor.
+
         Args:
             data: UnifiedData with region info
 
@@ -2769,6 +2844,9 @@ class PythiaTranslator(PythiaTranslatorBase):
         """
         from prismpy.packaging.manifest import (
             create_manifest, derive_boundary_label, save_manifest,
+        )
+        from prismpy.packaging.scenario_helpers import (
+            build_baseline_scenario_block_for_period,
         )
 
         # Resolved-source discriminator: read the runtime boundary
@@ -2807,11 +2885,42 @@ class PythiaTranslator(PythiaTranslatorBase):
             }
         }
 
-        # Create manifest
+        # Build the baseline scenario block. Every PYTHIA package
+        # emits a non-null ``manifest.scenario`` so paired-set
+        # consumers (UC2 climate scenarios) read the block from EVERY
+        # package — baseline-anchor and projection siblings alike.
+        # When temporal config is missing we skip emission to avoid
+        # injecting a malformed block; downstream consumers handle
+        # the legacy missing-block case via ``.get("scenario")``.
+        scenario_block = None
+        if (
+            self.config.temporal is not None
+            and self.config.temporal.start_year is not None
+            and self.config.temporal.end_year is not None
+        ):
+            try:
+                scenario_block = build_baseline_scenario_block_for_period(
+                    region_name=data.region.name,
+                    crop_name=self.config.crop.name,
+                    time_slice_start=self.config.temporal.start_year,
+                    time_slice_end=self.config.temporal.end_year,
+                )
+            except Exception as exc:  # noqa: BLE001 — emission is best-effort
+                # A schema-bound failure (e.g., end_year < start_year)
+                # falls back to scenario-null rather than crashing the
+                # whole manifest emission. Existing pre-CA-1 behaviour
+                # for the malformed-config case.
+                logger.warning(
+                    "Skipping baseline scenario block emission: %s", exc,
+                )
+
+        # Create manifest with the (optional) scenario block plumbed
+        # through so the on-disk JSON carries it at top level.
         manifest = create_manifest(
             package_dir=self.output_dir,
             project_config=project_config,
             platform="pythia",
+            scenario=scenario_block,
         )
 
         # Save
