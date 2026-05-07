@@ -51,10 +51,37 @@ def validate_manifest_cell_summary_consistency(
         ManifestConsistencyError: When the manifest flag and the
             per-cell substrate disagree.
     """
-    flags = manifest.get("flags") or {}
-    flag_present = bool(flags.get("interpolation_present", False))
+    # Codex HIGH #3 absorption: present-but-malformed ``flags`` /
+    # ``cells`` raises rather than coercing via ``or {}`` / ``or []``.
+    # ABSENCE is a clean no-op (legacy package compat); MALFORMED is
+    # not.
+    if "flags" in manifest:
+        flags = manifest["flags"]
+        if not isinstance(flags, dict):
+            raise ManifestConsistencyError(
+                f"manifest.flags must be a JSON object; got "
+                f"{type(flags).__name__!r}"
+            )
+        if "interpolation_present" in flags and not isinstance(
+            flags["interpolation_present"], bool
+        ):
+            raise ManifestConsistencyError(
+                f"manifest.flags.interpolation_present must be a bool; "
+                f"got {type(flags['interpolation_present']).__name__!r}"
+            )
+        flag_present = bool(flags.get("interpolation_present", False))
+    else:
+        flag_present = False
 
-    cells = cell_summary.get("cells") or []
+    if "cells" in cell_summary:
+        cells = cell_summary["cells"]
+        if not isinstance(cells, list):
+            raise ManifestConsistencyError(
+                f"cell_summary.cells must be a JSON list; got "
+                f"{type(cells).__name__!r}"
+            )
+    else:
+        cells = []
     cells_with_interpolation = [
         cell
         for cell in cells

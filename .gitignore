@@ -112,3 +112,4 @@ Thumbs.db
 # scoping, per-sprint sub-folders, and any harness-only files that do
 # not match the suffix patterns above. Symmetric with prismweb/.gitignore.
 .local/
+.venv-py312/

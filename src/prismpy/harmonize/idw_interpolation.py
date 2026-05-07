@@ -158,7 +158,17 @@ def interpolate_idw(
         InsufficientNeighborsError: when zero candidates fall within
             ``radius_km`` after self-filter. Per AC-E2-3 routing
             this case shouldn't reach the engine in production.
+        ValueError: when ``k < 1`` (no contributing neighbours
+            requested) — codex MEDIUM-2 absorption; previously
+            ``k=0`` fell through to a divide-by-zero.
     """
+    if k < 1:
+        raise ValueError(
+            f"interpolate_idw: k must be >= 1; got k={k}. "
+            f"Use IDW_DEFAULT_K (={IDW_DEFAULT_K}) for the canonical "
+            f"per-cell interpolation."
+        )
+
     # Self-filter + radius scan in one pass. We collect (distance,
     # candidate) tuples and sort.
     target_lat = float(target_cell.lat)

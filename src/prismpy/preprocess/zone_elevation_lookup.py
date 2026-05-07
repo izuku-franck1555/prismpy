@@ -119,38 +119,46 @@ def lookup_zone_and_elevation(
             f"HWSD2 raster read at {hwsd2_path} failed: {exc!r}"
         ) from exc
 
+    # Codex HIGH #4 absorption: route through the existing
+    # ``KGClassifier`` (canonical Köppen-zone classifier) rather
+    # than a non-existent ``classify_zone_from_code`` helper. The
+    # classifier opens the raster, samples (lat, lon), and maps
+    # the integer code to a ``KGZone`` enum value via the bundled
+    # ``KG_CODE_TO_ZONE`` table.
+    from prismpy.koppen.kg_classifier import KGClassifier
+    from prismpy.koppen.zones import KoppenZone as _KoppenZoneType  # noqa: F401
+
+    # Sprint E.2's KoppenZone Literal is a 5-zone subset of the
+    # full KG enum (Beck 2023 publishes 30 zones). When the
+    # classifier returns a zone outside that subset (e.g., BSk,
+    # BWh, Cwb) the lookup is "out-of-Sprint-E.2-scope" and we
+    # raise LookupSkipped so the caller falls back honestly.
     try:
-        with rasterio.open(str(koppen_path)) as src:
-            samples = list(src.sample([centroid]))
-            if not samples or samples[0] is None or len(samples[0]) == 0:
-                raise LookupSkipped(
-                    f"Köppen sample at {centroid} returned no data."
-                )
-            koppen_raw = samples[0][0]
+        with KGClassifier(koppen_path) as classifier:
+            kg_zone = classifier.classify(float(cell.lat), float(cell.lon))
     except (OSError, ValueError) as exc:
         raise LookupSkipped(
-            f"Köppen raster read at {koppen_path} failed: {exc!r}"
+            f"KGClassifier read at {koppen_path} failed: {exc!r}"
         ) from exc
 
-    # The Köppen raster encodes zones as integer codes; the
-    # mapping to string codes lives in the Köppen-classifier module.
-    # For Sprint E.2 we delegate to whatever the existing
-    # classifier knows about; if the integer-to-string mapping
-    # produces a value outside the canonical KoppenZone Literal,
-    # raise LookupSkipped (caller falls back).
-    from prismpy.koppen.kg_classifier import (  # type: ignore[import-untyped]
-        classify_zone_from_code,
-    )
-
-    try:
-        koppen_code = classify_zone_from_code(int(koppen_raw))
-    except (ValueError, KeyError) as exc:
+    if kg_zone is None:
         raise LookupSkipped(
-            f"Köppen raw code {koppen_raw} cannot be classified: {exc!r}"
-        ) from exc
+            f"Köppen sample at {centroid} returned no data (ocean / "
+            f"nodata cell)."
+        )
+    # KGZone is a str-Enum whose value matches our KoppenZone
+    # Literal members 1-1 for the 5 Sprint E.2 zones.
+    code_str = kg_zone.value
+    sprint_e2_zones = {"Af", "Aw", "BSh", "Cfa", "Cwa"}
+    if code_str not in sprint_e2_zones:
+        raise LookupSkipped(
+            f"Köppen zone {code_str!r} at {centroid} is out of "
+            f"Sprint E.2 scope (registry covers {sorted(sprint_e2_zones)}); "
+            f"V2-19.5 Data Bootstrapper expansion required."
+        )
 
     return ZoneElevationLookup(
-        koppen_code=koppen_code,
+        koppen_code=code_str,  # type: ignore[arg-type]
         elevation_m=elevation_m,
     )
 

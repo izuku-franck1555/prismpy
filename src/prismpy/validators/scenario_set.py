@@ -853,26 +853,55 @@ def _validate_interpolation_consistency(
     """
     import json
     from prismpy.validators.manifest_consistency import (
+        ManifestConsistencyError,
         validate_manifest_cell_summary_consistency,
     )
 
     cell_summary_path = package_path / "cell_summary.json"
     if not cell_summary_path.exists():
-        return  # legacy package without the new substrate
+        # Codex HIGH #3 absorption: ABSENCE is the only legacy no-op.
+        # Present-but-malformed below raises loud per
+        # ``feedback_no_data_cooking.md`` honest-signal contract.
+        return
     try:
         cell_summary = json.loads(cell_summary_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return  # malformed → upstream validator handles
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ScenarioSetValidationError(
+            package_label=package_label,
+            failing_field_path="cell_summary.json",
+            expected="readable JSON object",
+            actual=f"unreadable: {exc!r}",
+            message=(
+                f"{package_label}: cell_summary.json is present but "
+                f"unreadable: {exc!r}"
+            ),
+        ) from exc
     if not isinstance(cell_summary, dict):
-        return
-    # Re-raise as ScenarioSetValidationError-shaped failure with the
-    # package_label trace context the rest of this validator uses.
+        raise ScenarioSetValidationError(
+            package_label=package_label,
+            failing_field_path="cell_summary.json",
+            expected="JSON object",
+            actual=type(cell_summary).__name__,
+            message=(
+                f"{package_label}: cell_summary.json must be a JSON "
+                f"object; got {type(cell_summary).__name__!r}"
+            ),
+        )
+    # Codex HIGH #2 absorption: catch only ManifestConsistencyError
+    # (the typed exception) + re-raise via the structured-trace
+    # constructor. Other exceptions bubble unchanged.
     try:
         validate_manifest_cell_summary_consistency(manifest, cell_summary)
-    except Exception as exc:
+    except ManifestConsistencyError as exc:
         raise ScenarioSetValidationError(
-            f"{package_label}: manifest/cell_summary interpolation "
-            f"consistency: {exc}"
+            package_label=package_label,
+            failing_field_path="manifest.flags.interpolation_present",
+            expected="agreement with cell_summary.cells[].interpolation_decision_id",
+            actual="drift",
+            message=(
+                f"{package_label}: manifest/cell_summary "
+                f"interpolation consistency: {exc}"
+            ),
         ) from exc
 
 

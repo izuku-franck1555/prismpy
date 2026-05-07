@@ -263,72 +263,49 @@ def current_decisions(
         return {}
 
     # Sort by canonical ordering tuple per §0.2 #2. Caller need
-    # not pre-sort.
+    # not pre-sort. Tie-break by decision_id (UUID stringification)
+    # for determinism on duplicate (timestamp, sequence_number)
+    # tuples per codex MEDIUM-3 absorption.
     sorted_records = sorted(
         records,
-        key=lambda r: (r.timestamp, r.sequence_number),
+        key=lambda r: (r.timestamp, r.sequence_number, str(r.decision_id)),
     )
 
-    # Index by decision_id for revert-chain traversal.
-    by_id: dict[UUID, CellDecisionRecord] = {r.decision_id: r for r in sorted_records}
-
-    # Compute reverted-set: the set of decision_ids that any record
-    # in the log reverts (transitively — a revert is a record, but
-    # the "thing being reverted" is the original decision_id, NOT
-    # the revert record's own decision_id). The semantic per
-    # Drill I: (write A, revert A, write C) → A and the revert
-    # both filtered; C is current. So when we see B with
-    # revert_of=A, we mark A as reverted AND B itself is excluded
-    # from "current" candidates.
-    reverted_decision_ids: set[UUID] = set()
-    revert_action_ids: set[UUID] = set()
+    # Per-cell stack semantics (codex HIGH #1 absorption). Walk
+    # records in chronological order; for each cell, maintain a
+    # stack of "active" non-reverted decisions. Encountering a
+    # ``revert_of=X`` record pops the matching entry from the
+    # stack (a no-op if ``X`` isn't on the stack — defensive).
+    # The top of each cell's stack at end-of-walk is the current
+    # active decision; an empty stack means no current decision
+    # (all reverted).
+    #
+    # This semantic correctly handles the Drill I revert-of-revert
+    # chain (write A → revert A → write C → C is current) AND the
+    # codex-flagged write-D → write-A → revert-A → D-restored case
+    # (D remains current; the revert undoes A and unmasks D).
+    stacks: dict[CellID, list[CellDecisionRecord]] = {}
     for record in sorted_records:
+        cell_stack = stacks.setdefault(record.cell_id, [])
         if record.revert_of is not None:
-            reverted_decision_ids.add(record.revert_of)
-            revert_action_ids.add(record.decision_id)
+            # Revert action: pop the matching decision off the
+            # stack. We walk from top (most-recent) so a revert
+            # that targets a non-current entry still un-masks
+            # the entry below it on the next walk.
+            for idx in range(len(cell_stack) - 1, -1, -1):
+                if cell_stack[idx].decision_id == record.revert_of:
+                    cell_stack.pop(idx)
+                    break
+            # The revert record itself does NOT push onto the
+            # stack — it's a reversal, not a new decision.
+        else:
+            # Regular decision: push.
+            cell_stack.append(record)
 
-    # For each cell, walk records in reverse chronological order
-    # (latest first). The first record that is NOT reverted AND
-    # NOT itself a revert action is the current decision. If no
-    # such record exists, the cell has no current decision (all
-    # decisions reverted).
-    result: dict[CellID, Optional[CellDecisionRecord]] = {}
-    cells_seen: set[CellID] = set()
-    for record in reversed(sorted_records):
-        if record.cell_id in cells_seen:
-            continue
-        # Two filter conditions: (1) skip records that ARE reverts
-        # (the revert is inert history, not a current decision);
-        # (2) skip records whose decision_id appears in
-        # reverted_decision_ids (the original got reverted).
-        if record.decision_id in revert_action_ids:
-            # This record is itself a revert action; mark cell as
-            # seen so older records on the same cell are reachable
-            # below. Actually wait — we want the most-recent
-            # non-reverted, so we should keep walking. Let me
-            # think again.
-            continue
-        if record.decision_id in reverted_decision_ids:
-            # This original decision was reverted by a later
-            # record. The revert action is also inert (filtered
-            # above). So neither this nor the revert counts as
-            # current; mark the cell as resolved-to-None and
-            # don't keep walking older records on the same cell.
-            result[record.cell_id] = None
-            cells_seen.add(record.cell_id)
-            continue
-        # First non-reverted, non-revert-action record for this
-        # cell when walking newest-to-oldest. This is the current.
-        result[record.cell_id] = record
-        cells_seen.add(record.cell_id)
-
-    # Cells whose ALL records were reverts (rare edge case) need
-    # an explicit None entry. Walk again to fill.
-    for record in sorted_records:
-        if record.cell_id not in result:
-            result[record.cell_id] = None
-
-    return result
+    return {
+        cell_id: (stack[-1] if stack else None)
+        for cell_id, stack in stacks.items()
+    }
 
 
 __all__ = [

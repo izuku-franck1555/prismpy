@@ -95,14 +95,45 @@ _PRISMPY_ORDERING_CONSUMERS: frozenset[str] = frozenset(
 def test_decision_log_uses_canonical_ordering_tuple() -> None:
     """The canonical reader at ``current_decisions()`` MUST sort by
     the canonical (timestamp, sequence_number) tuple per §0.2 #2.
-    A drift to (timestamp, decision_id) or (timestamp,) alone fires
-    this pin."""
+    Codex LOW-3 absorption: AST walk over the function's lambda key
+    rather than raw-text grep — a refactor that renames the loop
+    variable would otherwise silently break the assertion.
+    """
+    import ast
+
     src = _prismpy_src() / "models" / "decision_log.py"
-    text = src.read_text(encoding="utf-8")
-    # Canonical sort key references both attributes.
-    assert "r.timestamp" in text and "r.sequence_number" in text, (
-        f"decision_log.py must sort by (r.timestamp, r.sequence_number) "
-        f"per §0.2 canonical-source #2. Either attribute missing → drift."
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+
+    # Find the ``current_decisions`` function definition.
+    target_func: ast.FunctionDef | None = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "current_decisions":
+            target_func = node
+            break
+    assert target_func is not None, (
+        "current_decisions function not found in decision_log.py"
+    )
+
+    # Walk the function body for ``sorted(... key=lambda r: (...))``
+    # and assert the lambda body references both ``timestamp`` AND
+    # ``sequence_number`` attributes.
+    found_canonical_lambda = False
+    for node in ast.walk(target_func):
+        if not isinstance(node, ast.Lambda):
+            continue
+        # Collect Attribute references inside the lambda body.
+        attrs: set[str] = set()
+        for inner in ast.walk(node.body):
+            if isinstance(inner, ast.Attribute):
+                attrs.add(inner.attr)
+        if "timestamp" in attrs and "sequence_number" in attrs:
+            found_canonical_lambda = True
+            break
+
+    assert found_canonical_lambda, (
+        "current_decisions() must sort by a lambda key referencing "
+        "BOTH ``timestamp`` AND ``sequence_number`` attributes per "
+        "§0.2 canonical-source #2 ordering tuple. Drift fires this pin."
     )
 
 
