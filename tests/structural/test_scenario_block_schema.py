@@ -719,3 +719,58 @@ def test_ac_g_11_provenance_appears_in_model_dump() -> None:
     assert payload["scenario_bias_correction_provenance"] == (
         "ISIMIP3BASD v2.5.0 quantile-mapping against W5E5 v2.0"
     )
+
+
+# ── Codex round 1 boundary 5/7 P2 absorption — format pattern ────────
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        "foo",  # no version, no "against"
+        "ISIMIP v1.0",  # no "against"
+        "ISIMIP v1.0 against W5E5",  # no reference version
+        "ISIMIP against W5E5 v2.0",  # no method version
+        "v1.0 against v2.0",  # method/reference names too short
+        "ISIMIP3BASD 2.5.0 against W5E5 2.0",  # missing 'v' prefix on versions
+    ],
+)
+def test_ac_g_11_rejects_malformed_provenance(malformed: str) -> None:
+    """Codex round 1 boundary 5/7 P2 absorption: non-empty provenance
+    that doesn't match the canonical format ``<method> v<version>
+    against <reference> v<version>`` is rejected. Catches
+    truthy-but-meaningless strings like ``"foo"`` that would otherwise
+    pass the prior truthiness-only check and ship as audit-incomplete
+    citations."""
+    kwargs = _valid_block_kwargs()
+    kwargs["scenario_bias_correction_provenance"] = malformed
+    with pytest.raises(ValidationError) as exc_info:
+        ScenarioBlock(**kwargs)
+    assert "format" in str(exc_info.value).lower() or "canonical" in str(
+        exc_info.value
+    ).lower()
+
+
+@pytest.mark.parametrize(
+    "valid",
+    [
+        # Canonical example
+        "ISIMIP3BASD v2.5.0 quantile-mapping against W5E5 v2.0",
+        # Different method
+        "ISIMIP3BASD v2.5.0 delta-method against W5E5 v2.0",
+        # No descriptor between method and 'against'
+        "ISIMIP3BASD v2.5.0 against W5E5 v2.0",
+        # Multi-segment reference name
+        "ISIMIP3BASD v2.5.0 against ERA5-Land v1.2.3",
+        # Multi-segment versions
+        "ISIMIP3BASD v2.5.0.1 against W5E5 v2.0.5",
+    ],
+)
+def test_ac_g_11_accepts_canonical_format_variations(valid: str) -> None:
+    """Reasonable variations on the canonical format validate cleanly
+    — the regex catches obviously-malformed strings without
+    over-constraining legitimate field values."""
+    kwargs = _valid_block_kwargs()
+    kwargs["scenario_bias_correction_provenance"] = valid
+    block = ScenarioBlock(**kwargs)
+    assert block.scenario_bias_correction_provenance == valid

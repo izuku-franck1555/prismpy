@@ -478,7 +478,7 @@ def test_baseline_with_unknown_method_rejected_in_ship_mode(
     )
     base_manifest["scenario"]["bias_correction_method"] = "unknown"
     base_manifest["scenario"]["scenario_bias_correction_provenance"] = (
-        "synthetic legacy provenance for AC-G-11 compatibility"
+        "ISIMIP3BASD v2.5.0 quantile-mapping against W5E5 v2.0"
     )
     (base / "manifest.json").write_text(
         json.dumps(base_manifest, indent=2, sort_keys=True),

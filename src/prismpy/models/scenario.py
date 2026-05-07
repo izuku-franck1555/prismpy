@@ -34,6 +34,7 @@ consumers that surface the role to researchers.
 
 from __future__ import annotations
 
+import re
 from enum import Enum
 from typing import Optional
 
@@ -44,6 +45,38 @@ from prismpy.standards.co2_ppm import (
     CO2ProvenanceMismatchError,
     co2_ppm_matches_canonical,
     get_co2_ppm_with_provenance,
+)
+
+
+# AC-G-11 canonical bias-correction provenance format:
+#
+#   "<method_name> v<method_version> against <reference_dataset> v<reference_version>"
+#
+# Example (from contract Draft 5):
+#
+#   "ISIMIP3BASD v2.5.0 quantile-mapping against W5E5 v2.0"
+#
+# Regex requires:
+# 1. A version token ``v<digits>(\.<digits>)*`` somewhere in the
+#    method-name portion (catches "ISIMIP v1.0" with optional extra
+#    descriptor like "quantile-mapping" before "against").
+# 2. The literal " against " separator.
+# 3. A version token after the reference-dataset name.
+#
+# This rejects obviously-malformed strings ("foo", "no version here")
+# while accepting legitimate variations in the method-name descriptor
+# part. Pass-2 MEDIUM-Rebase-style permissive boundary: catches
+# deliberate cooking without flagging legitimate format variance.
+_BIAS_CORRECTION_PROVENANCE_RE = re.compile(
+    r"^"
+    r".+?"            # method software name (non-greedy)
+    r"\sv\d+(?:\.\d+)*"  # method version token
+    r".*?"            # optional descriptors (e.g., "quantile-mapping")
+    r"\sagainst\s"    # canonical separator
+    r".+?"            # reference dataset name
+    r"\sv\d+(?:\.\d+)*"  # reference version token
+    r"\s*$",
+    re.IGNORECASE,
 )
 
 
@@ -297,6 +330,25 @@ class ScenarioBlock(BaseModel):
                 "version-pinned provenance citation. Format: "
                 "'<method_name> v<method_version> against "
                 "<reference_dataset> v<reference_version>'."
+            )
+        # Codex round 1 boundary 5/7 P2 absorption: a non-empty
+        # provenance string can still bypass the audit contract if it
+        # carries an unstructured value like ``"foo"``. Enforce the
+        # canonical format pattern so Dr. Kofi's grep on the manifest
+        # always lands on a parseable citation.
+        if not _BIAS_CORRECTION_PROVENANCE_RE.match(
+            self.scenario_bias_correction_provenance.strip()
+        ):
+            raise MissingProvenanceError(
+                "scenario_bias_correction_provenance does not match "
+                "the canonical AC-G-11 format. Got: "
+                f"{self.scenario_bias_correction_provenance!r}. "
+                "Expected: '<method_name> v<method_version> against "
+                "<reference_dataset> v<reference_version>' "
+                "(e.g., 'ISIMIP3BASD v2.5.0 quantile-mapping against "
+                "W5E5 v2.0'). The version-pinned citation MUST carry a "
+                "method version, the literal separator ' against ', "
+                "and a reference-dataset version."
             )
         return self
 
