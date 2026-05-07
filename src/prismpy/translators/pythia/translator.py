@@ -2049,17 +2049,39 @@ class PythiaTranslator(PythiaTranslatorBase):
     ) -> bool:
         """Return True if the canonical substrate builder is the dispatch target.
 
-        The dispatch only chooses the canonical path when the
-        operator has not forced legacy mode AND every input the
-        builder needs (grid, per-cell soil profile dict,
-        ``region.country_iso3``) is present. When inputs are
-        incomplete, the dispatcher silently falls back to the legacy
-        bundled flow with an INFO log — this matches the back-compat
-        contract for projects whose ingestion has not yet adopted
-        per-cell soil resolution. Operators who want loud-fail
-        instead can pass ``prefer_canonical_substrate=False`` to
-        force legacy mode (explicit opt-out).
+        The dispatch only chooses the canonical path when:
+
+        1. The ``PRISMPY_DISABLE_CANONICAL_EGHR`` environment variable
+           is NOT set to ``"1"``. Operators set this escape hatch
+           when running on legacy bundled-eGHR assets — the env-var
+           takes precedence over the constructor parameter so a
+           process can opt out of canonical mode without rebuilding
+           the translator (e.g., from a CI harness that wraps the
+           prismpy pipeline). When the var is set, the dispatcher
+           emits a WARNING per the project's no-data-cooking
+           contract so the legacy path is never chosen silently.
+        2. The operator has not forced legacy mode via
+           ``prefer_canonical_substrate=False``.
+        3. Every canonical-path input is present: ``data.grid``,
+           a non-empty per-cell ``data.soil`` dict, and
+           ``self.config.region.country_iso3``.
+
+        When any condition is unmet, the dispatcher routes to the
+        legacy bundled flow. Operators who want loud-fail instead
+        can pass ``prefer_canonical_substrate=False`` to force
+        legacy mode (explicit opt-out via the constructor) or set
+        ``PRISMPY_DISABLE_CANONICAL_EGHR=1`` (operator escape hatch
+        from the runtime environment).
         """
+        import os
+
+        if os.environ.get("PRISMPY_DISABLE_CANONICAL_EGHR") == "1":
+            logger.warning(
+                "Canonical eGHR substrate disabled via "
+                "PRISMPY_DISABLE_CANONICAL_EGHR=1; using legacy "
+                "global GHR.db path."
+            )
+            return False
         if not self.prefer_canonical_substrate:
             return False
         if data is None or data.grid is None:
