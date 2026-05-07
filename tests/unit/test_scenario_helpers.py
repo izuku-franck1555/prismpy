@@ -359,6 +359,173 @@ def test_rewrite_raises_on_malformed_json(tmp_path: Path) -> None:
         )
 
 
+# ── CA-1 wiring helpers: estimate_observed_co2_ppm + period builder ──
+
+
+def test_estimate_observed_co2_ppm_at_anchor_year() -> None:
+    """At an anchor year, the function returns the anchor value exactly."""
+    from prismpy.packaging.scenario_helpers import estimate_observed_co2_ppm
+
+    # 2014 is the canonical mid-2010s anchor neighborhood; the function
+    # should return a value between the 2010 and 2015 anchors.
+    assert 390.0 <= estimate_observed_co2_ppm(2014) <= 401.0
+    # 2020 is exactly an anchor (414.0).
+    assert estimate_observed_co2_ppm(2020) == 414.0
+    # 2010 is exactly an anchor (390.0).
+    assert estimate_observed_co2_ppm(2010) == 390.0
+
+
+def test_estimate_observed_co2_ppm_saturates_at_extremes() -> None:
+    """Years outside the anchor range return the closest anchor value."""
+    from prismpy.packaging.scenario_helpers import estimate_observed_co2_ppm
+
+    # Pre-1958: returns the first anchor.
+    assert estimate_observed_co2_ppm(1900) == 315.0
+    # Post-2023: returns the last anchor.
+    assert estimate_observed_co2_ppm(2050) == 422.0
+
+
+def test_estimate_observed_co2_ppm_increases_monotonically() -> None:
+    """CO2 is strictly non-decreasing across the historical period.
+
+    Sanity pin: any anchor table entry that violates monotonicity
+    (e.g., a typo flipping two values) fails this check. Real
+    Mauna Loa observations are monotonically non-decreasing year-
+    over-year through 2023.
+    """
+    from prismpy.packaging.scenario_helpers import estimate_observed_co2_ppm
+
+    years = [1960, 1970, 1980, 1990, 2000, 2010, 2014, 2020, 2023]
+    values = [estimate_observed_co2_ppm(y) for y in years]
+    for prev, curr in zip(values, values[1:]):
+        assert curr >= prev, (
+            f"CO2 estimator non-monotonic across anchors: {values}"
+        )
+
+
+def test_build_baseline_scenario_block_for_period_for_benoue() -> None:
+    """The period-aware builder constructs a valid block with auto-derived defaults."""
+    from prismpy.packaging.scenario_helpers import (
+        build_baseline_scenario_block_for_period,
+    )
+
+    block = build_baseline_scenario_block_for_period(
+        region_name="Bénoué",
+        crop_name="Sorghum",
+        time_slice_start=2013,
+        time_slice_end=2015,
+    )
+    serialized = block.model_dump()
+    assert serialized["scenario_role"] == "baseline"
+    assert serialized["bias_correction_method"] == "none"
+    assert serialized["rcp_or_ssp"] == "historical"
+    assert serialized["gcm_source"] == "observed_NASA-POWER"
+    assert serialized["time_slice_start"] == 2013
+    assert serialized["time_slice_end"] == 2015
+    # Label is ASCII-folded + uppercased.
+    assert "BENOUE" in serialized["scenario_label"]
+    assert "SORGHUM" in serialized["scenario_label"]
+    assert "É" not in serialized["scenario_label"]
+    # CO2 ppm for 2014 midpoint is between 2010 and 2015 anchors.
+    assert 390.0 <= serialized["co2_ppm"] <= 401.0
+    # Provenance string is non-empty (AC-G-10).
+    assert serialized["co2_ppm_provenance"]
+    assert "Mauna Loa" in serialized["co2_ppm_provenance"]
+
+
+def test_build_baseline_scenario_block_for_period_handles_pure_nonascii_region() -> None:
+    """A pure-non-ASCII region defaults to UNKNOWN in the label."""
+    from prismpy.packaging.scenario_helpers import (
+        build_baseline_scenario_block_for_period,
+    )
+
+    # Pure Chinese ideographs fold to empty → UNKNOWN sentinel.
+    block = build_baseline_scenario_block_for_period(
+        region_name="中文",
+        crop_name="Sorghum",
+        time_slice_start=2015,
+        time_slice_end=2017,
+    )
+    assert "UNKNOWN" in block.scenario_label
+    assert block.scenario_label.isascii()
+
+
+def test_pythia_translator_baseline_manifest_has_scenario_block(tmp_path: Path) -> None:
+    """CA-1 round-trip pin: PYTHIA translator's manifest carries a non-null scenario block.
+
+    Synthetic Bénoué-Cameroon-Sorghum-2013-2015 project exercises
+    the full ``_generate_manifest`` path; the on-disk manifest.json
+    MUST have ``scenario.scenario_role == "baseline"`` populated by
+    the period-aware builder. Without CA-1 wiring (i.e., on commit
+    ``2ecc0a9`` before the fixup), the manifest's scenario field
+    was null and UC2 hard-failed.
+    """
+    from prismpy.config.schema import (
+        BoundaryConfig,
+        BoundarySource,
+        CropCalendarConfig,
+        CropConfig,
+        ManualBoundsConfig,
+        OutputConfig,
+        Platform,
+        ProjectConfig,
+        ProjectInfo,
+        RegionConfig,
+        TemporalConfig,
+    )
+    from prismpy.models.region import BoundingBox, Region
+    from prismpy.translators.base import UnifiedData
+    from prismpy.translators.pythia.translator import PythiaTranslator
+
+    cfg = ProjectConfig(
+        project=ProjectInfo(name="ca1_baseline_scenario_pin"),
+        region=RegionConfig(
+            name="Bénoué",
+            country="Cameroon",
+            country_iso3="CMR",
+            boundary=BoundaryConfig(
+                source=BoundarySource.MANUAL,
+                manual_bounds=ManualBoundsConfig(
+                    minx=13.5, miny=8.0, maxx=14.5, maxy=9.0,
+                ),
+            ),
+        ),
+        crop=CropConfig(
+            name="Sorghum",
+            name_short="sgh",
+            calendar=CropCalendarConfig(planting_doy=166, maturity_doy=285),
+        ),
+        temporal=TemporalConfig(
+            start_year=2013, end_year=2015, spinup_years=0,
+        ),
+        targets=[Platform.PYTHIA],
+        output=OutputConfig(base_dir=str(tmp_path), structure="by_platform"),
+    )
+
+    region = Region(
+        name="Bénoué",
+        country="Cameroon",
+        country_iso3="CMR",
+        bounds=BoundingBox(minx=13.5, miny=8.0, maxx=14.5, maxy=9.0),
+    )
+    data = UnifiedData(region=region)
+
+    translator = PythiaTranslator(config=cfg, output_dir=str(tmp_path))
+    manifest_path = translator._generate_manifest(data)
+
+    with manifest_path.open("r", encoding="utf-8") as fh:
+        manifest = json.load(fh)
+
+    assert "scenario" in manifest, (
+        "manifest.json missing scenario block — CA-1 wiring not in effect"
+    )
+    assert manifest["scenario"] is not None
+    assert manifest["scenario"]["scenario_role"] == "baseline"
+    assert manifest["scenario"]["bias_correction_method"] == "none"
+    assert manifest["scenario"]["time_slice_start"] == 2013
+    assert manifest["scenario"]["time_slice_end"] == 2015
+
+
 # ── End-to-end pin: helpers compose for a UC2 baseline ─────────────
 
 

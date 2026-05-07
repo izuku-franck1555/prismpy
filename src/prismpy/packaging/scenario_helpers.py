@@ -277,3 +277,139 @@ def _replace_year_prefix(iso_date: str, new_year: int) -> str:
     if iso_date[4] != "-" or iso_date[7] != "-":
         return iso_date
     return f"{new_year:04d}{iso_date[4:]}"
+
+
+# ── CA-1 wiring helper: derive an observed-period CO2 ppm value ─────
+
+
+# Anchor points for NOAA Mauna Loa annual mean atmospheric CO₂ ppm.
+# Source: https://gml.noaa.gov/ccgg/trends/data.html (annual mean
+# global average, ~mid-year-of-year convention). Used to derive a
+# sensible default ``co2_ppm`` for observed-climate baseline scenario
+# blocks via piecewise-linear interpolation on the period midpoint.
+# Callers needing precise per-year values from a specific source
+# should override the helper's ``co2_ppm`` argument.
+_OBSERVED_CO2_PPM_ANCHORS: tuple[tuple[int, float], ...] = (
+    (1958, 315.0),
+    (1970, 326.0),
+    (1980, 339.0),
+    (1990, 354.0),
+    (2000, 370.0),
+    (2010, 390.0),
+    (2015, 401.0),
+    (2020, 414.0),
+    (2023, 422.0),
+)
+
+
+def estimate_observed_co2_ppm(year: int) -> float:
+    """Estimate observed atmospheric CO₂ ppm for a given calendar year.
+
+    Piecewise-linear interpolation across the NOAA Mauna Loa annual-
+    mean anchor table at :data:`_OBSERVED_CO2_PPM_ANCHORS`. Years
+    before the first anchor return the first anchor's value;
+    years after the last anchor return the last anchor's value
+    (saturating extrapolation rather than free-form extrapolation —
+    callers extending past 2023 should override with a current
+    observation).
+
+    The schema bound on ``co2_ppm`` is [200.0, 2000.0]; the anchor
+    table stays comfortably inside this range. Used by
+    :func:`build_baseline_scenario_block_for_period` to construct
+    sensible default scenario blocks for observed-climate baseline
+    packages.
+
+    Args:
+        year: Calendar year (e.g., 2014 for the midpoint of a
+            2013-2015 baseline period).
+
+    Returns:
+        Estimated CO₂ ppm at that year.
+    """
+    if year <= _OBSERVED_CO2_PPM_ANCHORS[0][0]:
+        return _OBSERVED_CO2_PPM_ANCHORS[0][1]
+    if year >= _OBSERVED_CO2_PPM_ANCHORS[-1][0]:
+        return _OBSERVED_CO2_PPM_ANCHORS[-1][1]
+    for (y0, c0), (y1, c1) in zip(
+        _OBSERVED_CO2_PPM_ANCHORS, _OBSERVED_CO2_PPM_ANCHORS[1:]
+    ):
+        if y0 <= year <= y1:
+            # Linear interpolation between anchor points.
+            frac = (year - y0) / (y1 - y0)
+            return c0 + frac * (c1 - c0)
+    # Unreachable given the saturating-extrapolation guards above,
+    # but defensive for future anchor-table changes.
+    return _OBSERVED_CO2_PPM_ANCHORS[-1][1]
+
+
+def build_baseline_scenario_block_for_period(
+    *,
+    region_name: str,
+    crop_name: str,
+    time_slice_start: int,
+    time_slice_end: int,
+    gcm_source: str = "observed_NASA-POWER",
+) -> ScenarioBlock:
+    """Construct a default baseline ScenarioBlock from period + region + crop.
+
+    Convenience wrapper around :func:`build_baseline_scenario_block`
+    that auto-derives:
+
+    - ``scenario_label`` from region + crop + period
+      (``"OBSERVED_<REGION>_<CROP>_<START>-<END>"``, ASCII-folded).
+    - ``co2_ppm`` from the period midpoint via
+      :func:`estimate_observed_co2_ppm`.
+    - ``co2_ppm_provenance`` to a NOAA-Mauna-Loa-anchored citation.
+
+    Used by the PYTHIA translator's manifest emission path
+    (CA-1 wiring) so every baseline package carries a non-null
+    ``manifest.scenario`` block consistent with the projection
+    sibling shape — UC2 pre-flight validators read both packages
+    through the same code path without baseline-specific
+    null-handling.
+
+    Args:
+        region_name: Region display name (may carry diacritics; the
+            scenario_label is ASCII-folded so DSSAT consumers see
+            byte-clean strings).
+        crop_name: Crop display name (e.g., ``"Sorghum"``).
+        time_slice_start: Inclusive start year.
+        time_slice_end: Inclusive end year. Must be >= start.
+        gcm_source: Defaults to ``"observed_NASA-POWER"``. Override
+            when the baseline uses a different observed source
+            (e.g., ``"observed_AgERA5"``, ``"observed_TAMSAT"``).
+
+    Returns:
+        A constructed :class:`ScenarioBlock` ready to embed at
+        ``manifest.scenario``.
+    """
+    import unicodedata
+
+    # ASCII-fold the region for the label — DSSAT-byte-consumed
+    # strings on the eventual UC2 scenario_label-based path stay
+    # byte-clean.
+    region_ascii = unicodedata.normalize("NFKD", region_name).encode(
+        "ASCII", "ignore"
+    ).decode("ASCII").upper().replace(" ", "-") or "UNKNOWN"
+    crop_ascii = unicodedata.normalize("NFKD", crop_name).encode(
+        "ASCII", "ignore"
+    ).decode("ASCII").upper().replace(" ", "-") or "UNKNOWN"
+    label = (
+        f"OBSERVED_{region_ascii}_{crop_ascii}_"
+        f"{time_slice_start}-{time_slice_end}"
+    )
+
+    midpoint_year = (time_slice_start + time_slice_end) // 2
+    co2_ppm = estimate_observed_co2_ppm(midpoint_year)
+
+    return build_baseline_scenario_block(
+        scenario_label=label,
+        time_slice_start=time_slice_start,
+        time_slice_end=time_slice_end,
+        co2_ppm=round(co2_ppm, 1),
+        co2_ppm_provenance=(
+            f"NOAA Mauna Loa annual mean (piecewise-linear "
+            f"interpolation, midpoint year {midpoint_year})"
+        ),
+        gcm_source=gcm_source,
+    )

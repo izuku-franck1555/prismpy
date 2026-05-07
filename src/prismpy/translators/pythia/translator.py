@@ -2828,6 +2828,14 @@ class PythiaTranslator(PythiaTranslatorBase):
     def _generate_manifest(self, data: UnifiedData) -> Path:
         """Generate manifest.json with file inventory and checksums.
 
+        The manifest carries a non-null ``scenario`` block populated
+        from the project's temporal + region + crop config via
+        :func:`prismpy.packaging.scenario_helpers.build_baseline_scenario_block_for_period`.
+        Every PYTHIA baseline package emits the block — UC2 climate-
+        scenarios consumers (and any future scenario-set workflow)
+        read ``manifest.scenario.scenario_role`` from EVERY package
+        in the comparison set, including the baseline anchor.
+
         Args:
             data: UnifiedData with region info
 
@@ -2836,6 +2844,9 @@ class PythiaTranslator(PythiaTranslatorBase):
         """
         from prismpy.packaging.manifest import (
             create_manifest, derive_boundary_label, save_manifest,
+        )
+        from prismpy.packaging.scenario_helpers import (
+            build_baseline_scenario_block_for_period,
         )
 
         # Resolved-source discriminator: read the runtime boundary
@@ -2874,11 +2885,42 @@ class PythiaTranslator(PythiaTranslatorBase):
             }
         }
 
-        # Create manifest
+        # Build the baseline scenario block. Every PYTHIA package
+        # emits a non-null ``manifest.scenario`` so paired-set
+        # consumers (UC2 climate scenarios) read the block from EVERY
+        # package — baseline-anchor and projection siblings alike.
+        # When temporal config is missing we skip emission to avoid
+        # injecting a malformed block; downstream consumers handle
+        # the legacy missing-block case via ``.get("scenario")``.
+        scenario_block = None
+        if (
+            self.config.temporal is not None
+            and self.config.temporal.start_year is not None
+            and self.config.temporal.end_year is not None
+        ):
+            try:
+                scenario_block = build_baseline_scenario_block_for_period(
+                    region_name=data.region.name,
+                    crop_name=self.config.crop.name,
+                    time_slice_start=self.config.temporal.start_year,
+                    time_slice_end=self.config.temporal.end_year,
+                )
+            except Exception as exc:  # noqa: BLE001 — emission is best-effort
+                # A schema-bound failure (e.g., end_year < start_year)
+                # falls back to scenario-null rather than crashing the
+                # whole manifest emission. Existing pre-CA-1 behaviour
+                # for the malformed-config case.
+                logger.warning(
+                    "Skipping baseline scenario block emission: %s", exc,
+                )
+
+        # Create manifest with the (optional) scenario block plumbed
+        # through so the on-disk JSON carries it at top level.
         manifest = create_manifest(
             package_dir=self.output_dir,
             project_config=project_config,
             platform="pythia",
+            scenario=scenario_block,
         )
 
         # Save
