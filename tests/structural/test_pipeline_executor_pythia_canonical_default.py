@@ -176,3 +176,123 @@ def test_pipeline_executor_translator_registry_includes_pythia() -> None:
         "routes PYTHIA package generation through the Sprint S "
         "canonical-substrate-aware translator."
     )
+
+
+def test_pipeline_get_translator_pythia_uses_canonical_default(tmp_path) -> None:
+    """Behavioral pin (codex P3 round 1) — the registry-mapped construction
+    path produces a translator with ``prefer_canonical_substrate=True``.
+
+    Stronger than the AST walker above: this test instantiates a real
+    :class:`prismpy.pipeline.executor.TranslationPipeline` and asks
+    its ``_get_translator`` factory for the PYTHIA translator. The
+    factory uses the registry-mapped class
+    (``translator_map[Platform.PYTHIA] = PythiaTranslator``) and
+    constructs it with ``(config=, output_dir=, provenance=)`` —
+    identical to the production wizard-driven path.
+
+    Asserts both:
+    1. The returned object is a :class:`PythiaTranslator` (registry
+       routes PYTHIA correctly).
+    2. ``translator.prefer_canonical_substrate is True`` (the
+       canonical default fires through the production construction
+       site).
+
+    Catches both regression classes in one assertion:
+    - Class-level default flip (``prefer_canonical_substrate: bool = False``)
+      → existing default-True unit test fails first; this test fails
+      second as a backstop.
+    - Orchestrator-explicit-False slip (someone refactors
+      ``pipeline/executor.py:309-313`` to pass
+      ``prefer_canonical_substrate=False``) → only this test catches
+      it; the default-True unit test would still pass because the
+      class signature is unchanged.
+
+    Per durable §24 canonical-source-or-pin: the orchestrator IS
+    the canonical entry point for prismweb-driven PYTHIA package
+    runs, so its construction site MUST consistently exercise the
+    canonical substrate path. This test catches future regressions
+    where someone explicitly disables the canonical mode in the
+    orchestrator without realizing the downstream impact.
+    """
+    from prismpy.config.schema import (
+        BoundaryConfig,
+        BoundarySource,
+        CropCalendarConfig,
+        CropConfig,
+        ManualBoundsConfig,
+        OutputConfig,
+        Platform,
+        ProjectConfig,
+        ProjectInfo,
+        RegionConfig,
+        TemporalConfig,
+    )
+    from prismpy.pipeline.executor import TranslationPipeline
+    from prismpy.provenance.tracker import ProvenanceTracker
+
+    cfg = ProjectConfig(
+        project=ProjectInfo(
+            name="codex_p3_pythia_canonical_default_pin",
+            description=(
+                "Sprint S Gate-B-FIX behavioral pin per codex round 1 P3 — "
+                "registry-mapped TranslationPipeline._get_translator(PYTHIA) "
+                "must produce a translator with the canonical-substrate "
+                "default firing."
+            ),
+        ),
+        region=RegionConfig(
+            name="Bénoué",
+            country="Cameroon",
+            country_iso3="CMR",
+            boundary=BoundaryConfig(
+                source=BoundarySource.MANUAL,
+                manual_bounds=ManualBoundsConfig(
+                    minx=13.5, miny=8.0, maxx=14.5, maxy=9.0,
+                ),
+            ),
+        ),
+        crop=CropConfig(
+            name="Sorghum",
+            name_short="sgh",
+            variety="Medium-duration",
+            calendar=CropCalendarConfig(
+                planting_doy=166, maturity_doy=285,
+            ),
+        ),
+        temporal=TemporalConfig(
+            start_year=2015, end_year=2015, spinup_years=0,
+        ),
+        targets=[Platform.PYTHIA],
+        output=OutputConfig(
+            base_dir=str(tmp_path), structure="by_platform",
+        ),
+    )
+    pipeline = TranslationPipeline(
+        cfg,
+        provenance=ProvenanceTracker(
+            enabled=False, project_name="codex_p3_pythia_canonical_default_pin",
+        ),
+    )
+
+    translator = pipeline._get_translator(Platform.PYTHIA)
+    assert translator is not None, (
+        "pipeline/_get_translator(Platform.PYTHIA) must return a translator "
+        "instance (registry-mapped); got None — the registry refactor "
+        "broke the PYTHIA mapping."
+    )
+    assert isinstance(translator, PythiaTranslator), (
+        "pipeline/_get_translator(Platform.PYTHIA) must return a "
+        f"PythiaTranslator instance; got {type(translator).__name__}. "
+        "The registry mapping was changed to a non-PYTHIA class."
+    )
+    assert translator.prefer_canonical_substrate is True, (
+        "pipeline/_get_translator(Platform.PYTHIA) constructed a translator "
+        f"with prefer_canonical_substrate={translator.prefer_canonical_substrate!r}; "
+        "the orchestrator's production construction site must exercise the "
+        "canonical-substrate path by default. Either the class default "
+        "flipped (covered by the default-True unit test) OR the "
+        "orchestrator explicitly disabled canonical mode (covered ONLY "
+        "by this test). Per durable §24 canonical-source-or-pin: the "
+        "orchestrator IS the canonical entry point and MUST stay on the "
+        "canonical-substrate path."
+    )
