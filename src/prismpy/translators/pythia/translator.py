@@ -1940,13 +1940,15 @@ class PythiaTranslator(PythiaTranslatorBase):
             logger.warning("No PYTHIA config available, skipping eGHR data inclusion")
             return None
 
-        # Determine which countries are needed
-        required_countries = self._get_required_country_codes()
-        if not required_countries:
-            logger.warning("No country codes determined, skipping eGHR data inclusion")
-            return None
-
-        # Create eGHR directory in package
+        # Create eGHR directory and stage the GHR.db FIRST so the
+        # country-code resolver below can read it from the local
+        # per-package path. The resolver no longer consults the
+        # bundled global eghr_database_path directly; it only reads
+        # output_dir/eGHR/GHR.db. Copying the source database (or,
+        # in a future revision, building it via build_eghr_substrate)
+        # before resolving the country codes keeps cross-border
+        # bounding boxes from falling back to a single-country
+        # region default.
         eghr_output = self.output_dir / "eGHR"
         eghr_output.mkdir(parents=True, exist_ok=True)
 
@@ -1966,6 +1968,14 @@ class PythiaTranslator(PythiaTranslatorBase):
                 logger.info(f"Copied GHR.db to package ({src_db.stat().st_size / 1024 / 1024:.1f} MB)")
             else:
                 logger.warning(f"GHR.db not found at {src_db}")
+
+        # Determine which countries are needed (reads the local
+        # GHR.db that was just staged, or — once build_eghr_substrate
+        # wires up — the per-package synthesized one).
+        required_countries = self._get_required_country_codes()
+        if not required_countries:
+            logger.warning("No country codes determined, skipping eGHR data inclusion")
+            return None
 
         # Copy only required .SOL files (filtered by country)
         if pythia_config.eghr_sol_dir:

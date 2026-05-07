@@ -259,6 +259,91 @@ def test_country_codes_fallback_when_substrate_missing(
     )
 
 
+def test_include_eghr_data_stages_ghr_db_before_resolving_country_codes(
+    tmp_path: Path,
+) -> None:
+    """``_include_eghr_data`` must copy GHR.db to the local path BEFORE
+    consulting ``_get_required_country_codes``.
+
+    The resolver reads exclusively from the per-package
+    ``output_dir/eGHR/GHR.db``; if ``_include_eghr_data`` invokes the
+    resolver before staging the local DB, cross-border bounding boxes
+    fall back to the single region country code and downstream
+    .SOL-copy logic omits required files (the failure mode the
+    Bénoué/Cameroon trace in the substrate work pointed at).
+
+    This test stubs the resolver and verifies that, at the moment it
+    is called, the local GHR.db is already in place — pinning the
+    ordering invariant directly rather than the indirect
+    cross-border behavior it protects.
+    """
+    import sqlite3
+
+    from prismpy.translators.pythia.translator import PythiaTranslator
+
+    # Stage a tiny but valid source GHR.db that the legacy copy path
+    # can ingest. Multi-row content so a curious resolver could in
+    # principle return multiple country codes from it.
+    src_db_dir = tmp_path / "src"
+    src_db_dir.mkdir(parents=True, exist_ok=True)
+    src_db_path = src_db_dir / "GHR.db"
+    with sqlite3.connect(src_db_path) as conn:
+        conn.execute(
+            "CREATE TABLE profile_map ("
+            "id INTEGER PRIMARY KEY, profile TEXT NOT NULL"
+            ")"
+        )
+        conn.execute("INSERT INTO profile_map (id, profile) VALUES (?, ?)", (1, "ML00000001"))
+        conn.execute("INSERT INTO profile_map (id, profile) VALUES (?, ?)", (2, "BF00000002"))
+        conn.commit()
+
+    # Empty .SOL source dir (the test only inspects the resolver
+    # ordering; the .SOL-copy step is allowed to find nothing).
+    src_sol_dir = tmp_path / "sol_src"
+    src_sol_dir.mkdir()
+
+    config = _build_project_config(tmp_path)
+    translator = PythiaTranslator(config=config, output_dir=str(tmp_path))
+
+    # Wire the synthetic legacy paths onto the existing pythia config.
+    if (
+        translator.config.platform_config is None
+        or getattr(translator.config.platform_config, "pythia", None) is None
+    ):
+        pytest.skip("No platform_config.pythia available for this test fixture.")
+    translator.config.platform_config.pythia.eghr_database_path = str(src_db_path)
+    translator.config.platform_config.pythia.eghr_sol_dir = str(src_sol_dir)
+
+    # Spy on the resolver: capture whether the local GHR.db existed
+    # at the moment _get_required_country_codes was called. The spy
+    # must run AFTER mkdir + copy for the ordering to be correct.
+    state_at_resolver_call = {}
+    real_resolver = translator._get_required_country_codes
+
+    def _spy_resolver():
+        local_db = translator.output_dir / "eGHR" / "GHR.db"
+        state_at_resolver_call["local_db_existed"] = local_db.exists()
+        state_at_resolver_call["local_db_size"] = (
+            local_db.stat().st_size if local_db.exists() else 0
+        )
+        return real_resolver()
+
+    translator._get_required_country_codes = _spy_resolver  # type: ignore[method-assign]
+
+    translator._include_eghr_data()
+
+    assert state_at_resolver_call.get("local_db_existed") is True, (
+        "_include_eghr_data invoked _get_required_country_codes BEFORE the "
+        "local GHR.db was staged. The resolver only consults the local path "
+        "now; calling it before the copy regresses cross-border bounding "
+        "boxes to the single region.country_iso3 fallback."
+    )
+    assert state_at_resolver_call["local_db_size"] > 0, (
+        "Local GHR.db was empty when the resolver was called; the copy may "
+        "have completed but produced an empty file."
+    )
+
+
 def test_country_codes_does_not_consult_global_pythia_eghr_database_path(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
