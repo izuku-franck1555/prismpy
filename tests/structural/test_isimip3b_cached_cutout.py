@@ -784,3 +784,171 @@ def test_bbox_missing_keys_raises_typed_error(
             bbox={"south": 13.0, "north": 14.5},  # missing west / east
             cache_dir=cache_root,
         )
+
+
+# ── F-AV: live ISIMIP3b API nests specifiers under ``specifiers`` ────
+
+
+def _stub_dataset_nested_specifiers() -> Dict[str, Any]:
+    """Return a synthetic dataset whose ``specifiers`` keys (product /
+    climate_forcing / climate_scenario / climate_variable) are nested
+    under a ``specifiers`` sub-dict, matching the live ISIMIP3b API
+    response shape (per the public data.isimip.org schema).
+
+    Compared to ``_stub_dataset()``: top-level ``id`` / ``name`` /
+    ``path`` / ``version`` / ``doi`` mirror the live shape; the four
+    extractor-relevant fields move under ``specifiers``.
+    """
+    return {
+        "id": "isimip3b/InputData/gfdl-esm4/ssp585/tasmax/v1",
+        "name": "gfdl-esm4_w5e5_ssp585_tasmax_global_daily",
+        "path": "ISIMIP3b/InputData/climate/atmosphere/bias-adjusted/global/daily/ssp585/GFDL-ESM4/tasmax",
+        "version": "20240101",
+        "doi": "10.5281/zenodo.fake",
+        "files": [],
+        "specifiers": {
+            "product": "InputData",
+            "climate_scenario": "ssp585",
+            "climate_forcing": "gfdl-esm4",
+            "climate_variable": "tasmax",
+        },
+    }
+
+
+class TestSpecifiersNestedShapeAccessors:
+    """F-AV regression net: the four extractor helpers MUST recognize
+    the live ISIMIP3b API's nested ``specifiers`` shape, not just the
+    flat shape the internal harness constructs by hand. The pre-fix
+    helpers walked top-level keys only and rejected every live response
+    with ``IsimipDatasetNotFoundError: missing required fields``.
+    """
+
+    def test_dataset_specifiers_returns_nested_dict_when_present(self) -> None:
+        dataset = _stub_dataset_nested_specifiers()
+        assert isimip3b._dataset_specifiers(dataset) == dataset["specifiers"]
+
+    def test_dataset_specifiers_returns_empty_when_absent(self) -> None:
+        assert isimip3b._dataset_specifiers({"id": "x"}) == {}
+
+    def test_dataset_specifiers_returns_empty_for_non_dict_value(self) -> None:
+        # Defensive: hostile API drift (specifiers as list / null / scalar)
+        # should not raise; downstream helpers fall through to top-level.
+        assert isimip3b._dataset_specifiers({"specifiers": None}) == {}
+        assert isimip3b._dataset_specifiers({"specifiers": ["a", "b"]}) == {}
+        assert isimip3b._dataset_specifiers({"specifiers": "ssp585"}) == {}
+
+    @pytest.mark.parametrize(
+        "stub_factory",
+        [_stub_dataset, _stub_dataset_nested_specifiers],
+        ids=["flat-shape", "nested-specifiers-shape"],
+    )
+    def test_each_helper_extracts_from_both_shapes(
+        self, stub_factory
+    ) -> None:
+        # Same expected values for both shapes — proves the helpers
+        # recognize either layout. The nested fixture's specifiers
+        # carry IDENTICAL field values to the flat fixture so a single
+        # set of assertions covers both.
+        dataset = stub_factory()
+        assert isimip3b._product_from_dataset(dataset) == "InputData"
+        assert isimip3b._scenario_from_dataset(dataset) == "ssp585"
+        assert isimip3b._gcm_from_dataset(dataset) == "gfdl-esm4"
+        assert isimip3b._variable_from_dataset(dataset) == "tasmax"
+
+    def test_top_level_wins_when_both_layers_present(self) -> None:
+        # Mixed-shape datasets in the wild are unlikely but defensive
+        # priority is well-defined: top-level wins over specifiers.
+        # Locks the priority so a future refactor cannot silently
+        # invert it.
+        dataset = {
+            "id": "x",
+            "product": "InputData",
+            "climate_scenario": "ssp585",
+            "climate_forcing": "gfdl-esm4",
+            "climate_variable": "tasmax",
+            "specifiers": {
+                "product": "SecondaryInputData",  # would lose
+                "climate_scenario": "ssp245",
+                "climate_forcing": "ipsl-cm6a-lr",
+                "climate_variable": "tasmin",
+            },
+        }
+        assert isimip3b._product_from_dataset(dataset) == "InputData"
+        assert isimip3b._scenario_from_dataset(dataset) == "ssp585"
+        assert isimip3b._gcm_from_dataset(dataset) == "gfdl-esm4"
+        assert isimip3b._variable_from_dataset(dataset) == "tasmax"
+
+    def test_short_name_fallbacks_at_both_layers(self) -> None:
+        # Older API shapes used ``scenario`` / ``gcm`` / ``variable``;
+        # the helpers MUST still find them whether they sit at the top
+        # level OR nested under ``specifiers``. Ordering: top-level
+        # canonical name → nested canonical name → top-level short →
+        # nested short → empty.
+        dataset_top_short = {
+            "scenario": "ssp585",
+            "gcm": "gfdl-esm4",
+            "variable": "tasmax",
+            "product": "InputData",
+        }
+        assert isimip3b._scenario_from_dataset(dataset_top_short) == "ssp585"
+        assert isimip3b._gcm_from_dataset(dataset_top_short) == "gfdl-esm4"
+        assert isimip3b._variable_from_dataset(dataset_top_short) == "tasmax"
+
+        dataset_nested_short = {
+            "specifiers": {
+                "scenario": "ssp245",
+                "gcm": "ipsl-cm6a-lr",
+                "variable": "tasmin",
+                "product": "SecondaryInputData",
+            }
+        }
+        assert isimip3b._scenario_from_dataset(dataset_nested_short) == "ssp245"
+        assert isimip3b._gcm_from_dataset(dataset_nested_short) == "ipsl-cm6a-lr"
+        assert isimip3b._variable_from_dataset(dataset_nested_short) == "tasmin"
+        assert (
+            isimip3b._product_from_dataset(dataset_nested_short)
+            == "SecondaryInputData"
+        )
+
+    def test_missing_in_both_layers_returns_empty(self) -> None:
+        # Regression: cached_cutout's required-fields check at line ~714
+        # depends on these helpers returning empty so the typed error
+        # fires. This pin documents that the helpers MUST return ""
+        # (not None / KeyError / "None") when nothing is found.
+        dataset = {"id": "incomplete"}
+        assert isimip3b._scenario_from_dataset(dataset) == ""
+        assert isimip3b._gcm_from_dataset(dataset) == ""
+        assert isimip3b._variable_from_dataset(dataset) == ""
+        assert isimip3b._product_from_dataset(dataset) == ""
+
+
+def test_cached_cutout_works_with_nested_specifiers_dataset(
+    cache_root: Path,
+    http_responses: responses.RequestsMock,
+) -> None:
+    """End-to-end F-AV regression: cached_cutout with a live-shape
+    dataset MUST resolve the cache key and write the artifact, NOT
+    raise IsimipDatasetNotFoundError. Pre-fix this test would fail at
+    line ~714's ``if not all([product, scenario, gcm, variable])``
+    guard because every helper returned "" against the nested shape.
+    """
+    http_responses.add(responses.GET, _FAKE_FILE_URL, body=_FAKE_NETCDF_BODY)
+    client = _FakeISIMIP3bClient()
+    nested_dataset = _stub_dataset_nested_specifiers()
+    nc_path = cached_cutout(
+        client,  # type: ignore[arg-type]
+        nested_dataset,
+        bbox={"south": 13.0, "north": 14.5, "west": 1.5, "east": 3.0},
+        cache_dir=cache_root,
+    )
+    # Cache key derives from the four nested specifiers; if the
+    # accessors couldn't read them the path would be empty/malformed
+    # rather than the contract layout.
+    rel = nc_path.relative_to(cache_root)
+    parts = rel.parts
+    assert parts[0] == "ISIMIP3b"
+    assert parts[1] == "InputData"
+    assert parts[2] == "ssp585"
+    assert parts[3] == "gfdl-esm4"
+    assert parts[4] == "tasmax"
+    assert parts[5].endswith(".nc")

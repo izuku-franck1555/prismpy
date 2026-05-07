@@ -469,37 +469,70 @@ def _is_cache_fresh(
     return True
 
 
+def _dataset_specifiers(dataset: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the dataset's ``specifiers`` sub-dict, or ``{}`` if absent.
+
+    The live ISIMIP3b API nests the (product / climate_forcing /
+    climate_scenario / climate_variable) fields under a ``specifiers``
+    sub-dict (e.g., ``dataset["specifiers"]["climate_scenario"] =
+    "ssp585"``). Older response shapes — and the synthetic dicts the
+    internal harness constructs — carry the same fields at the top
+    level. Each accessor below checks both layers so the helper family
+    is shape-tolerant.
+    """
+    nested = dataset.get("specifiers")
+    if isinstance(nested, dict):
+        return nested
+    return {}
+
+
 def _scenario_from_dataset(dataset: Dict[str, Any]) -> str:
     """Extract the climate scenario from the upstream dataset dict.
 
     Uses ``climate_scenario`` (the ISIMIP API field) with a fallback to
-    ``scenario`` for older response shapes.
+    ``scenario`` for older response shapes. Each name is tried at the
+    top level first, then under ``specifiers`` to cover the live API's
+    nested response shape.
     """
+    specs = _dataset_specifiers(dataset)
     return str(
         dataset.get("climate_scenario")
+        or specs.get("climate_scenario")
         or dataset.get("scenario")
+        or specs.get("scenario")
         or ""
     )
 
 
 def _gcm_from_dataset(dataset: Dict[str, Any]) -> str:
+    specs = _dataset_specifiers(dataset)
     return str(
         dataset.get("climate_forcing")
+        or specs.get("climate_forcing")
         or dataset.get("gcm")
+        or specs.get("gcm")
         or ""
     )
 
 
 def _variable_from_dataset(dataset: Dict[str, Any]) -> str:
+    specs = _dataset_specifiers(dataset)
     return str(
         dataset.get("climate_variable")
+        or specs.get("climate_variable")
         or dataset.get("variable")
+        or specs.get("variable")
         or ""
     )
 
 
 def _product_from_dataset(dataset: Dict[str, Any]) -> str:
-    return str(dataset.get("product") or "")
+    specs = _dataset_specifiers(dataset)
+    return str(
+        dataset.get("product")
+        or specs.get("product")
+        or ""
+    )
 
 
 def _dataset_paths(dataset: Dict[str, Any]) -> List[str]:
