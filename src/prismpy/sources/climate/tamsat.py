@@ -43,7 +43,6 @@ from prismpy.sources._cache_base import (
     TMPFILE_PREFIX,
     CacheManifestState,
     _bbox_matches,
-    _cleanup_orphan_tmpfiles,
     _legacy_warned_cache_paths,
     _legacy_warned_lock,
     _utcnow_iso,

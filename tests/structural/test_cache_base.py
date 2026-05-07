@@ -262,7 +262,6 @@ def test_no_other_module_redefines_cache_primitives() -> None:
         "delete_marker",
         "warn_legacy_cache_once",
         "cleanup_orphan_tmpfiles",
-        "_cleanup_orphan_tmpfiles",
     }
     offenders: list[tuple[str, str]] = []
     for py_file in src.rglob("*.py"):

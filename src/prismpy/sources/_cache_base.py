@@ -444,10 +444,3 @@ def warn_legacy_cache_once(cache_path: Path, source_logger: logging.Logger) -> N
     )
 
 
-# ── Backward-compat aliases ──────────────────────────────────────────
-#
-# ``_cleanup_orphan_tmpfiles`` was the pre-Sprint-G underscore name in
-# tamsat.py. Re-export the public name so callers that grep the old
-# private name still find it; new code uses ``cleanup_orphan_tmpfiles``.
-
-_cleanup_orphan_tmpfiles = cleanup_orphan_tmpfiles

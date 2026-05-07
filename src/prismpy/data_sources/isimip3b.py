@@ -75,6 +75,17 @@ except ImportError as exc:  # pragma: no cover - exercised by structural test
         "declared in prismpy/pyproject.toml [project.dependencies]."
     ) from exc
 
+# Canonical 12-dimension version pin lives in
+# ``prismpy.standards.isimip_versions``. Importing the GCM and variable
+# rosters from there keeps this module from going out of sync with the
+# pin module under future ISIMIP point releases.
+from prismpy.standards.isimip_versions import (
+    PRIMARY_GCMS as _PRIMARY_GCMS,
+    SCENARIO_PRODUCT_MAP as _SCENARIO_PRODUCT_MAP,
+    SIMULATION_ROUND as _SIMULATION_ROUND,
+    SUPPORTED_VARIABLES as _SUPPORTED_VARIABLES,
+)
+
 
 # ── Typed exception hierarchy ────────────────────────────────────────
 
@@ -129,29 +140,11 @@ class CacheWriteError(CacheDirectoryError):
 
 
 # ── Product / scenario resolution ────────────────────────────────────
-
-# ISIMIP3b primary core ensemble: 5 GCMs.
-_PRIMARY_GCMS = frozenset(
-    {"gfdl-esm4", "ipsl-cm6a-lr", "mpi-esm1-2-hr", "mri-esm2-0", "ukesm1-0-ll"}
-)
-
-# Scenario → ISIMIP "product" mapping. ssp585 is shipped under the
-# primary "InputData" product; ssp245 under "SecondaryInputData". This
-# is a publication convention of the ISIMIP3b release, not a free
-# parameter — passing the wrong product silently returns an empty
-# dataset list.
-_SCENARIO_PRODUCT_MAP: Dict[str, str] = {
-    "ssp585": "InputData",
-    "ssp245": "SecondaryInputData",
-}
-
-# Variable allowlist. Sprint G ships these six CF-1.x daily variables
-# from the ISIMIP3b primary core ensemble. Adding a seventh requires
-# CC-G-6 dim 7 (variable_units) to gain a row + the AC-G-7 conversion
-# table to gain a row.
-_SUPPORTED_VARIABLES = frozenset(
-    {"rsds", "tasmax", "tasmin", "pr", "hurs", "sfcWind"}
-)
+#
+# ``_PRIMARY_GCMS``, ``_SCENARIO_PRODUCT_MAP``, ``_SUPPORTED_VARIABLES``
+# are imported above from ``prismpy.standards.isimip_versions``. They
+# are the authoritative source for the 5-GCM × 6-variable × 2-scenario
+# enumeration; this module does NOT redefine them.
 
 
 def _product_for_scenario(scenario: str) -> str:
@@ -267,7 +260,7 @@ def discover_datasets(
     product = _product_for_scenario(scenario)
 
     query: Dict[str, Any] = {
-        "simulation_round": "ISIMIP3b",
+        "simulation_round": _SIMULATION_ROUND,
         "product": product,
         "climate_forcing": gcm,
         "climate_scenario": scenario,
