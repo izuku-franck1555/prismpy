@@ -2591,16 +2591,29 @@ class PythiaTranslator(PythiaTranslatorBase):
     def _generate_snx_template(self, data: UnifiedData) -> Path:
         """Generate DSSAT SNX experiment template with Jinja2 variables.
 
+        Both ``exp_id`` and the on-disk write path derive from
+        :meth:`_get_template_filename` so the SNX file written here
+        agrees byte-for-byte with the template name referenced by
+        ``pythia_config["default_setup"]["template"]`` written by
+        :meth:`_generate_pythia_json`. This prevents the cross-
+        write-site drift class where one site folds a non-ASCII
+        region name while the other writes the raw multi-byte form
+        — DSSAT then opens the folded path, finds nothing, and
+        logs ``WARNING.OUT: File not found``.
+
         Args:
             data: UnifiedData with region and config info
 
         Returns:
             Path to generated SNX template
         """
-        # Generate experiment ID (DSSAT: exactly 8 chars)
-        region_code = data.region.name[:2].upper()
-        crop_code = self._get_dssat_crop_code()
-        exp_id = f"{region_code}{crop_code}8001"
+        # Single source of truth for the SNX filename. The helper
+        # ASCII-folds DSSAT-byte-consumed identifiers so non-ASCII
+        # region names (e.g., "Bénoué") write byte-clean filenames
+        # ("BESG8001.SNX") that DSSAT's fixed-width Fortran reads
+        # handle correctly.
+        template_filename = self._get_template_filename()
+        exp_id = template_filename[:-4]  # strip ".SNX"
 
         # Get mapped parameters
         config_params = self._map_generic_to_pythia_config()
@@ -2632,8 +2645,11 @@ class PythiaTranslator(PythiaTranslatorBase):
         templates_dir = self.output_dir / "templates"
         templates_dir.mkdir(parents=True, exist_ok=True)
 
-        # Write template
-        template_path = templates_dir / f"{exp_id}.SNX"
+        # Write template using the SAME filename the config references,
+        # not a re-derived raw region.name slice. Cross-write-site pin
+        # at tests/unit/test_pythia_dssat_ascii_fold.py asserts these
+        # two surfaces never drift.
+        template_path = templates_dir / template_filename
         with open(template_path, 'w') as f:
             f.write(template_content)
 

@@ -286,6 +286,79 @@ def test_rewrite_handles_missing_default_setup_block(tmp_path: Path) -> None:
     assert rewritten["runs"][0]["startYear"] == 2046
 
 
+# ── Codex round 1 LOW absorption — edge cases on rewriter ───────────
+
+
+def test_rewrite_handles_missing_runs_block(tmp_path: Path) -> None:
+    """A config without ``runs`` still has default_setup rewritten cleanly.
+
+    Mirror of `test_rewrite_handles_missing_default_setup_block` for
+    the inverse omission. The rewriter no-ops on the missing key
+    without raising, preserving the rest of the config untouched.
+    """
+    config = {
+        "default_setup": {
+            "sdate": "2013-01-01",
+            "pfrst": "2013-06-15",
+            "plast": "2013-07-15",
+        }
+    }
+    path = tmp_path / "pythia_config.json"
+    with path.open("w") as fh:
+        json.dump(config, fh)
+
+    rewrite_pythia_config_for_scenario(
+        path,
+        time_slice_start=2046,
+        time_slice_end=2048,
+    )
+    with path.open() as fh:
+        rewritten = json.load(fh)
+    # default_setup got rewritten as expected.
+    assert rewritten["default_setup"]["sdate"] == "2046-01-01"
+    # runs[] absence preserved (rewriter no-ops without raising).
+    assert "runs" not in rewritten
+
+
+def test_rewrite_raises_on_empty_file(tmp_path: Path) -> None:
+    """An empty pythia_config.json raises a JSON decode error.
+
+    Defensive: the rewriter relies on `json.load` to parse the
+    input; an empty file produces a JSONDecodeError before the
+    rewriter touches the on-disk content. This pin asserts the
+    rewriter does NOT silently no-op or write malformed output.
+    """
+    path = tmp_path / "pythia_config.json"
+    path.write_text("")  # empty file
+
+    with pytest.raises(json.JSONDecodeError):
+        rewrite_pythia_config_for_scenario(
+            path,
+            time_slice_start=2046,
+            time_slice_end=2048,
+        )
+
+
+def test_rewrite_raises_on_malformed_json(tmp_path: Path) -> None:
+    """A malformed pythia_config.json raises a JSON decode error.
+
+    Mirror of the empty-file pin for the inverse failure mode: the
+    rewriter must not silently overwrite the malformed input with
+    "fixed" content. Failing loud at the parse step lets the caller
+    inspect + decide (re-fetch upstream artifact, re-emit, etc.)
+    rather than corrupting the on-disk state.
+    """
+    path = tmp_path / "pythia_config.json"
+    path.write_text("{ this is not valid json,, }")
+
+    with pytest.raises(json.JSONDecodeError):
+        rewrite_pythia_config_for_scenario(
+            path,
+            time_slice_start=2046,
+            time_slice_end=2048,
+        )
+
+
 # ── End-to-end pin: helpers compose for a UC2 baseline ─────────────
 
 
