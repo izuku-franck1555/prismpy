@@ -357,3 +357,150 @@ def test_build_eghr_substrate_creates_subdirs_when_missing(tmp_path: Path) -> No
     assert result.soil_raster_path.exists()
     assert result.ghr_db_path.exists()
     assert result.sol_path.exists()
+
+
+def test_build_eghr_substrate_raster_uses_uint32(tmp_path: Path) -> None:
+    """The raster dtype is uint32 so >65 535 unique profiles can be encoded."""
+    grid = _build_grid_2x3()
+    profiles = _build_profiles_5_cells_3_distinct()
+
+    result = build_eghr_substrate(
+        grid=grid,
+        profiles_by_cell=profiles,
+        country_code="CM",
+        region=_build_region(),
+        output_dir=tmp_path,
+    )
+
+    with rasterio.open(result.soil_raster_path) as src:
+        assert src.dtypes[0] == "uint32"
+        assert src.nodata == 0
+
+
+def test_build_eghr_substrate_aligns_raster_to_filtered_cells(tmp_path: Path) -> None:
+    """When the caller filters the grid, the raster covers the cells that remain.
+
+    Pipelines clip cells via centroid_strict / share-percent /
+    exclude_cells; when that happens, ``grid.cells`` is the post-filter
+    roster but ``grid.bounds`` still describes the unfiltered region.
+    The raster transform must align to the cells that survived so
+    PYTHIA's cell-center sampling lands on the correct pixel.
+    """
+    grid_unfiltered = _build_grid_2x3()
+    # Filter to a 1-row x 2-col strip in the middle of the original 2x3 grid.
+    kept_cells = [c for c in grid_unfiltered.cells if c.cell_id in {1, 2}]
+    grid_filtered = SpatialGrid(
+        resolution="custom",
+        cells=kept_cells,
+        increment_deg=0.5,
+        # Bounds intentionally describe the ORIGINAL 2x3 region, not the
+        # 1x2 filtered subset; this is the realistic post-filter shape.
+        bounds=BoundingBox(minx=2.0, miny=11.0, maxx=3.5, maxy=12.5),
+    )
+    profiles = {
+        cid: profile
+        for cid, profile in _build_profiles_5_cells_3_distinct().items()
+        if cid in {1, 2}
+    }
+
+    result = build_eghr_substrate(
+        grid=grid_filtered,
+        profiles_by_cell=profiles,
+        country_code="CM",
+        region=_build_region(),
+        output_dir=tmp_path,
+    )
+
+    # PYTHIA samples soil.tif at each cell's lat/lon. After the fix the
+    # cell-center coordinate must land on a non-nodata pixel that maps
+    # to that cell's profile id.
+    with rasterio.open(result.soil_raster_path) as src:
+        for cell in kept_cells:
+            sampled = list(src.sample([(cell.lon, cell.lat)]))[0][0]
+            assert sampled != 0, (
+                f"Cell {cell.cell_id} at ({cell.lat}, {cell.lon}) sampled "
+                f"to nodata; raster transform mis-aligned."
+            )
+
+
+def test_build_eghr_substrate_is_idempotent_with_unset_hydraulics(tmp_path: Path) -> None:
+    """Idempotency holds even when source profiles arrive without hydraulic fields.
+
+    HWSD2 / iSDA per-cell layered horizons commonly omit
+    field-capacity / wilting-point / saturated-water-content. The
+    canonical SOL writer mutates these values in-place when it sees
+    ``None``; without an up-front normalization the second build's
+    dedup key would differ from the first because only the
+    representative profiles got mutated. ``assign_cell_to_profile_id``
+    pre-normalizes the layers so the dedup keys are stable.
+    """
+    grid = _build_grid_2x3()
+    region = _build_region()
+
+    def _fresh_profiles() -> Dict[int, SoilProfile]:
+        return {
+            0: SoilProfile(
+                profile_id="P0",
+                lat=12.0,
+                lon=2.0,
+                source="hwsd2",
+                layers=[
+                    SoilLayer(
+                        depth_top=0.0,
+                        depth_bottom=0.2,
+                        sand=30.0,
+                        clay=45.0,
+                        silt=25.0,
+                        organic_carbon=0.5,
+                        bulk_density=1.4,
+                        ph=6.5,
+                        # field_capacity, wilting_point, saturated_wc deliberately None.
+                    )
+                ],
+            ),
+            3: SoilProfile(
+                profile_id="P3",
+                lat=11.5,
+                lon=2.0,
+                source="hwsd2",
+                # Same layer parameters as cell 0 — should dedup to a single id.
+                layers=[
+                    SoilLayer(
+                        depth_top=0.0,
+                        depth_bottom=0.2,
+                        sand=30.0,
+                        clay=45.0,
+                        silt=25.0,
+                        organic_carbon=0.5,
+                        bulk_density=1.4,
+                        ph=6.5,
+                    )
+                ],
+            ),
+        }
+
+    result_a = build_eghr_substrate(
+        grid=grid,
+        profiles_by_cell=_fresh_profiles(),
+        country_code="CM",
+        region=region,
+        output_dir=tmp_path,
+    )
+
+    result_b = build_eghr_substrate(
+        grid=grid,
+        profiles_by_cell=_fresh_profiles(),
+        country_code="CM",
+        region=region,
+        output_dir=tmp_path,
+    )
+
+    # Two cells, identical layer parameters (modulo the auto-derived
+    # hydraulic fields) — must collapse to a single profile id every
+    # time, and produce byte-identical artifacts across reruns.
+    assert result_a.profile_count == 1
+    assert result_b.profile_count == 1
+    assert result_b.cell_count == result_a.cell_count
+    assert result_b.soil_raster_sha256 == result_a.soil_raster_sha256
+    assert result_b.ghr_db_sha256 == result_a.ghr_db_sha256
+    assert result_b.sol_sha256 == result_a.sol_sha256

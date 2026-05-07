@@ -135,6 +135,17 @@ def assign_cell_to_profile_id(
     ids are deterministic across reruns; identical input always yields
     the same id mapping.
 
+    Hydraulic properties on every layer are normalized up front (a single
+    pre-dedup call to :meth:`SoilLayer.estimate_hydraulic_properties`
+    when any of the wilting/field-capacity/saturated-water-content fields
+    is missing). Without this step, the canonical SOL writer would
+    populate those fields on the representative profile only, leaving
+    cell-level duplicates unchanged; subsequent reruns would then
+    compute different dedup keys and yield different profile ids — a
+    silent break of the idempotency contract that the structural test
+    ``test_build_eghr_substrate_is_idempotent_with_unset_hydraulics``
+    pins.
+
     Args:
         grid: Cell roster.
         profiles_by_cell: Mapping ``cell_id`` → :class:`SoilProfile`.
@@ -144,6 +155,19 @@ def assign_cell_to_profile_id(
     Returns:
         Tuple of ``(cell_id → profile_id, profile_id → SoilProfile)``.
     """
+    # Step 1: pre-normalize hydraulic fields so dedup keys are stable
+    # across reruns. Touches every layer once; idempotent if already
+    # normalized (the model's own short-circuit on populated fields).
+    for profile in profiles_by_cell.values():
+        for layer in profile.layers:
+            if (
+                layer.wilting_point is None
+                or layer.field_capacity is None
+                or layer.saturated_wc is None
+            ):
+                layer.estimate_hydraulic_properties()
+
+    # Step 2: deterministic dedup pass over cells in ascending id order.
     profile_id_by_dedup_key: Dict[bytes, int] = {}
     profiles_by_id: Dict[int, SoilProfile] = {}
     cell_to_profile_id: Dict[int, int] = {}
@@ -257,6 +281,11 @@ def build_eghr_substrate(
     )
 
 
+_RASTER_DTYPE = "uint32"
+_RASTER_NODATA = 0
+_MAX_PROFILE_ID = 2**32 - 1
+
+
 def _write_soil_raster(
     raster_path: Path,
     grid: SpatialGrid,
@@ -264,50 +293,73 @@ def _write_soil_raster(
 ) -> None:
     """Write the cell-to-profile-id assignment as a single-band GeoTIFF.
 
-    The pixel data type is ``uint16`` (65 535 unique profiles per package
-    is more than the largest realistic eGHR substrate); pixel value ``0``
-    means nodata. The transform is computed from ``grid.bounds`` and the
-    grid dimensions so re-runs with identical inputs produce identical
-    pixel coordinates.
+    The pixel data type is ``uint32`` so the substrate can encode up to
+    ~4.3 billion unique profiles without silent overflow (uint16 wraps
+    above 65 535 and would split a single profile's coverage between two
+    raster ids while the database keeps the larger id intact). Pixel
+    value ``0`` means nodata.
+
+    The georeferencing transform is computed from the spatial extent of
+    the cells actually present in ``grid.cells``, not from
+    ``grid.bounds``. Pipelines routinely filter cells (centroid_strict,
+    share-percent, exclude_cells); when that happens, ``grid.cells``
+    is the post-filter roster while ``grid.bounds`` still describes the
+    original region. Aligning the raster to the cell-extent bounds keeps
+    PYTHIA's cell-center sampling pointing at the correct pixel.
     """
     if not grid.cells:
         raise ValueError("Cannot write eGHR raster: grid has no cells.")
-    if grid.bounds is None:
-        raise ValueError(
-            "Cannot write eGHR raster: grid.bounds is required to compute the "
-            "GeoTIFF transform."
-        )
+
+    if cell_to_profile_id:
+        max_id = max(cell_to_profile_id.values())
+        if max_id > _MAX_PROFILE_ID:
+            raise ValueError(
+                f"eGHR substrate has {max_id} unique profiles; raster dtype "
+                f"{_RASTER_DTYPE} can only encode up to {_MAX_PROFILE_ID}."
+            )
 
     n_rows = grid.n_rows
     n_cols = grid.n_cols
     min_row = min(cell.row for cell in grid.cells)
     min_col = min(cell.col for cell in grid.cells)
 
-    data = np.zeros((n_rows, n_cols), dtype=np.uint16)
+    data = np.zeros((n_rows, n_cols), dtype=np.uint32)
     for cell in grid.cells:
         profile_id = cell_to_profile_id.get(cell.cell_id)
         if profile_id is None:
             continue
         data[cell.row - min_row, cell.col - min_col] = profile_id
 
+    # Cell-extent bounds (centers ± half-increment). Using these instead
+    # of ``grid.bounds`` is what keeps the raster's pixel grid aligned
+    # with the cells that actually carry profile data even when the
+    # caller filtered the grid down from a larger original region.
+    half_inc = grid.increment_deg / 2.0
+    min_lat = min(cell.lat for cell in grid.cells) - half_inc
+    max_lat = max(cell.lat for cell in grid.cells) + half_inc
+    min_lon = min(cell.lon for cell in grid.cells) - half_inc
+    max_lon = max(cell.lon for cell in grid.cells) + half_inc
+
     transform = from_bounds(
-        west=grid.bounds.minx,
-        south=grid.bounds.miny,
-        east=grid.bounds.maxx,
-        north=grid.bounds.maxy,
+        west=min_lon,
+        south=min_lat,
+        east=max_lon,
+        north=max_lat,
         width=n_cols,
         height=n_rows,
     )
+
+    crs = grid.bounds.crs if grid.bounds is not None else "EPSG:4326"
 
     profile = {
         "driver": "GTiff",
         "height": n_rows,
         "width": n_cols,
         "count": 1,
-        "dtype": "uint16",
-        "crs": grid.bounds.crs,
+        "dtype": _RASTER_DTYPE,
+        "crs": crs,
         "transform": transform,
-        "nodata": 0,
+        "nodata": _RASTER_NODATA,
         "compress": "deflate",
         "tiled": False,
     }
