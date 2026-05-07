@@ -117,6 +117,11 @@ dev = [
     "black>=23.0.0",
     "isort>=5.12.0",
     "mypy>=1.0.0",
+    # Sprint G structural tests for the ISIMIP3b client substrate use
+    # the ``responses`` library to mock HTTP cutout responses without
+    # touching the live API. Locally installed transitively in some
+    # dev envs but not declared by manifest, so CI couldn't find it.
+    "responses>=0.26.0",
 ]
 viz = [
     "matplotlib>=3.7.0",
