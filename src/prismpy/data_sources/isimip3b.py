@@ -208,19 +208,25 @@ class ISIMIP3bClient:
     def cutout_bbox(
         self,
         paths: List[str],
-        bbox: List[float],
+        *,
+        west: float,
+        east: float,
+        south: float,
+        north: float,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Submit a server-side bbox cutout job and return its handle.
 
-        The upstream ``cutout_bbox`` accepts a list of dataset paths
-        plus a 4-element bbox in ``[south, north, west, east]`` order
-        and submits an asynchronous job. Callers wait via
+        The upstream ``cutout_bbox`` signature is
+        ``cutout_bbox(paths, west, east, south, north, ...)`` — four
+        SEPARATE float arguments in the canonical W/E/S/N order, NOT a
+        single bbox list. The wrapper enforces keyword-only edges so
+        callers cannot accidentally swap the order. Callers wait via
         ``isimip_client.client.ISIMIPClient.get_job(...)``; the cached
         cutout helper threads the wait + download + cache write
         together.
         """
-        return self._inner.cutout_bbox(paths, bbox, **kwargs)
+        return self._inner.cutout_bbox(paths, west, east, south, north, **kwargs)
 
 
 # ── Dataset discovery ────────────────────────────────────────────────
@@ -286,7 +292,21 @@ def discover_datasets(
             f"ISIMIP discovery call failed for {query!r}: {exc!r}"
         ) from exc
 
-    results: List[Dict[str, Any]] = list(response.get("results") or [])
+    # Default ``isimip_client.ISIMIPClient.list()`` returns the raw
+    # ``results`` list, NOT the paginated dict. Pagination wraps the
+    # list as ``{"results": [...], "next": ..., "previous": ...}``
+    # only when the caller passes ``paginate=True``. Handle both shapes
+    # so the discovery helper does not regress depending on whether
+    # callers ever flip the pagination flag.
+    if isinstance(response, list):
+        results: List[Dict[str, Any]] = list(response)
+    elif isinstance(response, dict):
+        results = list(response.get("results") or [])
+    else:
+        raise IsimipFetchError(
+            "Unexpected ISIMIP datasets() response shape "
+            f"{type(response).__name__!r}; expected list or dict."
+        )
     if not results:
         raise IsimipDatasetNotFoundError(
             f"No ISIMIP3b dataset matched {query!r} for time_slice "
@@ -515,16 +535,19 @@ def _submit_and_wait_cutout_job(
     the finished job dict; the caller pulls ``file_url`` (or equivalent)
     out of it for the actual file download.
     """
-    bbox_list = [
-        float(bbox["south"]),
-        float(bbox["north"]),
-        float(bbox["west"]),
-        float(bbox["east"]),
-    ]
     paths = _dataset_paths(dataset)
 
     try:
-        job = client.cutout_bbox(paths, bbox_list)
+        # Upstream ``cutout_bbox`` takes 4 separate W/E/S/N floats; the
+        # wrapper enforces keyword-only edges so caller-side ordering
+        # cannot drift silently.
+        job = client.cutout_bbox(
+            paths,
+            west=float(bbox["west"]),
+            east=float(bbox["east"]),
+            south=float(bbox["south"]),
+            north=float(bbox["north"]),
+        )
     except Exception as exc:  # noqa: BLE001 — wrap upstream
         raise IsimipFetchError(
             f"ISIMIP cutout_bbox submission failed: {exc!r}"
@@ -587,6 +610,19 @@ def _download_to_staging(
             pass
         raise IsimipFetchError(
             f"ISIMIP cutout download from {file_url!r} failed: {exc!r}"
+        ) from exc
+    except OSError as exc:
+        # Disk-full / IO error / permission denied during the staging
+        # write loop. The ``requests`` exception path above only covers
+        # network-side failures; the file system can also fail during
+        # ``fh.write(chunk)`` and that has to surface as the typed
+        # ``CacheWriteError`` per the AC-G-1 typed exception contract.
+        try:
+            staging_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise CacheWriteError(
+            f"Cache write to staging path {staging_path} failed: {exc!r}"
         ) from exc
 
 

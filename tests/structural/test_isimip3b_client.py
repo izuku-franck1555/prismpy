@@ -322,5 +322,52 @@ def test_discover_datasets_wraps_upstream_failure_as_typed_error() -> None:
         )
 
 
+def test_discover_datasets_handles_raw_list_response() -> None:
+    """Default ``isimip_client.ISIMIPClient.list()`` returns the raw
+    ``results`` list (NOT the paginated dict). The discover helper
+    must accept both shapes — list (default) and dict (paginate=True).
+
+    Codex round 1 on b89b784 caught this drift class — the original
+    code only handled the dict shape and the test fixture hid the bug.
+    """
+
+    class _ListResponseClient:
+        def __init__(self) -> None:
+            self.calls: List[Dict[str, Any]] = []
+
+        def datasets(self, **kwargs: Any):
+            self.calls.append(dict(kwargs))
+            # Real upstream returns a raw LIST by default.
+            return [_stub_dataset("ssp585-list-response")]
+
+    fake = _ListResponseClient()
+    result = isimip3b.discover_datasets(
+        fake,  # type: ignore[arg-type]
+        gcm="gfdl-esm4",
+        scenario="ssp585",
+        variable="tasmax",
+        time_slice=(2046, 2065),
+    )
+    assert result["id"] == "ssp585-list-response"
+
+
+def test_discover_datasets_rejects_unexpected_response_shape() -> None:
+    """A response that is neither list nor dict must surface as
+    ``IsimipFetchError`` rather than crash with AttributeError."""
+
+    class _BadShapeClient:
+        def datasets(self, **_kwargs: Any):
+            return "totally-unexpected-shape"
+
+    with pytest.raises(isimip3b.IsimipFetchError):
+        isimip3b.discover_datasets(
+            _BadShapeClient(),  # type: ignore[arg-type]
+            gcm="gfdl-esm4",
+            scenario="ssp585",
+            variable="tasmax",
+            time_slice=(2046, 2065),
+        )
+
+
 # AC-G-2 cached_cutout body lives in tests/structural/test_isimip3b_cached_cutout.py.
 # This file remains the AC-G-1 substrate-only structural pin.

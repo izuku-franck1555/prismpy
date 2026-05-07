@@ -108,9 +108,28 @@ class _FakeISIMIP3bClient:
         self._side_effect = cutout_side_effect
 
     def cutout_bbox(
-        self, paths: List[str], bbox: List[float]
+        self,
+        paths: List[str],
+        *,
+        west: float,
+        east: float,
+        south: float,
+        north: float,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
-        self.cutout_calls.append({"paths": list(paths), "bbox": list(bbox)})
+        # Match the real ``isimip_client.client.ISIMIPClient.cutout_bbox``
+        # 4-float signature so the fake doesn't drift from upstream
+        # (durable §24 + structural pin in
+        # ``test_isimip_client_signature_alignment.py``).
+        self.cutout_calls.append(
+            {
+                "paths": list(paths),
+                "west": west,
+                "east": east,
+                "south": south,
+                "north": north,
+            }
+        )
         if self._side_effect is not None:
             raise self._side_effect
         return self._response
@@ -496,6 +515,66 @@ def test_drill_9_cache_write_error_on_disk_full(
     leftovers = list(cache_root.rglob("*.nc"))
     assert leftovers == [], (
         f"Cache must NOT contain a half-written .nc post-disk-full: {leftovers}"
+    )
+
+
+# ── §F-G-10 #9b: CacheWriteError on real OSError mid-write ───────────
+
+
+def test_drill_9b_cache_write_error_on_disk_full_mid_write(
+    cache_root: Path,
+    fake_dataset: Dict[str, Any],
+    http_responses: responses.RequestsMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real-condition drill #9b per MED-Pass4-1 — disk-full surfaces
+    DURING the staging-write loop, not at the rename step.
+
+    Drill #9 exercises ``os.replace`` failure (rename step). This
+    companion drill exercises ``fh.write(chunk)`` failure (write
+    step). Codex round 1 on b89b784 caught the unwrapped OSError on
+    the write path; this drill calibrates that the new ``except OSError``
+    clause in ``_download_to_staging`` raises the typed
+    ``CacheWriteError`` and leaves the cache clean.
+    """
+    http_responses.add(
+        responses.GET,
+        _FAKE_FILE_URL,
+        body=_FAKE_NETCDF_BODY,
+    )
+    client = _FakeISIMIP3bClient()
+    bbox = {"south": 13.0, "north": 14.5, "west": 1.5, "east": 3.0}
+
+    real_open = Path.open
+
+    def failing_writer_open(self: Path, mode: str = "r", *args: Any, **kwargs: Any):
+        fh = real_open(self, mode, *args, **kwargs)
+        # Only intercept the staging file's binary-write path to avoid
+        # blowing up the fixture's own JSON writes.
+        if "w" in mode and "b" in mode and self.name.endswith(".partial"):
+            def write_with_disk_full(_data):
+                raise OSError(28, "No space left on device")
+
+            fh.write = write_with_disk_full  # type: ignore[method-assign]
+        return fh
+
+    monkeypatch.setattr(Path, "open", failing_writer_open)
+
+    with pytest.raises(CacheWriteError) as exc_info:
+        cached_cutout(
+            client,  # type: ignore[arg-type]
+            fake_dataset,
+            bbox=bbox,
+            cache_dir=cache_root,
+        )
+    assert "No space left on device" in str(exc_info.value)
+
+    # Cache stays clean: no .nc / .partial leftovers.
+    leftovers = list(cache_root.rglob("*.nc")) + list(
+        cache_root.rglob("*.partial")
+    )
+    assert leftovers == [], (
+        f"Cache must be clean post-write-failure: {leftovers}"
     )
 
 
