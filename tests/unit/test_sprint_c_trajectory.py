@@ -46,6 +46,9 @@ landed) plus headroom for the remaining boundary 4/7 (AC-G-9
 provenance + bias-correction provenance string) + boundary 6/7
 (AC-G-12 14-fixture mutation-drill matrix) + boundary 7/7
 (AC-G-13 4 paired-set deliverables + SHA hash pins).
+Re-anchored to [815, 2000] at Sprint G boundary 7/7 absorption
+(post-codex-round-2 P1 ISIMIP→SARRA mapping + unit conversions
++ 4 structural pins via ``test_isimip_to_sarra_mapping.py``).
 Kept in sync with ``test_sprint_d_trajectory.py`` since both
 pins measure the same ``pytest tests/ --collect-only`` count.
 
@@ -69,11 +72,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 _LOWER = 815
-# Sprint S re-anchor: 1500 -> 1700 (per-package eGHR substrate
-# builder's new tests). Sprint G replay continues: 1700 -> 1750
-# (cache-primitive extraction) -> 1900 (boundary 3/7 close, this
-# commit, post-AC-G-7c SARRA-Py GeoTIFF projection-climate path).
-_UPPER = 1900
+# Sprint S re-anchor: 1500 -> 1700 (per-package eGHR substrate).
+# Sprint G replay continues: 1700 -> 1750 (cache-primitive
+# extraction) -> 1900 (boundary 3/7 close, post-AC-G-7c
+# SARRA-Py GeoTIFF) -> 2000 (boundary 7/7 absorption, this
+# commit, post-codex-round-2 P1 ISIMIP→SARRA mapping + unit
+# conversions). Each replay layer absorbs further test growth.
+_UPPER = 2000
 
 
 class TestSprintCTrajectory(TestCase):

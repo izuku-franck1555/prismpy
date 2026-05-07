@@ -65,6 +65,14 @@ Sprint D.1 band rationale:
     provenance string) + boundary 6/7 (AC-G-12 14-fixture
     mutation-drill matrix) + boundary 7/7 (AC-G-13 4
     paired-set deliverables + SHA hash pins).
+  - 1900 → 2000 (Sprint G boundary 7/7 absorption,
+    post-codex-round-2 P1 ISIMIP→SARRA mapping + unit
+    conversions) to absorb 17 absorption tests in
+    ``test_isimip_to_sarra_mapping.py`` covering the 4 structural
+    pins (mapping completeness + unit conversion correctness
+    + two-vocabulary AST walker per
+    ``feedback_two_vocabulary_substrate_drift.md`` +
+    sibling-sweep over SARRA-Py translator). Pre-bump count 1906.
 
 Re-anchor this pin by updating ``_LOWER`` / ``_UPPER`` after a
 new sprint deliberately changes the trajectory.
@@ -82,11 +90,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 _LOWER = 815
-# Sprint S re-anchor: 1500 -> 1700 (per-package eGHR substrate
-# builder's new tests). Sprint G replay continues: 1700 -> 1750
-# (cache-primitive extraction) -> 1900 (boundary 3/7 close, this
-# commit). Kept in sync with ``test_sprint_c_trajectory.py``.
-_UPPER = 1900
+# Sprint S re-anchor: 1500 -> 1700 (per-package eGHR substrate).
+# Sprint G replay continues: 1700 -> 1750 (cache-primitive
+# extraction) -> 1900 (boundary 3/7 close) -> 2000 (boundary 7/7
+# absorption, this commit). Kept in sync with
+# ``test_sprint_c_trajectory.py``.
+_UPPER = 2000
 
 
 class TestSprintDTrajectory(TestCase):

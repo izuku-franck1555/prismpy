@@ -176,6 +176,116 @@ SCENARIO_TIME_SLICES: Final[Tuple[Tuple[int, int], ...]] = (
 """ISIMIP3b primary scenario time-slice ensemble (mid-century + end-century)."""
 
 
+# ── ISIMIP → SARRA-Py variable / unit mapping (canonical) ────────────
+#
+# AC-G-7c boundary 7/7 absorption per codex round 2 P1:
+# the SARRA-Py projection writer was emitting raw ISIMIP CF
+# variable names (``tasmax`` / ``pr`` / etc) in raw CF units
+# (Kelvin / kg m⁻² s⁻¹ / W m⁻²). Existing SARRA-Py consumers
+# (``_copy_climate_geotiffs`` + the per-cell sampling +
+# validation paths) scan AgERA5-style directory names + expect
+# converted units (Kelvin passthrough for temperature; mm/day
+# for precipitation; J/m²/day for solar radiation). The
+# mapping below IS the canonical ISIMIP → SARRA-Py
+# vocabulary + units alignment; per durable §24
+# canonical-source-or-pin: every consumer routes through this
+# table, no inline restatement.
+#
+# Coverage: 4 of 6 SARRA-Py expected climate directories —
+# ``rainfall`` (← ``pr``), ``2m_temperature_24_hour_maximum``
+# (← ``tasmax``), ``2m_temperature_24_hour_minimum``
+# (← ``tasmin``), ``solar_radiation_flux_daily`` (← ``rsds``).
+# The remaining 2 (``2m_temperature_24_hour_mean``,
+# ``ET0Hargeaves``) require derivation (mean = average of
+# tmax+tmin; ET0 = Hargreaves-Samani from temperature +
+# extraterrestrial radiation) — declared in
+# ``manifest.limitations.sarra_py_projection_derivations_pending``
+# per Sprint G structural-pin scope; full derivation lands in
+# Sprint H+ end-to-end pipeline per team-lead authorization
+# 2026-05-07 (no preemptive H+ work in boundary 7/7
+# absorption).
+
+
+_KG_PER_M2_PER_SECOND_TO_MM_PER_DAY: Final[float] = 86400.0
+"""Conversion factor: 1 kg m⁻² s⁻¹ × 86400 s/day = 86.4 mm/day.
+
+ISIMIP ``pr`` (precipitation) is shipped in kg m⁻² s⁻¹ per CF-1.x
+convention. SARRA-Py's ``rainfall`` directory expects mm/day. 1 kg
+of water spread over 1 m² is 1 mm depth, and 1 day = 86400 s, so
+the numeric factor is 86400.
+"""
+
+
+_W_PER_M2_TO_J_PER_M2_PER_DAY: Final[float] = 86400.0
+"""Conversion factor: 1 W m⁻² × 86400 s/day = 86400 J m⁻²/day.
+
+ISIMIP ``rsds`` (downwelling shortwave at surface) is shipped in
+W m⁻² (instantaneous power, daily-averaged). SARRA-Py's
+``solar_radiation_flux_daily`` expects accumulated daily energy in
+J m⁻²/day, matching the AgERA5 convention. 1 W m⁻² × 86400 s/day =
+86400 J m⁻²/day.
+"""
+
+
+ISIMIP_TO_SARRA_VAR_MAPPING: Final[
+    Mapping[str, Tuple[str, str, str]]
+] = {
+    # ISIMIP CF name → (SARRA-Py directory name, source unit, target unit)
+    "pr": (
+        "rainfall",
+        "kg m-2 s-1",
+        "mm/day",
+    ),
+    "tasmax": (
+        "2m_temperature_24_hour_maximum",
+        "K",
+        "K",  # passthrough — AgERA5 + SARRA-Py both consume K
+    ),
+    "tasmin": (
+        "2m_temperature_24_hour_minimum",
+        "K",
+        "K",
+    ),
+    "rsds": (
+        "solar_radiation_flux_daily",
+        "W m-2",
+        "J m-2 day-1",
+    ),
+}
+"""Canonical ISIMIP CF variable → SARRA-Py directory name + unit mapping.
+
+Per durable §24 canonical-source-or-pin: every consumer that needs
+to translate an ISIMIP3b variable to a SARRA-Py output directory +
+unit imports this dict. The structural pin
+``tests/structural/test_isimip_to_sarra_mapping.py`` asserts the
+SARRA-Py projection writer emits ONLY directory names from this
+table's values, never raw ISIMIP CF names directly.
+
+Each tuple value: ``(sarra_directory_name, source_unit, target_unit)``.
+The unit fields are self-documenting; the conversion factors live in
+``prismpy.harmonize.isimip_unit_conversions`` so the math is in one
+place + version-pinned.
+"""
+
+
+SARRA_PY_DERIVED_VARIABLE_DIRECTORIES: Final[FrozenSet[str]] = frozenset(
+    {
+        # tasmean = (tasmax + tasmin) / 2 — trivial derivation
+        "2m_temperature_24_hour_mean",
+        # ET0 = Hargreaves-Samani from tasmax + tasmin + Ra(latitude, DOY)
+        "ET0Hargeaves",
+    }
+)
+"""SARRA-Py expected directories that require derivation from ISIMIP variables.
+
+These don't appear in :data:`ISIMIP_TO_SARRA_VAR_MAPPING` because
+they're not directly downloaded — the values must be computed from
+other variables. Sprint G boundary 7/7 absorption defers the
+derivation to Sprint H+ end-to-end pipeline; the projection package
+declares the deferral via ``manifest.limitations.sarra_py_projection_derivations_pending``.
+"""
+
+
 __all__ = [
     "SIMULATION_ROUND",
     "SCENARIO_PRODUCT_MAP",
@@ -192,4 +302,6 @@ __all__ = [
     "PRIMARY_GCMS",
     "SUPPORTED_VARIABLES",
     "SCENARIO_TIME_SLICES",
+    "ISIMIP_TO_SARRA_VAR_MAPPING",
+    "SARRA_PY_DERIVED_VARIABLE_DIRECTORIES",
 ]

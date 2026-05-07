@@ -138,11 +138,17 @@ def test_sarra_py_projection_emits_per_variable_directories(
 
     files = inst._generate_projection_climate_geotiffs(climate_by_var, meta)
 
-    # Per-variable directories exist
-    tasmax_dir = inst.output_dir / "data" / "climate" / "tasmax"
-    pr_dir = inst.output_dir / "data" / "climate" / "pr"
+    # Per-variable directories exist — codex round 2 P1 absorption
+    # routes ISIMIP CF names through the canonical SARRA-Py mapping
+    # (tasmax → 2m_temperature_24_hour_maximum; pr → rainfall).
+    tasmax_dir = inst.output_dir / "data" / "climate" / "2m_temperature_24_hour_maximum"
+    pr_dir = inst.output_dir / "data" / "climate" / "rainfall"
     assert tasmax_dir.is_dir()
     assert pr_dir.is_dir()
+    # Raw ISIMIP-named directories MUST NOT appear (the mapping is
+    # the canonical-source-or-pin contract per durable §24).
+    assert not (inst.output_dir / "data" / "climate" / "tasmax").exists()
+    assert not (inst.output_dir / "data" / "climate" / "pr").exists()
 
     # Each directory has 3 days worth of GeoTIFFs + 1 sidecar
     tasmax_tifs = sorted(tasmax_dir.glob("*.tif"))
@@ -165,7 +171,7 @@ def test_sarra_py_projection_geotiff_filenames_are_dates(
 
     inst._generate_projection_climate_geotiffs(climate_by_var, meta)
 
-    tifs = sorted((inst.output_dir / "data" / "climate" / "tasmax").glob("*.tif"))
+    tifs = sorted((inst.output_dir / "data" / "climate" / "2m_temperature_24_hour_maximum").glob("*.tif"))
     assert tifs[0].stem == "2046-06-01"
     assert tifs[1].stem == "2046-06-02"
 
@@ -184,7 +190,7 @@ def test_sarra_py_projection_sidecar_carries_canonical_fields(
 
     inst._generate_projection_climate_geotiffs(climate_by_var, meta)
 
-    sidecar = inst.output_dir / "data" / "climate" / "tasmax" / ".meta.json"
+    sidecar = inst.output_dir / "data" / "climate" / "2m_temperature_24_hour_maximum" / ".meta.json"
     payload = json.loads(sidecar.read_text(encoding="utf-8"))
     assert payload["gcm_source"] == "gfdl-esm4"
     assert payload["bias_correction_method"] == "quantile_mapping"
@@ -207,7 +213,7 @@ def test_sarra_py_projection_sidecar_validates_against_schema(
 
     inst._generate_projection_climate_geotiffs(climate_by_var, meta)
 
-    sidecar = inst.output_dir / "data" / "climate" / "pr" / ".meta.json"
+    sidecar = inst.output_dir / "data" / "climate" / "rainfall" / ".meta.json"
     raw = json.loads(sidecar.read_text(encoding="utf-8"))
     re_validated = ProjectionClimateMeta.model_validate(raw)
     assert re_validated.variable == "pr"
@@ -227,8 +233,8 @@ def test_sarra_py_projection_geotiff_deterministic(tmp_path: Path) -> None:
     inst_a._generate_projection_climate_geotiffs(climate_by_var, meta)
     inst_b._generate_projection_climate_geotiffs(climate_by_var, meta)
 
-    tifs_a = sorted((inst_a.output_dir / "data" / "climate" / "tasmax").glob("*.tif"))
-    tifs_b = sorted((inst_b.output_dir / "data" / "climate" / "tasmax").glob("*.tif"))
+    tifs_a = sorted((inst_a.output_dir / "data" / "climate" / "2m_temperature_24_hour_maximum").glob("*.tif"))
+    tifs_b = sorted((inst_b.output_dir / "data" / "climate" / "2m_temperature_24_hour_maximum").glob("*.tif"))
     assert len(tifs_a) == len(tifs_b)
     for tif_a, tif_b in zip(tifs_a, tifs_b):
         assert tif_a.read_bytes() == tif_b.read_bytes(), (
@@ -245,8 +251,8 @@ def test_sarra_py_projection_sidecar_deterministic(tmp_path: Path) -> None:
     inst_a._generate_projection_climate_geotiffs(climate_by_var, meta)
     inst_b._generate_projection_climate_geotiffs(climate_by_var, meta)
 
-    sidecar_a = inst_a.output_dir / "data" / "climate" / "tasmax" / ".meta.json"
-    sidecar_b = inst_b.output_dir / "data" / "climate" / "tasmax" / ".meta.json"
+    sidecar_a = inst_a.output_dir / "data" / "climate" / "2m_temperature_24_hour_maximum" / ".meta.json"
+    sidecar_b = inst_b.output_dir / "data" / "climate" / "2m_temperature_24_hour_maximum" / ".meta.json"
     assert sidecar_a.read_bytes() == sidecar_b.read_bytes()
 
 
@@ -263,7 +269,7 @@ def test_sarra_py_projection_geotiff_no_aux_xml_sidecar(
 
     inst._generate_projection_climate_geotiffs(climate_by_var, meta)
 
-    var_dir = inst.output_dir / "data" / "climate" / "tasmax"
+    var_dir = inst.output_dir / "data" / "climate" / "2m_temperature_24_hour_maximum"
     aux_files = list(var_dir.glob("*.aux.xml"))
     assert aux_files == [], (
         f"GDAL .aux.xml sidecars must not appear in projection output: {aux_files}"
@@ -287,7 +293,7 @@ def test_sarra_py_projection_geotiff_metadata_pinned(tmp_path: Path) -> None:
 
     inst._generate_projection_climate_geotiffs(climate_by_var, meta)
 
-    tif = next((inst.output_dir / "data" / "climate" / "tasmax").glob("*.tif"))
+    tif = next((inst.output_dir / "data" / "climate" / "2m_temperature_24_hour_maximum").glob("*.tif"))
     with rasterio.open(tif) as src:
         assert src.crs.to_epsg() == 4326
         assert str(src.dtypes[0]) == "float32"
@@ -436,7 +442,7 @@ def test_sarra_py_projection_nan_replaced_with_nodata_sentinel(
     inst._generate_projection_climate_geotiffs(climate_by_var, meta)
 
     tif_path = (
-        inst.output_dir / "data" / "climate" / "tasmax" / "2046-06-01.tif"
+        inst.output_dir / "data" / "climate" / "2m_temperature_24_hour_maximum" / "2046-06-01.tif"
     )
     with rasterio.open(tif_path) as ds:
         band = ds.read(1)
@@ -482,7 +488,7 @@ def test_sarra_py_projection_finite_values_preserved_around_nodata(
     inst._generate_projection_climate_geotiffs(climate_by_var, meta)
 
     tif_path = (
-        inst.output_dir / "data" / "climate" / "tasmax" / "2046-06-01.tif"
+        inst.output_dir / "data" / "climate" / "2m_temperature_24_hour_maximum" / "2046-06-01.tif"
     )
     with rasterio.open(tif_path) as ds:
         band = ds.read(1)

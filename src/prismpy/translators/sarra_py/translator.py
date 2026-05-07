@@ -772,7 +772,14 @@ class SarraPyTranslator(SarraPyTranslatorBase):
         import rasterio
         from rasterio.transform import from_bounds
 
+        from prismpy.harmonize.isimip_unit_conversions import (
+            convert_to_sarra_py_units,
+            sarra_py_directory_for_isimip,
+        )
         from prismpy.models.scenario import ProjectionClimateMeta as _Meta
+        from prismpy.standards.isimip_versions import (
+            ISIMIP_TO_SARRA_VAR_MAPPING,
+        )
 
         output_files: List[Path] = []
         climate_root = self.output_dir / "data" / "climate"
@@ -783,7 +790,23 @@ class SarraPyTranslator(SarraPyTranslatorBase):
         }
 
         for variable, data_array in climate_by_variable.items():
-            var_dir = climate_root / variable
+            # Codex round 2 P1 absorption — route every emitted variable
+            # through the canonical ISIMIP → SARRA-Py mapping per durable
+            # §24. Variables not in the mapping (e.g., ``hurs``,
+            # ``sfcWind``, ``tasmean``) have no SARRA-Py consumer and
+            # are skipped with a log warning rather than emitted as raw
+            # CF names that downstream consumers would ignore.
+            if variable not in ISIMIP_TO_SARRA_VAR_MAPPING:
+                logger.warning(
+                    f"Skipping ISIMIP variable {variable!r} — no SARRA-Py "
+                    "directory mapping registered in "
+                    "prismpy.standards.isimip_versions."
+                    "ISIMIP_TO_SARRA_VAR_MAPPING. Add an entry to extend "
+                    "consumer coverage."
+                )
+                continue
+            sarra_dir_name = sarra_py_directory_for_isimip(variable)
+            var_dir = climate_root / sarra_dir_name
             var_dir.mkdir(parents=True, exist_ok=True)
 
             # Resolve geospatial layout. The DataArray must carry a CRS
@@ -820,7 +843,17 @@ class SarraPyTranslator(SarraPyTranslatorBase):
                         # numpy datetime64 → str
                         date_str = str(time_val).split("T")[0][:10]
 
-                    band = data_array.isel(time=time_idx).values.astype("float32")
+                    raw_band = data_array.isel(time=time_idx).values.astype(
+                        "float32"
+                    )
+                    # Codex round 2 P1 absorption — convert raw ISIMIP
+                    # CF units to SARRA-Py target units BEFORE writing
+                    # (kg m⁻² s⁻¹ → mm/day for ``pr``; W m⁻² →
+                    # J m⁻²/day for ``rsds``; K passthrough for
+                    # ``tasmax`` / ``tasmin``). Per durable §24 the
+                    # math lives in ``harmonize.isimip_unit_conversions``.
+                    converted = convert_to_sarra_py_units(variable, raw_band)
+                    band = np.asarray(converted, dtype="float32")
                     # NaN-as-valid-value-leakage guard (codex round 1
                     # boundary 3/7 P2): any NaN that survived from
                     # upstream ``_FillValue`` decoding or a sea-mask
