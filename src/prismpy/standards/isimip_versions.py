@@ -207,7 +207,7 @@ SCENARIO_TIME_SLICES: Final[Tuple[Tuple[int, int], ...]] = (
 
 
 _KG_PER_M2_PER_SECOND_TO_MM_PER_DAY: Final[float] = 86400.0
-"""Conversion factor: 1 kg m⁻² s⁻¹ × 86400 s/day = 86.4 mm/day.
+"""Conversion factor: 1 kg m⁻² s⁻¹ × 86400 s/day = 86400 mm/day.
 
 ISIMIP ``pr`` (precipitation) is shipped in kg m⁻² s⁻¹ per CF-1.x
 convention. SARRA-Py's ``rainfall`` directory expects mm/day. 1 kg
@@ -216,14 +216,32 @@ the numeric factor is 86400.
 """
 
 
-_W_PER_M2_TO_J_PER_M2_PER_DAY: Final[float] = 86400.0
-"""Conversion factor: 1 W m⁻² × 86400 s/day = 86400 J m⁻²/day.
+_W_PER_M2_TO_KJ_PER_M2_PER_DAY: Final[float] = 86.4
+"""Conversion factor: 1 W m⁻² × 86400 s/day ÷ 1000 J/kJ = 86.4
+kJ m⁻²/day.
 
 ISIMIP ``rsds`` (downwelling shortwave at surface) is shipped in
 W m⁻² (instantaneous power, daily-averaged). SARRA-Py's
 ``solar_radiation_flux_daily`` expects accumulated daily energy in
-J m⁻²/day, matching the AgERA5 convention. 1 W m⁻² × 86400 s/day =
-86400 J m⁻²/day.
+kJ m⁻²/day matching the AgERA5 vendored-library output (per
+``sources/climate/agera5.py:1002`` ``version="SARRA-Py"`` flag +
+``validators/post_translate.py:576`` SARRA_PY_VAR_MAPPING comment
+``"kJ/m²/d → MJ/m²/d"``). Codex round 2 boundary 7/7 P1
+absorption — earlier J/m²/day shipping made radiation 1000× too
+large for SARRA-Py consumers.
+"""
+
+
+_KELVIN_TO_CELSIUS_OFFSET: Final[float] = 273.15
+"""Conversion factor: K → °C subtraction offset.
+
+ISIMIP ships temperatures in Kelvin per CF-1.x convention. SARRA-Py
+consumes °C per ``validators/post_translate.py:574-575``
+``SARRA_PY_VAR_MAPPING`` (``noop`` ops with comment ``"already °C"``)
+and ``sources/climate/agera5.py:1002`` ``version="SARRA-Py"`` flag
+which triggers K→°C conversion in the vendored library. Codex round
+2 boundary 7/7 P1 absorption — earlier K passthrough shipping made
+300 K read as 300 °C downstream.
 """
 
 
@@ -239,17 +257,17 @@ ISIMIP_TO_SARRA_VAR_MAPPING: Final[
     "tasmax": (
         "2m_temperature_24_hour_maximum",
         "K",
-        "K",  # passthrough — AgERA5 + SARRA-Py both consume K
+        "degC",  # SARRA-Py expects °C per post_translate.py:574 noop comment
     ),
     "tasmin": (
         "2m_temperature_24_hour_minimum",
         "K",
-        "K",
+        "degC",
     ),
     "rsds": (
         "solar_radiation_flux_daily",
         "W m-2",
-        "J m-2 day-1",
+        "kJ m-2 day-1",  # SARRA-Py expects kJ/m²/d per post_translate.py:576 mul 1e-3
     ),
 }
 """Canonical ISIMIP CF variable → SARRA-Py directory name + unit mapping.

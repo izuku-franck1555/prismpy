@@ -34,8 +34,9 @@ import numpy as np
 
 from prismpy.standards.isimip_versions import (
     ISIMIP_TO_SARRA_VAR_MAPPING,
+    _KELVIN_TO_CELSIUS_OFFSET,
     _KG_PER_M2_PER_SECOND_TO_MM_PER_DAY,
-    _W_PER_M2_TO_J_PER_M2_PER_DAY,
+    _W_PER_M2_TO_KJ_PER_M2_PER_DAY,
 )
 
 
@@ -56,43 +57,48 @@ def pr_kg_m2_s_to_mm_day(values: Any) -> Any:
     return values * _KG_PER_M2_PER_SECOND_TO_MM_PER_DAY
 
 
-def rsds_w_m2_to_j_m2_day(values: Any) -> Any:
+def rsds_w_m2_to_kj_m2_day(values: Any) -> Any:
     """Convert downwelling shortwave radiation from W m⁻² →
-    J m⁻²/day.
+    kJ m⁻²/day.
 
-    1 W m⁻² × 86400 s/day = 86400 J m⁻²/day. Matches the AgERA5
-    convention SARRA-Py's ``solar_radiation_flux_daily`` directory
-    expects.
+    1 W m⁻² × 86400 s/day ÷ 1000 J/kJ = 86.4 kJ m⁻²/day. Matches
+    the AgERA5 ``version="SARRA-Py"`` vendored-library output that
+    SARRA-Py's ``solar_radiation_flux_daily`` directory expects per
+    ``validators/post_translate.py:576`` SARRA_PY_VAR_MAPPING
+    (``mul 1e-3`` to scale kJ → MJ at validation time).
+
+    Codex round 2 boundary 7/7 P1 absorption: earlier ``rsds_w_m2_to_j_m2_day``
+    shipped J/m²/day which made SARRA-Py read radiation 1000× too
+    large.
 
     Args:
         values: Numeric (scalar / numpy array / xarray DataArray) in
             W m⁻².
 
     Returns:
-        Same shape, in J m⁻²/day.
+        Same shape, in kJ m⁻²/day.
     """
-    return values * _W_PER_M2_TO_J_PER_M2_PER_DAY
+    return values * _W_PER_M2_TO_KJ_PER_M2_PER_DAY
 
 
-def temperature_passthrough_k(values: Any) -> Any:
-    """Identity for ISIMIP temperatures (Kelvin → Kelvin).
+def temperature_kelvin_to_celsius(values: Any) -> Any:
+    """Convert ISIMIP temperatures from Kelvin → °C.
 
-    AgERA5 + SARRA-Py both consume Kelvin per the existing observed-
-    mode pipeline. This helper exists so every variable's conversion
-    routes through a named function (consumer call sites don't need
-    to know "is there a unit conversion for this variable" — they
-    just call the dispatcher).
-
-    A future SARRA-Py upgrade that expects °C would replace this with
-    ``values - 273.15``.
+    SARRA-Py consumes °C per ``validators/post_translate.py:574-575``
+    SARRA_PY_VAR_MAPPING noop ops (comment: "already °C") and
+    ``sources/climate/agera5.py:1002`` ``version="SARRA-Py"`` flag
+    which triggers K→°C in the vendored library. Codex round 2
+    boundary 7/7 P1 absorption: earlier ``temperature_passthrough_k``
+    shipped Kelvin which made downstream consumers read 300 K as
+    300 °C — scientifically invalid.
 
     Args:
-        values: Numeric in K.
+        values: Numeric (scalar / numpy array / xarray DataArray) in K.
 
     Returns:
-        Same values (passthrough).
+        Same shape, in °C.
     """
-    return values
+    return values - _KELVIN_TO_CELSIUS_OFFSET
 
 
 def convert_to_sarra_py_units(isimip_variable: str, values: Any) -> Any:
@@ -134,10 +140,10 @@ def convert_to_sarra_py_units(isimip_variable: str, values: Any) -> Any:
 
     if source_unit == "kg m-2 s-1" and target_unit == "mm/day":
         return pr_kg_m2_s_to_mm_day(values)
-    if source_unit == "W m-2" and target_unit == "J m-2 day-1":
-        return rsds_w_m2_to_j_m2_day(values)
-    if source_unit == "K" and target_unit == "K":
-        return temperature_passthrough_k(values)
+    if source_unit == "W m-2" and target_unit == "kJ m-2 day-1":
+        return rsds_w_m2_to_kj_m2_day(values)
+    if source_unit == "K" and target_unit == "degC":
+        return temperature_kelvin_to_celsius(values)
 
     raise ValueError(
         f"Unsupported unit conversion: {source_unit!r} → "
@@ -172,8 +178,8 @@ def sarra_py_directory_for_isimip(isimip_variable: str) -> str:
 
 __all__ = [
     "pr_kg_m2_s_to_mm_day",
-    "rsds_w_m2_to_j_m2_day",
-    "temperature_passthrough_k",
+    "rsds_w_m2_to_kj_m2_day",
+    "temperature_kelvin_to_celsius",
     "convert_to_sarra_py_units",
     "sarra_py_directory_for_isimip",
 ]

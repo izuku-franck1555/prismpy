@@ -476,7 +476,11 @@ def test_sarra_py_projection_finite_values_preserved_around_nodata(
     arr_values = arr.values.astype("float32")
     # Single NaN cell amid finite values
     arr_values[0, 7, 7] = np.nan
-    expected_finite_value = arr_values[0, 7, 6]  # neighbour stays finite
+    # Codex round 2 P1 absorption: tasmax is K → °C converted before
+    # write (subtract 273.15). Compute the expected output value
+    # accordingly so the round-trip pin reflects the actual SARRA-Py
+    # consumer-facing units.
+    expected_finite_value_celsius = float(arr_values[0, 7, 6]) - 273.15
 
     new_arr = xr.DataArray(
         arr_values, coords=arr.coords, dims=arr.dims, name=arr.name
@@ -495,7 +499,7 @@ def test_sarra_py_projection_finite_values_preserved_around_nodata(
     n_lat = arr_values.shape[1]
     # NaN cell replaced with sentinel
     assert band[(n_lat - 1) - 7, 7] == -9999.0
-    # Adjacent finite cell preserved
+    # Adjacent finite cell preserved (post K → °C conversion)
     assert band[(n_lat - 1) - 7, 6] == pytest.approx(
-        float(expected_finite_value)
+        expected_finite_value_celsius, abs=1e-3
     )

@@ -43,9 +43,9 @@ import pytest
 from prismpy.harmonize.isimip_unit_conversions import (
     convert_to_sarra_py_units,
     pr_kg_m2_s_to_mm_day,
-    rsds_w_m2_to_j_m2_day,
+    rsds_w_m2_to_kj_m2_day,
     sarra_py_directory_for_isimip,
-    temperature_passthrough_k,
+    temperature_kelvin_to_celsius,
 )
 from prismpy.standards.isimip_versions import (
     ISIMIP_TO_SARRA_VAR_MAPPING,
@@ -126,34 +126,39 @@ def test_pin_b_pr_conversion_kg_m2_s_to_mm_day() -> None:
     np.testing.assert_array_almost_equal(out, [0.0, 86400.0, 50.0])
 
 
-def test_pin_b_rsds_conversion_w_m2_to_j_m2_day() -> None:
-    """1 W m⁻² × 86400 s/day = 86400 J m⁻²/day. A typical sunny-day
-    average solar flux of 250 W m⁻² → 21,600,000 J m⁻²/day."""
-    assert rsds_w_m2_to_j_m2_day(1.0) == pytest.approx(86400.0)
-    assert rsds_w_m2_to_j_m2_day(250.0) == pytest.approx(21600000.0)
+def test_pin_b_rsds_conversion_w_m2_to_kj_m2_day() -> None:
+    """Codex round 2 P1 absorption: 1 W m⁻² × 86400 s/day ÷ 1000 J/kJ
+    = 86.4 kJ m⁻²/day matches AgERA5 ``version="SARRA-Py"``
+    vendored-library output. A typical sunny-day average solar
+    flux of 250 W m⁻² → 21,600 kJ m⁻²/day."""
+    assert rsds_w_m2_to_kj_m2_day(1.0) == pytest.approx(86.4)
+    assert rsds_w_m2_to_kj_m2_day(250.0) == pytest.approx(21600.0)
 
 
-def test_pin_b_temperature_passthrough_k() -> None:
-    """Temperature is K passthrough — AgERA5 + SARRA-Py both consume
-    Kelvin, so no conversion. A future SARRA-Py upgrade that expects
-    °C would replace this helper; the pin asserts the current
-    contract."""
-    assert temperature_passthrough_k(300.0) == 300.0
-    assert temperature_passthrough_k(273.15) == 273.15
+def test_pin_b_temperature_kelvin_to_celsius() -> None:
+    """Codex round 2 P1 absorption: SARRA-Py consumes °C per
+    ``post_translate.SARRA_PY_VAR_MAPPING`` noop ops (comment:
+    "already °C"). Temperature conversion subtracts 273.15."""
+    assert temperature_kelvin_to_celsius(273.15) == pytest.approx(0.0)
+    assert temperature_kelvin_to_celsius(300.0) == pytest.approx(26.85)
     arr = np.array([250.0, 273.15, 320.0])
-    np.testing.assert_array_equal(temperature_passthrough_k(arr), arr)
+    np.testing.assert_array_almost_equal(
+        temperature_kelvin_to_celsius(arr),
+        np.array([-23.15, 0.0, 46.85]),
+    )
 
 
 def test_pin_b_dispatcher_routes_each_variable_correctly() -> None:
     """The :func:`convert_to_sarra_py_units` dispatcher routes by
-    ISIMIP variable name. Pin each of the 4 entries."""
+    ISIMIP variable name. Pin each of the 4 entries (codex round 2
+    P1 absorption: tasmax/tasmin → °C; rsds → kJ/m²/day)."""
     # pr → mm/day × 86400
     assert convert_to_sarra_py_units("pr", 1.0) == pytest.approx(86400.0)
-    # tasmax / tasmin → K passthrough
-    assert convert_to_sarra_py_units("tasmax", 300.0) == 300.0
-    assert convert_to_sarra_py_units("tasmin", 280.0) == 280.0
-    # rsds → J/m²/day × 86400
-    assert convert_to_sarra_py_units("rsds", 250.0) == pytest.approx(21600000.0)
+    # tasmax / tasmin → °C (K - 273.15)
+    assert convert_to_sarra_py_units("tasmax", 300.0) == pytest.approx(26.85)
+    assert convert_to_sarra_py_units("tasmin", 280.0) == pytest.approx(6.85)
+    # rsds → kJ/m²/day × 86.4
+    assert convert_to_sarra_py_units("rsds", 250.0) == pytest.approx(21600.0)
 
 
 def test_pin_b_dispatcher_rejects_unknown_isimip_variable() -> None:
@@ -370,8 +375,8 @@ def test_isimip_unit_conversions_module_public_api() -> None:
 
     assert set(mod.__all__) == {
         "pr_kg_m2_s_to_mm_day",
-        "rsds_w_m2_to_j_m2_day",
-        "temperature_passthrough_k",
+        "rsds_w_m2_to_kj_m2_day",
+        "temperature_kelvin_to_celsius",
         "convert_to_sarra_py_units",
         "sarra_py_directory_for_isimip",
     }
