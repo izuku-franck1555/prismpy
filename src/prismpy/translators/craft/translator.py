@@ -1620,6 +1620,8 @@ class CraftTranslator(CraftTranslatorBase):
     def _generate_weather_files(
         self,
         climate_data: Dict[int, ClimateTimeSeries],
+        *,
+        climate_kind: "ClimateKind" = None,
     ) -> List[Path]:
         """Generate CRAFT tab-separated weather files.
 
@@ -1628,16 +1630,41 @@ class CraftTranslator(CraftTranslatorBase):
         input.csv for NASA Power download via CRAFT GUI.
 
         CRAFT weather format:
-        YRDOY   SRAD    TMAX    TMIN    RAIN
+            * ``ClimateKind.OBSERVED`` (default): 5-column legacy path
+              ``YRDOY\\tSRAD\\tTMAX\\tTMIN\\tRAIN`` — preserves the existing
+              TAMSAT/AgERA5-source emission contract.
+            * ``ClimateKind.PROJECTION`` (Sprint G AC-G-7a): 8-column
+              projection path ``YRDOY\\tSRAD\\tTMAX\\tTMIN\\tRAIN\\tTDEW\\tRHUM\\tWIND``.
+              TDEW is derived via FAO-56 Tetens
+              (:func:`prismpy.harmonize.tetens.derive_tdew`) when the
+              source supplies hurs + tmean but not tdew (the ISIMIP3b
+              standard); honest-signal MISDAT (-99.0) is emitted only
+              when the source is genuinely missing both tdew and the
+              tmean+hurs pair needed to derive it.
 
         Args:
             climate_data: Dictionary of cell_id to ClimateTimeSeries
+            climate_kind: Source provenance discriminator. Defaults to
+                ``ClimateKind.OBSERVED`` (backward-compat with all
+                existing callers); pass ``ClimateKind.PROJECTION`` to
+                emit the 8-column WTH for ISIMIP3b-derived projection
+                packages.
 
         Returns:
             List of generated weather file paths
         """
+        # Late import to keep harmonize/ off the translator's import-
+        # time path for callers that don't touch projection climate.
+        from prismpy.harmonize.climate_kind import ClimateKind as _ClimateKind
+        from prismpy.harmonize.tetens import derive_tdew_for_record_or
+
+        if climate_kind is None:
+            climate_kind = _ClimateKind.OBSERVED
+
         output_files = []
         weather_dir = self.output_dir / "weather"
+        is_projection = climate_kind == _ClimateKind.PROJECTION
+        MISDAT = -99.0
 
         for cell_id, ts in climate_data.items():
             # Use CRAFT 1-indexed CellID for self-documenting filenames
@@ -1646,23 +1673,52 @@ class CraftTranslator(CraftTranslatorBase):
             weather_file = weather_dir / f"{craft_cellid}.txt"
 
             with open(weather_file, 'w', newline='\r\n') as f:
-                # Header
-                f.write("YRDOY\tSRAD\tTMAX\tTMIN\tRAIN\n")
+                # Header — column count varies by climate_kind
+                if is_projection:
+                    f.write(
+                        "YRDOY\tSRAD\tTMAX\tTMIN\tRAIN\tTDEW\tRHUM\tWIND\n"
+                    )
+                else:
+                    f.write("YRDOY\tSRAD\tTMAX\tTMIN\tRAIN\n")
 
                 # Data rows
                 for record in ts.records:
                     yrdoy = date_to_yrdoy(record.date)
-                    srad = record.srad if record.srad is not None else -99.0
-                    tmax = record.tmax if record.tmax is not None else -99.0
-                    tmin = record.tmin if record.tmin is not None else -99.0
-                    rain = record.precip if record.precip is not None else -99.0
+                    srad = record.srad if record.srad is not None else MISDAT
+                    tmax = record.tmax if record.tmax is not None else MISDAT
+                    tmin = record.tmin if record.tmin is not None else MISDAT
+                    rain = record.precip if record.precip is not None else MISDAT
 
-                    f.write(f"{yrdoy}\t{srad:.1f}\t{tmax:.1f}\t{tmin:.1f}\t{rain:.1f}\n")
+                    if is_projection:
+                        # Projection-path: derive TDEW from Tetens when
+                        # the source omits it but supplies hurs +
+                        # tmean (AC-G-8 + AC-G-7a). Honest-signal
+                        # MISDAT only when neither path resolves.
+                        rhum = record.rh if record.rh is not None else MISDAT
+                        wind = record.wind if record.wind is not None else MISDAT
+                        tdew = derive_tdew_for_record_or(
+                            explicit_tdew=record.tdew,
+                            tmean_celsius=record.tmean,
+                            hurs_pct=record.rh,
+                            fallback=MISDAT,
+                        )
+                        f.write(
+                            f"{yrdoy}\t{srad:.1f}\t{tmax:.1f}\t{tmin:.1f}\t"
+                            f"{rain:.1f}\t{tdew:.1f}\t{rhum:.1f}\t{wind:.1f}\n"
+                        )
+                    else:
+                        f.write(
+                            f"{yrdoy}\t{srad:.1f}\t{tmax:.1f}\t{tmin:.1f}\t"
+                            f"{rain:.1f}\n"
+                        )
 
             output_files.append(weather_file)
             logger.debug(f"Generated weather file: {weather_file}")
 
-        logger.info(f"Generated {len(output_files)} CRAFT weather files")
+        logger.info(
+            f"Generated {len(output_files)} CRAFT weather files "
+            f"(climate_kind={climate_kind.value})"
+        )
         return output_files
 
     def _generate_soil_package(

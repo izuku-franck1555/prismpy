@@ -263,9 +263,14 @@ def test_tetens_module_cites_fao56() -> None:
 
 
 def test_tetens_public_api_minimal() -> None:
-    """The module exposes ONLY ``derive_tdew`` as public API. Helpers
-    are underscore-prefixed so call sites don't accidentally bypass
-    the canonical entry point."""
+    """The module exposes ``derive_tdew`` plus the projection-or-
+    fallback helper ``derive_tdew_for_record_or`` (added in AC-G-7a
+    so CRAFT + PYTHIA writers share the canonical fallback chain).
+    Internal helpers are underscore-prefixed so call sites don't
+    accidentally bypass the canonical entry point."""
     import prismpy.harmonize.tetens as tetens_mod
 
-    assert tetens_mod.__all__ == ["derive_tdew"]
+    assert set(tetens_mod.__all__) == {
+        "derive_tdew",
+        "derive_tdew_for_record_or",
+    }

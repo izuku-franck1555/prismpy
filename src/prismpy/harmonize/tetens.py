@@ -191,6 +191,60 @@ def _validate_relative_humidity(hurs_pct: float) -> None:
         )
 
 
+def derive_tdew_for_record_or(
+    *,
+    explicit_tdew: Any,
+    tmean_celsius: Any,
+    hurs_pct: Any,
+    fallback: float,
+) -> float:
+    """Resolve a single record's TDEW with projection-path fallback chain.
+
+    Order of precedence:
+
+    1. ``explicit_tdew`` — if the source already supplies a non-None
+       dewpoint, return it as-is (preserves observed-source TDEW
+       directly without re-deriving).
+    2. Tetens derivation — if the source supplies non-None
+       ``tmean_celsius`` + ``hurs_pct``, derive via :func:`derive_tdew`.
+    3. ``fallback`` — when neither resolves; honest-signal "data
+       genuinely unavailable" sentinel.
+
+    The Tetens helper validates inputs at the boundary (temperature
+    bounds + humidity bounds + finite-check); any out-of-bound input
+    (e.g., a kelvin-vs-celsius unit confusion upstream) raises
+    ``ValueError`` inside derive_tdew, which this wrapper translates
+    into the fallback so a single bad record does not fail the whole
+    writer run. The cell-summary / coverage validator records the
+    data-availability status downstream.
+
+    Args:
+        explicit_tdew: ``record.tdew`` (Optional[float]). When non-
+            None, returned directly.
+        tmean_celsius: ``record.tmean`` (Optional[float]). Required
+            for Tetens derivation.
+        hurs_pct: ``record.rh`` (Optional[float]). Required for
+            Tetens derivation. Per ClimateRecord docstring rh is
+            already %.
+        fallback: Platform-specific missing-value sentinel
+            (e.g., DSSAT WTH ``-99.0``).
+
+    Returns:
+        Float TDEW in °C, or the fallback sentinel.
+    """
+    if explicit_tdew is not None:
+        return float(explicit_tdew)
+    if tmean_celsius is None or hurs_pct is None:
+        return fallback
+    try:
+        return derive_tdew(float(tmean_celsius), float(hurs_pct))
+    except (ValueError, TypeError):
+        # Out-of-bound or non-numeric input — emit the fallback
+        # sentinel rather than silently propagating NaN downstream.
+        return fallback
+
+
 __all__ = [
     "derive_tdew",
+    "derive_tdew_for_record_or",
 ]

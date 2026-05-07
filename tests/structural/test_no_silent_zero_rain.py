@@ -46,6 +46,22 @@ def _read_source(module_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def test_craft_misdat_constant_pinned_to_minus_99() -> None:
+    """If CRAFT defines a ``MISDAT`` local for the rain default, that
+    constant must be -99.0 (the DSSAT WTH sentinel). Sprint G AC-G-7a
+    introduced ``MISDAT = -99.0`` as a named local in
+    ``_generate_weather_files`` so the rain / tdew / rhum / wind paths
+    share one canonical sentinel; the regression net asserts the
+    constant didn't drift while the variable was added."""
+    src = _read_source("prismpy.translators.craft.translator")
+    misdat_pattern = re.compile(r"MISDAT\s*=\s*-99\.0\b")
+    assert misdat_pattern.search(src), (
+        "CRAFT MISDAT constant must equal -99.0 (DSSAT WTH sentinel). "
+        "Drift here means the rain default no longer carries the "
+        "honest-signal MISDAT semantic."
+    )
+
+
 def test_pythia_no_silent_zero_rain_default():
     """PYTHIA's rain default uses -99.0 (the DSSAT MISDAT
     sentinel), not 0.0. The grep is anchored to ``rain =
@@ -97,13 +113,19 @@ def test_pythia_uses_misdat_constant():
 def test_craft_rain_uses_minus_99_default():
     """CRAFT's rain default was already correct prior to Sprint
     D.1 — the regression pin asserts the contract did not slip
-    while AC-2 was being applied to PYTHIA."""
+    while AC-2 was being applied to PYTHIA. Sprint G AC-G-7a
+    introduced a ``MISDAT = -99.0`` local in
+    ``_generate_weather_files`` so the rain default may use either
+    the literal ``-99.0`` or the ``MISDAT`` variable form (both
+    carry the DSSAT WTH sentinel semantic). The companion pin
+    ``test_craft_misdat_constant_pinned_to_minus_99`` asserts the
+    variable resolves to -99.0."""
     src = _read_source("prismpy.translators.craft.translator")
     good_pattern = re.compile(
-        r"rain\s*=\s*record\.precip\s+if\s+record\.precip\s+is\s+not\s+None\s+else\s+-99\.0"
+        r"rain\s*=\s*record\.precip\s+if\s+record\.precip\s+is\s+not\s+None\s+else\s+(?:-99\.0|MISDAT)\b"
     )
     assert good_pattern.search(src), (
-        "CRAFT rain default no longer uses else -99.0 — "
+        "CRAFT rain default no longer uses else -99.0 / else MISDAT — "
         "regression of the already-correct path is a Sprint D.1 "
         "watch item."
     )

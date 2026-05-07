@@ -489,6 +489,8 @@ class PythiaTranslator(PythiaTranslatorBase):
     def _generate_weather_files(
         self,
         climate_data: Dict[int, ClimateTimeSeries],
+        *,
+        climate_kind: "ClimateKind" = None,
     ) -> List[Path]:
         """Generate DSSAT .WTH weather files.
 
@@ -500,12 +502,33 @@ class PythiaTranslator(PythiaTranslatorBase):
         @  DATE  SRAD  TMAX  TMIN  RAIN  TDEW  RHUM  WIND
         YRDOY  srad  tmax  tmin  rain  tdew  rhum  wind
 
+        Per Sprint G AC-G-7a, the writer accepts a ``climate_kind``
+        discriminator so the projection path derives TDEW via FAO-56
+        Tetens (:func:`prismpy.harmonize.tetens.derive_tdew_for_record_or`)
+        when source ``record.tdew`` is None but ``record.rh`` and
+        ``record.tmean`` are present (the ISIMIP3b standard). The
+        observed-climate path keeps the legacy MISDAT (-99.0) fallback
+        because TAMSAT/AgERA5 sources don't reliably supply hurs to
+        derive TDEW from. Both paths emit the 8-column WTH; the only
+        behavior difference is whether tdew is computed or sentinel-
+        replaced.
+
         Args:
             climate_data: Dictionary of site_id to ClimateTimeSeries
+            climate_kind: Source provenance discriminator. Defaults to
+                ``ClimateKind.OBSERVED`` for backward-compat with all
+                existing callers.
 
         Returns:
             List of generated .WTH file paths
         """
+        # Late import — see CRAFT translator for the rationale.
+        from prismpy.harmonize.climate_kind import ClimateKind as _ClimateKind
+        from prismpy.harmonize.tetens import derive_tdew_for_record_or
+
+        if climate_kind is None:
+            climate_kind = _ClimateKind.OBSERVED
+        is_projection = climate_kind == _ClimateKind.PROJECTION
         output_files = []
         weather_dir = self.output_dir / "weather"
 
@@ -559,7 +582,25 @@ class PythiaTranslator(PythiaTranslatorBase):
                     tmax = record.tmax if record.tmax is not None else MISDAT
                     tmin = record.tmin if record.tmin is not None else MISDAT
                     rain = record.precip if record.precip is not None else MISDAT
-                    tdew = record.tdew if record.tdew is not None else MISDAT
+                    if is_projection:
+                        # Projection-source TDEW comes from Tetens
+                        # (record.tdew preferred when supplied; rh +
+                        # tmean derive otherwise; MISDAT only when
+                        # neither resolves). Per AC-G-7a + AC-G-8.
+                        tdew = derive_tdew_for_record_or(
+                            explicit_tdew=record.tdew,
+                            tmean_celsius=record.tmean,
+                            hurs_pct=record.rh,
+                            fallback=MISDAT,
+                        )
+                    else:
+                        # Observed-climate path keeps the legacy MISDAT
+                        # fallback for missing TDEW. TAMSAT/AgERA5
+                        # don't reliably supply hurs to derive TDEW
+                        # from, and emitting -99.0 is the documented
+                        # DSSAT "data not available" semantic per the
+                        # Jones 2003 v4.7 Wth.WTH spec.
+                        tdew = record.tdew if record.tdew is not None else MISDAT
                     rhum = record.rh if record.rh is not None else MISDAT
                     wind = record.wind if record.wind is not None else MISDAT
 
@@ -575,7 +616,10 @@ class PythiaTranslator(PythiaTranslatorBase):
             output_files.append(wth_path)
             logger.debug(f"Generated weather file: {wth_path}")
 
-        logger.info(f"Generated {len(output_files)} PYTHIA .WTH files")
+        logger.info(
+            f"Generated {len(output_files)} PYTHIA .WTH files "
+            f"(climate_kind={climate_kind.value})"
+        )
         return output_files
 
     def _calculate_tav_amp(self, ts: ClimateTimeSeries) -> Tuple[float, float]:
