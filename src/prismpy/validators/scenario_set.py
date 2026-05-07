@@ -712,6 +712,7 @@ def validate_scenario_set(
 
     baseline_manifest = _read_manifest(baseline_path)
     _validate_scenario_block(baseline_manifest, "baseline")
+    _validate_interpolation_consistency(baseline_path, baseline_manifest, "baseline")
 
     if mode is ValidationMode.SHIP:
         baseline_method = (
@@ -727,6 +728,7 @@ def validate_scenario_set(
         proj_label = f"projection_{idx}"
         proj_manifest = _read_manifest(proj_path)
         _validate_scenario_block(proj_manifest, proj_label)
+        _validate_interpolation_consistency(proj_path, proj_manifest, proj_label)
 
         _check_pairing_rule(baseline_manifest, proj_manifest, proj_label)
         _check_cell_identity(baseline_path, proj_path, proj_label)
@@ -829,6 +831,78 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
     print("PASS")
     return 0
+
+
+def _validate_interpolation_consistency(
+    package_path: Path,
+    manifest: Dict[str, Any],
+    package_label: str,
+) -> None:
+    """Sprint E.2 AC-E2-22: cross-document validator integration.
+
+    Reads the package's ``cell_summary.json`` (if present) and runs
+    ``validate_manifest_cell_summary_consistency`` from
+    ``prismpy.validators.manifest_consistency``. The check enforces
+    that ``manifest.flags.interpolation_present`` agrees with the
+    per-cell ``interpolation_decision_id`` substrate; drift in
+    either direction surfaces as ``ManifestConsistencyError`` (per
+    AC-E2-8 + Drill H invariant).
+
+    Cell_summary missing → no-op (legacy E.1 packages without the
+    new field pass cleanly; the integration is forward-compat).
+    """
+    import json
+    from prismpy.validators.manifest_consistency import (
+        ManifestConsistencyError,
+        validate_manifest_cell_summary_consistency,
+    )
+
+    cell_summary_path = package_path / "cell_summary.json"
+    if not cell_summary_path.exists():
+        # Codex HIGH #3 absorption: ABSENCE is the only legacy no-op.
+        # Present-but-malformed below raises loud per
+        # ``feedback_no_data_cooking.md`` honest-signal contract.
+        return
+    try:
+        cell_summary = json.loads(cell_summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ScenarioSetValidationError(
+            package_label=package_label,
+            failing_field_path="cell_summary.json",
+            expected="readable JSON object",
+            actual=f"unreadable: {exc!r}",
+            message=(
+                f"{package_label}: cell_summary.json is present but "
+                f"unreadable: {exc!r}"
+            ),
+        ) from exc
+    if not isinstance(cell_summary, dict):
+        raise ScenarioSetValidationError(
+            package_label=package_label,
+            failing_field_path="cell_summary.json",
+            expected="JSON object",
+            actual=type(cell_summary).__name__,
+            message=(
+                f"{package_label}: cell_summary.json must be a JSON "
+                f"object; got {type(cell_summary).__name__!r}"
+            ),
+        )
+    # Codex HIGH #2 absorption: catch only ManifestConsistencyError
+    # (the typed exception) + re-raise via the structured-trace
+    # constructor. Other exceptions bubble unchanged.
+    try:
+        validate_manifest_cell_summary_consistency(manifest, cell_summary)
+    except ManifestConsistencyError as exc:
+        raise ScenarioSetValidationError(
+            package_label=package_label,
+            failing_field_path="manifest.flags.interpolation_present",
+            expected="agreement with cell_summary.cells[].interpolation_decision_id",
+            actual="drift",
+            message=(
+                f"{package_label}: manifest/cell_summary "
+                f"interpolation consistency: {exc}"
+            ),
+        ) from exc
 
 
 if __name__ == "__main__":
