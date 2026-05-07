@@ -712,6 +712,7 @@ def validate_scenario_set(
 
     baseline_manifest = _read_manifest(baseline_path)
     _validate_scenario_block(baseline_manifest, "baseline")
+    _validate_interpolation_consistency(baseline_path, baseline_manifest, "baseline")
 
     if mode is ValidationMode.SHIP:
         baseline_method = (
@@ -727,6 +728,7 @@ def validate_scenario_set(
         proj_label = f"projection_{idx}"
         proj_manifest = _read_manifest(proj_path)
         _validate_scenario_block(proj_manifest, proj_label)
+        _validate_interpolation_consistency(proj_path, proj_manifest, proj_label)
 
         _check_pairing_rule(baseline_manifest, proj_manifest, proj_label)
         _check_cell_identity(baseline_path, proj_path, proj_label)
@@ -829,6 +831,49 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
     print("PASS")
     return 0
+
+
+def _validate_interpolation_consistency(
+    package_path: Path,
+    manifest: Dict[str, Any],
+    package_label: str,
+) -> None:
+    """Sprint E.2 AC-E2-22: cross-document validator integration.
+
+    Reads the package's ``cell_summary.json`` (if present) and runs
+    ``validate_manifest_cell_summary_consistency`` from
+    ``prismpy.validators.manifest_consistency``. The check enforces
+    that ``manifest.flags.interpolation_present`` agrees with the
+    per-cell ``interpolation_decision_id`` substrate; drift in
+    either direction surfaces as ``ManifestConsistencyError`` (per
+    AC-E2-8 + Drill H invariant).
+
+    Cell_summary missing → no-op (legacy E.1 packages without the
+    new field pass cleanly; the integration is forward-compat).
+    """
+    import json
+    from prismpy.validators.manifest_consistency import (
+        validate_manifest_cell_summary_consistency,
+    )
+
+    cell_summary_path = package_path / "cell_summary.json"
+    if not cell_summary_path.exists():
+        return  # legacy package without the new substrate
+    try:
+        cell_summary = json.loads(cell_summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return  # malformed → upstream validator handles
+    if not isinstance(cell_summary, dict):
+        return
+    # Re-raise as ScenarioSetValidationError-shaped failure with the
+    # package_label trace context the rest of this validator uses.
+    try:
+        validate_manifest_cell_summary_consistency(manifest, cell_summary)
+    except Exception as exc:
+        raise ScenarioSetValidationError(
+            f"{package_label}: manifest/cell_summary interpolation "
+            f"consistency: {exc}"
+        ) from exc
 
 
 if __name__ == "__main__":
