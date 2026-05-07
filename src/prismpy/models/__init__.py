@@ -10,6 +10,12 @@ from prismpy.models.climate import ClimateRecord, ClimateTimeSeries
 from prismpy.models.soil import SoilProfile, SoilLayer
 from prismpy.models.crop import CropParameters, CropCalendar
 from prismpy.models.provenance import ProvenanceRecord, TransformationRecord, DecisionRecord
+from prismpy.models.scenario import (
+    BiasCorrectionMethod,
+    MissingProvenanceError,
+    ScenarioBlock,
+    ScenarioRole,
+)
 
 __all__ = [
     "Region",
@@ -25,4 +31,8 @@ __all__ = [
     "ProvenanceRecord",
     "TransformationRecord",
     "DecisionRecord",
+    "BiasCorrectionMethod",
+    "MissingProvenanceError",
+    "ScenarioBlock",
+    "ScenarioRole",
 ]

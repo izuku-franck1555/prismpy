@@ -182,7 +182,8 @@ def create_manifest(
     package_dir: Union[str, Path],
     project_config: Dict[str, Any],
     platform: str = "sarra_py",
-    additional_metadata: Optional[Dict[str, Any]] = None
+    additional_metadata: Optional[Dict[str, Any]] = None,
+    scenario: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     Create a complete manifest for a package.
@@ -192,6 +193,12 @@ def create_manifest(
         project_config: Project configuration dictionary
         platform: Target platform name
         additional_metadata: Optional additional metadata to include
+        scenario: Optional ``prismpy.models.scenario.ScenarioBlock``
+            instance describing a paired baseline+projection scenario
+            package. When provided, the model's serialized fields are
+            embedded at the manifest's ``scenario`` key. When omitted,
+            no ``scenario`` key is added — existing observed-climate
+            manifests without a scenario continue to validate cleanly.
 
     Returns:
         Complete manifest dictionary
@@ -266,6 +273,28 @@ def create_manifest(
     if additional_metadata:
         manifest.update(additional_metadata)
 
+    # Optional scenario block per Sprint G AC-G-3. The block is OPTIONAL
+    # outside scenario package contexts (codex H3 absorption); existing
+    # observed-climate manifests do not carry a scenario key today and
+    # continue to round-trip cleanly. When provided, the ScenarioBlock's
+    # serialized form is embedded at the ``scenario`` key.
+    if scenario is not None:
+        # Late import to avoid pulling pydantic at every manifest call;
+        # ``ScenarioBlock`` exposes ``model_dump`` (pydantic v2 API).
+        if hasattr(scenario, "model_dump"):
+            manifest["scenario"] = scenario.model_dump()
+        elif isinstance(scenario, dict):
+            # Allow raw dicts for callers that already serialized; the
+            # validator will catch any shape errors when validate_manifest
+            # runs.
+            manifest["scenario"] = dict(scenario)
+        else:
+            raise TypeError(
+                "scenario argument must be a ScenarioBlock instance or "
+                "an already-serialized dict; got "
+                f"{type(scenario).__name__}"
+            )
+
     return manifest
 
 
@@ -325,11 +354,32 @@ def validate_manifest(
 
     Returns:
         Validation results dictionary
+
+    Raises:
+        pydantic.ValidationError: when the manifest carries a
+            ``scenario`` key that does not match the ``ScenarioBlock``
+            schema (Sprint G AC-G-3 + AC-G-10). Manifests without a
+            ``scenario`` key validate normally — the schema is OPTIONAL
+            outside scenario contexts per codex H3 absorption.
     """
     with open(manifest_path, 'r') as f:
         manifest = json.load(f)
 
     package_dir = Path(package_dir)
+
+    # Sprint G AC-G-3 + AC-G-10: when the manifest carries a scenario
+    # block, validate it against the ScenarioBlock schema. The model's
+    # post-validators enforce time-slice ordering and the AC-G-10
+    # co2_ppm/co2_ppm_provenance pairing. Manifests without a scenario
+    # key skip this branch — the schema is optional outside scenario
+    # contexts.
+    scenario_payload = manifest.get("scenario")
+    if scenario_payload is not None:
+        # Late import keeps pydantic out of the manifest module's
+        # import-time path for non-scenario callers.
+        from prismpy.models.scenario import ScenarioBlock
+
+        ScenarioBlock.model_validate(scenario_payload)
 
     results = {
         "valid": True,
