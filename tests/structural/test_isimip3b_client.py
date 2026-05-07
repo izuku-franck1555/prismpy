@@ -322,20 +322,5 @@ def test_discover_datasets_wraps_upstream_failure_as_typed_error() -> None:
         )
 
 
-# ── AC-G-2 placeholder: cached_cutout fails loud until implemented ───
-
-
-def test_cached_cutout_skeleton_raises_until_ac_g_2_lands() -> None:
-    """Until AC-G-2 lands the body, ``cached_cutout`` must fail loud
-    rather than return a placeholder path that downstream code might
-    accept silently. Per ``feedback_no_data_cooking.md``."""
-
-    class _ClientStub:
-        pass
-
-    with pytest.raises(NotImplementedError):
-        isimip3b.cached_cutout(
-            _ClientStub(),  # type: ignore[arg-type]
-            dataset={"id": "x"},
-            bbox={"south": 13.0, "north": 14.5, "west": 1.5, "east": 3.0},
-        )
+# AC-G-2 cached_cutout body lives in tests/structural/test_isimip3b_cached_cutout.py.
+# This file remains the AC-G-1 substrate-only structural pin.
