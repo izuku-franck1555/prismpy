@@ -431,7 +431,15 @@ def _validate_layer_block(
     """Validate the ``@ SLB`` layer header + one or more 17-col data rows.
 
     Returns (next line index, count of layer rows validated).
+
+    Per Tsuji et al. 1994 §5.2.4 + the DSSAT v4.8 user guide, every
+    profile block must carry at least one layer row; a header with
+    no data rows is a malformed profile that DSSAT-CSM cannot
+    consume. The terminator paths below append a missing-data
+    error if the loop exited without reading any rows.
     """
+    header_line_number = i + 1  # for the missing-rows error
+
     if i >= len(lines):
         issues.append(
             DssatSolIssue(
@@ -457,16 +465,34 @@ def _validate_layer_block(
         )
     i += 1
 
+    def _flag_missing_layer_rows() -> None:
+        """Append the per-DSSAT-spec error when a profile block ships zero layer rows."""
+        issues.append(
+            DssatSolIssue(
+                severity="error",
+                line_number=header_line_number,
+                message=(
+                    "Profile block has no layer data rows; DSSAT v4.8 spec "
+                    "requires at least one row after the @SLB header."
+                ),
+                line_content=header,
+            )
+        )
+
     # Layer data rows: read until a blank line, EOF, or the next profile id.
     layer_count = 0
     while i < len(lines):
         line = lines[i]
         stripped = line.strip()
         if not stripped or stripped.startswith("!"):
+            if layer_count == 0:
+                _flag_missing_layer_rows()
             return i + 1, layer_count
         if line.startswith("*"):
             # Next profile starts; stop the layer-block walk without
             # consuming the asterisk line.
+            if layer_count == 0:
+                _flag_missing_layer_rows()
             return i, layer_count
 
         layer_count += 1
@@ -485,6 +511,8 @@ def _validate_layer_block(
             )
         i += 1
 
+    if layer_count == 0:
+        _flag_missing_layer_rows()
     return i, layer_count
 
 
