@@ -141,9 +141,9 @@ _PAIRED_SETS: Tuple[Tuple[str, str, str, Dict[str, Any], Dict[str, Any]], ...] =
             "co2_ppm_provenance": _AR6_PROVENANCE,
         },
     ),
-    # Set 4 — free choice: Bénoué Sorghum + UKESM1 SSP585 end-of-century
+    # Set 4 — free choice: Bénoué Sorghum + IPSL-CM6A-LR SSP585 end-of-century
     (
-        "set4_benoue_sorghum_ukesm",
+        "set4_benoue_sorghum_ipsl",
         "benoue-sorghum-baseline-2019-2023",
         "benoue-sorghum-projection-ipsl-ssp585-2086-2100",
         {
@@ -173,10 +173,31 @@ _PAIRED_SETS: Tuple[Tuple[str, str, str, Dict[str, Any], Dict[str, Any]], ...] =
 # the pin and requires deliberate re-baselining (analogous to the
 # trajectory-pin re-anchor pattern). The pins guard against silent
 # format drift in the deterministic output.
+#
+# Re-baselining: when an intentional manifest-format change ships,
+# regenerate these constants by running the test once with
+# ``EXPECTED_MANIFEST_SHAS`` cleared, capturing the printed
+# ``actual_shas`` output, and updating the dict here. The
+# pin-mismatch error message names the offending set + side so the
+# diff is unambiguous.
 EXPECTED_MANIFEST_SHAS: Dict[str, Tuple[str, str]] = {
     # Mapping: set_id → (baseline_sha, projection_sha)
-    # Populated dynamically below; the constant exists to declare
-    # the contract surface (see test_ac_g_13_pinned_shas_match).
+    "set1_niamey_millet": (
+        "861714ecd9c0393cea41b4dc47b46fea1ab3a529f8de77013d6e430c486c3da9",  # baseline
+        "f4abaf56aca953ee9790f9c6dbdd1d780a7726007c02dd128b649dce628f4819",  # projection
+    ),
+    "set2_madarounfa_maize": (
+        "755e7d4962de9ebce1e77a11821290b0e6a97a9fa717ce147cad0f8d36d9f8dc",  # baseline
+        "d2c2713b410ee524881c01a6157016dd9e9fad63daf7e39aa458a79373d5dcb5",  # projection
+    ),
+    "set3_menoua_groundnut": (
+        "a8f58fde9df43689faf53374b8315fa50cf43d0c2418ba96577cab83f9553162",  # baseline
+        "d1b989df9837ad4d10c94f40e682c9b96c4b5f2cdeefa429814f318a5504632d",  # projection
+    ),
+    "set4_benoue_sorghum_ipsl": (
+        "a7096b2614530ef6e48983bf423ff2ce7c1667fa079f2470ca3ef3a008fb6941",  # baseline
+        "594dc277d9e4be162c0871d6c5f7e108a5b9703be58687780bb06f39ff1d4998",  # projection
+    ),
 }
 
 
@@ -219,10 +240,18 @@ def _projection_kwargs_for_set(
     return proj
 
 
-def _write_set_files(package_dir: Path, *, role: str) -> None:
+def _write_set_files(
+    package_dir: Path, *, role: str, time_slice_start: int
+) -> None:
     """Write deterministic identity-file + cell_summary content for
     a paired-set deliverable. All bytes are fully determined by the
-    code so two runs produce byte-identical content."""
+    code so two runs produce byte-identical content.
+
+    The weather YRDOY row is derived from ``time_slice_start`` so a
+    set's weather data matches its advertised time slice (codex round
+    1 boundary 7/7 P2-3 absorption — without this, set4's
+    2086-2100 projection would carry 2046 weather data and the
+    fixture would contradict the manifest's scenario metadata)."""
     package_dir.mkdir(parents=True, exist_ok=True)
 
     # cell_summary.json — 2 cells, deterministic
@@ -254,8 +283,11 @@ def _write_set_files(package_dir: Path, *, role: str) -> None:
         "planting=152\nmaturity=273\n", encoding="utf-8"
     )
 
-    # Weather files — 5-col baseline, 8-col projection per AC-G-7
+    # Weather files — 5-col baseline, 8-col projection per AC-G-7.
+    # YRDOY row uses the set's time_slice_start so the fixture's
+    # weather data matches the advertised time slice.
     (package_dir / "weather").mkdir(exist_ok=True)
+    yrdoy = f"{time_slice_start}001"  # day 1 of time_slice_start
     if role == "baseline":
         wth_body = (
             "$WEATHER DATA: AR6 WG1 Annex III observed historical record\n"
@@ -264,7 +296,7 @@ def _write_set_files(package_dir: Path, *, role: str) -> None:
             + "  S001  13.5  2.1  0.0  25.0  10.0  2.0  2.0\n"
             + "\n"
             + "@ DATE  SRAD  TMAX  TMIN  RAIN\n"
-            + "2017001 20.0 30.0 18.0 0.0\n"
+            + f"{yrdoy} 20.0 30.0 18.0 0.0\n"
         )
     else:
         wth_body = (
@@ -274,11 +306,55 @@ def _write_set_files(package_dir: Path, *, role: str) -> None:
             + "  S001  13.5  2.1  0.0  25.0  10.0  2.0  2.0\n"
             + "\n"
             + "@ DATE  SRAD  TMAX  TMIN  TDEW  RAIN  WIND  RHUM\n"
-            + "2046001 20.0 30.0 18.0 12.0 0.0 2.5 65.0\n"
+            + f"{yrdoy} 20.0 30.0 18.0 12.0 0.0 2.5 65.0\n"
         )
     (package_dir / "weather" / "data.wth").write_text(
         wth_body, encoding="utf-8"
     )
+
+
+def _config_for_set(
+    set_id: str,
+    baseline_label: str,
+    extras: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build the flat-keyed config dict that ``create_manifest`` reads.
+
+    Codex round 1 boundary 7/7 P2-2 absorption: ``create_manifest``
+    expects flat keys (``project_name``, ``region_name``, ``crop_name``,
+    ``start_year``, ``end_year``, ``data_sources``), NOT nested
+    ``project`` / ``region`` keys. Without this fix every fixture
+    manifest carries placeholder ``"unknown"`` / ``""`` values and
+    the per-set distinctions are not actually pinned by the SHA hash.
+    """
+    # Region + crop derived from the set_id pattern
+    # ``setN_<region>_<crop>[_<extra>]`` for human-readable distinctness
+    parts = set_id.split("_", 2)
+    if len(parts) >= 3:
+        region_name = parts[1].capitalize()
+        crop_name = parts[2].split("_")[0].capitalize()
+    else:
+        region_name = parts[1].capitalize() if len(parts) > 1 else ""
+        crop_name = ""
+    return {
+        "project_name": set_id,
+        "region_name": region_name,
+        "country": "Niger" if "niamey" in set_id or "madarounfa" in set_id
+        else "Cameroon",
+        "crop_name": crop_name,
+        "planting_doy": 152,
+        "maturity_doy": 273,
+        "start_year": extras["time_slice_start"],
+        "end_year": extras["time_slice_end"],
+        "spinup_years": 0,
+        "data_sources": {
+            "climate": "ISIMIP3b" if extras.get("rcp_or_ssp") != "observed"
+            else "AR6 observed historical",
+            "soil": "synthetic-NER",
+            "crop_mask": "SPAM 2020 (synthetic)",
+            "boundaries": "GADM v3.6",
+        },
+    }
 
 
 def _build_paired_set_on_disk(
@@ -293,8 +369,16 @@ def _build_paired_set_on_disk(
     (baseline_path, projection_path) tuple."""
     base_path = root / set_id / "baseline"
     proj_path = root / set_id / "projection"
-    _write_set_files(base_path, role="baseline")
-    _write_set_files(proj_path, role="projection")
+    _write_set_files(
+        base_path,
+        role="baseline",
+        time_slice_start=baseline_extras["time_slice_start"],
+    )
+    _write_set_files(
+        proj_path,
+        role="projection",
+        time_slice_start=projection_extras["time_slice_start"],
+    )
 
     base_block = ScenarioBlock(
         **_baseline_kwargs_for_set(baseline_label, baseline_extras)
@@ -305,16 +389,11 @@ def _build_paired_set_on_disk(
         )
     )
 
-    config = {
-        "project": {
-            "name": set_id,
-            "platform": "synthetic",
-        },
-        "region": {"name": baseline_label.split("-")[0]},
-    }
+    base_config = _config_for_set(set_id, baseline_label, baseline_extras)
+    proj_config = _config_for_set(set_id, baseline_label, projection_extras)
 
     base_manifest = create_manifest(
-        base_path, config, platform="synthetic", scenario=base_block
+        base_path, base_config, platform="synthetic", scenario=base_block
     )
     # Per Draft 5 §AC-G-13: each baseline declares the limitation
     base_manifest["limitations"] = {
@@ -323,7 +402,7 @@ def _build_paired_set_on_disk(
     save_manifest(base_manifest, base_path / "manifest.json")
 
     proj_manifest = create_manifest(
-        proj_path, config, platform="synthetic", scenario=proj_block
+        proj_path, proj_config, platform="synthetic", scenario=proj_block
     )
     proj_manifest["limitations"] = {
         "weather_schema_asymmetric_within_set": _ASYMMETRY_LIMITATION,
@@ -469,7 +548,7 @@ def test_ac_g_13_inventory_carries_4_sets() -> None:
         "set1_niamey_millet",
         "set2_madarounfa_maize",
         "set3_menoua_groundnut",
-        "set4_benoue_sorghum_ukesm",
+        "set4_benoue_sorghum_ipsl",
     ]
     assert set_ids == expected_set_ids
 
@@ -486,6 +565,115 @@ def test_ac_g_13_set1_is_smallest_per_priority() -> None:
 
 
 # ── §4 Limitation key generality (per warning-auditor MEDIUM-Rebase-1) ─
+
+
+# ── §5 Codex round 1 boundary 7/7 P2-1 absorption — SHA pin assertions ─
+
+
+@pytest.mark.parametrize("spec", _PAIRED_SETS, ids=lambda s: s[0])
+def test_ac_g_13_pinned_shas_match(
+    spec: Tuple[str, str, str, Dict[str, Any], Dict[str, Any]],
+    tmp_path: Path,
+) -> None:
+    """Codex round 1 boundary 7/7 P2-1 absorption: assert each
+    deliverable manifest SHA-256 matches the value pinned in
+    ``EXPECTED_MANIFEST_SHAS``. Without this, a future format /
+    fixture change would still pass the determinism test (which only
+    checks twice-regenerate-equal) without surfacing the drift.
+
+    Re-baselining: when a deliberate format change ships, capture
+    the new hashes (run with the assertions disabled OR run
+    ``hashlib.sha256(manifest.read_bytes()).hexdigest()`` directly)
+    and update ``EXPECTED_MANIFEST_SHAS`` with rationale block."""
+    set_id, base_label, proj_label, base_extras, proj_extras = spec
+    base_path, proj_path = _build_paired_set_on_disk(
+        set_id, base_label, proj_label, base_extras, proj_extras, tmp_path
+    )
+    expected_base, expected_proj = EXPECTED_MANIFEST_SHAS[set_id]
+    actual_base = _sha256_of_file(base_path / "manifest.json")
+    actual_proj = _sha256_of_file(proj_path / "manifest.json")
+
+    assert actual_base == expected_base, (
+        f"{set_id} baseline manifest SHA drift: "
+        f"expected {expected_base}, got {actual_base}. "
+        f"Re-baseline EXPECTED_MANIFEST_SHAS if intentional."
+    )
+    assert actual_proj == expected_proj, (
+        f"{set_id} projection manifest SHA drift: "
+        f"expected {expected_proj}, got {actual_proj}. "
+        f"Re-baseline EXPECTED_MANIFEST_SHAS if intentional."
+    )
+
+
+def test_ac_g_13_pinned_shas_inventory_complete() -> None:
+    """``EXPECTED_MANIFEST_SHAS`` must cover all 4 deliverable sets.
+    A future addition that registers a new set in ``_PAIRED_SETS``
+    without updating the SHA pin table fails this test loud."""
+    pin_keys = set(EXPECTED_MANIFEST_SHAS.keys())
+    paired_keys = {s[0] for s in _PAIRED_SETS}
+    missing_pins = paired_keys - pin_keys
+    extra_pins = pin_keys - paired_keys
+    assert not missing_pins, (
+        f"Sets without SHA pins: {missing_pins}. Update "
+        "EXPECTED_MANIFEST_SHAS."
+    )
+    assert not extra_pins, (
+        f"Stale SHA pins for removed sets: {extra_pins}. Drop them."
+    )
+
+
+def test_ac_g_13_pinned_shas_carries_distinct_values() -> None:
+    """The 8 pinned SHAs (4 baseline + 4 projection) are all
+    distinct. Catches a copy-paste error in the constants."""
+    all_shas: list = []
+    for base_sha, proj_sha in EXPECTED_MANIFEST_SHAS.values():
+        all_shas.extend([base_sha, proj_sha])
+    assert len(all_shas) == 8
+    assert len(set(all_shas)) == 8
+
+
+def test_ac_g_13_manifest_carries_actual_metadata(tmp_path: Path) -> None:
+    """Codex round 1 boundary 7/7 P2-2 absorption regression pin:
+    each deliverable manifest carries the actual region / crop /
+    time-slice metadata, not the placeholder ``"unknown"`` /
+    ``""``. Without flat-keyed config the manifest fields would
+    be blank and the per-set distinctions wouldn't be pinned."""
+    spec = _PAIRED_SETS[0]  # set1 niamey-millet
+    set_id, base_label, proj_label, base_extras, proj_extras = spec
+    base_path, _ = _build_paired_set_on_disk(
+        set_id, base_label, proj_label, base_extras, proj_extras, tmp_path
+    )
+    manifest = json.loads(
+        (base_path / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["project_name"] == "set1_niamey_millet"
+    assert manifest["region"]["name"] == "Niamey"
+    assert manifest["crop"]["name"] == "Millet"
+    assert manifest["temporal"]["start_year"] == 2017
+    assert manifest["temporal"]["end_year"] == 2021
+
+
+def test_ac_g_13_weather_yrdoy_matches_time_slice(tmp_path: Path) -> None:
+    """Codex round 1 boundary 7/7 P2-3 absorption regression pin:
+    each set's WTH file's YRDOY data row matches the set's
+    ``time_slice_start``. Without this, set4's 2086-2100 projection
+    would carry 2046 weather data and the fixture would contradict
+    the manifest's scenario metadata."""
+    for spec in _PAIRED_SETS:
+        set_id, base_label, proj_label, base_extras, proj_extras = spec
+        base_path, proj_path = _build_paired_set_on_disk(
+            set_id, base_label, proj_label, base_extras, proj_extras,
+            tmp_path / set_id,
+        )
+        base_wth = (base_path / "weather" / "data.wth").read_text()
+        proj_wth = (proj_path / "weather" / "data.wth").read_text()
+        # The WTH data row contains the YRDOY: <time_slice_start>001
+        assert f"{base_extras['time_slice_start']}001" in base_wth, (
+            f"{set_id} baseline WTH YRDOY drift"
+        )
+        assert f"{proj_extras['time_slice_start']}001" in proj_wth, (
+            f"{set_id} projection WTH YRDOY drift"
+        )
 
 
 def test_asymmetry_limitation_key_is_general_form() -> None:
