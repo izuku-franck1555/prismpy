@@ -196,13 +196,22 @@ def test_canonical_path_writes_full_substrate_triple_via_build_eghr_substrate(
     assert (tmp_path / "eGHR" / "CM.SOL").exists()
 
 
-def test_canonical_path_raises_typed_error_when_data_is_none(tmp_path: Path) -> None:
-    """Substrate-build failures under canonical mode raise ``BuildEghrSubstrateError``.
+def test_canonical_falls_back_to_legacy_when_data_is_none(
+    tmp_path: Path, caplog
+) -> None:
+    """Auto-detect: missing ``data`` -> dispatcher routes to the legacy flow.
 
-    No ``data`` argument means no grid + no soil profiles to pass to
-    the builder. The canonical path must fail loud rather than
-    silently fall back to the legacy bundled flow.
+    The default ``prefer_canonical_substrate=True`` means "prefer
+    canonical when its inputs are available." When inputs are
+    missing, the dispatcher silently falls back to the legacy
+    bundled-eGHR flow with an INFO log. This back-compat path is
+    what allows existing pipeline executors (which do not pass the
+    keyword) to keep running on legacy bundled assets after the
+    flag landed. The honest-signal contract is satisfied by the
+    INFO log naming the missing inputs.
     """
+    import logging
+
     config = _build_project_config(tmp_path)
     translator = PythiaTranslator(
         config=config,
@@ -210,12 +219,31 @@ def test_canonical_path_raises_typed_error_when_data_is_none(tmp_path: Path) -> 
         prefer_canonical_substrate=True,
     )
 
-    with pytest.raises(BuildEghrSubstrateError):
-        translator._include_eghr_data(None)
+    # No data argument: dispatcher must NOT raise; routes to legacy.
+    with caplog.at_level(logging.INFO):
+        result = translator._include_eghr_data(None)
+
+    # Legacy path with no eghr_database_path / eghr_sol_dir configured
+    # returns None and writes nothing to the substrate triple.
+    assert result is None
+    assert not (tmp_path / "eGHR" / "GHR.db").exists()
+    fallback_logs = [
+        record
+        for record in caplog.records
+        if "Canonical eGHR substrate inputs unavailable" in record.getMessage()
+    ]
+    assert fallback_logs, (
+        "Dispatcher did not log the canonical-fallback INFO message; "
+        "legacy was entered silently."
+    )
 
 
-def test_canonical_path_raises_typed_error_when_grid_missing(tmp_path: Path) -> None:
-    """``data.grid is None`` under canonical mode -> ``BuildEghrSubstrateError``."""
+def test_canonical_falls_back_to_legacy_when_grid_missing(
+    tmp_path: Path, caplog
+) -> None:
+    """Auto-detect: ``data.grid is None`` -> dispatcher routes to legacy flow."""
+    import logging
+
     config = _build_project_config(tmp_path)
     translator = PythiaTranslator(
         config=config,
@@ -231,14 +259,25 @@ def test_canonical_path_raises_typed_error_when_grid_missing(tmp_path: Path) -> 
     )
     data = UnifiedData(region=region, grid=None, soil=_build_profiles())
 
-    with pytest.raises(BuildEghrSubstrateError, match="populated grid"):
-        translator._include_eghr_data(data)
+    with caplog.at_level(logging.INFO):
+        result = translator._include_eghr_data(data)
+
+    assert result is None
+    assert not (tmp_path / "eGHR" / "GHR.db").exists()
+    fallback_logs = [
+        record
+        for record in caplog.records
+        if "Canonical eGHR substrate inputs unavailable" in record.getMessage()
+    ]
+    assert fallback_logs
 
 
-def test_canonical_path_raises_typed_error_when_soil_profiles_missing(
-    tmp_path: Path,
+def test_canonical_falls_back_to_legacy_when_soil_profiles_missing(
+    tmp_path: Path, caplog
 ) -> None:
-    """``data.soil`` empty under canonical mode -> ``BuildEghrSubstrateError``."""
+    """Auto-detect: ``data.soil`` empty -> dispatcher routes to legacy flow."""
+    import logging
+
     config = _build_project_config(tmp_path)
     translator = PythiaTranslator(
         config=config,
@@ -254,8 +293,50 @@ def test_canonical_path_raises_typed_error_when_soil_profiles_missing(
     )
     data = UnifiedData(region=region, grid=_build_grid_2x3(), soil={})
 
-    with pytest.raises(BuildEghrSubstrateError, match="non-empty dict"):
-        translator._include_eghr_data(data)
+    with caplog.at_level(logging.INFO):
+        result = translator._include_eghr_data(data)
+
+    assert result is None
+    assert not (tmp_path / "eGHR" / "GHR.db").exists()
+    fallback_logs = [
+        record
+        for record in caplog.records
+        if "Canonical eGHR substrate inputs unavailable" in record.getMessage()
+    ]
+    assert fallback_logs
+
+
+def test_build_eghr_substrate_error_raised_on_underlying_writer_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Underlying writer failures (rasterio, sqlite3, filesystem) raise loud.
+
+    The dispatcher absorbs missing-input cases as a back-compat
+    fallback. But once the canonical builder has been invoked,
+    failures in its writers (rasterio cannot write the GeoTIFF,
+    sqlite3 cannot create the database, etc.) must surface as
+    :class:`BuildEghrSubstrateError` rather than silently degrading
+    to an empty package — that's the honest-signal contract for
+    actual substrate-build failures.
+    """
+    config = _build_project_config(tmp_path)
+    translator = PythiaTranslator(
+        config=config,
+        output_dir=str(tmp_path),
+        prefer_canonical_substrate=True,
+    )
+
+    # Force the underlying builder to raise an OSError mid-build.
+    def _failing_builder(*_, **__):
+        raise OSError("simulated rasterio write failure")
+
+    monkeypatch.setattr(
+        "prismpy.translators.pythia.translator.build_eghr_substrate",
+        _failing_builder,
+    )
+
+    with pytest.raises(BuildEghrSubstrateError, match="simulated rasterio"):
+        translator._include_eghr_data(_build_unified_data())
 
 
 def test_canonical_path_does_not_consult_global_eghr_database_path(

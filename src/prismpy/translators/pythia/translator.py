@@ -222,12 +222,26 @@ class PythiaTranslator(PythiaTranslatorBase):
                 warnings.append("No climate data available - weather files not generated")
 
             # 3. Generate soil raster (clip from eGHR)
-            logger.info("Step 3/8: Generating soil raster...")
-            soil_raster = self._generate_soil_raster(data)
-            if soil_raster:
-                output_files.append(soil_raster)
+            # Skip when the canonical substrate path will produce
+            # ``raster/soil.tif`` later in step 7 — otherwise the
+            # legacy clip step issues a stale "Soil raster not
+            # generated" warning before the canonical builder writes
+            # the file, leaving the TranslationResult under-counting
+            # the actual artifacts on disk (the codex-flagged
+            # confusing-warning class).
+            canonical_substrate_will_run = self._canonical_substrate_will_run(data)
+            if canonical_substrate_will_run:
+                logger.info(
+                    "Step 3/8: Skipping legacy soil-raster clip; "
+                    "canonical eGHR substrate will produce raster/soil.tif."
+                )
             else:
-                warnings.append("Soil raster not generated (eGHR not configured)")
+                logger.info("Step 3/8: Generating soil raster...")
+                soil_raster = self._generate_soil_raster(data)
+                if soil_raster:
+                    output_files.append(soil_raster)
+                else:
+                    warnings.append("Soil raster not generated (eGHR not configured)")
 
             # 4. Generate crop mask raster (clip from SPAM)
             logger.info("Step 4/8: Generating crop mask raster...")
@@ -257,6 +271,16 @@ class PythiaTranslator(PythiaTranslatorBase):
                 # Count files in eGHR directory
                 eghr_files = list(eghr_dir.glob("*"))
                 logger.info(f"Included {len(eghr_files)} eGHR files in package")
+                # Surface the canonically-built soil raster on the
+                # output_files list when step 3 deferred to the
+                # canonical path. The raster lives at output_dir/
+                # raster/soil.tif; without this surfacing the
+                # TranslationResult's output count under-reports the
+                # canonical artifacts (the codex-flagged P3 class).
+                if canonical_substrate_will_run:
+                    canonical_raster = self.output_dir / "raster" / "soil.tif"
+                    if canonical_raster.exists():
+                        output_files.append(canonical_raster)
 
             # 8. Generate PYTHIA JSON configuration
             logger.info("Step 8/9: Generating PYTHIA JSON config...")
@@ -2005,9 +2029,46 @@ class PythiaTranslator(PythiaTranslatorBase):
             Path to the package's ``eGHR/`` directory if at least one
             artifact was written, otherwise ``None``.
         """
-        if self.prefer_canonical_substrate:
-            return self._include_eghr_data_canonical(data)
-        return self._include_eghr_data_legacy()
+        if not self.prefer_canonical_substrate:
+            return self._include_eghr_data_legacy()
+        if not self._canonical_substrate_will_run(data):
+            logger.info(
+                "Canonical eGHR substrate inputs unavailable "
+                "(grid=%s, soil=%s, country_iso3=%r); falling back to "
+                "the legacy bundled-eGHR flow.",
+                "yes" if (data and data.grid) else "no",
+                "yes" if (data and isinstance(data.soil, dict) and data.soil) else "no",
+                self.config.region.country_iso3,
+            )
+            return self._include_eghr_data_legacy()
+        return self._include_eghr_data_canonical(data)
+
+    def _canonical_substrate_will_run(
+        self,
+        data: Optional[UnifiedData],
+    ) -> bool:
+        """Return True if the canonical substrate builder is the dispatch target.
+
+        The dispatch only chooses the canonical path when the
+        operator has not forced legacy mode AND every input the
+        builder needs (grid, per-cell soil profile dict,
+        ``region.country_iso3``) is present. When inputs are
+        incomplete, the dispatcher silently falls back to the legacy
+        bundled flow with an INFO log — this matches the back-compat
+        contract for projects whose ingestion has not yet adopted
+        per-cell soil resolution. Operators who want loud-fail
+        instead can pass ``prefer_canonical_substrate=False`` to
+        force legacy mode (explicit opt-out).
+        """
+        if not self.prefer_canonical_substrate:
+            return False
+        if data is None or data.grid is None:
+            return False
+        if not isinstance(data.soil, dict) or not data.soil:
+            return False
+        if not self.config.region.country_iso3:
+            return False
+        return True
 
     def _include_eghr_data_canonical(
         self,
@@ -2015,34 +2076,22 @@ class PythiaTranslator(PythiaTranslatorBase):
     ) -> Optional[Path]:
         """Synthesize the per-package eGHR substrate via the shared builder.
 
-        Raises :class:`BuildEghrSubstrateError` when the inputs the
-        builder needs (grid + per-cell soil profiles) are absent or
-        when one of the underlying writers fails. The legacy bundled
-        path is only entered when an operator explicitly opts in via
-        ``prefer_canonical_substrate=False``; under the canonical
-        path the helper fails loud per the project's honest-signal
-        contract for substrate failures.
+        Caller (``_include_eghr_data``) guarantees the inputs are
+        complete via :meth:`_canonical_substrate_will_run`; this
+        method only raises :class:`BuildEghrSubstrateError` when the
+        underlying writers themselves fail (rasterio, sqlite3, or
+        filesystem errors during artifact generation). Input-shape
+        problems are absorbed by the dispatcher's fallback to legacy
+        mode, not raised here.
         """
-        if data is None or data.grid is None:
-            raise BuildEghrSubstrateError(
-                "Canonical eGHR substrate path requires UnifiedData with a "
-                "populated grid; got data=%r." % (data,)
-            )
-        if not data.soil or not isinstance(data.soil, dict):
-            raise BuildEghrSubstrateError(
-                "Canonical eGHR substrate path requires UnifiedData.soil to "
-                "be a non-empty dict of per-cell SoilProfile objects; got "
-                "data.soil=%r. Set prefer_canonical_substrate=False to fall "
-                "back to the legacy bundled-file flow." % (data.soil,)
-            )
-
+        # The dispatcher guarantees these are populated; assert defensively
+        # so a future caller that bypasses the dispatcher fails loud rather
+        # than racing on a None dereference.
+        assert data is not None and data.grid is not None
+        assert isinstance(data.soil, dict) and data.soil
         country_iso3 = self.config.region.country_iso3
-        country_code = self._iso3_to_iso2(country_iso3) if country_iso3 else ""
-        if not country_code:
-            raise BuildEghrSubstrateError(
-                "Canonical eGHR substrate path requires region.country_iso3; "
-                "config carries country_iso3=%r." % (country_iso3,)
-            )
+        assert country_iso3
+        country_code = self._iso3_to_iso2(country_iso3)
 
         region = data.region if data.region is not None else self._region_from_config()
 
