@@ -34,10 +34,12 @@ empirically exercised.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import threading
 import time
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import patch
@@ -952,3 +954,210 @@ def test_cached_cutout_works_with_nested_specifiers_dataset(
     assert parts[3] == "gfdl-esm4"
     assert parts[4] == "tasmax"
     assert parts[5].endswith(".nc")
+
+
+def test_helpers_skip_falsy_top_level_to_specifiers() -> None:
+    """Codex round-1 LOW absorption: a falsy-but-present top-level
+    value (e.g., ``""``) does NOT take priority over a non-empty
+    nested specifiers value. The documented "top-level wins" priority
+    refers to PRESENT non-empty values; the ``or``-chain semantics
+    fall through on falsy entries. Production fields are never
+    legitimately falsy so this is latent-only, but pinning the
+    behaviour keeps the priority ladder observable for future
+    maintainers.
+    """
+    dataset_empty_top = {
+        "id": "x",
+        "climate_scenario": "",
+        "climate_forcing": "",
+        "climate_variable": "",
+        "product": "",
+        "specifiers": {
+            "climate_scenario": "ssp585",
+            "climate_forcing": "gfdl-esm4",
+            "climate_variable": "tasmax",
+            "product": "InputData",
+        },
+    }
+    assert isimip3b._scenario_from_dataset(dataset_empty_top) == "ssp585"
+    assert isimip3b._gcm_from_dataset(dataset_empty_top) == "gfdl-esm4"
+    assert isimip3b._variable_from_dataset(dataset_empty_top) == "tasmax"
+    assert isimip3b._product_from_dataset(dataset_empty_top) == "InputData"
+
+
+# ── F-AV expanded scope: live cutout responses arrive ZIP-wrapped ────
+
+
+def _make_zip_with_netcdf(
+    nc_body: bytes = _FAKE_NETCDF_BODY,
+    nc_name: str = "cutout.nc",
+) -> bytes:
+    """Build a minimal ZIP archive carrying a single NetCDF entry.
+
+    Mirrors the live ISIMIP3b cutout API's ZIP-wrapped response shape.
+    The synthetic NetCDF body inside is the same magic-prefixed stub
+    the existing tests use, so the regression net for the unwrapped
+    artifact is identical to the existing happy-path assertions.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(nc_name, nc_body)
+    return buf.getvalue()
+
+
+def _make_zip_with_no_netcdf() -> bytes:
+    """Build a ZIP whose only entry is a non-NetCDF file."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("README.txt", b"not a netcdf")
+    return buf.getvalue()
+
+
+def _make_zip_with_two_netcdfs() -> bytes:
+    """Build a ZIP carrying two NetCDF entries (an over-match shape
+    the cutout API never returns; pinned so a future change can't
+    silently start picking arbitrary inner files)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("cutout_1.nc", _FAKE_NETCDF_BODY)
+        zf.writestr("cutout_2.nc", _FAKE_NETCDF_BODY)
+    return buf.getvalue()
+
+
+def test_cached_cutout_unzips_zip_wrapped_response(
+    cache_root: Path,
+    fake_dataset: Dict[str, Any],
+    http_responses: responses.RequestsMock,
+) -> None:
+    """Live ISIMIP3b cutout responses are ZIP archives carrying a
+    single NetCDF file. cached_cutout MUST unwrap the ZIP, persist
+    only the inner NetCDF body in the cache, and validate the magic
+    bytes against the extracted file (NOT the ZIP container). Pre-fix
+    this raised ``InvalidIsimipResponseError`` on the ZIP magic
+    ``PK\\x03\\x04``.
+    """
+    zipped_body = _make_zip_with_netcdf()
+    http_responses.add(responses.GET, _FAKE_FILE_URL, body=zipped_body)
+    client = _FakeISIMIP3bClient()
+    nc_path = cached_cutout(
+        client,  # type: ignore[arg-type]
+        fake_dataset,
+        bbox={"south": 13.0, "north": 14.5, "west": 1.5, "east": 3.0},
+        cache_dir=cache_root,
+    )
+    # The cache file must hold the unwrapped NetCDF body, not the ZIP.
+    persisted = nc_path.read_bytes()
+    assert persisted[:4] == b"CDF\x01", (
+        f"Cache holds ZIP container instead of inner NetCDF; "
+        f"first 8 bytes: {persisted[:8]!r}"
+    )
+    assert persisted == _FAKE_NETCDF_BODY
+
+
+def test_cached_cutout_rejects_zip_with_no_netcdf_entries(
+    cache_root: Path,
+    fake_dataset: Dict[str, Any],
+    http_responses: responses.RequestsMock,
+) -> None:
+    """A ZIP body without any NetCDF members surfaces as
+    InvalidIsimipResponseError — this is malformed cutout output, NOT
+    a network failure or cache-write error."""
+    http_responses.add(
+        responses.GET, _FAKE_FILE_URL, body=_make_zip_with_no_netcdf()
+    )
+    client = _FakeISIMIP3bClient()
+    with pytest.raises(InvalidIsimipResponseError, match="no NetCDF entries"):
+        cached_cutout(
+            client,  # type: ignore[arg-type]
+            fake_dataset,
+            bbox={"south": 13.0, "north": 14.5, "west": 1.5, "east": 3.0},
+            cache_dir=cache_root,
+        )
+
+
+def test_cached_cutout_rejects_zip_with_multiple_netcdf_entries(
+    cache_root: Path,
+    fake_dataset: Dict[str, Any],
+    http_responses: responses.RequestsMock,
+) -> None:
+    """A ZIP body with more than one NetCDF entry surfaces as
+    InvalidIsimipResponseError. The cutout API always returns exactly
+    one NetCDF; an over-match is malformed output that must NOT be
+    silently picking the first entry."""
+    http_responses.add(
+        responses.GET, _FAKE_FILE_URL, body=_make_zip_with_two_netcdfs()
+    )
+    client = _FakeISIMIP3bClient()
+    with pytest.raises(
+        InvalidIsimipResponseError, match="multiple NetCDF entries"
+    ):
+        cached_cutout(
+            client,  # type: ignore[arg-type]
+            fake_dataset,
+            bbox={"south": 13.0, "north": 14.5, "west": 1.5, "east": 3.0},
+            cache_dir=cache_root,
+        )
+
+
+def test_cached_cutout_rejects_corrupt_zip_archive(
+    cache_root: Path,
+    fake_dataset: Dict[str, Any],
+    http_responses: responses.RequestsMock,
+) -> None:
+    """A response body whose first 4 bytes are the ZIP magic prefix
+    but whose remainder is not a readable archive surfaces as
+    InvalidIsimipResponseError (not a generic OSError leaking out)."""
+    corrupt_zip = b"PK\x03\x04" + b"\x00" * 64  # ZIP magic + garbage
+    http_responses.add(responses.GET, _FAKE_FILE_URL, body=corrupt_zip)
+    client = _FakeISIMIP3bClient()
+    with pytest.raises(
+        InvalidIsimipResponseError, match="not a readable ZIP archive"
+    ):
+        cached_cutout(
+            client,  # type: ignore[arg-type]
+            fake_dataset,
+            bbox={"south": 13.0, "north": 14.5, "west": 1.5, "east": 3.0},
+            cache_dir=cache_root,
+        )
+
+
+def test_cached_cutout_passes_through_plain_netcdf_response(
+    cache_root: Path,
+    fake_dataset: Dict[str, Any],
+    http_responses: responses.RequestsMock,
+) -> None:
+    """The unwrap step MUST be a no-op when the body is already a
+    plain NetCDF — synthetic test fixtures + older API shapes still
+    return raw NetCDF directly. Regression net: the existing happy
+    path stays green."""
+    http_responses.add(responses.GET, _FAKE_FILE_URL, body=_FAKE_NETCDF_BODY)
+    client = _FakeISIMIP3bClient()
+    nc_path = cached_cutout(
+        client,  # type: ignore[arg-type]
+        fake_dataset,
+        bbox={"south": 13.0, "north": 14.5, "west": 1.5, "east": 3.0},
+        cache_dir=cache_root,
+    )
+    assert nc_path.read_bytes() == _FAKE_NETCDF_BODY
+
+
+def test_cached_cutout_unzips_nc4_extension_member(
+    cache_root: Path,
+    fake_dataset: Dict[str, Any],
+    http_responses: responses.RequestsMock,
+) -> None:
+    """The ZIP-member filter recognises both ``.nc`` and ``.nc4`` so a
+    NetCDF-4 cutout (HDF5-magic body inside a ``.nc4`` member) is
+    unwrapped the same way as a NetCDF-classic ``.nc`` member."""
+    zipped = _make_zip_with_netcdf(nc_body=_FAKE_NETCDF_HDF5, nc_name="cutout.nc4")
+    http_responses.add(responses.GET, _FAKE_FILE_URL, body=zipped)
+    client = _FakeISIMIP3bClient()
+    nc_path = cached_cutout(
+        client,  # type: ignore[arg-type]
+        fake_dataset,
+        bbox={"south": 13.0, "north": 14.5, "west": 1.5, "east": 3.0},
+        cache_dir=cache_root,
+    )
+    persisted = nc_path.read_bytes()
+    assert persisted[:4] == b"\x89HDF"
+    assert persisted == _FAKE_NETCDF_HDF5
