@@ -402,3 +402,94 @@ def test_sarra_py_writer_signature_accepts_climate_kind_keyword() -> None:
     sig = inspect.signature(SarraPyTranslator._generate_climate_files)
     assert "climate_kind" in sig.parameters
     assert "projection_meta" in sig.parameters
+
+
+# ── §8 Codex round 1 P2 absorption — NaN→nodata replacement ──────────
+
+
+def test_sarra_py_projection_nan_replaced_with_nodata_sentinel(
+    tmp_path: Path,
+) -> None:
+    """Codex round 1 boundary 3/7 P2: NaN values in the input
+    DataArray (from upstream ``_FillValue`` decoding or sea-mask
+    cells) MUST be written as the declared ``nodata=-9999.0``
+    sentinel — NOT as raw NaN. Otherwise GDAL/rasterio do not mask
+    those pixels on read and downstream SARRA-Py consumers ingest
+    NaN as a valid climate value."""
+    import rasterio
+
+    inst = _instantiate_minimal_sarra_py(tmp_path)
+
+    # Build a DataArray with some NaN cells (sea-mask-like).
+    arr = _make_projection_data_array("tasmax", n_days=1).copy()
+    arr_values = arr.values
+    arr_values[0, 0, 0] = np.nan
+    arr_values[0, 5, 5] = np.nan
+    arr_values[0, 10, 10] = np.nan
+    new_arr = xr.DataArray(
+        arr_values, coords=arr.coords, dims=arr.dims, name=arr.name
+    )
+
+    climate_by_var = {"tasmax": new_arr}
+    meta = ProjectionClimateMeta(**_valid_meta_kwargs())
+
+    inst._generate_projection_climate_geotiffs(climate_by_var, meta)
+
+    tif_path = (
+        inst.output_dir / "data" / "climate" / "tasmax" / "2046-06-01.tif"
+    )
+    with rasterio.open(tif_path) as ds:
+        band = ds.read(1)
+        assert ds.nodata == -9999.0
+        # No NaN values written to the band — they must be replaced
+        # with the nodata sentinel.
+        assert not np.any(np.isnan(band)), (
+            "GeoTIFF band contains NaN values; nodata=-9999.0 will "
+            "not mask them on read. Codex round 1 P2 regression."
+        )
+        # The 3 NaN positions should now hold -9999.0. The lat axis
+        # is flipped on write (north → south), so coords map to
+        # band[(n_lat-1) - i, j] not band[i, j]. Using north→south
+        # convention: input row 0 → band row (n_lat-1).
+        n_lat = arr_values.shape[1]
+        assert band[(n_lat - 1) - 0, 0] == -9999.0
+        assert band[(n_lat - 1) - 5, 5] == -9999.0
+        assert band[(n_lat - 1) - 10, 10] == -9999.0
+
+
+def test_sarra_py_projection_finite_values_preserved_around_nodata(
+    tmp_path: Path,
+) -> None:
+    """Adjacent finite values are preserved verbatim while only NaN
+    cells are replaced with -9999.0. Codex round 1 boundary 3/7 P2."""
+    import rasterio
+
+    inst = _instantiate_minimal_sarra_py(tmp_path)
+
+    arr = _make_projection_data_array("tasmax", n_days=1).copy()
+    arr_values = arr.values.astype("float32")
+    # Single NaN cell amid finite values
+    arr_values[0, 7, 7] = np.nan
+    expected_finite_value = arr_values[0, 7, 6]  # neighbour stays finite
+
+    new_arr = xr.DataArray(
+        arr_values, coords=arr.coords, dims=arr.dims, name=arr.name
+    )
+
+    climate_by_var = {"tasmax": new_arr}
+    meta = ProjectionClimateMeta(**_valid_meta_kwargs())
+
+    inst._generate_projection_climate_geotiffs(climate_by_var, meta)
+
+    tif_path = (
+        inst.output_dir / "data" / "climate" / "tasmax" / "2046-06-01.tif"
+    )
+    with rasterio.open(tif_path) as ds:
+        band = ds.read(1)
+    n_lat = arr_values.shape[1]
+    # NaN cell replaced with sentinel
+    assert band[(n_lat - 1) - 7, 7] == -9999.0
+    # Adjacent finite cell preserved
+    assert band[(n_lat - 1) - 7, 6] == pytest.approx(
+        float(expected_finite_value)
+    )

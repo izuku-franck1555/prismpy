@@ -347,3 +347,128 @@ def test_all_primary_gcms_route_to_recognised_calendar() -> None:
             test_ds = ds
         result = convert_to_gregorian(test_ds, source_calendar=cal)
         assert result.target_calendar == "standard"
+
+
+# ── §11 Codex round 1 P1 absorption — float64 dtype + NaN-free output ─
+
+
+def test_360_day_output_preserves_float_dtype() -> None:
+    """Codex round 1 boundary 3/7 P1: ``missing="interpolate"`` (a
+    string) was being passed to ``convert_calendar`` which treats
+    ``missing`` as a numeric fill value, NOT an interpolation mode.
+    The string was inserted into the added days, contaminating the
+    output dtype to ``object``. The fix uses ``missing=np.nan`` plus
+    ``.interpolate_na`` so the output preserves float64 dtype."""
+    ds = _three60_day_dataset(start_year=2046, n_years=1)
+    result = convert_to_gregorian(ds, source_calendar="360_day")
+    # The output must be float (NOT object). Object dtype would
+    # mean the literal string "interpolate" leaked into the array.
+    assert result.data["tasmax"].dtype.kind == "f", (
+        f"360-day output dtype is {result.data['tasmax'].dtype} — "
+        f"expected float. Codex round 1 P1 regression."
+    )
+
+
+def test_360_day_output_has_no_string_contamination() -> None:
+    """No element of the converted output is the literal string
+    ``"interpolate"`` (the symptom of the codex round 1 P1 misuse).
+    A regression of the bug would surface as object dtype with
+    interspersed strings; this asserts the absence."""
+    ds = _three60_day_dataset(start_year=2046, n_years=1)
+    result = convert_to_gregorian(ds, source_calendar="360_day")
+    values = result.data["tasmax"].values
+    # All values must be numeric. Convert to float; failure indicates
+    # string contamination.
+    arr = np.asarray(values, dtype=float)
+    assert np.all(np.isfinite(arr)), (
+        "360-day output contains non-finite values — interpolate_na "
+        "did not fill the gap days"
+    )
+
+
+def test_360_day_output_yields_full_year_with_interpolated_gaps() -> None:
+    """365 days for a non-leap year (2046), ALL finite (no NaN)
+    after the interpolate_na step fills the 5-6 day gap."""
+    ds = _three60_day_dataset(start_year=2046, n_years=1)
+    result = convert_to_gregorian(ds, source_calendar="360_day")
+    n_days = result.data["tasmax"].size
+    # 2046 is non-leap → 365 days; the 5-day gap from 360→365
+    # alignment is filled by linear interpolation.
+    assert n_days == 365
+    # No NaN in the output — every gap must be interpolated.
+    n_nan = int(np.isnan(result.data["tasmax"].values).sum())
+    assert n_nan == 0, (
+        f"360-day output has {n_nan} NaN values — interpolate_na "
+        "did not fill the gap days"
+    )
+
+
+def test_360_day_interpolated_values_are_monotonic_with_source() -> None:
+    """The 360-day source has strictly increasing values 0..359.
+    After conversion + interpolation, the output values should also
+    be strictly non-decreasing across the year (linear interpolation
+    of a monotonic source preserves monotonicity)."""
+    ds = _three60_day_dataset(start_year=2046, n_years=1)
+    result = convert_to_gregorian(ds, source_calendar="360_day")
+    values = result.data["tasmax"].values.astype(float)
+    diffs = np.diff(values)
+    # Linear interpolation of a monotonic source must produce
+    # non-decreasing differences (allow tiny float epsilon).
+    assert np.all(diffs >= -1e-9), (
+        "Interpolated output is not monotonic — the gap-fill is "
+        "introducing non-monotonic artifacts"
+    )
+
+
+# ── §12 Codex round 1 P3 absorption — time_dim parameter threading ───
+
+
+def test_time_dim_parameter_threads_to_xarray() -> None:
+    """The function exposes ``time_dim`` for testability but the
+    internal ``convert_calendar`` call must pass ``dim=time_dim``;
+    otherwise xarray defaults to ``"time"`` and the parameter has
+    zero effect for any non-``"time"`` coord. Codex round 1
+    boundary 3/7 P3.
+
+    Build a dataset whose time coordinate is named ``"DATE"`` (not
+    ``"time"``) and assert the conversion succeeds rather than
+    raising ``KeyError: 'time'``."""
+    times = []
+    for year in range(2046, 2047):
+        for month in range(1, 13):
+            for day in range(1, 31):
+                times.append(cftime.Datetime360Day(year, month, day))
+    arr = np.arange(len(times), dtype=float)
+    ds = xr.Dataset(
+        {"tasmax": ("DATE", arr)},
+        coords={"DATE": ("DATE", times)},
+    )
+    result = convert_to_gregorian(
+        ds,
+        source_calendar="360_day",
+        time_dim="DATE",
+    )
+    assert result.target_calendar == "standard"
+    # The time coord should still be named DATE post-conversion.
+    assert "DATE" in result.data.dims
+
+
+def test_time_dim_parameter_threads_for_noleap() -> None:
+    """Same as above but for the noleap branch."""
+    times = []
+    for year in range(2048, 2049):
+        for doy in range(1, 366):
+            month, day = _noleap_doy_to_date(doy)
+            times.append(cftime.DatetimeNoLeap(year, month, day))
+    arr = np.arange(len(times), dtype=float)
+    ds = xr.Dataset(
+        {"tasmax": ("DATE", arr)},
+        coords={"DATE": ("DATE", times)},
+    )
+    result = convert_to_gregorian(
+        ds,
+        source_calendar="noleap",
+        time_dim="DATE",
+    )
+    assert result.target_calendar == "standard"
+    assert "DATE" in result.data.dims

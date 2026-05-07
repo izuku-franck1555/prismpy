@@ -12,9 +12,11 @@ Per Draft 5 contract:
   ``manifest.limitations.calendar_noleap_dropped_feb29``.
 * ``gregorian`` (IPSL-CM6A-LR / MPI-ESM1-2-HR / MRI-ESM2-0) →
   gregorian: pass-through.
-* ``360_day`` (UKESM1-0-LL) → gregorian:
-  ``xarray.convert_calendar('standard', missing='interpolate')``.
-  Document ``manifest.limitations.calendar_360_day_resampled``.
+* ``360_day`` (UKESM1-0-LL) → gregorian: insert 5-6 NaN gap days
+  per year via ``xarray.convert_calendar('standard',
+  align_on='year', missing=np.nan)`` then fill the gaps with
+  ``.interpolate_na(dim=time_dim, method='linear')``. Document
+  ``manifest.limitations.calendar_360_day_resampled``.
 
 Determinism contract per CC-G-7: cftime + xarray versions pinned at
 module level. The CC-G-6 12-dimension drift-detection pin
@@ -38,6 +40,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+
+import numpy as np
 
 
 from prismpy.standards.isimip_versions import (
@@ -145,9 +149,12 @@ def convert_to_gregorian(
       so the consumer knows which days have no source value. Returns
       a limitation record so the manifest writer can populate
       ``manifest.limitations.calendar_noleap_dropped_feb29``.
-    * ``360_day`` → invoke ``xarray.convert_calendar('standard',
-      missing='interpolate')``. Returns a limitation record for
-      ``manifest.limitations.calendar_360_day_resampled``.
+    * ``360_day`` → ``xarray.convert_calendar('standard',
+      align_on='year', missing=np.nan)`` produces a 365-day series
+      with 5-6 NaN gap days per source year; these gaps are then
+      filled by ``.interpolate_na(dim=time_dim, method='linear')``
+      so the output has no NaN values. Returns a limitation record
+      for ``manifest.limitations.calendar_360_day_resampled``.
     * ``gregorian`` / ``standard`` / ``proleptic_gregorian`` →
       pass-through, no limitation.
 
@@ -196,6 +203,7 @@ def convert_to_gregorian(
         try:
             converted = climate_data.convert_calendar(
                 "standard",
+                dim=time_dim,
                 align_on="date",
             )
         except AttributeError as exc:
@@ -221,15 +229,31 @@ def convert_to_gregorian(
             # 12 × 30-day months across the 365-day standard year,
             # which is the right semantic for climate data: each
             # 360-day year represents the same climate year, just
-            # with regularised month lengths. ``missing='interpolate'``
-            # fills the 5-6 day gap left after alignment.
+            # with regularised month lengths.
+            #
+            # The ``missing`` keyword is a NUMERIC fill value, NOT
+            # an interpolation mode. Passing the string
+            # ``"interpolate"`` corrupts numeric variables to object
+            # dtype (codex round 1 boundary 3/7 P1). The right
+            # pattern is two-step: insert NaN gaps via
+            # ``missing=np.nan``, then call ``.interpolate_na`` on
+            # the result so the gaps are filled by linear
+            # interpolation across surrounding days. This preserves
+            # float64 dtype and produces meaningful interpolated
+            # values rather than NaN or string contamination.
+            #
             # xarray>=2023.1 requires ``align_on`` for 360_day
             # conversions; passing it explicitly avoids the
             # default-fallback divergence.
-            converted = climate_data.convert_calendar(
+            converted_with_gaps = climate_data.convert_calendar(
                 "standard",
+                dim=time_dim,
                 align_on="year",
-                missing="interpolate",
+                missing=np.nan,
+            )
+            converted = converted_with_gaps.interpolate_na(
+                dim=time_dim,
+                method="linear",
             )
         except AttributeError as exc:
             raise ValueError(
@@ -241,10 +265,12 @@ def convert_to_gregorian(
             limitation_key=LIMITATION_KEY_360_RESAMPLED,
             limitation_value=(
                 f"Source GCM uses {source_calendar!r} (12x30 day) "
-                "calendar; xarray.convert_calendar interpolated 5-6 "
-                "days per year to fill the gap to standard gregorian. "
-                "Consumer code reads the interpolated values; the "
-                "limitation key signals that interpolation occurred."
+                "calendar; xarray.convert_calendar inserted 5-6 NaN "
+                "gap days per year to align with the 365-day "
+                "standard calendar, then linear interpolation across "
+                "neighbouring days filled the gaps. Consumer code "
+                "reads the interpolated values; the limitation key "
+                "signals that interpolation occurred."
             ),
             source_calendar=source_calendar,
             target_calendar="standard",

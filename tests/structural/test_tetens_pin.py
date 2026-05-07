@@ -274,3 +274,77 @@ def test_tetens_public_api_minimal() -> None:
         "derive_tdew",
         "derive_tdew_for_record_or",
     }
+
+
+# ── §7 NaN-as-valid-value-leakage guard (codex round 1 P2 absorption) ─
+
+
+def test_record_or_treats_nan_explicit_tdew_as_missing() -> None:
+    """``explicit_tdew = NaN`` (the surface form of pandas / xarray
+    decoded missing values) must NOT short-circuit the fallback
+    chain. The wrapper falls through to Tetens derivation when
+    ``tmean_celsius`` + ``hurs_pct`` are present, or to the platform
+    sentinel when they are not. Codex round 1 boundary 3/7 P2."""
+    from prismpy.harmonize.tetens import derive_tdew_for_record_or
+
+    nan = float("nan")
+    # NaN explicit_tdew + valid tmean + hurs → Tetens derivation runs.
+    derived = derive_tdew_for_record_or(
+        explicit_tdew=nan,
+        tmean_celsius=20.0,
+        hurs_pct=70.0,
+        fallback=-99.0,
+    )
+    # The Tetens output for (20°C, 70%) is ~14.4°C; the contract is
+    # that the function does NOT return NaN.
+    assert not math.isnan(derived), (
+        "NaN explicit_tdew leaked to output — fallback chain bypassed"
+    )
+    assert derived != -99.0, (
+        "NaN explicit_tdew dropped to fallback — Tetens path not "
+        "exercised when valid tmean/hurs were available"
+    )
+    # Sanity-bound: dewpoint at 20°C / 70% RH is ~ 14-15°C.
+    assert 13.0 <= derived <= 16.0
+
+
+def test_record_or_treats_nan_explicit_tdew_falls_back_when_no_inputs() -> None:
+    """NaN explicit_tdew + None tmean / hurs → fallback sentinel,
+    not NaN."""
+    from prismpy.harmonize.tetens import derive_tdew_for_record_or
+
+    result = derive_tdew_for_record_or(
+        explicit_tdew=float("nan"),
+        tmean_celsius=None,
+        hurs_pct=None,
+        fallback=-99.0,
+    )
+    assert result == -99.0
+    assert not math.isnan(result)
+
+
+def test_record_or_finite_explicit_tdew_returns_directly() -> None:
+    """Finite explicit_tdew passes through unchanged."""
+    from prismpy.harmonize.tetens import derive_tdew_for_record_or
+
+    result = derive_tdew_for_record_or(
+        explicit_tdew=12.5,
+        tmean_celsius=20.0,
+        hurs_pct=70.0,
+        fallback=-99.0,
+    )
+    assert result == 12.5
+
+
+def test_record_or_none_explicit_tdew_falls_through_to_tetens() -> None:
+    """None explicit_tdew + valid tmean/hurs → Tetens derivation."""
+    from prismpy.harmonize.tetens import derive_tdew_for_record_or
+
+    result = derive_tdew_for_record_or(
+        explicit_tdew=None,
+        tmean_celsius=20.0,
+        hurs_pct=70.0,
+        fallback=-99.0,
+    )
+    assert not math.isnan(result)
+    assert 13.0 <= result <= 16.0

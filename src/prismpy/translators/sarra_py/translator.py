@@ -821,6 +821,17 @@ class SarraPyTranslator(SarraPyTranslatorBase):
                         date_str = str(time_val).split("T")[0][:10]
 
                     band = data_array.isel(time=time_idx).values.astype("float32")
+                    # NaN-as-valid-value-leakage guard (codex round 1
+                    # boundary 3/7 P2): any NaN that survived from
+                    # upstream ``_FillValue`` decoding or a sea-mask
+                    # cell would be written into the GeoTIFF band as a
+                    # NaN float32 — which GDAL and rasterio do NOT mask
+                    # on read because the stored value does not match
+                    # the declared ``nodata=-9999.0`` tag. The result is
+                    # silent NaN propagation through downstream SARRA-Py
+                    # ingestion. Replace NaN with the declared sentinel
+                    # before write so the nodata tag actually applies.
+                    band = np.where(np.isnan(band), -9999.0, band).astype("float32")
                     # Lat axis is typically descending in geospatial convention
                     # (north → south); flip if the source is ascending so
                     # the GeoTIFF's row 0 is the northernmost row.

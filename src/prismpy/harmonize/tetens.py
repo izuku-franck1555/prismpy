@@ -202,9 +202,12 @@ def derive_tdew_for_record_or(
 
     Order of precedence:
 
-    1. ``explicit_tdew`` — if the source already supplies a non-None
-       dewpoint, return it as-is (preserves observed-source TDEW
-       directly without re-deriving).
+    1. ``explicit_tdew`` — if the source already supplies a finite
+       dewpoint (non-None and non-NaN), return it as-is (preserves
+       observed-source TDEW directly without re-deriving). NaN is
+       treated identically to None: pandas / xarray decoded missing
+       values surface as ``float('nan')`` and would otherwise leak
+       through the naive ``is not None`` check.
     2. Tetens derivation — if the source supplies non-None
        ``tmean_celsius`` + ``hurs_pct``, derive via :func:`derive_tdew`.
     3. ``fallback`` — when neither resolves; honest-signal "data
@@ -232,8 +235,23 @@ def derive_tdew_for_record_or(
     Returns:
         Float TDEW in °C, or the fallback sentinel.
     """
+    # NaN-as-valid-value-leakage guard (codex round 1 boundary 3/7
+    # P2): pandas/xarray decoded missing values surface as
+    # ``float('nan')`` rather than ``None``. The naive
+    # ``if explicit_tdew is not None`` check passes for NaN and would
+    # return NaN directly, bypassing the Tetens fallback chain and
+    # surfacing ``"nan"`` strings into DSSAT WTH files. Treat NaN
+    # exactly the same as None so the Tetens / fallback path runs.
     if explicit_tdew is not None:
-        return float(explicit_tdew)
+        try:
+            explicit_value = float(explicit_tdew)
+        except (TypeError, ValueError):
+            explicit_value = None
+        else:
+            if math.isnan(explicit_value):
+                explicit_value = None
+        if explicit_value is not None:
+            return explicit_value
     if tmean_celsius is None or hurs_pct is None:
         return fallback
     try:
