@@ -170,6 +170,58 @@ class UnknownBiasCorrectionInShipModeError(ScenarioSetValidationError):
         )
 
 
+class WeatherSchemaAsymmetricWithoutLimitationError(ScenarioSetValidationError):
+    """F-G-8: baseline + projection ship WTH files with different
+    column counts AND the projection's manifest.limitations does NOT
+    declare ``weather_schema_asymmetric_within_set``.
+
+    Per ``feedback_no_data_cooking.md`` + durable #16 honest-signal
+    contract: silent quality loss is forbidden. When a projection's
+    WTH (e.g., 8-col AC-G-7a output with TDEW + RH + SRAD + WIND)
+    differs in column count from its baseline (5-col observed-mode),
+    the asymmetry MUST appear in ``manifest.limitations`` so audit
+    consumers (Dr. Kofi's grep on the limitations key) see the
+    declaration. Without it, the asymmetry is silent — exactly the
+    trust violation Sprint G's ship contract forbids.
+
+    The fix is for the projection generator to populate
+    ``manifest.limitations.weather_schema_asymmetric_within_set``
+    with a value field carrying the specifics (e.g., "baseline ships
+    5-col WTH per existing observed-climate translators; projection
+    ships 8-col WTH per AC-G-7"). The general-form key per warning-
+    auditor pass-2 MEDIUM-Rebase-1 covers ANY future asymmetry
+    dimension; do not introduce per-instance keys.
+    """
+
+    def __init__(
+        self,
+        *,
+        package_label: str,
+        baseline_columns: int,
+        projection_columns: int,
+    ) -> None:
+        super().__init__(
+            package_label=package_label,
+            failing_field_path=(
+                "manifest.limitations.weather_schema_asymmetric_within_set"
+            ),
+            expected="present (asymmetric column count declared)",
+            actual=(
+                f"missing (baseline {baseline_columns}-col / "
+                f"projection {projection_columns}-col)"
+            ),
+            message=(
+                f"{package_label}: weather schema asymmetry detected — "
+                f"baseline WTH has {baseline_columns} columns, "
+                f"projection WTH has {projection_columns} columns. F-G-8 "
+                "requires manifest.limitations.weather_schema_asymmetric_"
+                "within_set to declare the asymmetry. Otherwise the "
+                "quality-loss is silent (per feedback_no_data_cooking.md "
+                "+ durable #16 honest-signal contract)."
+            ),
+        )
+
+
 class UnregisteredScenarioInShipModeError(ScenarioSetValidationError):
     """Codex round 1 boundary 4/7 P2-2 absorption: a projection
     package's ``(rcp_or_ssp, time_slice)`` tuple is not in the canonical
@@ -410,6 +462,69 @@ def _check_identity_files(
 # ── Pairing + bias-correction rules ──────────────────────────────────
 
 
+def _wth_column_count(weather_dir: Path) -> Optional[int]:
+    """Return the number of whitespace-separated columns in the first
+    non-comment, non-empty data row of the first WTH file under
+    ``weather_dir``.
+
+    Returns ``None`` if no WTH file is present (out of F-G-8 scope).
+    Comment / header lines (starting with ``@``, ``*``, or ``!``) are
+    skipped so the count reflects the actual data schema.
+    """
+    if not weather_dir.exists() or not weather_dir.is_dir():
+        return None
+    candidates = sorted(
+        list(weather_dir.glob("*.WTH"))
+        + list(weather_dir.glob("*.wth"))
+    )
+    if not candidates:
+        return None
+    first = candidates[0]
+    try:
+        text = first.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(("@", "*", "!", "#")):
+            continue
+        return len(stripped.split())
+    return None
+
+
+def _check_weather_schema_asymmetry(
+    baseline_pkg: Path,
+    projection_pkg: Path,
+    projection_label: str,
+    projection_manifest: Dict[str, Any],
+) -> None:
+    """F-G-8: detect WTH column-count asymmetry + require
+    ``manifest.limitations.weather_schema_asymmetric_within_set``
+    declaration when asymmetric.
+
+    Per Sprint G Draft 5 §AC-G-12 drill 6 + drill 6a + warning-auditor
+    pass-2 MEDIUM-Rebase-1 (general-form limitation key — covers any
+    future asymmetry dimension, not just baseline-5-col-projection-8-col).
+    Per ``feedback_no_data_cooking.md`` honest-signal contract.
+    """
+    base_cols = _wth_column_count(baseline_pkg / "weather")
+    proj_cols = _wth_column_count(projection_pkg / "weather")
+    if base_cols is None or proj_cols is None:
+        return  # Out of scope — no WTH files on at least one side
+    if base_cols == proj_cols:
+        return  # Symmetric — F-G-8 does not fire
+    limitations = projection_manifest.get("limitations") or {}
+    if "weather_schema_asymmetric_within_set" in limitations:
+        return  # Asymmetry declared — honest signal preserved
+    raise WeatherSchemaAsymmetricWithoutLimitationError(
+        package_label=projection_label,
+        baseline_columns=base_cols,
+        projection_columns=proj_cols,
+    )
+
+
 def _check_pairing_rule(
     baseline_manifest: Dict[str, Any],
     projection_manifest: Dict[str, Any],
@@ -564,6 +679,9 @@ def validate_scenario_set(
         _check_pairing_rule(baseline_manifest, proj_manifest, proj_label)
         _check_cell_identity(baseline_path, proj_path, proj_label)
         _check_identity_files(baseline_path, proj_path, proj_label)
+        _check_weather_schema_asymmetry(
+            baseline_path, proj_path, proj_label, proj_manifest
+        )
 
         if mode is ValidationMode.SHIP:
             _check_scenario_period_registered(proj_manifest, proj_label)
@@ -674,5 +792,6 @@ __all__ = [
     "UnknownBiasCorrectionInShipModeError",
     "validate_scenario_set",
     "UnregisteredScenarioInShipModeError",
+    "WeatherSchemaAsymmetricWithoutLimitationError",
     "main",
 ]

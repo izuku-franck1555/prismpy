@@ -45,6 +45,7 @@ from prismpy.validators.scenario_set import (
     ScenarioSetValidationError,
     UnknownBiasCorrectionInShipModeError,
     UnregisteredScenarioInShipModeError,
+    WeatherSchemaAsymmetricWithoutLimitationError,
     ValidationMode,
     validate_scenario_set,
 )
@@ -159,6 +160,51 @@ def _write_weather_differ(package_dir: Path, marker: str) -> None:
     (package_dir / "weather").mkdir(parents=True, exist_ok=True)
     (package_dir / "weather" / "data.wth").write_text(
         f"weather-data-marker={marker}\n", encoding="utf-8"
+    )
+
+
+def _write_wth_with_columns(
+    package_dir: Path,
+    *,
+    columns: int,
+    marker: str = "synthetic",
+) -> None:
+    """Write a synthetic WTH file with a specified column count for
+    F-G-8 weather-schema-asymmetry drills.
+
+    Per AC-G-12 drill 6 + 6a: baseline 5-col vs projection 8-col is
+    the canonical asymmetry. The validator's column-count check skips
+    @ / * / ! / # comment lines and counts whitespace-separated
+    tokens on the first data row.
+
+    Overwrites the marker ``data.wth`` written by
+    ``_write_weather_differ`` so the validator sees a single WTH file
+    with the requested column count (rather than the 1-col marker
+    masking the asymmetry).
+    """
+    (package_dir / "weather").mkdir(parents=True, exist_ok=True)
+    # Remove any stale 1-col marker file from _write_weather_differ
+    marker_file = package_dir / "weather" / "data.wth"
+    if marker_file.exists():
+        marker_file.unlink()
+    header_tokens = [
+        "DATE",
+        "TMAX",
+        "TMIN",
+        "TDEW",
+        "RAIN",
+        "RH",
+        "SRAD",
+        "WIND",
+        "ETO",
+        "EXTRA",
+    ][:columns]
+    data_tokens = ["2046001"] + [f"{1.0 + i:.1f}" for i in range(columns - 1)]
+    (package_dir / "weather" / "data.wth").write_text(
+        "@ {}\n".format(" ".join(header_tokens))
+        + " ".join(data_tokens)
+        + f"\n# marker={marker}\n",
+        encoding="utf-8",
     )
 
 
@@ -540,6 +586,215 @@ def test_unregistered_scenario_allowed_in_legacy_mode(tmp_path: Path) -> None:
     # registration check.
     result = validate_scenario_set(base, [proj], mode=ValidationMode.LEGACY)
     assert result is None
+
+
+# ── AC-G-12 drill #5 — CO₂ canonical mismatch via validator pipeline ─
+
+
+def test_drill_5_co2_ppm_mismatch_via_validator_pipeline(
+    tmp_path: Path,
+) -> None:
+    """AC-G-12 drill #5: when a projection's manifest carries a
+    co2_ppm value that disagrees with the canonical lookup for
+    its (rcp_or_ssp, time_slice) tuple, ``validate_scenario_set``
+    surfaces the AC-G-9 Layer 2 ``CO2ProvenanceMismatchError``
+    wrapped in ``ScenarioSetValidationError`` (because
+    ``_validate_scenario_block`` re-validates the manifest payload
+    via ``ScenarioBlock.model_validate`` after the disk read)."""
+    base, proj = _build_pair_fixture(tmp_path)
+    proj_manifest = json.loads(
+        (proj / "manifest.json").read_text(encoding="utf-8")
+    )
+    proj_manifest["scenario"]["co2_ppm"] = 999.0  # canonical SSP585 (2046, 2065) is 571.0
+    (proj / "manifest.json").write_text(
+        json.dumps(proj_manifest, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ScenarioSetValidationError) as exc_info:
+        validate_scenario_set(base, [proj], mode=ValidationMode.SHIP)
+    msg = str(exc_info.value)
+    # Either the AC-G-9 Layer 2 wrapped message or the canonical key
+    assert "canonical" in msg.lower() or "Layer 2" in msg or "999" in msg
+
+
+def test_drill_5_co2_ppm_provenance_paraphrase_via_validator_pipeline(
+    tmp_path: Path,
+) -> None:
+    """Companion drill: paraphrased provenance string (non-empty but
+    not the canonical citation) also surfaces via the validator
+    pipeline."""
+    base, proj = _build_pair_fixture(tmp_path)
+    proj_manifest = json.loads(
+        (proj / "manifest.json").read_text(encoding="utf-8")
+    )
+    proj_manifest["scenario"]["co2_ppm_provenance"] = (
+        "AR6 mid-period (paraphrased)"
+    )
+    (proj / "manifest.json").write_text(
+        json.dumps(proj_manifest, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ScenarioSetValidationError):
+        validate_scenario_set(base, [proj], mode=ValidationMode.SHIP)
+
+
+# ── AC-G-12 drill #6 — F-G-8 weather schema asymmetric without limitation ─
+
+
+def test_drill_6_wth_asymmetric_without_limitation_fires_f_g_8(
+    tmp_path: Path,
+) -> None:
+    """AC-G-12 drill #6 + F-G-8: 5-col WTH baseline + 8-col WTH
+    projection MUST declare ``manifest.limitations.weather_schema_
+    asymmetric_within_set``. Without the declaration, the validator
+    fires ``WeatherSchemaAsymmetricWithoutLimitationError``."""
+    base, proj = _build_pair_fixture(tmp_path)
+    # Replace the trivial 1-col weather marker with structured WTH files
+    _write_wth_with_columns(base, columns=5, marker="baseline-5-col")
+    _write_wth_with_columns(proj, columns=8, marker="projection-8-col")
+
+    with pytest.raises(
+        WeatherSchemaAsymmetricWithoutLimitationError
+    ) as exc_info:
+        validate_scenario_set(base, [proj], mode=ValidationMode.SHIP)
+    err = exc_info.value
+    assert err.package_label == "projection_1"
+    msg = str(err)
+    assert "5" in msg and "8" in msg
+
+
+def test_drill_6_wth_asymmetric_error_carries_column_counts(
+    tmp_path: Path,
+) -> None:
+    """``WeatherSchemaAsymmetricWithoutLimitationError`` exposes the
+    baseline + projection column counts in the structured fields so
+    the cockpit error rendering can show the mismatch quantitatively."""
+    base, proj = _build_pair_fixture(tmp_path)
+    _write_wth_with_columns(base, columns=5, marker="baseline")
+    _write_wth_with_columns(proj, columns=8, marker="projection")
+
+    try:
+        validate_scenario_set(base, [proj], mode=ValidationMode.SHIP)
+        assert False, "Expected F-G-8 fire"
+    except WeatherSchemaAsymmetricWithoutLimitationError as err:
+        assert err.actual is not None
+        assert "5-col" in err.actual
+        assert "8-col" in err.actual
+        assert (
+            err.failing_field_path
+            == "manifest.limitations.weather_schema_asymmetric_within_set"
+        )
+
+
+# ── AC-G-12 drill #6a — F-G-8 positive companion (limitation declared) ─
+
+
+def test_drill_6a_wth_asymmetric_with_limitation_passes(
+    tmp_path: Path,
+) -> None:
+    """AC-G-12 drill #6a positive companion: 5-col WTH baseline +
+    8-col WTH projection WITH ``manifest.limitations.weather_schema_
+    asymmetric_within_set`` populated → validator passes. Drill #6
+    tests the fire path; #6a tests the pass path. Together they
+    fully calibrate F-G-8 detection."""
+    base, proj = _build_pair_fixture(tmp_path)
+    _write_wth_with_columns(base, columns=5, marker="baseline-5-col")
+    _write_wth_with_columns(proj, columns=8, marker="projection-8-col")
+
+    # Populate the manifest.limitations declaration on the projection
+    proj_manifest = json.loads(
+        (proj / "manifest.json").read_text(encoding="utf-8")
+    )
+    proj_manifest["limitations"] = {
+        "weather_schema_asymmetric_within_set": (
+            "baseline ships 5-col WTH per existing observed-climate "
+            "translators; projection ships 8-col WTH per AC-G-7"
+        )
+    }
+    (proj / "manifest.json").write_text(
+        json.dumps(proj_manifest, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    # Validator passes — asymmetry declared, no F-G-8 fire
+    result = validate_scenario_set(base, [proj], mode=ValidationMode.SHIP)
+    assert result is None
+
+
+def test_drill_6_walker_skips_when_no_wth_files(tmp_path: Path) -> None:
+    """When neither baseline nor projection ships any WTH file, the
+    F-G-8 check is out of scope and does not fire (the trivial
+    ``data.wth`` marker file written by ``_build_pair_fixture`` is
+    1-column on both sides → symmetric → no F-G-8)."""
+    base, proj = _build_pair_fixture(tmp_path)
+    # No mutation — both have 1-col data.wth from fixture default.
+    # Validator passes cleanly.
+    result = validate_scenario_set(base, [proj])
+    assert result is None
+
+
+def test_drill_6_walker_skips_when_symmetric_columns(tmp_path: Path) -> None:
+    """8-col WTH on BOTH sides → symmetric → no F-G-8 fire even
+    without the limitation declaration."""
+    base, proj = _build_pair_fixture(tmp_path)
+    _write_wth_with_columns(base, columns=8, marker="baseline-8-col")
+    _write_wth_with_columns(proj, columns=8, marker="projection-8-col")
+
+    # No limitations declared, but asymmetry doesn't exist.
+    result = validate_scenario_set(base, [proj], mode=ValidationMode.SHIP)
+    assert result is None
+
+
+# ── AC-G-12 fixture inventory pin ────────────────────────────────────
+
+
+def test_ac_g_12_drill_inventory_complete() -> None:
+    """Pin inventory of named drills per AC-G-12 contract §12. A
+    refactor that drops a drill must update this list explicitly,
+    making the omission impossible to miss in code review."""
+    expected_drills = {
+        # Drill #1 — happy path positive
+        "test_happy_path_passes_in_ship_mode",
+        "test_happy_path_passes_in_legacy_mode",
+        "test_happy_path_2_projections_same_method",
+        # Drills #2-#4 — identity coupling
+        "test_drill_cell_id_mutated_fires_identity_drift",
+        "test_drill_lat_lon_drift_fires_identity_drift",
+        "test_drill_identity_file_sha_mutation_fires",
+        "test_drill_identity_file_added_fires_identity_drift",
+        # Pairing rule
+        "test_drill_pairing_rule_wrong_baseline_reference",
+        # Bias-correction conflict
+        "test_drill_bias_correction_conflict_fires",
+        # Drill #5 — CO₂ canonical mismatch
+        "test_drill_5_co2_ppm_mismatch_via_validator_pipeline",
+        "test_drill_5_co2_ppm_provenance_paraphrase_via_validator_pipeline",
+        # Drill #6 + #6a — F-G-8 weather schema asymmetric
+        "test_drill_6_wth_asymmetric_without_limitation_fires_f_g_8",
+        "test_drill_6_wth_asymmetric_error_carries_column_counts",
+        "test_drill_6a_wth_asymmetric_with_limitation_passes",
+        # Drill #7 + #7a — mode disambiguation
+        "test_drill_7_unknown_method_rejected_in_ship_mode",
+        "test_drill_7a_unknown_method_allowed_in_legacy_mode",
+    }
+    # Spot-check by name presence in this module
+    import sys
+
+    this_module = sys.modules[__name__]
+    actual_tests = {
+        name
+        for name in dir(this_module)
+        if name.startswith("test_") and callable(getattr(this_module, name))
+    }
+    missing = expected_drills - actual_tests
+    assert not missing, (
+        f"AC-G-12 drill inventory incomplete. Missing tests: {missing}. "
+        "Per Sprint G Draft 5 §AC-G-12 + warning-auditor pass-2/3 "
+        "MEDIUM-Rebase-4/5 + MEDIUM-Pass3-1: every named drill MUST "
+        "have a calibrating test."
+    )
 
 
 def test_unregistered_scenario_error_carries_structured_fields(
