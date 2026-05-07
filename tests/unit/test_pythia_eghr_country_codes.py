@@ -303,7 +303,15 @@ def test_include_eghr_data_stages_ghr_db_before_resolving_country_codes(
     src_sol_dir.mkdir()
 
     config = _build_project_config(tmp_path)
-    translator = PythiaTranslator(config=config, output_dir=str(tmp_path))
+    # Pin the legacy bundled-file path explicitly: the ordering invariant
+    # this test enforces is specific to that flow (the canonical
+    # substrate path produces GHR.db without copying from a global
+    # source so the staging-before-resolver check does not apply).
+    translator = PythiaTranslator(
+        config=config,
+        output_dir=str(tmp_path),
+        prefer_canonical_substrate=False,
+    )
 
     # Wire the synthetic legacy paths onto the existing pythia config.
     if (
