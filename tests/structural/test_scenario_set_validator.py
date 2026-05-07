@@ -44,6 +44,7 @@ from prismpy.validators.scenario_set import (
     PairingRuleError,
     ScenarioSetValidationError,
     UnknownBiasCorrectionInShipModeError,
+    UnregisteredScenarioInShipModeError,
     ValidationMode,
     validate_scenario_set,
 )
@@ -476,6 +477,90 @@ def test_baseline_with_unknown_method_rejected_in_ship_mode(
 
     with pytest.raises(UnknownBiasCorrectionInShipModeError):
         validate_scenario_set(base, [proj], mode=ValidationMode.SHIP)
+
+
+# ── Codex round 1 boundary 4/7 P2-2 absorption — unregistered scenario ─
+
+
+def test_unregistered_scenario_rejected_in_ship_mode(tmp_path: Path) -> None:
+    """Codex round 1 boundary 4/7 P2-2 absorption: a projection
+    package with a scenario × period not in the canonical
+    ``CO2_PPM_BY_SCENARIO_PERIOD`` table MUST be rejected in ship
+    mode. Without this check, ``ScenarioBlock``'s Layer 2 silently
+    skips and a shipped package could carry an arbitrary CO₂ value."""
+    base, proj = _build_pair_fixture(tmp_path)
+    # Mutate the projection's scenario to an unregistered tuple
+    proj_manifest = json.loads(
+        (proj / "manifest.json").read_text(encoding="utf-8")
+    )
+    proj_manifest["scenario"]["rcp_or_ssp"] = "ssp370"
+    proj_manifest["scenario"]["time_slice_start"] = 2030
+    proj_manifest["scenario"]["time_slice_end"] = 2049
+    proj_manifest["scenario"]["co2_ppm"] = 999.0  # arbitrary
+    (proj / "manifest.json").write_text(
+        json.dumps(proj_manifest, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(UnregisteredScenarioInShipModeError) as exc_info:
+        validate_scenario_set(base, [proj], mode=ValidationMode.SHIP)
+    err = exc_info.value
+    assert "ssp370" in str(err)
+    assert err.package_label == "projection_1"
+
+
+def test_unregistered_scenario_allowed_in_legacy_mode(tmp_path: Path) -> None:
+    """``mode=LEGACY`` honors the external-source path: an
+    unregistered scenario is accepted at the validator level."""
+    base, proj = _build_pair_fixture(tmp_path)
+    proj_manifest = json.loads(
+        (proj / "manifest.json").read_text(encoding="utf-8")
+    )
+    proj_manifest["scenario"]["rcp_or_ssp"] = "ssp370"
+    proj_manifest["scenario"]["time_slice_start"] = 2030
+    proj_manifest["scenario"]["time_slice_end"] = 2049
+    proj_manifest["scenario"]["co2_ppm"] = 999.0
+    (proj / "manifest.json").write_text(
+        json.dumps(proj_manifest, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    # Legacy mode passes — ScenarioBlock Layer 2 skips silently for
+    # unregistered scenarios; validator does not enforce ship-mode
+    # registration check.
+    result = validate_scenario_set(base, [proj], mode=ValidationMode.LEGACY)
+    assert result is None
+
+
+def test_unregistered_scenario_error_carries_structured_fields(
+    tmp_path: Path,
+) -> None:
+    """``UnregisteredScenarioInShipModeError`` exposes the offending
+    scenario + time_slice + package_label so callers (cockpit error
+    rendering) get specific info, not a freeform message."""
+    base, proj = _build_pair_fixture(tmp_path)
+    proj_manifest = json.loads(
+        (proj / "manifest.json").read_text(encoding="utf-8")
+    )
+    proj_manifest["scenario"]["rcp_or_ssp"] = "ssp126"
+    proj_manifest["scenario"]["time_slice_start"] = 2050
+    proj_manifest["scenario"]["time_slice_end"] = 2069
+    proj_manifest["scenario"]["co2_ppm"] = 450.0
+    (proj / "manifest.json").write_text(
+        json.dumps(proj_manifest, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    try:
+        validate_scenario_set(base, [proj], mode=ValidationMode.SHIP)
+        assert False, "Expected UnregisteredScenarioInShipModeError"
+    except UnregisteredScenarioInShipModeError as err:
+        assert err.package_label == "projection_1"
+        assert err.failing_field_path is not None
+        # Message references the scenario + period
+        msg = str(err)
+        assert "ssp126" in msg
+        assert "2050" in msg or "(2050, 2069)" in msg
 
 
 # ── §5.10-§5.11 CLI exit codes ───────────────────────────────────────

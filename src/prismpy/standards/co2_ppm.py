@@ -145,8 +145,22 @@ def get_co2_ppm_with_provenance(
     the canonical lookup. The Layer 3 runtime-emit walker (F-G-2c)
     asserts every translator's projection-mode CO₂ emission sources
     from here.
+
+    Case normalisation: ``rcp_or_ssp`` is upper-cased before the
+    table lookup so the existing prismpy roster (which uses lowercase
+    ``"ssp245"`` / ``"ssp585"`` per
+    :data:`prismpy.standards.isimip_versions.SCENARIO_PRODUCT_MAP`)
+    routes cleanly through this helper. Codex round 1 boundary 4/7
+    P2-1 absorption — without normalisation a translator passing
+    ``"ssp585"`` would raise even though ``ScenarioBlock`` accepts
+    the same identifier.
     """
-    key = (rcp_or_ssp, tuple(time_slice))  # type: ignore[assignment]
+    if not isinstance(rcp_or_ssp, str):
+        raise ValueError(
+            f"rcp_or_ssp must be str, got {type(rcp_or_ssp).__name__}"
+        )
+    normalised_scenario = rcp_or_ssp.upper()
+    key = (normalised_scenario, tuple(time_slice))  # type: ignore[assignment]
     if key not in CO2_PPM_BY_SCENARIO_PERIOD:
         raise ValueError(
             f"No canonical CO₂ ppm registered for "
@@ -158,6 +172,28 @@ def get_co2_ppm_with_provenance(
             "when adding a new scenario × period."
         )
     return CO2_PPM_BY_SCENARIO_PERIOD[key]
+
+
+def is_registered_scenario_period(
+    rcp_or_ssp: str,
+    time_slice: Tuple[int, int],
+) -> bool:
+    """Return True iff ``(rcp_or_ssp, time_slice)`` is in the canonical
+    table. Mirrors :func:`get_co2_ppm_with_provenance` case-normalisation
+    so the predicate and the lookup stay consistent.
+
+    Per codex round 1 boundary 4/7 P2-2 absorption: the
+    :func:`prismpy.validators.scenario_set.validate_scenario_set` ship-
+    mode pipeline calls this predicate to reject unregistered scenario
+    × period tuples that would otherwise carry arbitrary CO₂ values
+    through Layer 2's silent-skip path.
+    """
+    if not isinstance(rcp_or_ssp, str):
+        return False
+    return (
+        rcp_or_ssp.upper(),
+        tuple(time_slice),
+    ) in CO2_PPM_BY_SCENARIO_PERIOD
 
 
 # ── Exception type for Layer 2 semantic check ────────────────────────
@@ -242,4 +278,5 @@ __all__ = [
     "CO2ProvenanceMismatchError",
     "get_co2_ppm_with_provenance",
     "co2_ppm_matches_canonical",
+    "is_registered_scenario_period",
 ]

@@ -396,7 +396,8 @@ def test_layer1_walker_excludes_function_scope_assignments() -> None:
 
 def test_co2_ppm_module_public_api() -> None:
     """The module exports the canonical table + whitelist + tolerance
-    + lookup + matcher + exception. No internal helpers leaked."""
+    + lookup + matcher + exception + registered-predicate. No
+    internal helpers leaked."""
     import prismpy.standards.co2_ppm as co2_mod
 
     assert set(co2_mod.__all__) == {
@@ -406,4 +407,69 @@ def test_co2_ppm_module_public_api() -> None:
         "CO2ProvenanceMismatchError",
         "get_co2_ppm_with_provenance",
         "co2_ppm_matches_canonical",
+        "is_registered_scenario_period",
     }
+
+
+# ── §8 Codex round 1 boundary 4/7 P2-1 absorption — case normalisation ─
+
+
+def test_lookup_normalises_lowercase_ssp_input() -> None:
+    """Codex round 1 boundary 4/7 P2-1: the canonical lookup MUST
+    accept lowercase ``"ssp245"`` / ``"ssp585"`` (the prismpy
+    roster's existing form) and route to the uppercase canonical
+    table key. Otherwise translators or runtime-emit consumers
+    passing the lowercase form would raise even though
+    ``ScenarioBlock`` accepts the same identifier."""
+    ppm_lower, prov_lower = get_co2_ppm_with_provenance(
+        "ssp245", (2046, 2065)
+    )
+    ppm_upper, prov_upper = get_co2_ppm_with_provenance(
+        "SSP245", (2046, 2065)
+    )
+    assert ppm_lower == ppm_upper == 478.0
+    assert prov_lower == prov_upper
+
+
+def test_lookup_normalises_mixed_case_input() -> None:
+    """Mixed-case (e.g., ``"Ssp245"``) also normalises."""
+    ppm, _ = get_co2_ppm_with_provenance("Ssp585", (2046, 2065))
+    assert ppm == 571.0
+
+
+def test_lookup_rejects_non_string_scenario() -> None:
+    """Defensive: a non-string scenario id raises a ValueError
+    rather than crashing on ``.upper()``."""
+    with pytest.raises(ValueError, match="must be str"):
+        get_co2_ppm_with_provenance(245, (2046, 2065))  # type: ignore[arg-type]
+
+
+# ── §9 is_registered_scenario_period predicate ──────────────────────
+
+
+def test_is_registered_returns_true_for_canonical_tuple() -> None:
+    """Codex round 1 boundary 4/7 P2-2 absorption: predicate matches
+    the lookup helper's case-normalisation."""
+    from prismpy.standards.co2_ppm import is_registered_scenario_period
+
+    assert is_registered_scenario_period("SSP245", (2046, 2065))
+    assert is_registered_scenario_period("ssp245", (2046, 2065))  # lowercase
+    assert is_registered_scenario_period("SSP585", (2086, 2100))
+
+
+def test_is_registered_returns_false_for_unknown_tuple() -> None:
+    from prismpy.standards.co2_ppm import is_registered_scenario_period
+
+    # Unknown scenario
+    assert not is_registered_scenario_period("SSP370", (2046, 2065))
+    # Unknown time slice
+    assert not is_registered_scenario_period("SSP245", (2030, 2049))
+
+
+def test_is_registered_returns_false_for_non_string() -> None:
+    """Defensive: a non-string scenario id returns False (does not
+    crash)."""
+    from prismpy.standards.co2_ppm import is_registered_scenario_period
+
+    assert not is_registered_scenario_period(None, (2046, 2065))  # type: ignore[arg-type]
+    assert not is_registered_scenario_period(245, (2046, 2065))  # type: ignore[arg-type]

@@ -170,6 +170,52 @@ class UnknownBiasCorrectionInShipModeError(ScenarioSetValidationError):
         )
 
 
+class UnregisteredScenarioInShipModeError(ScenarioSetValidationError):
+    """Codex round 1 boundary 4/7 P2-2 absorption: a projection
+    package's ``(rcp_or_ssp, time_slice)`` tuple is not in the canonical
+    :data:`prismpy.standards.co2_ppm.CO2_PPM_BY_SCENARIO_PERIOD` table.
+
+    Without this check, ``ScenarioBlock``'s Layer 2 post-validator
+    silently skips for unregistered tuples and ``mode=SHIP`` would
+    otherwise let a shipped package carry an arbitrary CO₂ value.
+    Sprint G primary core ensemble is closed: SSP245 / SSP585 × two
+    time-slices each. Adding a new scenario × period requires
+    extending the canonical table atomically with the
+    ``isimip_versions.SCENARIO_TIME_SLICES`` roster.
+
+    ``mode=LEGACY`` does NOT raise this error — external-source
+    packages can carry non-primary scenarios at the user-runtime CLI.
+    """
+
+    def __init__(
+        self,
+        *,
+        package_label: str,
+        rcp_or_ssp: str,
+        time_slice: Tuple[int, int],
+    ) -> None:
+        super().__init__(
+            package_label=package_label,
+            failing_field_path=(
+                "manifest.scenario.rcp_or_ssp + time_slice_start/end"
+            ),
+            expected=(
+                "registered in prismpy.standards.co2_ppm."
+                "CO2_PPM_BY_SCENARIO_PERIOD"
+            ),
+            actual=f"({rcp_or_ssp!r}, {time_slice})",
+            message=(
+                f"{package_label}: scenario × period "
+                f"({rcp_or_ssp!r}, {time_slice}) is not in the "
+                "canonical CO₂ table. Sprint G primary core ensemble "
+                "covers SSP245 / SSP585 × (2046,2065) / (2086,2100); "
+                "extend prismpy.standards.co2_ppm + "
+                "isimip_versions.SCENARIO_TIME_SLICES atomically OR "
+                "use mode=LEGACY for external-source packages."
+            ),
+        )
+
+
 # ── Identity-coupling helpers ────────────────────────────────────────
 
 
@@ -519,9 +565,47 @@ def validate_scenario_set(
         _check_cell_identity(baseline_path, proj_path, proj_label)
         _check_identity_files(baseline_path, proj_path, proj_label)
 
+        if mode is ValidationMode.SHIP:
+            _check_scenario_period_registered(proj_manifest, proj_label)
+
         projection_manifests.append((proj_label, proj_manifest))
 
     _check_bias_correction_methods(projection_manifests, mode=mode)
+
+
+def _check_scenario_period_registered(
+    projection_manifest: Dict[str, Any],
+    projection_label: str,
+) -> None:
+    """Codex round 1 boundary 4/7 P2-2 absorption — ship-mode unregistered-
+    scenario rejection.
+
+    Without this check, ``ScenarioBlock``'s Layer 2 post-validator
+    silently skips for unregistered ``(rcp_or_ssp, time_slice)``
+    tuples and ``mode=SHIP`` would otherwise let a shipped package
+    carry an arbitrary CO₂ value paired with any provenance string.
+    Calls
+    :func:`prismpy.standards.co2_ppm.is_registered_scenario_period`
+    so the predicate stays consistent with the canonical lookup
+    helper (case-normalisation included).
+    """
+    from prismpy.standards.co2_ppm import is_registered_scenario_period
+
+    scenario = projection_manifest.get("scenario") or {}
+    rcp_or_ssp = scenario.get("rcp_or_ssp")
+    start = scenario.get("time_slice_start")
+    end = scenario.get("time_slice_end")
+    if not isinstance(rcp_or_ssp, str) or start is None or end is None:
+        # Schema validation already ran upstream — if we reach here
+        # the fields exist. Defensive guard against a future schema
+        # change that loosens these to optional.
+        return
+    if not is_registered_scenario_period(rcp_or_ssp, (int(start), int(end))):
+        raise UnregisteredScenarioInShipModeError(
+            package_label=projection_label,
+            rcp_or_ssp=rcp_or_ssp,
+            time_slice=(int(start), int(end)),
+        )
 
 
 # ── CLI wrapper ──────────────────────────────────────────────────────
@@ -589,5 +673,6 @@ __all__ = [
     "BiasCorrectionConflictError",
     "UnknownBiasCorrectionInShipModeError",
     "validate_scenario_set",
+    "UnregisteredScenarioInShipModeError",
     "main",
 ]
