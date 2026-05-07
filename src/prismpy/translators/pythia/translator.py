@@ -1802,89 +1802,122 @@ class PythiaTranslator(PythiaTranslatorBase):
     # =========================================================================
 
     def _get_required_country_codes(self) -> set:
-        """Determine which country codes are needed based on soil raster pixels.
+        """Resolve the country codes covered by the per-package eGHR substrate.
 
-        Reads the clipped soil raster, looks up pixel IDs in GHR.db to find
-        the country codes (2-letter ISO codes from profile names like ML04002407).
+        The package's ``raster/soil.tif`` carries an integer pixel id at
+        each cell; the package's ``eGHR/GHR.db`` maps each pixel id to a
+        ten-character profile name whose first two characters are the
+        ISO 3166-1 alpha-2 country code. This helper reads both files
+        from the local per-package paths the substrate builder produces
+        (or that the legacy copy path lays down on top of a bundled
+        eGHR archive) and returns the set of country codes the package
+        actually covers.
+
+        On the happy path — a per-package eGHR substrate is present at
+        ``output_dir/raster/soil.tif`` and ``output_dir/eGHR/GHR.db`` —
+        no fallback fires and the result is the exact country roster
+        the substrate registered. The fallback branch only applies to
+        edge cases where the substrate has not been written yet (early
+        partial runs, tests that exercise this helper without a built
+        substrate, or future code paths that defer the substrate build).
 
         Returns:
-            Set of 2-letter country codes needed for the modeling area
+            Set of 2-letter country codes covered by the package.
+        """
+        soil_raster = self.output_dir / "raster" / "soil.tif"
+        db_path = self.output_dir / "eGHR" / "GHR.db"
+
+        if soil_raster.exists() and db_path.exists():
+            return self._enumerate_countries_from_local_substrate(
+                soil_raster=soil_raster,
+                db_path=db_path,
+            )
+
+        # Substrate not yet present: derive from the region's ISO3 code.
+        # The happy path never reaches this branch once the substrate
+        # builder has run; this is the partial-run / early-test edge.
+        logger.warning(
+            "Per-package eGHR substrate missing (raster=%s db=%s); "
+            "falling back to region country code.",
+            soil_raster.exists(),
+            db_path.exists(),
+        )
+        country_codes: set = set()
+        iso3 = self.config.region.country_iso3
+        if iso3:
+            country_codes.add(self._iso3_to_iso2(iso3))
+        return country_codes
+
+    def _enumerate_countries_from_local_substrate(
+        self,
+        soil_raster: Path,
+        db_path: Path,
+    ) -> set:
+        """Enumerate country codes from the per-package substrate triple.
+
+        Reads unique non-nodata pixel ids from ``soil_raster``, queries
+        ``profile_map.profile`` for the matching rows in ``db_path``,
+        and extracts the 2-letter country prefix from each profile
+        name. Idempotent and side-effect free.
         """
         import sqlite3
 
-        country_codes = set()
+        import numpy as np
+        import rasterio
 
-        # Get soil raster path
-        soil_raster = self.output_dir / "raster" / "soil.tif"
-        if not soil_raster.exists():
-            logger.warning("Soil raster not found, falling back to region country")
-            # Fallback: use the config's country ISO code
-            iso3 = self.config.region.country_iso3
-            if iso3:
-                iso2 = self._iso3_to_iso2(iso3)
-                country_codes.add(iso2)
+        country_codes: set = set()
+
+        with rasterio.open(soil_raster) as src:
+            data = src.read(1)
+            unique_pixels = np.unique(data[data > 0])
+
+        if len(unique_pixels) == 0:
+            logger.warning(
+                "Per-package eGHR substrate has no non-nodata pixel ids in "
+                "soil.tif; package covers no cells."
+            )
             return country_codes
 
-        # Get GHR.db path
-        pythia_config = self.config.platform_config.pythia if self.config.platform_config else None
-        if not pythia_config or not pythia_config.eghr_database_path:
-            return country_codes
-
-        db_path = Path(pythia_config.eghr_database_path)
-        if not db_path.is_absolute():
-            db_path = Path.cwd() / db_path
-
-        if not db_path.exists():
-            logger.warning(f"GHR.db not found at {db_path}")
-            return country_codes
+        logger.info(
+            "Found %d unique soil pixels in modeling area",
+            len(unique_pixels),
+        )
 
         try:
-            import rasterio
-            import numpy as np
-
-            # Read unique pixel IDs from soil raster
-            with rasterio.open(soil_raster) as src:
-                data = src.read(1)
-                # Get unique non-zero pixel IDs
-                unique_pixels = np.unique(data[data > 0])
-
-            if len(unique_pixels) == 0:
-                logger.warning("No valid pixel IDs in soil raster")
-                return country_codes
-
-            logger.info(f"Found {len(unique_pixels)} unique soil pixels in modeling area")
-
-            # Query GHR.db for profile names (which contain country codes)
             conn = sqlite3.connect(str(db_path))
-            cursor = conn.cursor()
-
-            # Query in batches to avoid huge IN clauses
-            batch_size = 1000
-            for i in range(0, len(unique_pixels), batch_size):
-                batch = unique_pixels[i:i+batch_size]
-                placeholders = ','.join('?' * len(batch))
-                cursor.execute(
-                    f"SELECT DISTINCT profile FROM profile_map WHERE id IN ({placeholders})",
-                    batch.tolist()
-                )
-                for row in cursor.fetchall():
-                    profile = row[0]
-                    if profile and len(profile) >= 2:
-                        # Profile format: ML04002407 - first 2 chars are country code
-                        country_code = profile[:2].upper()
-                        country_codes.add(country_code)
-
-            conn.close()
-
-            logger.info(f"Countries covered by modeling area: {sorted(country_codes)}")
-
-        except Exception as e:
-            logger.warning(f"Error determining country codes: {e}")
-            # Fallback to region country
+            try:
+                cursor = conn.cursor()
+                batch_size = 1000
+                for start in range(0, len(unique_pixels), batch_size):
+                    batch = unique_pixels[start : start + batch_size]
+                    placeholders = ",".join("?" * len(batch))
+                    cursor.execute(
+                        "SELECT DISTINCT profile FROM profile_map "
+                        f"WHERE id IN ({placeholders})",
+                        batch.tolist(),
+                    )
+                    for row in cursor.fetchall():
+                        profile = row[0]
+                        if profile and len(profile) >= 2:
+                            country_codes.add(profile[:2].upper())
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            # The local GHR.db is malformed: log and fall back to region.
+            logger.warning(
+                "Failed to read country codes from per-package GHR.db at %s: %s",
+                db_path,
+                exc,
+            )
             iso3 = self.config.region.country_iso3
             if iso3:
-                country_codes.add(iso3[:2])
+                country_codes.add(self._iso3_to_iso2(iso3))
+            return country_codes
 
+        logger.info(
+            "Countries covered by modeling area: %s",
+            sorted(country_codes),
+        )
         return country_codes
 
     def _include_eghr_data(self) -> Optional[Path]:
