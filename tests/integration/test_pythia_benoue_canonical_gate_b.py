@@ -51,6 +51,7 @@ from prismpy.config.schema import (
 from prismpy.models.region import BoundingBox, Region
 from prismpy.models.soil import SoilLayer, SoilProfile
 from prismpy.models.spatial import GridCell, SpatialGrid
+from prismpy.provenance.tracker import ProvenanceTracker
 from prismpy.translators.base import UnifiedData
 from prismpy.translators.pythia.translator import PythiaTranslator
 
@@ -244,9 +245,15 @@ def test_ac8_benoue_canonical_gate_b(
     directly.
     """
     config = _build_benoue_config(tmp_path)
+    provenance = ProvenanceTracker(
+        enabled=True,
+        output_dir=tmp_path,
+        project_name="ac8_benoue_canonical_gate_b",
+    )
     translator = PythiaTranslator(
         config=config,
         output_dir=str(tmp_path),
+        provenance=provenance,
         prefer_canonical_substrate=True,
     )
     data = _build_benoue_unified_data()
@@ -329,4 +336,41 @@ def test_ac8_benoue_canonical_gate_b(
     # Sanity: substrate dispatcher returned the eGHR directory.
     assert eghr_dir == tmp_path / "eGHR", (
         f"_include_eghr_data should return the eGHR directory; got {eghr_dir!r}."
+    )
+
+    # ------------------------------------------------------------------
+    # Contract criterion 5 (Sprint S Gate-B-FIX): provenance.json carries
+    # the dedicated eghr_substrate_decision field set to "canonical". This
+    # is the load-bearing source-of-truth signal added to close the
+    # b5fb6538 false-PASS loop — downstream consumers (the AC-8
+    # reproduction snippet, the evaluator's Gate B verifier) read this
+    # field directly rather than inferring the dispatch decision from
+    # secondary signals like presence-of-CM.SOL or absence-of-fallback-
+    # warnings (durable §24 canonical-source-or-pin).
+    # ------------------------------------------------------------------
+    assert provenance.record.eghr_substrate_decision == "canonical", (
+        "AC-8 contract criterion 5 (Sprint S Gate-B-FIX): "
+        "provenance.record.eghr_substrate_decision must be 'canonical' "
+        f"after the canonical-path dispatch; got "
+        f"{provenance.record.eghr_substrate_decision!r}."
+    )
+    assert provenance.record.eghr_substrate_reason == "ok", (
+        "AC-8 contract criterion 5 (Sprint S Gate-B-FIX): "
+        "provenance.record.eghr_substrate_reason must be 'ok' on the "
+        f"canonical happy path; got {provenance.record.eghr_substrate_reason!r}."
+    )
+
+    # Belt-and-suspenders: serialize the record to JSON via to_dict()
+    # and re-read the keys; the AC-8 reproduction snippet reads the
+    # serialized JSON, so the field MUST survive serialization.
+    serialized = provenance.record.to_dict()
+    assert serialized.get("eghr_substrate_decision") == "canonical", (
+        "AC-8 contract criterion 5 serialization: provenance.json must "
+        "carry 'eghr_substrate_decision' == 'canonical' at top level "
+        f"after to_dict(); got {serialized.get('eghr_substrate_decision')!r}."
+    )
+    assert serialized.get("eghr_substrate_reason") == "ok", (
+        "AC-8 contract criterion 5 serialization: provenance.json must "
+        "carry 'eghr_substrate_reason' == 'ok' at top level after "
+        f"to_dict(); got {serialized.get('eghr_substrate_reason')!r}."
     )

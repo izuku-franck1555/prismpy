@@ -824,6 +824,75 @@ class ProvenanceTracker:
         # leak through.
         self.record.stage_1_verdicts_snapshot = copy.deepcopy(snapshot)
 
+    def set_eghr_substrate_decision(
+        self,
+        decision: str,
+        reason: str,
+    ) -> None:
+        """Sprint S Gate-B-FIX — record the eGHR substrate dispatch.
+
+        Called by :class:`prismpy.translators.pythia.translator.PythiaTranslator`
+        from inside ``_include_eghr_data(data)`` after the canonical-
+        vs-legacy dispatch decision is taken. Writes both the
+        machine-readable decision (``"canonical"`` or
+        ``"legacy_bundled"``) and the reason code (``"ok"``,
+        ``"disabled_via_flag"``, ``"disabled_via_env"``,
+        ``"inputs_unavailable"``) to dedicated top-level fields on
+        :class:`prismpy.models.provenance.ProvenanceRecord` so
+        downstream consumers — the AC-8 reproduction snippet, the
+        evaluator's Gate B verifier, and Dr. Kofi's grep-the-package
+        workflow — read an unambiguous binary signal.
+
+        Per durable §24 canonical-source-or-pin: the field IS the
+        source of truth for "did the canonical substrate path run
+        on this package". Consumers MUST NOT re-derive the
+        dispatch decision from secondary signals (e.g., presence
+        of ``eGHR/{CC}.SOL``, absence of "SOL file not found"
+        warnings, raster-vs-database row count); inferring is
+        exactly the detective work that produced the false-PASS
+        on the b5fb6538 evaluator run.
+
+        Args:
+            decision: ``"canonical"`` or ``"legacy_bundled"``. The
+                receiver MUST validate this enum on read; a value
+                outside the two accepted strings indicates a
+                producer/consumer drift (durable §24 / Sprint S
+                two-vocabulary observational memo).
+            reason: One of ``"ok"`` / ``"disabled_via_flag"`` /
+                ``"disabled_via_env"`` / ``"inputs_unavailable"``.
+
+        Returns:
+            None. The record is mutated in place. Callers should
+            not rely on ordering guarantees with respect to other
+            ``record_*`` / ``set_*`` calls; idempotent overwrites
+            are safe (last write wins).
+        """
+        if not self.enabled:
+            return
+        # Validate the enum at the schema boundary per durable §6.4
+        # schema-layer discipline. A bad call site fails loud here
+        # rather than persisting a junk value that the AC-8 snippet
+        # later struggles to interpret.
+        accepted_decisions = {"canonical", "legacy_bundled"}
+        if decision not in accepted_decisions:
+            raise ValueError(
+                f"eghr_substrate_decision must be one of {sorted(accepted_decisions)}; "
+                f"got {decision!r}"
+            )
+        accepted_reasons = {
+            "ok",
+            "disabled_via_flag",
+            "disabled_via_env",
+            "inputs_unavailable",
+        }
+        if reason not in accepted_reasons:
+            raise ValueError(
+                f"eghr_substrate_reason must be one of {sorted(accepted_reasons)}; "
+                f"got {reason!r}"
+            )
+        self.record.eghr_substrate_decision = decision
+        self.record.eghr_substrate_reason = reason
+
     def record_wizard_decision(
         self,
         record_payload: Union[Dict[str, Any], "WizardOverrideRecord"],

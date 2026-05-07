@@ -312,6 +312,22 @@ class ProvenanceRecord:
     # field per codex Gate A #14 — explicit, not a vague
     # ``metadata`` bag.
     stage_1_verdicts_snapshot: Optional[Dict[str, Any]] = None
+    # Sprint S Gate-B-FIX — eGHR substrate dispatch decision.
+    # Populated by ``ProvenanceTracker.set_eghr_substrate_decision(...)``
+    # at PYTHIA Step 7 (``_include_eghr_data`` dispatch) with one of
+    # ``"canonical"`` or ``"legacy_bundled"``; the matching
+    # ``eghr_substrate_reason`` carries the machine-readable cause
+    # code (``"ok"``, ``"disabled_via_flag"``, ``"disabled_via_env"``,
+    # ``"inputs_unavailable"``). Distinct top-level fields per the
+    # codex Gate A #14 pattern — explicit, not a generic metadata
+    # bag — so downstream consumers (the AC-8 reproduction snippet,
+    # the evaluator's Gate B verifier, Dr. Kofi's grep-the-package
+    # workflow) read an unambiguous binary signal of which substrate
+    # path ran. ``None`` for runs from a translator without Sprint S
+    # canonical-substrate support (the absence is itself a signal
+    # that the package was built with pre-Sprint-S code).
+    eghr_substrate_decision: Optional[str] = None
+    eghr_substrate_reason: Optional[str] = None
 
     def add_artifact(self, lineage: DataLineage) -> None:
         """Add an artifact lineage to the record."""
@@ -436,6 +452,26 @@ class ProvenanceRecord:
                     self.stage_1_verdicts_snapshot
                 )}
                 if self.stage_1_verdicts_snapshot is not None
+                else {}
+            ),
+            # Sprint S Gate-B-FIX — eGHR substrate dispatch decision
+            # surfaced at top level so the AC-8 reproduction snippet,
+            # the evaluator Gate B verifier, and Dr. Kofi's grep
+            # workflow read an unambiguous binary signal. Omit when
+            # ``None`` so packages built by pre-Sprint-S translators
+            # (no canonical-substrate dispatch) keep the legacy
+            # provenance.json shape and the absence-of-key serves as
+            # the "this run was on stale code" signal. Per durable
+            # §24 canonical-source-or-pin: this is the source of
+            # truth field; consumers must NOT infer the dispatch
+            # decision from secondary signals (presence of CM.SOL,
+            # absence of fallback warnings, etc.).
+            **(
+                {
+                    "eghr_substrate_decision": self.eghr_substrate_decision,
+                    "eghr_substrate_reason": self.eghr_substrate_reason,
+                }
+                if self.eghr_substrate_decision is not None
                 else {}
             ),
         }
