@@ -202,8 +202,27 @@ class ScenarioBlock(BaseModel):
             "MissingProvenanceError at construction."
         ),
     )
+    scenario_bias_correction_provenance: Optional[str] = Field(
+        default=None,
+        description=(
+            "Version-pinned bias-correction provenance string sourced "
+            "from ISIMIP dataset metadata at fetch time. Format: "
+            "'<method_name> v<method_version> against <reference_dataset> "
+            "v<reference_version>' "
+            "(e.g., 'ISIMIP3BASD v2.5.0 quantile-mapping against W5E5 "
+            "v2.0'). Mandatory when bias_correction_method != 'none' per "
+            "AC-G-11 honest-signal contract; empty / whitespace / None "
+            "with a non-none method at ship time raises "
+            "MissingProvenanceError. NONE method (observed baseline) "
+            "is exempt."
+        ),
+    )
 
-    @field_validator("co2_ppm_provenance", mode="before")
+    @field_validator(
+        "co2_ppm_provenance",
+        "scenario_bias_correction_provenance",
+        mode="before",
+    )
     @classmethod
     def _strip_provenance_whitespace(cls, value: Optional[str]) -> Optional[str]:
         """Normalize whitespace-only provenance to None so the
@@ -243,6 +262,41 @@ class ScenarioBlock(BaseModel):
                 "co2_ppm_provenance is mandatory when co2_ppm is set. "
                 "Per AC-G-10 / CC-G-3, every numeric scenario field "
                 "needs a provenance string for audit traceability."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_bias_correction_provenance_pairing(self) -> "ScenarioBlock":
+        """AC-G-11 enforcement: when ``bias_correction_method`` is not
+        ``NONE``, ``scenario_bias_correction_provenance`` MUST be a
+        non-empty, non-whitespace string. Empty / whitespace / None
+        raises ``MissingProvenanceError``.
+
+        ``BiasCorrectionMethod.NONE`` (observed-climate baseline) is
+        exempt because there is no bias-correction algorithm applied —
+        the observed data is observed; provenance is the climate-source
+        provenance, not a bias-correction citation.
+
+        Honest-signal contract per ``feedback_no_data_cooking.md``:
+        every projection that applied a bias-correction algorithm must
+        carry the version-pinned citation so Dr. Kofi can audit the
+        full transformation chain (which version of which algorithm
+        against which reference dataset).
+        """
+        # ``use_enum_values=True`` config means
+        # ``self.bias_correction_method`` is the str value, not the
+        # enum instance. Compare against the enum's string value.
+        if self.bias_correction_method == BiasCorrectionMethod.NONE.value:
+            return self
+        if not self.scenario_bias_correction_provenance:
+            raise MissingProvenanceError(
+                "scenario_bias_correction_provenance is mandatory when "
+                f"bias_correction_method={self.bias_correction_method!r} "
+                "(non-NONE). Per AC-G-11 honest-signal contract, every "
+                "bias-correction algorithm application must carry a "
+                "version-pinned provenance citation. Format: "
+                "'<method_name> v<method_version> against "
+                "<reference_dataset> v<reference_version>'."
             )
         return self
 

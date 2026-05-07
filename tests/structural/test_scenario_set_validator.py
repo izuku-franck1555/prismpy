@@ -90,6 +90,10 @@ def _projection_block_kwargs(
         "co2_ppm_provenance": (
             "AR6 WG1 Annex III + RCMIP, mid-year-of-period convention"
         ),
+        # AC-G-11: bias-correction provenance mandatory for non-NONE method
+        "scenario_bias_correction_provenance": (
+            "ISIMIP3BASD v2.5.0 quantile-mapping against W5E5 v2.0"
+        ),
     }
 
 
@@ -465,11 +469,17 @@ def test_baseline_with_unknown_method_rejected_in_ship_mode(
     """The baseline itself with method='unknown' is rejected outright
     in ship mode (F-G-3 covers all packages, not just projections)."""
     base, proj = _build_pair_fixture(tmp_path)
-    # Mutate the baseline to use unknown.
+    # Mutate the baseline to use unknown. AC-G-11 requires a non-NONE
+    # method to also carry a bias-correction provenance string;
+    # populate it so this drill exercises F-G-3 (the unknown-method
+    # ship-mode rejection) rather than tripping AC-G-11 first.
     base_manifest = json.loads(
         (base / "manifest.json").read_text(encoding="utf-8")
     )
     base_manifest["scenario"]["bias_correction_method"] = "unknown"
+    base_manifest["scenario"]["scenario_bias_correction_provenance"] = (
+        "synthetic legacy provenance for AC-G-11 compatibility"
+    )
     (base / "manifest.json").write_text(
         json.dumps(base_manifest, indent=2, sort_keys=True),
         encoding="utf-8",

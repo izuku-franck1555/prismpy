@@ -96,6 +96,10 @@ def _valid_block_kwargs() -> Dict[str, Any]:
         "co2_ppm_provenance": (
             "AR6 WG1 Annex III + RCMIP, mid-year-of-period convention"
         ),
+        # AC-G-11: bias-correction provenance mandatory for non-NONE method
+        "scenario_bias_correction_provenance": (
+            "ISIMIP3BASD v2.5.0 quantile-mapping against W5E5 v2.0"
+        ),
     }
 
 
@@ -580,3 +584,138 @@ def test_layer2_accepts_all_4_canonical_tuples() -> None:
         kwargs["co2_ppm"] = ppm
         block = ScenarioBlock(**kwargs)
         assert block.co2_ppm == ppm
+
+
+# ── §AC-G-10 confirmation — co2_ppm_provenance mandatory ─────────────
+
+
+def test_ac_g_10_co2_provenance_mandatory_for_any_method() -> None:
+    """AC-G-10: co2_ppm is a required field, so co2_ppm_provenance
+    must be a non-empty + non-whitespace string regardless of
+    bias_correction_method (CO₂ canonical-source pairing applies to
+    every package, not just non-NONE methods). Pin confirms
+    Sprint G AC-G-3+4's _check_co2_provenance_pairing wiring stays
+    intact under boundary 5/7's parallel AC-G-11 work."""
+    kwargs = _valid_block_kwargs()
+    # Even with NONE method, co2_ppm_provenance is mandatory
+    kwargs["bias_correction_method"] = BiasCorrectionMethod.NONE
+    kwargs["rcp_or_ssp"] = "observed"
+    kwargs["co2_ppm"] = 410.0
+    kwargs["co2_ppm_provenance"] = (
+        "AR6 WG1 Annex III observed atmospheric record"
+    )
+    # AC-G-11 doesn't require bias-correction provenance for NONE
+    kwargs["scenario_bias_correction_provenance"] = None
+    # Should validate cleanly
+    block = ScenarioBlock(**kwargs)
+    assert block.co2_ppm_provenance.startswith("AR6")
+
+
+# ── §AC-G-11 bias-correction provenance pairing ──────────────────────
+
+
+def test_ac_g_11_bias_correction_provenance_mandatory_for_quantile_mapping() -> None:
+    """AC-G-11: bias_correction_method != NONE requires
+    scenario_bias_correction_provenance non-empty. None / empty raises
+    MissingProvenanceError wrapped in ValidationError."""
+    kwargs = _valid_block_kwargs()
+    kwargs["scenario_bias_correction_provenance"] = None
+    with pytest.raises(ValidationError) as exc_info:
+        ScenarioBlock(**kwargs)
+    assert "bias_correction" in str(exc_info.value).lower()
+
+
+def test_ac_g_11_bias_correction_provenance_empty_string_rejected() -> None:
+    """Empty string is normalised to None by the field validator,
+    then raises via the post-validator."""
+    kwargs = _valid_block_kwargs()
+    kwargs["scenario_bias_correction_provenance"] = ""
+    with pytest.raises(ValidationError):
+        ScenarioBlock(**kwargs)
+
+
+def test_ac_g_11_bias_correction_provenance_whitespace_rejected() -> None:
+    """Whitespace-only string also normalises to None and raises."""
+    kwargs = _valid_block_kwargs()
+    kwargs["scenario_bias_correction_provenance"] = "   "
+    with pytest.raises(ValidationError):
+        ScenarioBlock(**kwargs)
+
+
+def test_ac_g_11_none_method_is_exempt_from_provenance_pairing() -> None:
+    """Observed-climate baseline with bias_correction_method=NONE has
+    no bias-correction algorithm applied; provenance is exempt.
+    A baseline can construct without scenario_bias_correction_provenance
+    set."""
+    kwargs = _valid_block_kwargs()
+    kwargs["scenario_role"] = ScenarioRole.BASE
+    kwargs["bias_correction_method"] = BiasCorrectionMethod.NONE
+    kwargs["scenario_bias_correction_provenance"] = None
+    # Need to clear the canonical-CO₂ check (use a non-canonical
+    # scenario for the baseline).
+    kwargs["rcp_or_ssp"] = "observed"
+    kwargs["time_slice_start"] = 2017
+    kwargs["time_slice_end"] = 2021
+    kwargs["co2_ppm"] = 410.0
+    kwargs["co2_ppm_provenance"] = "observed historical record"
+    block = ScenarioBlock(**kwargs)
+    assert block.scenario_bias_correction_provenance is None
+    assert block.bias_correction_method == "none"
+
+
+def test_ac_g_11_canonical_format_string_validates() -> None:
+    """The canonical format
+    '<method_name> v<method_version> against <reference_dataset>
+    v<reference_version>' validates cleanly. Pin documents the
+    expected shape so future audit consumers grep on the format."""
+    kwargs = _valid_block_kwargs()
+    kwargs["scenario_bias_correction_provenance"] = (
+        "ISIMIP3BASD v2.5.0 quantile-mapping against W5E5 v2.0"
+    )
+    block = ScenarioBlock(**kwargs)
+    assert "ISIMIP3BASD" in block.scenario_bias_correction_provenance
+    assert "W5E5" in block.scenario_bias_correction_provenance
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        BiasCorrectionMethod.DELTA_METHOD,
+        BiasCorrectionMethod.QUANTILE_MAPPING,
+        BiasCorrectionMethod.TREND_PRESERVING,
+        BiasCorrectionMethod.UNKNOWN,
+    ],
+)
+def test_ac_g_11_all_non_none_methods_require_provenance(
+    method: BiasCorrectionMethod,
+) -> None:
+    """Every non-NONE bias_correction_method requires the provenance
+    string. Catches a future enum addition that would silently bypass
+    AC-G-11 at the boundary."""
+    kwargs = _valid_block_kwargs()
+    kwargs["bias_correction_method"] = method
+    kwargs["scenario_bias_correction_provenance"] = None
+    with pytest.raises(ValidationError):
+        ScenarioBlock(**kwargs)
+
+
+def test_ac_g_11_field_default_is_none() -> None:
+    """The new field defaults to None — backward-compat for callers
+    that don't set it explicitly. The post-validator decides whether
+    None is acceptable based on bias_correction_method."""
+    from prismpy.models.scenario import ScenarioBlock as SB
+
+    field_info = SB.model_fields["scenario_bias_correction_provenance"]
+    assert field_info.default is None
+
+
+def test_ac_g_11_provenance_appears_in_model_dump() -> None:
+    """The new field round-trips through ``model_dump()`` so the
+    manifest writer surfaces it at
+    ``manifest.scenario.scenario_bias_correction_provenance``."""
+    block = ScenarioBlock(**_valid_block_kwargs())
+    payload = block.model_dump()
+    assert "scenario_bias_correction_provenance" in payload
+    assert payload["scenario_bias_correction_provenance"] == (
+        "ISIMIP3BASD v2.5.0 quantile-mapping against W5E5 v2.0"
+    )
