@@ -29,6 +29,10 @@ grep structural pins. Re-anchored to [815, 1500] in Sprint
 F + bucket-fix train + #227 fix to absorb per-crop physiology
 bounds + Köppen substrate + cell-id companion-file pins +
 cockpit-dimension-bucket map structural pin. Re-anchored to
+[815, 1700] in Sprint S to absorb the per-package eGHR
+substrate builder's new tests (AC-1 byte-pin + AC-2
+substrate-builder integration + headroom for AC-3 through
+AC-13 of Sprint S). Re-anchored to
 [815, 1750] in Sprint G AC-G-2.0 cache primitive extraction
 + remaining Sprint G ACs to size headroom for ``test_cache_base.py``
 sibling-sweep + per-AC pins (AC-G-1 typed exceptions, AC-G-3
@@ -49,6 +53,16 @@ provenance + bias-correction provenance string) + boundary 6/7
 Re-anchored to [815, 2000] at Sprint G boundary 7/7 absorption
 (post-codex-round-2 P1 ISIMIP→SARRA mapping + unit conversions
 + 4 structural pins via ``test_isimip_to_sarra_mapping.py``).
+Re-anchored to [815, 2200] at the Sprint G/Sprint S rebase
+reconciliation — Sprint G branch (anchored at 1894 + 5.6%
+headroom pre-rebase) replayed onto post-Sprint-S main yields
+empirical post-rebase count 1982; new cap 2200 = 1982 + 218
+headroom = ~11% (matches the historical 5–15% pattern
+documented across Sprint D.1, E.0, E.0.5, F, G stages, and
+Sprint S). Per the pin's contract requirement of "after a
+new sprint deliberately changes the trajectory" — both
+Sprint S (200-unit delta) and Sprint G (500-unit delta) are
+deliberate; the rebased branch reflects both.
 Kept in sync with ``test_sprint_d_trajectory.py`` since both
 pins measure the same ``pytest tests/ --collect-only`` count.
 
@@ -73,12 +87,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _LOWER = 815
 # Sprint S re-anchor: 1500 -> 1700 (per-package eGHR substrate).
-# Sprint G replay continues: 1700 -> 1750 (cache-primitive
-# extraction) -> 1900 (boundary 3/7 close, post-AC-G-7c
-# SARRA-Py GeoTIFF) -> 2000 (boundary 7/7 absorption, this
-# commit, post-codex-round-2 P1 ISIMIP→SARRA mapping + unit
-# conversions). Each replay layer absorbs further test growth.
-_UPPER = 2000
+# Sprint G replay: 1700 -> 1750 (cache-primitive extraction)
+# -> 1900 (boundary 3/7 close) -> 2000 (boundary 7/7 absorption).
+# Sprint G/S rebase reconciliation: 2000 -> 2200 (empirical
+# post-rebase count 1982 + ~11% headroom; matches historical
+# 5-15% pattern).
+_UPPER = 2200
 
 
 class TestSprintCTrajectory(TestCase):

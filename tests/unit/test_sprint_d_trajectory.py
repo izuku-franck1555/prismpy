@@ -43,6 +43,10 @@ Sprint D.1 band rationale:
     absorb per-crop physiology bounds + Köppen substrate +
     cell-id companion-file pins + cockpit-dimension-bucket
     map structural pin.
+  - 1500 → 1700 (Sprint S) to absorb the per-package eGHR
+    substrate builder's new tests (AC-1 byte-pin + AC-2
+    substrate-builder integration + headroom reserved for
+    AC-3 through AC-13 of Sprint S).
   - 1500 → 1750 (Sprint G AC-G-2.0 cache primitive
     extraction + remaining Sprint G ACs) to absorb the
     sibling-sweep ``test_cache_base.py`` + per-AC pins for
@@ -73,6 +77,18 @@ Sprint D.1 band rationale:
     + two-vocabulary AST walker per
     ``feedback_two_vocabulary_substrate_drift.md`` +
     sibling-sweep over SARRA-Py translator). Pre-bump count 1906.
+  - 2000 → 2200 (Sprint G/Sprint S rebase reconciliation) —
+    Sprint G branch (anchored at 1894 + 106 headroom = 5.6%
+    pre-rebase) replayed onto post-Sprint-S main reveals the
+    combined trajectory exceeds the prior Sprint G cap. Empirical
+    post-rebase count: 1982 collected. New cap 2200 = 1982 +
+    218 headroom = ~11% (matches the historical 5–15% pattern
+    documented across Sprint D.1, E.0, E.0.5, F, G stages, and
+    Sprint S). Per the pin's contract requirement of "after a
+    new sprint deliberately changes the trajectory" — both
+    Sprint S (200-unit delta from common base 1500) and Sprint G
+    (500-unit delta) are deliberate; the rebased branch reflects
+    both.
 
 Re-anchor this pin by updating ``_LOWER`` / ``_UPPER`` after a
 new sprint deliberately changes the trajectory.
@@ -91,11 +107,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _LOWER = 815
 # Sprint S re-anchor: 1500 -> 1700 (per-package eGHR substrate).
-# Sprint G replay continues: 1700 -> 1750 (cache-primitive
-# extraction) -> 1900 (boundary 3/7 close) -> 2000 (boundary 7/7
-# absorption, this commit). Kept in sync with
-# ``test_sprint_c_trajectory.py``.
-_UPPER = 2000
+# Sprint G replay: 1700 -> 1750 (cache-primitive extraction)
+# -> 1900 (boundary 3/7 close) -> 2000 (boundary 7/7 absorption).
+# Sprint G/S rebase reconciliation: 2000 -> 2200 (empirical
+# post-rebase count 1982 + ~11% headroom; matches historical
+# 5-15% pattern). Kept in sync with ``test_sprint_c_trajectory.py``.
+_UPPER = 2200
 
 
 class TestSprintDTrajectory(TestCase):
