@@ -224,3 +224,115 @@ def test_no_unused_profile_map_rows(tmp_path: Path) -> None:
         f"{sorted(unused)}. The producer is shipping more profiles than the "
         "raster uses."
     )
+
+
+def _build_substrate_with_sol(tmp_path: Path):
+    """Build the same tiny substrate as ``_build_substrate`` and return
+    all three artifact paths (raster, GHR.db, .SOL).
+    """
+    db_path, raster_path = _build_substrate(tmp_path)
+    sol_path = db_path.parent / "CM.SOL"
+    return raster_path, db_path, sol_path
+
+
+def _parse_sol_profile_names(sol_path: Path) -> set:
+    """Read ``*<name>`` profile-block headers from a .SOL file.
+
+    Returns the 10-character profile names (rstripped) the canonical
+    SOL writer emits for each profile block. Skips the file-level
+    ``*SOILS:`` banner.
+    """
+    text = sol_path.read_text()
+    return {
+        line[1:11].rstrip()
+        for line in text.splitlines()
+        if line.startswith("*") and not line.startswith("*SOILS:")
+    }
+
+
+def test_every_db_profile_name_appears_as_sol_block_header(tmp_path: Path) -> None:
+    """Every ``profile_map.profile`` value appears as a ``*<name>`` header.
+
+    The producer-side guarantee that PYTHIA's lookup chain works
+    end-to-end: a raster pixel returns an id, the id returns a name
+    via ``profile_map``, and the name resolves to a profile block in
+    ``{CC}.SOL``. If any DB row has no matching SOL header, the
+    PYTHIA simulation hits the lookup chain and fails to find the
+    profile content; this pin asserts the producer never ships that
+    state.
+    """
+    raster_path, db_path, sol_path = _build_substrate_with_sol(tmp_path)
+
+    with sqlite3.connect(db_path) as conn:
+        db_profile_names = {
+            str(row[0])
+            for row in conn.execute("SELECT profile FROM profile_map").fetchall()
+        }
+
+    sol_profile_names = _parse_sol_profile_names(sol_path)
+
+    missing = db_profile_names - sol_profile_names
+    assert not missing, (
+        f"profile_map carries names that have no matching ``*<name>`` block "
+        f"in the .SOL: {sorted(missing)}. PYTHIA's lookup chain (raster -> "
+        f"profile_map -> SOL) will fail for any of these names."
+    )
+
+
+def test_every_sol_block_header_appears_in_profile_map(tmp_path: Path) -> None:
+    """Every ``*<name>`` SOL block has a matching ``profile_map`` row.
+
+    The reverse of the previous pin: a SOL block whose name is absent
+    from ``profile_map`` is a profile that no raster pixel can ever
+    reach (because the lookup goes raster -> profile_map -> SOL, and
+    a missing profile_map row means no raster pixel can resolve to
+    that name). Such a block is dead weight in the .SOL — it bloats
+    the file, weakens byte-identical idempotency guarantees, and
+    indicates the SOL writer received profiles the substrate builder
+    never registered.
+    """
+    raster_path, db_path, sol_path = _build_substrate_with_sol(tmp_path)
+
+    with sqlite3.connect(db_path) as conn:
+        db_profile_names = {
+            str(row[0])
+            for row in conn.execute("SELECT profile FROM profile_map").fetchall()
+        }
+
+    sol_profile_names = _parse_sol_profile_names(sol_path)
+
+    orphan_blocks = sol_profile_names - db_profile_names
+    assert not orphan_blocks, (
+        f".SOL contains ``*<name>`` blocks with no matching profile_map row: "
+        f"{sorted(orphan_blocks)}. No raster pixel can reach these blocks."
+    )
+
+
+def test_sol_block_count_matches_profile_map_row_count(tmp_path: Path) -> None:
+    """The .SOL has exactly one ``*<name>`` block per ``profile_map`` row.
+
+    Ties the membership-symmetry pins together with a count assertion.
+    Two membership pins (DB ⊆ SOL and SOL ⊆ DB) collectively imply
+    name-set equality, but a count mismatch — for example, a SOL
+    writer that emitted the same profile block twice — would slip
+    through both membership checks (the duplicate name is in both
+    sets). This pin catches duplicate emission at the .SOL level.
+    """
+    raster_path, db_path, sol_path = _build_substrate_with_sol(tmp_path)
+
+    with sqlite3.connect(db_path) as conn:
+        db_row_count = int(
+            conn.execute("SELECT COUNT(*) FROM profile_map").fetchone()[0]
+        )
+
+    sol_block_count = sum(
+        1
+        for line in sol_path.read_text().splitlines()
+        if line.startswith("*") and not line.startswith("*SOILS:")
+    )
+
+    assert sol_block_count == db_row_count, (
+        f".SOL block count ({sol_block_count}) differs from profile_map row "
+        f"count ({db_row_count}). The producer is emitting a different number "
+        "of profile blocks than the database registered."
+    )
