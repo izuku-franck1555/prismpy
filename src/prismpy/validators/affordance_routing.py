@@ -63,6 +63,7 @@ from typing import Final, Literal, Optional
 from prismpy.config.schema import Platform
 from prismpy.koppen.zones import KoppenZone
 from prismpy.models.decision_log import DecisionAction
+from prismpy.warnings.categories import WarningCategory
 
 
 # ── Action vocabulary ───────────────────────────────────────────────
@@ -190,8 +191,10 @@ def route_affordance(
         return "rerun_full_sources"
 
     # Crop-region-mismatch is wizard-time documented-override
-    # territory.
-    if check_id == "crop_region_mismatch":
+    # territory. Reference the canonical WarningCategory enum value
+    # rather than a bare string per durable §24 +
+    # ``test_no_bare_warning_category_strings.py`` pin.
+    if check_id == WarningCategory.CROP_REGION_MISMATCH.value:
         return "override"
 
     # Default: bucket-2 acknowledgement.
