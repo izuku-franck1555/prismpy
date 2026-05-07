@@ -464,18 +464,39 @@ def _check_identity_files(
 
 def _wth_column_count(weather_dir: Path) -> Optional[int]:
     """Return the number of whitespace-separated columns in the first
-    non-comment, non-empty data row of the first WTH file under
+    daily-climate data row of the first weather file under
     ``weather_dir``.
 
-    Returns ``None`` if no WTH file is present (out of F-G-8 scope).
-    Comment / header lines (starting with ``@``, ``*``, or ``!``) are
-    skipped so the count reflects the actual data schema.
+    Scans CRAFT-style ``cell_*.txt`` AND DSSAT-style ``*.WTH`` /
+    ``*.wth`` files. Returns ``None`` if no weather file is present
+    (F-G-8 out of scope) or no data row can be located.
+
+    Header detection per codex round 1 boundary 6/7 P1-2 absorption:
+    real DSSAT/PYTHIA WTH files have metadata + station-info rows
+    BEFORE the daily-climate ``@ DATE`` header. The naive
+    "first-non-comment-line" approach was counting station-info
+    columns (8 tokens) and missing the actual climate-data column
+    count. This implementation:
+
+    1. Walks lines looking for an ``@`` header containing ``DATE``
+       AND ``TMAX`` (the daily-climate header marker).
+    2. Returns the column count of the next non-blank line after
+       the data header.
+    3. Falls back: if no ``@ DATE ... TMAX`` header found
+       (CRAFT-style tab-delimited files have no ``@`` rows), returns
+       the column count of the first row whose first token is a
+       7-digit YRDOY integer.
+
+    Both fallbacks reject metadata/station-info rows so the count
+    reflects actual climate-data schema.
     """
     if not weather_dir.exists() or not weather_dir.is_dir():
         return None
+    # P1-1 absorption — include CRAFT cell_*.txt + DSSAT WTH variants
     candidates = sorted(
         list(weather_dir.glob("*.WTH"))
         + list(weather_dir.glob("*.wth"))
+        + list(weather_dir.glob("cell_*.txt"))
     )
     if not candidates:
         return None
@@ -484,13 +505,44 @@ def _wth_column_count(weather_dir: Path) -> Optional[int]:
         text = first.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
-    for line in text.splitlines():
+
+    lines = text.splitlines()
+
+    # Pass 1: find the @ DATE ... TMAX climate header, return next
+    # non-blank line's column count.
+    saw_data_header = False
+    for line in lines:
         stripped = line.strip()
         if not stripped:
             continue
-        if stripped.startswith(("@", "*", "!", "#")):
+        if stripped.startswith("@"):
+            upper = stripped.upper()
+            if "DATE" in upper and "TMAX" in upper:
+                saw_data_header = True
+                continue
+            # Other @ headers (station info) — keep scanning
             continue
-        return len(stripped.split())
+        if saw_data_header:
+            return len(stripped.split())
+
+    # Pass 2: no @ DATE header found (CRAFT tab-delimited files
+    # don't carry one). Use the YRDOY heuristic — first token is a
+    # 7-digit integer that looks like a date code.
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(("@", "*", "!", "#", "$")):
+            continue
+        # Tab-delimited (CRAFT) or space-delimited
+        tokens = stripped.split()
+        if not tokens:
+            continue
+        first_tok = tokens[0]
+        # YRDOY: 7-digit integer (e.g., 2046001)
+        if first_tok.isdigit() and 7 <= len(first_tok) <= 7:
+            return len(tokens)
+
     return None
 
 
