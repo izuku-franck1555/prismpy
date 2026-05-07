@@ -57,6 +57,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -66,6 +67,7 @@ from filelock import FileLock, Timeout
 
 from prismpy.sources._cache_base import (
     DOWNLOAD_LOCK_TIMEOUT_SECONDS,
+    TMPFILE_PREFIX,
     cache_lock_path,
     cleanup_orphan_tmpfiles,
     write_atomic_json,
@@ -730,7 +732,15 @@ def _unwrap_zip_cutout_if_needed(staging_path: Path) -> None:
     # the cache, not a ZIP. Per AC-G-2 §2.11 the staging-rename-meta
     # discipline must hold; an unwrap-write failure mid-flight is a
     # cache-write error, not an upstream invalid-response error.
-    tmp_path = staging_path.with_name(staging_path.name + ".unwrap")
+    #
+    # The tmp file uses the canonical ``.writing-*.tmp`` naming pattern
+    # so a SIGKILL between ``write_bytes`` and ``os.replace`` leaves an
+    # orphan that the next caller's ``cleanup_orphan_tmpfiles`` sweep
+    # removes — the cleanup glob in ``_cache_base.py`` matches this
+    # exact prefix.
+    tmp_path = staging_path.with_name(
+        f"{TMPFILE_PREFIX}unwrap-{uuid.uuid4().hex}.tmp"
+    )
     try:
         tmp_path.write_bytes(extracted)
         os.replace(str(tmp_path), str(staging_path))
