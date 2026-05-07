@@ -1,0 +1,359 @@
+"""Per-package eGHR substrate builder.
+
+The eGHR substrate is a triple of artifacts a PYTHIA-compatible package
+needs in order to resolve every cell to a soil profile without depending
+on a globally-bundled .SOL library:
+
+- ``raster/soil.tif`` — single-band GeoTIFF whose pixel value at each
+  cell carries an integer profile id (``0`` is reserved for nodata).
+- ``eGHR/GHR.db`` — SQLite database with one table,
+  ``profile_map(id INTEGER PRIMARY KEY, profile TEXT NOT NULL)``,
+  where ``id`` is the raster pixel value and ``profile`` is the
+  10-character profile name written into the ``.SOL`` file.
+- ``eGHR/{CC}.SOL`` — DSSAT v4.8-spec soil-profile file, written via
+  the canonical helper at
+  :func:`prismpy.translators._shared.dssat_sol_writer.write_dssat_sol`,
+  containing one ``*<profile>`` block per row in ``profile_map``.
+
+The builder takes a per-cell mapping of HWSD2/iSDA-derived
+:class:`SoilProfile` objects, deduplicates identical profiles into a
+shared registry, and emits the three artifacts in the supplied output
+directory. The cell-to-profile assignment is computed exactly once
+inside :func:`assign_cell_to_profile_id` so the raster, the database,
+and the ``.SOL`` cannot drift apart on which cell maps to which profile
+(durable lesson §24, canonical-source-or-pin).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import sqlite3
+from pathlib import Path
+from typing import Dict, Mapping, Tuple
+
+import numpy as np
+import rasterio
+from pydantic import BaseModel, ConfigDict, Field
+from rasterio.transform import from_bounds
+
+from prismpy.models.region import Region
+from prismpy.models.soil import SoilLayer, SoilProfile
+from prismpy.models.spatial import SpatialGrid
+from prismpy.translators._shared.dssat_sol_writer import write_dssat_sol
+
+
+logger = logging.getLogger(__name__)
+
+
+SHA256_PATTERN = r"^[0-9a-f]{64}$"
+
+
+class EghrSubstrateResult(BaseModel):
+    """Outcome of building a per-package eGHR substrate triple.
+
+    Returned by :func:`build_eghr_substrate`. Field paths point at the
+    three artifacts on disk; SHA-256 hashes capture the byte-level state
+    so a downstream consumer can detect tampering or stale cache hits.
+    """
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    soil_raster_path: Path = Field(
+        description="GeoTIFF profile-id raster (`raster/soil.tif`).",
+    )
+    ghr_db_path: Path = Field(
+        description="SQLite database with `profile_map(id, profile)` (`eGHR/GHR.db`).",
+    )
+    sol_path: Path = Field(
+        description="DSSAT v4.8 soil-profile file (`eGHR/{CC}.SOL`).",
+    )
+    cell_count: int = Field(
+        ge=0,
+        description="Number of grid cells covered by the raster (assigned to a profile).",
+    )
+    profile_count: int = Field(
+        ge=0,
+        description="Number of unique profiles in the substrate.",
+    )
+    soil_raster_sha256: str = Field(
+        pattern=SHA256_PATTERN,
+        description="SHA-256 hex digest of the raster GeoTIFF file.",
+    )
+    ghr_db_sha256: str = Field(
+        pattern=SHA256_PATTERN,
+        description="SHA-256 hex digest of the GHR.db file.",
+    )
+    sol_sha256: str = Field(
+        pattern=SHA256_PATTERN,
+        description="SHA-256 hex digest of the .SOL file.",
+    )
+
+
+def _profile_dedup_key(profile: SoilProfile) -> bytes:
+    """Deterministic dedup key for a SoilProfile.
+
+    Two profiles with byte-identical layer parameters share a key. The
+    key drives the canonical cell-to-profile-id assignment so unrelated
+    profile attributes (e.g., ``profile_id`` strings, metadata dicts)
+    cannot accidentally produce different pixel ids for the same soil.
+    """
+
+    def _layer_tuple(layer: SoilLayer) -> tuple:
+        return (
+            layer.depth_top,
+            layer.depth_bottom,
+            layer.sand,
+            layer.clay,
+            layer.silt,
+            layer.organic_carbon,
+            layer.bulk_density,
+            layer.ph,
+            layer.field_capacity,
+            layer.wilting_point,
+            layer.saturated_wc,
+        )
+
+    layers = tuple(_layer_tuple(layer) for layer in profile.layers)
+    blob = repr(layers).encode("utf-8")
+    return hashlib.sha256(blob).digest()
+
+
+def assign_cell_to_profile_id(
+    grid: SpatialGrid,
+    profiles_by_cell: Mapping[int, SoilProfile],
+) -> Tuple[Dict[int, int], Dict[int, SoilProfile]]:
+    """Compute the canonical cell-to-profile-id assignment.
+
+    This is the canonical-source helper for the cross-boundary invariant
+    "every artifact agrees on which cell maps to which profile id"
+    (durable lesson §24). All three writers consume the result of this
+    one function; no writer ever recomputes the assignment locally.
+
+    Profile ids are 1-based (``0`` is reserved as the GeoTIFF nodata
+    value). Cells iterate in ascending ``cell_id`` order so the assigned
+    ids are deterministic across reruns; identical input always yields
+    the same id mapping.
+
+    Args:
+        grid: Cell roster.
+        profiles_by_cell: Mapping ``cell_id`` → :class:`SoilProfile`.
+            Cells absent from this mapping are not assigned a profile
+            (the raster pixel will be nodata).
+
+    Returns:
+        Tuple of ``(cell_id → profile_id, profile_id → SoilProfile)``.
+    """
+    profile_id_by_dedup_key: Dict[bytes, int] = {}
+    profiles_by_id: Dict[int, SoilProfile] = {}
+    cell_to_profile_id: Dict[int, int] = {}
+
+    for cell in sorted(grid.cells, key=lambda c: c.cell_id):
+        profile = profiles_by_cell.get(cell.cell_id)
+        if profile is None:
+            continue
+        key = _profile_dedup_key(profile)
+        if key not in profile_id_by_dedup_key:
+            new_id = len(profile_id_by_dedup_key) + 1  # 1-based; 0 == nodata
+            profile_id_by_dedup_key[key] = new_id
+            profiles_by_id[new_id] = profile
+        cell_to_profile_id[cell.cell_id] = profile_id_by_dedup_key[key]
+
+    return cell_to_profile_id, profiles_by_id
+
+
+def build_eghr_substrate(
+    grid: SpatialGrid,
+    profiles_by_cell: Mapping[int, SoilProfile],
+    country_code: str,
+    region: Region,
+    output_dir: Path,
+) -> EghrSubstrateResult:
+    """Build the three eGHR substrate artifacts in ``output_dir``.
+
+    Idempotent: re-running with identical inputs regenerates byte-equal
+    artifacts. The cell-to-profile-id assignment is the single canonical
+    source for all three writers; raster pixel ids, ``profile_map`` rows,
+    and ``.SOL`` ``*<profile>`` headers reference the same id space.
+
+    Args:
+        grid: Cell roster used to dimension the raster and assign rows.
+        profiles_by_cell: Mapping ``cell_id`` → :class:`SoilProfile`. Any
+            cell not in this map yields a nodata pixel. Identical
+            profiles (per layer-parameter equality) are deduplicated.
+        country_code: Two-letter ISO code that prefixes every profile
+            name and names the ``.SOL`` file (``{country_code}.SOL``).
+        region: Region carrying the human-readable name plus the ISO3
+            country code; used by the canonical SOL writer to fill the
+            file header and ``@SITE`` lines.
+        output_dir: Existing or to-be-created directory. The builder
+            creates ``raster/`` and ``eGHR/`` subdirectories inside.
+
+    Returns:
+        :class:`EghrSubstrateResult` with paths, counts, and SHA-256
+        hashes for each artifact.
+    """
+    output_dir = Path(output_dir)
+    raster_dir = output_dir / "raster"
+    eghr_dir = output_dir / "eGHR"
+    raster_dir.mkdir(parents=True, exist_ok=True)
+    eghr_dir.mkdir(parents=True, exist_ok=True)
+
+    raster_path = raster_dir / "soil.tif"
+    db_path = eghr_dir / "GHR.db"
+    sol_path = eghr_dir / f"{country_code}.SOL"
+
+    # Step 1: canonical cell-to-profile assignment + deduplicated profile registry.
+    cell_to_profile_id, profiles_by_id = assign_cell_to_profile_id(
+        grid, profiles_by_cell
+    )
+
+    # Step 2: write the .SOL via the canonical writer. The eGHR substrate
+    # uses a different file-header suffix and source label so a manual
+    # inspector can tell a per-package substrate apart from a CRAFT
+    # HWSD-derived package without grepping for column conventions.
+    profile_id_to_name = write_dssat_sol(
+        soil_path=sol_path,
+        profiles_by_id=profiles_by_id,
+        country_code=country_code,
+        region=region,
+        file_header_suffix="(eGHR per-package substrate)",
+        source_label_for_id=lambda pid: f"eGHR profile {pid}",
+    )
+
+    # Step 3: GeoTIFF profile-id raster aligned to the grid.
+    _write_soil_raster(
+        raster_path=raster_path,
+        grid=grid,
+        cell_to_profile_id=cell_to_profile_id,
+    )
+
+    # Step 4: SQLite GHR.db with profile_map(id, profile).
+    _write_ghr_db(
+        db_path=db_path,
+        profile_id_to_name=profile_id_to_name,
+    )
+
+    logger.info(
+        "Built eGHR substrate at %s: %d cells -> %d unique profiles "
+        "(raster=%s db=%s sol=%s)",
+        output_dir,
+        len(cell_to_profile_id),
+        len(profiles_by_id),
+        raster_path.name,
+        db_path.name,
+        sol_path.name,
+    )
+
+    return EghrSubstrateResult(
+        soil_raster_path=raster_path,
+        ghr_db_path=db_path,
+        sol_path=sol_path,
+        cell_count=len(cell_to_profile_id),
+        profile_count=len(profiles_by_id),
+        soil_raster_sha256=_sha256(raster_path),
+        ghr_db_sha256=_sha256(db_path),
+        sol_sha256=_sha256(sol_path),
+    )
+
+
+def _write_soil_raster(
+    raster_path: Path,
+    grid: SpatialGrid,
+    cell_to_profile_id: Mapping[int, int],
+) -> None:
+    """Write the cell-to-profile-id assignment as a single-band GeoTIFF.
+
+    The pixel data type is ``uint16`` (65 535 unique profiles per package
+    is more than the largest realistic eGHR substrate); pixel value ``0``
+    means nodata. The transform is computed from ``grid.bounds`` and the
+    grid dimensions so re-runs with identical inputs produce identical
+    pixel coordinates.
+    """
+    if not grid.cells:
+        raise ValueError("Cannot write eGHR raster: grid has no cells.")
+    if grid.bounds is None:
+        raise ValueError(
+            "Cannot write eGHR raster: grid.bounds is required to compute the "
+            "GeoTIFF transform."
+        )
+
+    n_rows = grid.n_rows
+    n_cols = grid.n_cols
+    min_row = min(cell.row for cell in grid.cells)
+    min_col = min(cell.col for cell in grid.cells)
+
+    data = np.zeros((n_rows, n_cols), dtype=np.uint16)
+    for cell in grid.cells:
+        profile_id = cell_to_profile_id.get(cell.cell_id)
+        if profile_id is None:
+            continue
+        data[cell.row - min_row, cell.col - min_col] = profile_id
+
+    transform = from_bounds(
+        west=grid.bounds.minx,
+        south=grid.bounds.miny,
+        east=grid.bounds.maxx,
+        north=grid.bounds.maxy,
+        width=n_cols,
+        height=n_rows,
+    )
+
+    profile = {
+        "driver": "GTiff",
+        "height": n_rows,
+        "width": n_cols,
+        "count": 1,
+        "dtype": "uint16",
+        "crs": grid.bounds.crs,
+        "transform": transform,
+        "nodata": 0,
+        "compress": "deflate",
+        "tiled": False,
+    }
+
+    with rasterio.open(raster_path, "w", **profile) as dst:
+        dst.write(data, 1)
+
+
+def _write_ghr_db(
+    db_path: Path,
+    profile_id_to_name: Mapping[int, str],
+) -> None:
+    """Write the GHR.db SQLite database with the canonical schema.
+
+    Schema: ``profile_map(id INTEGER PRIMARY KEY, profile TEXT NOT NULL)``.
+    Inserts run in ascending ``id`` order so the on-disk page layout is
+    deterministic across reruns (combined with a fixed SQLite version
+    this gives byte-identical databases for byte-identical inputs).
+    """
+    if db_path.exists():
+        # Recreate so the file's contents reflect only the new inputs.
+        db_path.unlink()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "CREATE TABLE profile_map ("
+            "id INTEGER PRIMARY KEY, "
+            "profile TEXT NOT NULL"
+            ")"
+        )
+        for profile_id in sorted(profile_id_to_name.keys()):
+            cursor.execute(
+                "INSERT INTO profile_map (id, profile) VALUES (?, ?)",
+                (profile_id, profile_id_to_name[profile_id]),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _sha256(path: Path) -> str:
+    """Return the SHA-256 hex digest of the file at ``path``."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()

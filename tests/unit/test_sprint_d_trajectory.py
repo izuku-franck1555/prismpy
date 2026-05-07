@@ -56,7 +56,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 _LOWER = 815
-_UPPER = 1500
+# Sprint S re-anchor: bumped 1500 -> 1700 to absorb the per-package eGHR
+# substrate builder's new tests (AC-1 byte-pin + AC-2 substrate-builder
+# integration + headroom reserved for AC-3 through AC-13). Kept in sync
+# with ``test_sprint_c_trajectory.py`` since both pins measure the same
+# ``pytest tests/ --collect-only`` count.
+_UPPER = 1700
 
 
 class TestSprintDTrajectory(TestCase):
