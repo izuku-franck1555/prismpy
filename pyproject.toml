@@ -96,6 +96,18 @@ dependencies = [
     # and pinned in the production Dockerfile so prod deploys carry
     # both halves.
     "pyodbc>=5.0,<6.0",
+    # isimip-client wraps the public ISIMIP3b data API used by the
+    # climate-scenario-package generator (paired baseline + projection
+    # WTH/pickle/GeoTIFF outputs). No API key is required for read
+    # access. Public release: https://github.com/ISI-MIP/isimip-client
+    # The 2.x line is the current canonical API; the upper bound caps
+    # below 3.0 so a future major-version refactor surfaces at sprint
+    # time rather than as a silent contract drift in cached_cutout
+    # parameters or dataset-version metadata. Promoting from optional
+    # to required keeps fresh installs from silently skipping the
+    # scenario-package code path the way agera5/cdsapi did before
+    # being promoted.
+    "isimip-client>=2.0,<3.0",
 ]
 
 [project.optional-dependencies]
