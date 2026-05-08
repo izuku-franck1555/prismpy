@@ -3885,6 +3885,14 @@ class TranslationPipeline:
                     cell["failed_checks"].append(dict(entry_template))
 
                 # PRE.1.8 flatten — per-violation detail rows.
+                # AC-E2-25 sub-criterion 4 + Codex Gate A HIGH A2 —
+                # canonical entry shape carries ``date`` (Optional
+                # ISO string for per-day climate violations; None
+                # for soil + temporal + region paths that lack a
+                # date axis). Climate dual-scale variant of
+                # State C″ reads this through to render the
+                # specific failure dates alongside the seasonal
+                # aggregate.
                 for vd in details.get("violation_details", []) or []:
                     if not isinstance(vd, dict):
                         continue
@@ -3898,6 +3906,7 @@ class TranslationPipeline:
                         "category": category,
                         "layer_idx": vd.get("layer_idx"),
                         "variable": vd.get("variable"),
+                        "date": vd.get("date"),
                         "value": vd.get("value"),
                         "unit": vd.get("unit"),
                         "bounds": vd.get("bounds"),
