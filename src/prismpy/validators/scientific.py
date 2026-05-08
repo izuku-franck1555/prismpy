@@ -1266,9 +1266,17 @@ def _check_value_ranges(
                             # filename's date before this loop, so
                             # ``date=None`` honestly signals the
                             # daily resolution isn't recoverable
-                            # on this path; the cockpit's State C″
-                            # Variant B template falls back to the
-                            # tally-only narrative when date is null.
+                            # on this path; the producer schema
+                            # carries a uniform 7-key shape so a
+                            # null date is data, not a missing
+                            # field. Phase 2 prismweb cell-drawer
+                            # is responsible for rendering the
+                            # tally-only narrative (count + summary
+                            # stats; no per-day grid) when entries
+                            # arrive with ``date is null``; until
+                            # that template branch ships, consumers
+                            # render the existing aggregate-stats
+                            # row.
                             climate_violation_details.append({
                                 "cell_id": cell_id,
                                 "layer_idx": None,
@@ -1930,7 +1938,9 @@ def _check_coverage_climate_cells(unified_data) -> Dict[str, Any]:
             "violation_details": [
                 {
                     "cell_id": cid, "layer_idx": None,
-                    "variable": "climate", "value": None,
+                    "variable": "climate",
+                    "date": None,
+                    "value": None,
                     "unit": None, "bounds": None,
                 }
                 for cid in affected_cells
@@ -2015,7 +2025,9 @@ def _check_coverage_soil_cells(unified_data) -> Dict[str, Any]:
             "violation_details": [
                 {
                     "cell_id": cid, "layer_idx": None,
-                    "variable": "soil", "value": None,
+                    "variable": "soil",
+                    "date": None,
+                    "value": None,
                     "unit": None, "bounds": None,
                 }
                 for cid in affected_cells

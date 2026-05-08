@@ -202,10 +202,46 @@ def matches_known_prefix(check_id: str) -> bool:
     )
 
 
+# ── Coverage-check vocabulary ───────────────────────────────────────
+
+
+# Producer-side coverage-check identifiers. The validators emit
+# either of the two axis-specific identifiers; the executor's
+# per-cell pivot maps them onto the synthetic
+# ``coverage_per_cell`` category for the cockpit's left-rail
+# dimension toggle. Routing logic that wants to handle "any
+# coverage check" should call :func:`is_coverage_check` rather
+# than spelling out the membership inline (per durable §24
+# canonical-source-or-pin: every consumer reads from the same
+# helper).
+COVERAGE_CHECK_IDS: Final[frozenset[str]] = frozenset({
+    "coverage_climate_cells",
+    "coverage_soil_cells",
+    "coverage_per_cell",
+})
+
+
+def is_coverage_check(check_id: str) -> bool:
+    """True iff ``check_id`` belongs to the per-cell coverage
+    family.
+
+    Sprint E.2 AC-E2-3 ext + Codex round 1 HIGH-2 absorption —
+    the routing engine needs to recognize the producer-emitted
+    axis-specific identifiers (``coverage_climate_cells`` /
+    ``coverage_soil_cells``) AND the synthetic-pivot identifier
+    (``coverage_per_cell``) interchangeably so the bucket-4
+    INTERPOLATABLE branch is reachable when ``coverage_pct``
+    crosses :data:`prismpy.cockpit.bucket_thresholds.COVERAGE_PER_CELL_BUCKET_4_MIN_PCT`.
+    """
+    return check_id in COVERAGE_CHECK_IDS
+
+
 __all__ = [
+    "COVERAGE_CHECK_IDS",
     "POST_TRANSLATE_CHECK_IDS",
     "VALIDATOR_CHECK_IDS",
     "VALUE_RANGE_PREFIX_FAMILIES",
     "enumerate_emitted_check_ids",
+    "is_coverage_check",
     "matches_known_prefix",
 ]

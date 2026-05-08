@@ -124,3 +124,125 @@ def test_every_callsite_passes_cell_failure_context(callsites) -> None:
         "context dict, empty {} is the canonical 'no context' "
         "sentinel):\n  " + "\n  ".join(offenders)
     )
+
+
+# ── HIGH-2 reachability pair — coverage bucket-4 routing ────────────
+
+
+def test_coverage_high_pct_routes_to_interpolate_and_bucket_4() -> None:
+    """Sprint E.2 AC-E2-3 ext + Codex round 1 HIGH-2 absorption —
+    when ``coverage_pct >= 80`` the routing pipeline closes
+    cleanly: producer emits ``coverage_climate_cells`` →
+    :func:`route_affordance` returns ``interpolate`` →
+    :func:`bucket_for` returns ``bucket=4`` with the
+    ``climate-dual-scale`` diagnostic variant.
+
+    Pre-fix, branch 11 of ``bucket_for`` was structurally
+    unreachable in real-data runs (producer IDs didn't match
+    the literal ``coverage_per_cell`` check + the affordance
+    was hard-pinned to ``rerun_full_sources``); this pin
+    locks the contract-specified path open.
+    """
+    from prismpy.cockpit.routing_decision import bucket_for
+    from prismpy.config.schema import Platform
+    from prismpy.validators.affordance_routing import route_affordance
+
+    context = {"coverage_pct": 85.0}
+    affordance = route_affordance(
+        check_id="coverage_climate_cells",
+        platform=Platform.PYTHIA,
+        zone="BSh",
+        elevation_m=300.0,
+        n_candidates_in_radius=4,
+        cell_failure_context=context,
+    )
+    assert affordance == "interpolate", (
+        f"coverage_climate_cells with coverage_pct=85 should "
+        f"route to 'interpolate' (≥80%% threshold + ≥1 "
+        f"neighbour); got {affordance!r}"
+    )
+
+    decision = bucket_for(
+        check_id="coverage_climate_cells",
+        cell_failure_context=context,
+        routed_affordance=affordance,
+    )
+    assert decision.bucket == 4, (
+        f"coverage_climate_cells with affordance='interpolate' "
+        f"should route to bucket 4 INTERPOLATABLE; got bucket "
+        f"{decision.bucket}"
+    )
+    assert decision.diagnostic_variant == "climate-dual-scale", (
+        f"climate-side coverage check should dispatch to "
+        f"'climate-dual-scale' Variant B; got "
+        f"{decision.diagnostic_variant!r}"
+    )
+
+
+def test_coverage_low_pct_routes_to_rerun_and_bucket_3() -> None:
+    """Anti-mutation drill paired with the above — when
+    ``coverage_pct < 80`` the same producer + same routing
+    inputs MUST route to ``rerun_full_sources`` + bucket 3
+    TRUE_EXCLUDE (substantial gap; rerun with full source set).
+
+    Symmetric to the high-coverage case so a future routing-
+    engine refactor that breaks one direction can't quietly
+    pass the other.
+    """
+    from prismpy.cockpit.routing_decision import bucket_for
+    from prismpy.config.schema import Platform
+    from prismpy.validators.affordance_routing import route_affordance
+
+    context = {"coverage_pct": 70.0}
+    affordance = route_affordance(
+        check_id="coverage_climate_cells",
+        platform=Platform.PYTHIA,
+        zone="BSh",
+        elevation_m=300.0,
+        n_candidates_in_radius=4,
+        cell_failure_context=context,
+    )
+    assert affordance == "rerun_full_sources", (
+        f"coverage_climate_cells with coverage_pct=70 should "
+        f"route to 'rerun_full_sources' (below 80%% threshold); "
+        f"got {affordance!r}"
+    )
+
+    decision = bucket_for(
+        check_id="coverage_climate_cells",
+        cell_failure_context=context,
+        routed_affordance=affordance,
+    )
+    assert decision.bucket == 3, (
+        f"coverage_climate_cells with affordance='rerun_full_sources' "
+        f"should route to bucket 3 TRUE_EXCLUDE; got bucket "
+        f"{decision.bucket}"
+    )
+
+
+def test_coverage_soil_high_pct_routes_to_soil_layered_variant() -> None:
+    """Soil-side coverage with high coverage_pct dispatches to
+    ``soil-layered`` Variant C diagnostic_variant (per Draft 6.2
+    spec + team-lead disposition: 'or soil-layered if check_id
+    contains soil')."""
+    from prismpy.cockpit.routing_decision import bucket_for
+    from prismpy.config.schema import Platform
+    from prismpy.validators.affordance_routing import route_affordance
+
+    context = {"coverage_pct": 92.0}
+    affordance = route_affordance(
+        check_id="coverage_soil_cells",
+        platform=Platform.PYTHIA,
+        zone="BSh",
+        elevation_m=300.0,
+        n_candidates_in_radius=4,
+        cell_failure_context=context,
+    )
+    decision = bucket_for(
+        check_id="coverage_soil_cells",
+        cell_failure_context=context,
+        routed_affordance=affordance,
+    )
+    assert affordance == "interpolate"
+    assert decision.bucket == 4
+    assert decision.diagnostic_variant == "soil-layered"

@@ -18,6 +18,9 @@ from prismpy.cockpit.bucket_thresholds import (
     PROFILE_DEPTH_BUCKET_3_MIN_M,
     TEMPORAL_GAP_BUCKET_4_MAX_DAYS,
 )
+from prismpy.cockpit.cell_failure_context import (
+    CellFailureContext,
+)
 from prismpy.cockpit.check_id_enumeration import (
     POST_TRANSLATE_CHECK_IDS,
     VALIDATOR_CHECK_IDS,
@@ -70,6 +73,7 @@ __all__ = [
     # Sprint E.2 — per-cell routing canonical triple +
     # vocabulary canonical sources (Draft 6.2 absorptions).
     "COVERAGE_PER_CELL_BUCKET_4_MIN_PCT",
+    "CellFailureContext",
     "DIAGNOSTIC_VARIANT_VALUES",
     "DiagnosticVariant",
     "POST_TRANSLATE_CHECK_IDS",

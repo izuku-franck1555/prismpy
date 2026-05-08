@@ -16,27 +16,45 @@ variant vocabulary. Per durable §24 canonical-source-or-pin:
 
 * The Python ``DiagnosticVariant`` :class:`typing.Literal`
   alias is what the producer's type checker enforces — a
-  typo'd literal at any ``build_cell_detail`` callsite fails
-  at static analysis time, BEFORE shipping to the consumer.
-* The :data:`DIAGNOSTIC_VARIANT_VALUES` :class:`frozenset`
-  is what the structural pin imports (NOT AST-walk over this
-  source), so the pin reads the canonical vocabulary the
-  same way every other Python consumer does.
-* The JS-side consumer (cockpit-state.js cVariant getter) is
-  pinned via a regex parse over its source; the test asserts
-  ``set(producer Literal members) == set(consumer-handled
-  branches)`` per durable §27 two-vocabulary substrate-drift
-  cross-language enforcement.
+  typo'd literal at any future ``build_cell_detail`` callsite
+  fails at static analysis time, BEFORE shipping to the
+  consumer.
+* The :data:`DIAGNOSTIC_VARIANT_VALUES` :class:`frozenset` is
+  the runtime-importable vocabulary set future consumers (in
+  prismpy + cross-repo in prismweb) read instead of
+  re-enumerating the literal arguments.
 
-A producer-side drift (new variant added to Python without
-matching JS branch) silently routes the cell to the JS getter's
-``else`` fall-through (default 'interpolatable'). A
-consumer-side drift (JS branch that handles a string the
-producer never emits) is a dead branch. Both fail loud at
-structural-pin time.
+Phase 1.5 ships the canonical producer vocabulary only. The
+consumer-side wiring + parity enforcement lands at Phase 2
+prismweb UI work:
+
+* The JS ``cVariant`` getter at
+  ``prismweb/static/js/cockpit-redesign/cockpit-state.js``
+  reads ``selectedCell.diagnostic_variant`` first + dispatches
+  to the matching State C″ template branch (Variant A
+  cell-level-scalar / Variant B climate-dual-scale / Variant
+  C soil-layered) + the State C passing-cell + State C′
+  highland-excluded + State C‴ documented-override branches.
+* The structural pin
+  ``prismweb/core/tests/structural/test_diagnostic_variant_vocab_parity.py``
+  (WA CA-8) lands at Phase 2; it imports
+  :data:`DIAGNOSTIC_VARIANT_VALUES` from this module + reads
+  the JS getter's handled branches via regex parse over
+  ``cockpit-state.js`` source + asserts ``set(producer Literal
+  members) == set(consumer-handled branches)``. Until Phase 2
+  ships, the JS getter only handles the legacy four variants
+  (``documented-override`` / ``highland-excluded`` /
+  ``bucket-3-exclude`` / ``interpolatable``); cells whose
+  ``diagnostic_variant`` is one of the new three values
+  (``climate-dual-scale`` / ``soil-layered`` / ``passing``)
+  fall through the getter's ``else`` to the default
+  ``interpolatable`` path. The Phase 2 pin closes that
+  fallthrough.
 
 Pair pattern with Sprint G ISIMIP→SARRA + Sprint E.0
-``WarningCategory`` two-vocabulary precedents.
+``WarningCategory`` two-vocabulary precedents — both wire
+producer + consumer + parity pin in lockstep at the consumer-
+sprint close.
 """
 from __future__ import annotations
 

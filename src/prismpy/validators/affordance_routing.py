@@ -58,12 +58,23 @@ Draft 5.2 Cwa Highland-precip exclusion):
 
 from __future__ import annotations
 
-from typing import Any, Dict, Final, Literal, Optional
+from typing import TYPE_CHECKING, Final, Literal, Optional
 
 from prismpy.config.schema import Platform
 from prismpy.koppen.zones import KoppenZone
 from prismpy.models.decision_log import DecisionAction
 from prismpy.warnings.categories import WarningCategory
+
+if TYPE_CHECKING:
+    # ``CellFailureContext`` lives under ``prismpy.cockpit`` which
+    # imports back through this module via ``routing_decision.py``
+    # (it pulls in :data:`AffordanceType`). The runtime cycle is
+    # broken via :pep:`563` postponed-annotation evaluation
+    # (``from __future__ import annotations``) so the type is
+    # only resolved by static checkers, never at module load.
+    from prismpy.cockpit.cell_failure_context import (  # noqa: F401
+        CellFailureContext,
+    )
 
 
 # ── Action vocabulary ───────────────────────────────────────────────
@@ -128,7 +139,7 @@ def route_affordance(
     zone: KoppenZone,
     elevation_m: float,
     n_candidates_in_radius: int,
-    cell_failure_context: Dict[str, Any],
+    cell_failure_context: CellFailureContext,
 ) -> AffordanceType:
     """Route a flagged cell to its cockpit affordance.
 
@@ -165,17 +176,12 @@ def route_affordance(
     # structural pin can enforce explicit pass-through at every
     # callsite (per durable §24 canonical-source-or-pin: the
     # context is the single shared input ``bucket_for`` reads
-    # alongside the affordance, so callers MUST surface what they
-    # know rather than silently defaulting to None). The argument
-    # is read defensively to tolerate future expansions of the
-    # context shape.
-    _ = cell_failure_context  # explicit-discard placeholder; future
-    # affordance refinements consume this. The kwarg's presence at
-    # every callsite is what matters for the structural pin — its
-    # actual contents wire through to ``bucket_for`` at the call
-    # boundary, not inside this function (route_affordance owns
-    # the affordance dimension; bucket_for owns the bucket +
-    # variant dimensions).
+    # alongside the affordance). It is consumed below in the
+    # coverage-check branch (Sprint E.2 AC-E2-3 ext + Codex
+    # round 1 HIGH-2 absorption — ``coverage_pct`` decides
+    # ``interpolate`` vs ``rerun_full_sources``). Future
+    # routing branches can read additional keys without
+    # changing the signature.
     # value_range_precip with Highland zones + high elevation →
     # routed to skip per Decision 2 caveat 2 (orographic exclusion).
     # The Highland exclusion takes precedence over the n_candidates
@@ -216,8 +222,39 @@ def route_affordance(
     if check_id == "cross_variable":
         return "skip"
 
-    # Coverage-per-cell: rerun with full sources to fill.
-    if check_id == "coverage_per_cell":
+    # Coverage checks — Sprint E.2 AC-E2-3 ext + Codex round 1
+    # HIGH-2 absorption. Producers emit ``coverage_climate_cells``
+    # + ``coverage_soil_cells``; the executor's per-cell pivot
+    # maps both prefixes to the synthetic ``coverage_per_cell``
+    # category for the cockpit's dimension toggle. Routing logic
+    # below recognises all three identifiers via the canonical
+    # :func:`is_coverage_check` helper at
+    # ``prismpy/cockpit/check_id_enumeration.py``.
+    #
+    # Per Draft 6.2 contract + :data:`prismpy.cockpit.bucket_thresholds.COVERAGE_PER_CELL_BUCKET_4_MIN_PCT`
+    # threshold (80%): cells whose ``coverage_pct`` is at or
+    # above the threshold route to ``"interpolate"`` (gaps
+    # fillable via IDW); cells below route to
+    # ``"rerun_full_sources"`` (substantial gap; rerun with full
+    # source set). When ``coverage_pct`` is missing from the
+    # context the conservative fallback is
+    # ``"rerun_full_sources"`` — better to refetch with honest
+    # coverage than to interpolate from unknown coverage.
+    from prismpy.cockpit.check_id_enumeration import is_coverage_check
+    from prismpy.cockpit.bucket_thresholds import (
+        COVERAGE_PER_CELL_BUCKET_4_MIN_PCT,
+    )
+    if is_coverage_check(check_id):
+        coverage_pct = (
+            cell_failure_context.get("coverage_pct")
+            if cell_failure_context else None
+        )
+        if (
+            isinstance(coverage_pct, (int, float))
+            and coverage_pct >= COVERAGE_PER_CELL_BUCKET_4_MIN_PCT
+            and n_candidates_in_radius >= 1
+        ):
+            return "interpolate"
         return "rerun_full_sources"
 
     # Crop-region-mismatch is wizard-time documented-override

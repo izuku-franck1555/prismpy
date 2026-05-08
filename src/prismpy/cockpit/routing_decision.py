@@ -16,19 +16,13 @@ at bucket 3 for long-gap variants.
 
 The atomic triple :class:`RoutingDecision` is the single
 output shape per cell — bucket-int + affordance-string +
-diagnostic-variant-string. Three consumers read this triple:
-
-* The manifest builder (``manifest.py::build_manifest``)
-  reads ``bucket`` for the per-bucket grouping the cockpit's
-  AT A GLANCE counters render.
-* The cockpit affordance UI reads ``affordance`` to decide
-  which CTA to render per cell ("Skip from analysis" /
-  "Apply interpolation" / "Acknowledge" / "Document
-  override").
-* The cell-detail drawer reads ``diagnostic_variant`` to
-  dispatch to the right State C″ template (variant A
-  cell-level-scalar / variant B climate-dual-scale / variant
-  C soil-layered).
+diagnostic-variant-string. The producer-side consumer is the
+manifest builder (``manifest.py::build_manifest``) which reads
+``bucket`` for the per-bucket grouping the cockpit's AT A
+GLANCE counters render. ``affordance`` + ``diagnostic_variant``
+are surfaced for downstream consumers — the prismweb cockpit
+UI consumes them in Phase 2 (cell-drawer dispatch + per-cell
+CTA routing).
 
 Per durable §24 canonical-source-or-pin: returning the
 atomic triple from ONE function eliminates the producer-
@@ -37,12 +31,21 @@ each got computed at a different callsite with subtly
 different inputs (Codex MEDIUM A1 + Builder Sub-CA #6).
 
 Per durable §27 two-vocabulary substrate-drift: this module
-+ :mod:`prismpy.cockpit.diagnostic_variant` + the JS
-``cVariant`` getter at
-``static/js/cockpit-redesign/cockpit-state.js`` form a
-producer-consumer triangle. Structural pins enforce that
-every value the producer can emit is handled by every
-consumer.
++ :mod:`prismpy.cockpit.diagnostic_variant` are the producer
+side of a producer-consumer triangle whose consumer side
+(JS ``cVariant`` getter at
+``prismweb/static/js/cockpit-redesign/cockpit-state.js`` +
+the State C″ drawer template) lands at Phase 2 prismweb UI
+work. Phase 2 wires the consumer-side cVariant getter to
+read ``selectedCell.diagnostic_variant`` first + dispatch
+to the matching template branch; the WA CA-8 structural pin
+``test_diagnostic_variant_vocab_parity.py`` lives in Phase 2
+prismweb tests + imports
+:data:`prismpy.cockpit.diagnostic_variant.DIAGNOSTIC_VARIANT_VALUES`
+to assert the JS handled-value set equals the canonical
+producer set. Phase 1.5 (this module) ships the canonical
+producer vocabulary; Phase 2 ships the consumer wiring + the
+parity pin.
 """
 from __future__ import annotations
 
@@ -54,6 +57,8 @@ from prismpy.cockpit.bucket_thresholds import (
     PROFILE_DEPTH_BUCKET_3_MIN_M,
     TEMPORAL_GAP_BUCKET_4_MAX_DAYS,
 )
+from prismpy.cockpit.cell_failure_context import CellFailureContext
+from prismpy.cockpit.check_id_enumeration import is_coverage_check
 from prismpy.cockpit.diagnostic_variant import DiagnosticVariant
 from prismpy.validators.affordance_routing import AffordanceType
 from prismpy.warnings.categories import WarningCategory
@@ -98,7 +103,7 @@ class RoutingDecision:
 
 def bucket_for(
     check_id: str,
-    cell_failure_context: Dict[str, Any],
+    cell_failure_context: CellFailureContext,
     routed_affordance: AffordanceType,
 ) -> RoutingDecision:
     """Compute the per-cell ``RoutingDecision`` atomic triple.
@@ -275,26 +280,38 @@ def bucket_for(
             diagnostic_variant="cell-level-scalar",
         )
 
-    # 9) Coverage-per-cell — high-coverage routes to bucket 4;
-    #    low-coverage stays bucket 3. Threshold canonical-
-    #    sourced from
-    #    :data:`COVERAGE_PER_CELL_BUCKET_4_MIN_PCT`.
-    if check_id == "coverage_per_cell":
-        coverage_pct = ctx.get("coverage_pct")
-        if (
-            isinstance(coverage_pct, (int, float))
-            and coverage_pct >= COVERAGE_PER_CELL_BUCKET_4_MIN_PCT
-            and routed_affordance != "rerun_full_sources"
-        ):
-            return RoutingDecision(
-                bucket=4,
-                affordance=routed_affordance,
-                diagnostic_variant="cell-level-scalar",
-            )
+    # 9) Coverage checks — Sprint E.2 AC-E2-3 ext + Codex round 1
+    #    HIGH-2 absorption. Producers emit
+    #    ``coverage_climate_cells`` + ``coverage_soil_cells``;
+    #    the executor's per-cell pivot maps both prefixes to the
+    #    synthetic ``coverage_per_cell`` category. The
+    #    canonical :func:`is_coverage_check` helper recognizes
+    #    all three identifiers so this branch is reachable from
+    #    EITHER the raw producer ID OR the post-pivot synthetic
+    #    ID.
+    #
+    #    High-coverage cells route to bucket 4 INTERPOLATABLE
+    #    (gaps fillable via IDW from neighbour cells); the
+    #    coupled :func:`route_affordance` returns ``interpolate``
+    #    in that case. Low-coverage cells route to bucket 3
+    #    TRUE_EXCLUDE + the affordance is
+    #    ``rerun_full_sources`` (substantial gap; rerun with
+    #    full source set).
+    #
+    #    Diagnostic variant chooses ``soil-layered`` when the
+    #    check_id mentions soil (cockpit drawer dispatches to
+    #    Variant C with rootzone-aggregate context) +
+    #    ``climate-dual-scale`` otherwise (Variant B with
+    #    growing-season-aggregate context).
+    if is_coverage_check(check_id):
+        bucket = 4 if routed_affordance == "interpolate" else 3
+        coverage_variant: DiagnosticVariant = (
+            "soil-layered" if "soil" in check_id else "climate-dual-scale"
+        )
         return RoutingDecision(
-            bucket=3,
+            bucket=bucket,
             affordance=routed_affordance,
-            diagnostic_variant="cell-level-scalar",
+            diagnostic_variant=coverage_variant,
         )
 
     # 10) Cross-variable consistency — too multi-dimensional

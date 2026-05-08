@@ -52,18 +52,23 @@ CMS §2):
 ```
 
 Per durable §24 canonical-source-or-pin: this module is the
-single producer of the schema; the consumer (cockpit IDW
-orchestrator) imports the canonical key list from
-:data:`OBSERVED_VALUES_CLIMATE_KEYS` +
+single producer of the schema; future consumers (cockpit IDW
+orchestrator at Phase 2 prismweb) import the canonical key
+list from :data:`OBSERVED_VALUES_CLIMATE_KEYS` +
 :data:`OBSERVED_VALUES_SOIL_KEYS` so adding a key here
-auto-propagates to the consumer via the structural pin at
-``tests/structural/test_observed_values_writer_schema_parity.py``.
+auto-propagates to the consumer. The producer-side structural
+pin at ``tests/structural/test_observed_values_writer_schema_parity.py``
+locks the 17-key invariant + method/units dict completeness +
+the ``SoilProfile.get_weighted_average`` reuse contract; the
+matching consumer-side pin (asserting the IDW orchestrator
+reads exactly the producer's keys) lands at Phase 2.
 
-Per durable §27 two-vocabulary substrate-drift: producer +
-consumer agree on the 17-key vocabulary AND the
-``soil_aggregation_substrate`` enum values
-(``in_memory_layers`` vs ``eghr_no_in_memory_layers``) AND
-the units strings.
+Per durable §27 two-vocabulary substrate-drift: producer side
+fixes the 17-key vocabulary + the ``soil_aggregation_substrate``
+enum values (``in_memory_layers`` vs ``eghr_no_in_memory_layers``)
++ the units strings here. The consumer side (Phase 2 prismweb)
+reads the canonical constants directly via cross-repo import,
+so no parallel vocabulary literal exists to drift.
 
 CMS §9 follow-on math contracts:
 
