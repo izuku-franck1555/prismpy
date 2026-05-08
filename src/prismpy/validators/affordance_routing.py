@@ -58,7 +58,7 @@ Draft 5.2 Cwa Highland-precip exclusion):
 
 from __future__ import annotations
 
-from typing import Final, Literal, Optional
+from typing import Any, Dict, Final, Literal, Optional
 
 from prismpy.config.schema import Platform
 from prismpy.koppen.zones import KoppenZone
@@ -128,6 +128,7 @@ def route_affordance(
     zone: KoppenZone,
     elevation_m: float,
     n_candidates_in_radius: int,
+    cell_failure_context: Dict[str, Any],
 ) -> AffordanceType:
     """Route a flagged cell to its cockpit affordance.
 
@@ -142,10 +143,39 @@ def route_affordance(
             within the IDW search radius. Per §0.2 #1 + WA CA-1
             architectural concern: when 0, the cell is routed to
             ``"skip"`` BEFORE any IDW engine call would raise.
+        cell_failure_context: Per-cell metric dict carrying
+            additional signals the cockpit's per-cell routing
+            engine reads (gap_count / coverage_pct / layer_idx /
+            daily_failure_count / has_existing_override /
+            is_highland_precip / profile_depth_m). Sprint E.2
+            AC-E2-3 ext (Codex Gate A MEDIUM A1 + Builder
+            Sub-CA #6): the context is consumed alongside the
+            ``RoutingDecision`` triple in
+            :func:`prismpy.cockpit.routing_decision.bucket_for`
+            for per-cell-aware bucket assignment. Empty dict
+            (``{}``) is the canonical "no per-cell context"
+            sentinel — required as a positional argument so a
+            structural pin enforces every callsite passes it
+            explicitly + can't accidentally drop the context.
 
     Returns:
         ``AffordanceType`` — the cockpit affordance to surface.
     """
+    # ``cell_failure_context`` is required by the signature so a
+    # structural pin can enforce explicit pass-through at every
+    # callsite (per durable §24 canonical-source-or-pin: the
+    # context is the single shared input ``bucket_for`` reads
+    # alongside the affordance, so callers MUST surface what they
+    # know rather than silently defaulting to None). The argument
+    # is read defensively to tolerate future expansions of the
+    # context shape.
+    _ = cell_failure_context  # explicit-discard placeholder; future
+    # affordance refinements consume this. The kwarg's presence at
+    # every callsite is what matters for the structural pin — its
+    # actual contents wire through to ``bucket_for`` at the call
+    # boundary, not inside this function (route_affordance owns
+    # the affordance dimension; bucket_for owns the bucket +
+    # variant dimensions).
     # value_range_precip with Highland zones + high elevation →
     # routed to skip per Decision 2 caveat 2 (orographic exclusion).
     # The Highland exclusion takes precedence over the n_candidates

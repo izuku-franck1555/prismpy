@@ -13,6 +13,22 @@ grouping reads off; the wizard banner consumes the same
 prismpy substrate at a different surface (per-zone Bucket 5
 entries from ``Project.stage_1_verdicts``).
 """
+from prismpy.cockpit.bucket_thresholds import (
+    COVERAGE_PER_CELL_BUCKET_4_MIN_PCT,
+    PROFILE_DEPTH_BUCKET_3_MIN_M,
+    TEMPORAL_GAP_BUCKET_4_MAX_DAYS,
+)
+from prismpy.cockpit.check_id_enumeration import (
+    POST_TRANSLATE_CHECK_IDS,
+    VALIDATOR_CHECK_IDS,
+    VALUE_RANGE_PREFIX_FAMILIES,
+    enumerate_emitted_check_ids,
+    matches_known_prefix,
+)
+from prismpy.cockpit.diagnostic_variant import (
+    DIAGNOSTIC_VARIANT_VALUES,
+    DiagnosticVariant,
+)
 from prismpy.cockpit.manifest import (
     CockpitManifestEntry,
     UnknownCategoryError,
@@ -24,9 +40,14 @@ from prismpy.cockpit.per_run_snapshot import (
     is_snapshot_unavailable,
     snapshot_for_pipeline_run,
 )
+from prismpy.cockpit.routing_decision import (
+    RoutingDecision,
+    bucket_for,
+)
 
 
 __all__ = [
+    # Sprint E.1 — manifest builder + per-run snapshot.
     "CockpitManifestEntry",
     "UnknownCategoryError",
     "build_cockpit_warning_manifest",
@@ -34,4 +55,18 @@ __all__ = [
     "compute_snapshot_at_launch_hash",
     "is_snapshot_unavailable",
     "snapshot_for_pipeline_run",
+    # Sprint E.2 — per-cell routing canonical triple +
+    # vocabulary canonical sources (Draft 6.2 absorptions).
+    "COVERAGE_PER_CELL_BUCKET_4_MIN_PCT",
+    "DIAGNOSTIC_VARIANT_VALUES",
+    "DiagnosticVariant",
+    "POST_TRANSLATE_CHECK_IDS",
+    "PROFILE_DEPTH_BUCKET_3_MIN_M",
+    "RoutingDecision",
+    "TEMPORAL_GAP_BUCKET_4_MAX_DAYS",
+    "VALIDATOR_CHECK_IDS",
+    "VALUE_RANGE_PREFIX_FAMILIES",
+    "bucket_for",
+    "enumerate_emitted_check_ids",
+    "matches_known_prefix",
 ]
