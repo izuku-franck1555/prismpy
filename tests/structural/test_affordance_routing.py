@@ -33,6 +33,7 @@ def test_value_range_with_neighbours_routes_to_interpolate(check_id: str) -> Non
         zone="BSh",
         elevation_m=300.0,
         n_candidates_in_radius=4,
+        cell_failure_context={},
     )
     assert result == "interpolate"
 
@@ -58,6 +59,7 @@ def test_value_range_with_zero_neighbours_routes_to_skip(check_id: str) -> None:
         zone="BSh",
         elevation_m=300.0,
         n_candidates_in_radius=0,
+        cell_failure_context={},
     )
     assert result == "skip"
 
@@ -82,6 +84,7 @@ def test_drill_g_highland_precip_boundary_trio(
         zone="Cwa",
         elevation_m=elevation_m,
         n_candidates_in_radius=4,
+        cell_failure_context={},
     )
     assert result == expected, (
         f"Cwa precip at elevation_m={elevation_m} should route to "
@@ -99,6 +102,7 @@ def test_non_highland_precip_routes_to_interpolate() -> None:
         zone="BSh",
         elevation_m=2000.0,
         n_candidates_in_radius=4,
+        cell_failure_context={},
     )
     assert result == "interpolate"
 
@@ -126,6 +130,7 @@ def test_soil_check_ids_route_to_skip(check_id: str) -> None:
         zone="BSh",
         elevation_m=300.0,
         n_candidates_in_radius=4,
+        cell_failure_context={},
     )
     assert result == "skip"
 
@@ -137,6 +142,7 @@ def test_cross_variable_routes_to_skip() -> None:
         zone="BSh",
         elevation_m=300.0,
         n_candidates_in_radius=4,
+        cell_failure_context={},
     )
     assert result == "skip"
 
@@ -148,6 +154,7 @@ def test_temporal_completeness_sarra_py_routes_to_rerun() -> None:
         zone="BSh",
         elevation_m=300.0,
         n_candidates_in_radius=4,
+        cell_failure_context={},
     )
     assert result == "rerun_full_sources"
 
@@ -159,6 +166,7 @@ def test_coverage_per_cell_routes_to_rerun() -> None:
         zone="BSh",
         elevation_m=300.0,
         n_candidates_in_radius=4,
+        cell_failure_context={},
     )
     assert result == "rerun_full_sources"
 
@@ -170,6 +178,7 @@ def test_crop_region_mismatch_routes_to_override() -> None:
         zone="BSh",
         elevation_m=300.0,
         n_candidates_in_radius=4,
+        cell_failure_context={},
     )
     assert result == "override"
 
@@ -182,6 +191,7 @@ def test_unknown_check_id_routes_to_acknowledge() -> None:
         zone="BSh",
         elevation_m=300.0,
         n_candidates_in_radius=4,
+        cell_failure_context={},
     )
     assert result == "acknowledge"
 

@@ -637,6 +637,29 @@ def _check_temporal_completeness(
             # from every cell's `failed_checks` array. Sorted ASC for
             # deterministic JSON diffs.
             "affected_cells": sorted(cell_gaps.keys()),
+            # AC-E2-25 sub-criterion 4 + Codex Gate A HIGH A2 —
+            # canonical ``violation_details`` shape pivoted from
+            # the ``gap_details`` map. Each cell with a non-zero
+            # gap_count emits one entry; ``value=gap_count`` +
+            # ``unit='days'`` + ``bounds=(0, modal_expected)`` so
+            # the executor flattener at ``executor.py:3887`` can
+            # surface the same canonical 7-key payload the
+            # climate value_range + region_specific_bounds +
+            # soil paths emit. ``layer_idx`` and ``date`` are
+            # ``None`` — temporal completeness is per-cell-aggregate,
+            # not per-layer or per-date.
+            "violation_details": [
+                {
+                    "cell_id": cid,
+                    "layer_idx": None,
+                    "variable": "temporal_completeness",
+                    "date": None,
+                    "value": int(gap_count),
+                    "unit": "days",
+                    "bounds": [0, int(modal_expected_per_cell)],
+                }
+                for cid, gap_count in sorted(cell_gaps.items())
+            ],
         },
     }
 
@@ -1116,6 +1139,20 @@ def _check_value_ranges(
     climate = unified_data.climate if unified_data and hasattr(unified_data, 'climate') else {}
     climate_stats = {}
 
+    # AC-E2-25 sub-criterion 4 + Codex Gate A HIGH A2 — per-cell
+    # per-day climate violation detail accumulator. The aggregate
+    # stats above keep the per-variable record's summary line; the
+    # per-cell entries here populate ``details["violation_details"]``
+    # so the executor flattener at ``executor.py:3887`` can pivot
+    # them into the top-level ``cell_failed_check_details`` array
+    # the cockpit cell-detail drawer reads. Canonical key is
+    # ``violation_details`` (NOT ``climate_violation_details``) per
+    # Codex HIGH A2; canonical entry shape carries the ``date`` field
+    # so the State-C″ Variant B "climate dual-scale" template can
+    # surface specific per-day failures alongside the seasonal
+    # aggregate.
+    climate_violation_details: List[Dict[str, Any]] = []
+
     # G7 §2 — when the climate axis is unavailable the value-range
     # check cannot run on any climate variable. Emit a single axis-
     # level ``value_range_climate`` unavailable record rather than
@@ -1223,6 +1260,32 @@ def _check_value_ranges(
                         if v < vmin or v > vmax:
                             stats["out_of_range"] += 1
                             stats["affected_cells"].add(cell_id)
+                            # AC-E2-25 sub-criterion 4 — per-cell
+                            # violation entry. SARRA's stratified-
+                            # bucket sampling discards the source
+                            # filename's date before this loop, so
+                            # ``date=None`` honestly signals the
+                            # daily resolution isn't recoverable
+                            # on this path; the producer schema
+                            # carries a uniform 7-key shape so a
+                            # null date is data, not a missing
+                            # field. Phase 2 prismweb cell-drawer
+                            # is responsible for rendering the
+                            # tally-only narrative (count + summary
+                            # stats; no per-day grid) when entries
+                            # arrive with ``date is null``; until
+                            # that template branch ships, consumers
+                            # render the existing aggregate-stats
+                            # row.
+                            climate_violation_details.append({
+                                "cell_id": cell_id,
+                                "layer_idx": None,
+                                "variable": var,
+                                "date": None,
+                                "value": float(v),
+                                "unit": unit,
+                                "bounds": [vmin, vmax],
+                            })
         # else: empty climate_stats → no per-variable climate checks
         # emitted; the delegated info record above is the only output.
     else:
@@ -1249,6 +1312,29 @@ def _check_value_ranges(
                     if val < vmin or val > vmax:
                         stats["out_of_range"] += 1
                         stats["affected_cells"].add(cell_id)
+                        # AC-E2-25 sub-criterion 4 — per-cell
+                        # violation entry on the in-memory path.
+                        # ``record.date`` is a ``datetime.date``
+                        # (Sprint E.1 schema invariant); coerce
+                        # via ``isoformat`` for stable JSON
+                        # roundtrip + downstream string comparison
+                        # in the cockpit drawer's day-list render.
+                        record_date = getattr(record, "date", None)
+                        if hasattr(record_date, "isoformat"):
+                            date_iso: Optional[str] = record_date.isoformat()
+                        elif record_date is not None:
+                            date_iso = str(record_date)
+                        else:
+                            date_iso = None
+                        climate_violation_details.append({
+                            "cell_id": cell_id,
+                            "layer_idx": None,
+                            "variable": var,
+                            "date": date_iso,
+                            "value": float(val),
+                            "unit": unit,
+                            "bounds": [vmin, vmax],
+                        })
 
     for var, (vmin, vmax, unit) in CLIMATE_RANGES.items():
         stats = climate_stats.get(var)
@@ -1277,6 +1363,23 @@ def _check_value_ranges(
                 "total_values": stats["total"],
                 # V2-22c-PRE.1.3 — un-truncated for cockpit drill-down.
                 "affected_cells": list(stats["affected_cells"]),
+                # AC-E2-25 sub-criterion 4 + Codex HIGH A2 —
+                # canonical ``violation_details`` filtered by
+                # variable. Sorted by (cell_id, date, variable)
+                # for deterministic JSON diffs + cockpit-cursor
+                # stability when two cells share a violation
+                # date.
+                "violation_details": sorted(
+                    [
+                        d for d in climate_violation_details
+                        if d["variable"] == var
+                    ],
+                    key=lambda d: (
+                        d["cell_id"],
+                        d.get("date") or "",
+                        d["variable"],
+                    ),
+                ),
             },
         })
 
@@ -1337,6 +1440,15 @@ def _check_value_ranges(
                         "cell_id": cell_id,
                         "layer_idx": layer_idx,
                         "variable": var,
+                        # AC-E2-25 sub-criterion 4 — soil
+                        # violations don't carry a date axis
+                        # (per-layer profile, not per-record
+                        # time series); ``None`` keeps the
+                        # canonical entry shape uniform
+                        # across climate + soil + region +
+                        # temporal flatteners per Codex
+                        # HIGH A2.
+                        "date": None,
                         "value": float(val),
                         "unit": unit,
                         "bounds": [vmin, vmax],
@@ -1356,6 +1468,10 @@ def _check_value_ranges(
                         "cell_id": cell_id,
                         "layer_idx": layer_idx,
                         "variable": "texture_sum",
+                        # AC-E2-25 sub-criterion 4 — soil
+                        # texture-sum has no date axis; preserve
+                        # canonical entry shape per Codex HIGH A2.
+                        "date": None,
                         "value": float(texture_sum),
                         "unit": "%",
                         "bounds": [95, 105],
@@ -1822,7 +1938,9 @@ def _check_coverage_climate_cells(unified_data) -> Dict[str, Any]:
             "violation_details": [
                 {
                     "cell_id": cid, "layer_idx": None,
-                    "variable": "climate", "value": None,
+                    "variable": "climate",
+                    "date": None,
+                    "value": None,
                     "unit": None, "bounds": None,
                 }
                 for cid in affected_cells
@@ -1907,7 +2025,9 @@ def _check_coverage_soil_cells(unified_data) -> Dict[str, Any]:
             "violation_details": [
                 {
                     "cell_id": cid, "layer_idx": None,
-                    "variable": "soil", "value": None,
+                    "variable": "soil",
+                    "date": None,
+                    "value": None,
                     "unit": None, "bounds": None,
                 }
                 for cid in affected_cells
@@ -2009,6 +2129,20 @@ def _check_region_bounds(unified_data, config) -> Dict[str, Any]:
             if not hasattr(ts, 'records'):
                 continue
             for record in ts.records:
+                # AC-E2-25 sub-criterion 4 — coerce ``record.date``
+                # to ISO string once per record so each per-variable
+                # violation entry below carries the canonical
+                # ``date`` field (Codex HIGH A2). ``layer_idx`` is
+                # ``None`` since region_specific_bounds is climate-
+                # axis only (no soil layers).
+                record_date = getattr(record, "date", None)
+                if hasattr(record_date, "isoformat"):
+                    date_iso: Optional[str] = record_date.isoformat()
+                elif record_date is not None:
+                    date_iso = str(record_date)
+                else:
+                    date_iso = None
+
                 if tmax_range and hasattr(record, 'tmax') and record.tmax is not None:
                     if record.tmax < tmax_range[0] or record.tmax > tmax_range[1]:
                         violation_texts.append(
@@ -2016,7 +2150,10 @@ def _check_region_bounds(unified_data, config) -> Dict[str, Any]:
                             f"range {tmax_range}"
                         )
                         violation_records.append({
-                            "cell_id": cell_id, "variable": "tmax",
+                            "cell_id": cell_id,
+                            "layer_idx": None,
+                            "variable": "tmax",
+                            "date": date_iso,
                             "value": float(record.tmax), "unit": "°C",
                             "bounds": list(tmax_range),
                         })
@@ -2027,7 +2164,10 @@ def _check_region_bounds(unified_data, config) -> Dict[str, Any]:
                             f"range {tmin_range}"
                         )
                         violation_records.append({
-                            "cell_id": cell_id, "variable": "tmin",
+                            "cell_id": cell_id,
+                            "layer_idx": None,
+                            "variable": "tmin",
+                            "date": date_iso,
                             "value": float(record.tmin), "unit": "°C",
                             "bounds": list(tmin_range),
                         })
@@ -2040,7 +2180,10 @@ def _check_region_bounds(unified_data, config) -> Dict[str, Any]:
                             f"{region_name} daily max {precip_daily_max}"
                         )
                         violation_records.append({
-                            "cell_id": cell_id, "variable": "precip",
+                            "cell_id": cell_id,
+                            "layer_idx": None,
+                            "variable": "precip",
+                            "date": date_iso,
                             "value": float(record.precip),
                             "unit": "mm/day",
                             "bounds": [None, float(precip_daily_max)],
@@ -2052,7 +2195,10 @@ def _check_region_bounds(unified_data, config) -> Dict[str, Any]:
                             f"range {srad_range}"
                         )
                         violation_records.append({
-                            "cell_id": cell_id, "variable": "srad",
+                            "cell_id": cell_id,
+                            "layer_idx": None,
+                            "variable": "srad",
+                            "date": date_iso,
                             "value": float(record.srad),
                             "unit": "MJ/m²/d",
                             "bounds": list(srad_range),
