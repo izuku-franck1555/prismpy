@@ -3283,6 +3283,53 @@ class TranslationPipeline:
             # Canonical run-level save — NOT cwd-relative
             base_dir = Path(self.config.output.base_dir)
             base_dir.mkdir(parents=True, exist_ok=True)
+
+            # AC-E2-28 — cockpit observed-values writer fires
+            # once per pipeline run (both baseline + projection
+            # per Sprint G sibling-sweep). Computes the 17-key
+            # Hybrid A schema from HARMONIZE-stage UnifiedData
+            # + persists to a run-level JSON sidecar the
+            # cockpit's IDW orchestrator reads at Phase 2.
+            # Defensive try/except — a missing planting_doy
+            # (CMS §9.4) or any other writer exception logs +
+            # continues rather than blocking PACKAGE: the
+            # cockpit degrades gracefully when the substrate is
+            # absent (climate-only IDW or skip-from-analysis).
+            if unified_data:
+                try:
+                    from prismpy.cockpit.observed_values_writer import (
+                        write_observed_values_json,
+                    )
+                    observed_values_path = (
+                        base_dir / "cockpit_observed_values.json"
+                    )
+                    write_observed_values_json(
+                        unified_data=unified_data,
+                        crop_calendar=getattr(
+                            unified_data, "crop_calendar", None,
+                        ),
+                        output_path=observed_values_path,
+                    )
+                    self.logger.info(
+                        "Cockpit observed values saved to "
+                        f"{observed_values_path}"
+                    )
+                except ValueError as ove:
+                    warnings.append(
+                        "Cockpit observed values save skipped "
+                        f"(calendar gap): {ove}"
+                    )
+                    self.logger.warning(
+                        f"Cockpit observed values save skipped: {ove}"
+                    )
+                except Exception as ove:
+                    warnings.append(
+                        f"Cockpit observed values save failed: {ove}"
+                    )
+                    self.logger.warning(
+                        f"Cockpit observed values save error: {ove}"
+                    )
+
             canonical_rich = base_dir / "_pipeline_provenance.json"
             provenance_path = self.provenance.save(output_path=canonical_rich)
             # save() writes both rich + stages files side-by-side:

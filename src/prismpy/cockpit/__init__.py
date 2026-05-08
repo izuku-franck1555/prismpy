@@ -35,6 +35,18 @@ from prismpy.cockpit.manifest import (
     build_cockpit_warning_manifest,
     compute_manifest_hash,
 )
+from prismpy.cockpit.observed_values_writer import (
+    AGGREGATION_METHOD,
+    AGGREGATION_UNITS,
+    OBSERVED_VALUES_CLIMATE_KEYS,
+    OBSERVED_VALUES_SOIL_KEYS,
+    SCHEMA_VERSION as OBSERVED_VALUES_SCHEMA_VERSION,
+    SOIL_AGGREGATION_EGHR_SKIP,
+    SOIL_AGGREGATION_IN_MEMORY,
+    compute_climate_aggregates,
+    compute_soil_aggregates,
+    write_observed_values_json,
+)
 from prismpy.cockpit.per_run_snapshot import (
     compute_snapshot_at_launch_hash,
     is_snapshot_unavailable,
@@ -69,4 +81,16 @@ __all__ = [
     "bucket_for",
     "enumerate_emitted_check_ids",
     "matches_known_prefix",
+    # Sprint E.2 AC-E2-28 — HARMONIZE-stage cockpit observed-
+    # values writer + canonical 17-key Hybrid A schema.
+    "AGGREGATION_METHOD",
+    "AGGREGATION_UNITS",
+    "OBSERVED_VALUES_CLIMATE_KEYS",
+    "OBSERVED_VALUES_SCHEMA_VERSION",
+    "OBSERVED_VALUES_SOIL_KEYS",
+    "SOIL_AGGREGATION_EGHR_SKIP",
+    "SOIL_AGGREGATION_IN_MEMORY",
+    "compute_climate_aggregates",
+    "compute_soil_aggregates",
+    "write_observed_values_json",
 ]
