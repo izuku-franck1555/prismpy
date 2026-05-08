@@ -112,7 +112,13 @@ _LOWER = 815
 # Sprint G/S rebase reconciliation: 2000 -> 2200 (empirical
 # post-rebase count 1982 + ~11% headroom; matches historical
 # 5-15% pattern). Kept in sync with ``test_sprint_c_trajectory.py``.
-_UPPER = 2200
+# Sprint E.2 Phase 1.5 re-anchor: 2200 -> 2300 (foundations +
+# AC-E2-25 producer ext + AC-E2-28 writer + 4 structural pins
+# add ~15 net tests; new band absorbs ~5% headroom + leaves
+# room for AC-E2-25 + AC-E2-28 follow-on probes the contract's
+# Drill S + Drill V will surface). Kept in sync with
+# ``test_sprint_c_trajectory.py``.
+_UPPER = 2300
 
 
 class TestSprintDTrajectory(TestCase):
