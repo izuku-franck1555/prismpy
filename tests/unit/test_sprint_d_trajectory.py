@@ -118,7 +118,13 @@ _LOWER = 815
 # room for AC-E2-25 + AC-E2-28 follow-on probes the contract's
 # Drill S + Drill V will surface). Kept in sync with
 # ``test_sprint_c_trajectory.py``.
-_UPPER = 2300
+# Sprint E.3 re-anchor: 2300 -> 2400 (per AC-E3-15 +
+# `feedback_iteration_test_tiers.md` honest-flag at trajectory
+# approach; AC-E3-15 close ships canonical
+# ``prismpy/tests/test_trajectory_cap.py`` with the final band;
+# this legacy pin retires at AC-E3-15 close per durable §24
+# canonical-source-or-pin discipline).
+_UPPER = 2400
 
 
 class TestSprintDTrajectory(TestCase):

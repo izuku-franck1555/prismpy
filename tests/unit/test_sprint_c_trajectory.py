@@ -95,7 +95,10 @@ _LOWER = 815
 # Sprint E.2 Phase 1.5 re-anchor: 2200 -> 2300 (foundations +
 # AC-E2-25 producer ext + AC-E2-28 writer + 4 structural pins).
 # Kept in sync with ``test_sprint_d_trajectory.py``.
-_UPPER = 2300
+# Sprint E.3 re-anchor: 2300 -> 2400 (AC-E3-15 close ships
+# canonical ``test_trajectory_cap.py``; this legacy pin retires
+# at AC-E3-15 close per durable §24 canonical-source-or-pin).
+_UPPER = 2400
 
 
 class TestSprintCTrajectory(TestCase):

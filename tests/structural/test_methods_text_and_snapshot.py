@@ -127,8 +127,14 @@ def test_multi_platform_paragraph_names_platform() -> None:
 
 
 def test_empty_dict_serializes_to_empty_snapshot() -> None:
+    """Sprint E.3 AC-E3-14 Extension 1: serializer emits BOTH the
+    decisions block + the overrides block. Empty input → both
+    blocks empty."""
     snapshot = serialize_decisions_to_config({})
-    assert snapshot == {"cockpit_decisions_at_launch": {}}
+    assert snapshot == {
+        "cockpit_decisions_at_launch": {},
+        "cockpit_overrides_at_launch": {},
+    }
 
 
 def test_single_decision_serializes_with_cell_id_key() -> None:
@@ -309,7 +315,13 @@ def test_methods_text_module_exports() -> None:
 
 def test_cockpit_snapshot_module_exports() -> None:
     from prismpy.packaging import cockpit_snapshot
-    assert cockpit_snapshot.__all__ == ["serialize_decisions_to_config"]
+    # Sprint E.3 AC-E3-14 sub-6 absorbed — dual-shape loader
+    # ``deserialize_decisions_from_config`` joins the canonical
+    # exports alongside the writer.
+    assert sorted(cockpit_snapshot.__all__) == [
+        "deserialize_decisions_from_config",
+        "serialize_decisions_to_config",
+    ]
 
 
 def test_manifest_consistency_module_exports() -> None:
