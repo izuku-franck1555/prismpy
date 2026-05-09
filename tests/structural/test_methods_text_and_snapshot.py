@@ -123,6 +123,126 @@ def test_multi_platform_paragraph_names_platform() -> None:
     assert "CRAFT" in craft_text
 
 
+def _interp_record_with_radius(
+    *,
+    radius_km: float,
+    k: int = 4,
+    weight_power: float = 2.0,
+    source_cells: list[str] | None = None,
+    caveats: list[str] | None = None,
+) -> InterpolatedCellRecord:
+    """Fixture for the per-record provenance tests at AC-E3-11
+    sub-2 + post-Draft 4 codex HIGH-2 absorbed."""
+    return InterpolatedCellRecord(
+        interpolation_method="idw",
+        source_cells=source_cells or ["c1", "c2", "c3", "c4"],
+        uncertainty_ci_lower=410.0,
+        uncertainty_ci_upper=414.0,
+        method_doi="10.1145/800186.810616",
+        applied_at_decision_id=uuid4(),
+        affected_zone_code="BSh",
+        caveat_codes=caveats or [],
+        radius_km=radius_km,
+        k=k,
+        weight_power=weight_power,
+    )
+
+
+def test_methods_text_reads_acea_radius_from_record_not_default() -> None:
+    """Sprint E.3 AC-E3-11 sub-2 + codex round 1 HIGH CA absorbed —
+    the methods-text generator MUST read ``radius_km`` from the
+    per-record field, NOT from the module-level default. A drift
+    that re-introduces the IDW_DEFAULT_R hardcode would render
+    "within 15 km" for ACEA records (radius_km=100.0) — false
+    method identity that violates the audit-trail integrity
+    contract per durable §24."""
+    acea_records = [
+        _interp_record_with_radius(radius_km=100.0)
+        for _ in range(3)
+    ]
+    text = generate_interpolation_methods_paragraph(
+        acea_records, Platform.ACEA,
+    )
+    assert "100 km" in text, (
+        f"Methods text MUST reflect ACEA's per-record radius_km=100.0; "
+        f"got: {text!r}. Drift to '15 km' indicates the consumer "
+        f"reverted to the legacy IDW_DEFAULT_R hardcode."
+    )
+    assert "15 km" not in text, (
+        f"Methods text contains legacy '15 km' literal for ACEA "
+        f"records — false method identity per codex HIGH-2 + round 1 "
+        f"HIGH CA. Got: {text!r}"
+    )
+
+
+def test_methods_text_reads_pythia_radius_from_record() -> None:
+    """PYTHIA per-record radius is 25 km — the rendered text MUST
+    show 25 km, not the legacy 15 km default."""
+    pythia_records = [
+        _interp_record_with_radius(radius_km=25.0)
+        for _ in range(2)
+    ]
+    text = generate_interpolation_methods_paragraph(
+        pythia_records, Platform.PYTHIA,
+    )
+    assert "25 km" in text
+    assert "15 km" not in text
+
+
+def test_phrase_2_single_neighbour_reads_radius_from_record() -> None:
+    """The single-neighbour phrase ("within R=Nkm") MUST read the
+    actual record radius — same per-record-provenance contract as
+    the opening phrase."""
+    records = [
+        _interp_record_with_radius(
+            radius_km=100.0,
+            source_cells=["c_only"],
+        ),
+    ]
+    text = generate_interpolation_methods_paragraph(records, Platform.ACEA)
+    assert "R=100km" in text, (
+        f"Single-neighbour phrase MUST reflect per-record "
+        f"radius_km=100.0 for ACEA; got: {text!r}"
+    )
+    assert "R=15km" not in text
+
+
+def test_methods_text_renders_modal_k_from_records() -> None:
+    """The "fewer than k=N neighbors" phrase reads the modal k
+    across the records. A future kernel-family extension that
+    ships records with k=8 should render "fewer than k=8" not
+    "fewer than k=4"."""
+    # Mix of degraded (k=8 records with len(source_cells) < 8).
+    records = [
+        _interp_record_with_radius(
+            radius_km=15.0,
+            k=8,
+            source_cells=["c1", "c2", "c3"],  # degraded: 3 < 8
+        )
+        for _ in range(3)
+    ]
+    text = generate_interpolation_methods_paragraph(records, Platform.PYTHIA)
+    assert "k=8" in text
+
+
+def test_mixed_radius_records_render_distinct_radii() -> None:
+    """Defensive: when records carry different radii (would be a
+    substrate bug since one paragraph is per-platform, but
+    catches a future cross-platform render), the opening phrase
+    surfaces the distinct values rather than collapsing to a
+    misleading single value per the honest-signal floor."""
+    mixed_records = [
+        _interp_record_with_radius(radius_km=15.0),
+        _interp_record_with_radius(radius_km=100.0),
+    ]
+    text = generate_interpolation_methods_paragraph(
+        mixed_records, Platform.ACEA,
+    )
+    # Both radii should appear in the rendered phrase.
+    assert "15" in text
+    assert "100" in text
+
+
 # ── §2 cockpit_snapshot serialize_decisions_to_config ────────────────
 
 

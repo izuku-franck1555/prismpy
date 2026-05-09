@@ -134,14 +134,42 @@ class IdwOrchestrationResult:
     None on the InsufficientNeighborsError path (zero candidates
     within radius — should be routed to skip pre-orchestrator per
     AC-E2-3, but the orchestrator catches it as a defensive
-    fallback). ``decision_id`` echoes the input task's
-    ``decision_id`` so callers can correlate results back to
-    decisions without re-walking the task list.
+    fallback). Exactly one of ``record`` / ``error`` is populated
+    (XOR invariant per codex round 1 MEDIUM CA absorbed); the
+    ``__post_init__`` validator enforces this so a future caller
+    can't ignore the error path by reading ``record`` without an
+    error check.
+
+    ``decision_id`` echoes the input task's ``decision_id`` so
+    callers can correlate results back to decisions without re-
+    walking the task list.
     """
 
     decision_id: UUID
     record: Optional[InterpolatedCellRecord]
     error: Optional[str]
+
+    def __post_init__(self) -> None:
+        """Enforce XOR — exactly one of ``record`` / ``error`` is
+        populated. Both-None and both-populated are bug shapes
+        per codex round 1 MEDIUM CA absorbed."""
+        record_present = self.record is not None
+        error_present = self.error is not None
+        if record_present == error_present:
+            raise ValueError(
+                f"IdwOrchestrationResult XOR invariant violated: "
+                f"exactly one of record / error must be populated. "
+                f"Got record_present={record_present}, "
+                f"error_present={error_present}. "
+                f"decision_id={self.decision_id}"
+            )
+
+    @property
+    def is_success(self) -> bool:
+        """True iff the task produced a record (no error). Lets
+        callers branch on ``result.is_success`` rather than
+        re-checking the XOR pair."""
+        return self.record is not None
 
 
 def run_idw_orchestrator(

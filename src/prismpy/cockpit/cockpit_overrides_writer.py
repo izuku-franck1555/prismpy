@@ -40,8 +40,10 @@ never fired" (silent-skip class violation per
 **Atomicity** (WA CA-20 absorbed): the writer follows the
 write-to-temp-file + atomic-rename pattern. A partial-write
 failure mode (interrupt mid-write) does NOT leave torn artifacts
-visible to consumers — the rename is the commit point. Pin at
-``tests/structural/test_sidecar_writer_atomicity.py``.
+visible to consumers — the rename is the commit point. Behavioral
+drill at ``tests/unit/test_cockpit_overrides_writer.py``
+(``test_no_torn_artifact_on_simulated_mid_write_failure`` +
+``test_temp_file_cleaned_up_on_failure``).
 
 Schema shape::
 

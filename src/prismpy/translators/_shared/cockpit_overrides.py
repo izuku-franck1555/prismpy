@@ -27,13 +27,16 @@ appropriate per-cell copy without re-walking the decision log.
 
 **Helper is PURE**: does NOT mutate ``unified_data``; does NOT
 mutate ``sidecar``; does NOT mutate ``interpolation_record``.
-The behavioral pin at
-``tests/structural/test_apply_override_helper_purity.py`` asserts
-``unified_data`` byte-equivalent before/after AND
-``cockpit_observed_values.json`` byte-equivalent before/after
-(evaluator CA-E3-6 absorbed: dual-equivalent purity drill closes
-data-cooking honest-signal floor per
-``feedback_no_data_cooking.md``).
+Behavioral drill at ``tests/unit/test_apply_override.py``
+(``test_helper_does_not_mutate_sidecar`` +
+``test_helper_does_not_mutate_interpolation_record``) asserts the
+purity invariant on the Pydantic frozen contract; the integration-
+level dual-equivalent purity drill (``unified_data`` byte-
+equivalent before/after AND ``cockpit_observed_values.json``
+byte-equivalent before/after — evaluator CA-E3-6 absorbed) lands
+at AC-E3-9 4-translator wiring as a per-translator post-write
+diff against a raw-substrate baseline, closing the data-cooking
+honest-signal floor per ``feedback_no_data_cooking.md``.
 
 **Translator-wiring precedence pin** (AC-E3-12 #3 rewritten per
 builder CA-4 + WA CA-18; structural pin
