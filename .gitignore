@@ -113,3 +113,4 @@ Thumbs.db
 # not match the suffix patterns above. Symmetric with prismweb/.gitignore.
 .local/
 .venv-py312/
+.venv-build/
