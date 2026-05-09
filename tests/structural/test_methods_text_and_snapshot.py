@@ -132,6 +132,9 @@ def test_empty_dict_serializes_to_empty_snapshot() -> None:
 
 
 def test_single_decision_serializes_with_cell_id_key() -> None:
+    """Sprint E.3 AC-E3-14 reshape: nested
+    ``cockpit_decisions_at_launch[<cell_id>][<check_id>] = record``
+    JSON shape preserves multi-check coexistence per cell."""
     decision_id = uuid4()
     record = CellDecisionRecord(
         decision_id=decision_id,
@@ -143,10 +146,16 @@ def test_single_decision_serializes_with_cell_id_key() -> None:
         method_or_rationale="r",
         sequence_number=1,
     )
-    snapshot = serialize_decisions_to_config({"c1": record})
+    snapshot = serialize_decisions_to_config(
+        {("c1", "value_range_precip"): record}
+    )
     assert "cockpit_decisions_at_launch" in snapshot
     assert "c1" in snapshot["cockpit_decisions_at_launch"]
-    assert snapshot["cockpit_decisions_at_launch"]["c1"]["cell_id"] == "c1"
+    assert "value_range_precip" in snapshot["cockpit_decisions_at_launch"]["c1"]
+    assert (
+        snapshot["cockpit_decisions_at_launch"]["c1"]["value_range_precip"]["cell_id"]
+        == "c1"
+    )
 
 
 def test_serialization_is_json_dumpable() -> None:
@@ -163,15 +172,17 @@ def test_serialization_is_json_dumpable() -> None:
         method_or_rationale="r",
         sequence_number=1,
     )
-    snapshot = serialize_decisions_to_config({"c1": record})
+    snapshot = serialize_decisions_to_config(
+        {("c1", "value_range_precip"): record}
+    )
     # Should not raise.
     json.dumps(snapshot)
 
 
 def test_keys_sorted_for_deterministic_output() -> None:
-    """Sorted keys ensure byte-stable output across runs."""
+    """Sorted outer + inner keys ensure byte-stable output across runs."""
     records = {
-        f"c{i}": CellDecisionRecord(
+        (f"c{i}", "value_range_precip"): CellDecisionRecord(
             decision_id=uuid4(),
             cell_id=f"c{i}",
             action="acknowledge",
@@ -184,15 +195,58 @@ def test_keys_sorted_for_deterministic_output() -> None:
         for i in range(5, 0, -1)
     }
     snapshot = serialize_decisions_to_config(records)
-    keys = list(snapshot["cockpit_decisions_at_launch"].keys())
-    assert keys == sorted(keys)
+    outer_keys = list(snapshot["cockpit_decisions_at_launch"].keys())
+    assert outer_keys == sorted(outer_keys)
+
+
+def test_multi_check_per_cell_serializes_under_nested_keys() -> None:
+    """Sprint E.3 AC-E3-14 NEW: a single cell with two active
+    decisions on different check_ids serializes to two separate
+    inner-dict entries under the same outer cell_id key."""
+    record_tmax = CellDecisionRecord(
+        decision_id=uuid4(),
+        cell_id="c1",
+        action="acknowledge",
+        check_id="value_range_tmax",
+        timestamp=datetime(2026, 5, 7, 12, 0, 0, tzinfo=timezone.utc),
+        user_identity="u",
+        method_or_rationale="r",
+        sequence_number=1,
+    )
+    record_tmin = CellDecisionRecord(
+        decision_id=uuid4(),
+        cell_id="c1",
+        action="acknowledge",
+        check_id="value_range_tmin",
+        timestamp=datetime(2026, 5, 7, 12, 0, 1, tzinfo=timezone.utc),
+        user_identity="u",
+        method_or_rationale="r",
+        sequence_number=2,
+    )
+    snapshot = serialize_decisions_to_config(
+        {
+            ("c1", "value_range_tmax"): record_tmax,
+            ("c1", "value_range_tmin"): record_tmin,
+        }
+    )
+    inner = snapshot["cockpit_decisions_at_launch"]["c1"]
+    assert "value_range_tmax" in inner
+    assert "value_range_tmin" in inner
+    # Inner keys also sorted alphabetically.
+    assert list(inner.keys()) == sorted(inner.keys())
 
 
 def test_none_value_passes_through_unchanged() -> None:
-    """When current_decisions returns None for a cell (all decisions
-    reverted), the snapshot preserves the None marker."""
-    snapshot = serialize_decisions_to_config({"c1": None})
-    assert snapshot["cockpit_decisions_at_launch"]["c1"] is None
+    """When current_decisions returns None for a pair (all decisions
+    reverted), the snapshot preserves the None marker under the
+    nested key."""
+    snapshot = serialize_decisions_to_config(
+        {("c1", "value_range_precip"): None}
+    )
+    assert (
+        snapshot["cockpit_decisions_at_launch"]["c1"]["value_range_precip"]
+        is None
+    )
 
 
 # ── §3 manifest consistency validator ───────────────────────────────
