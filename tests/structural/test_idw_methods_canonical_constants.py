@@ -96,12 +96,18 @@ def test_idw_constants_use_final_typing() -> None:
 # ── §4 dunder-all is the explicit canonical-source surface ───────────
 
 
-def test_module_dunder_all_lists_four_canonical_names() -> None:
+def test_module_dunder_all_lists_canonical_names() -> None:
+    """Sprint E.3 AC-E3-11 extends idw_methods with two new
+    constants (canonical / legacy method literals) + a per-platform
+    radius dispatcher. The dunder-all surface grows alongside."""
     expected = {
+        "IDW_CANONICAL_METHOD_LITERAL",
         "IDW_DEFAULT_K",
         "IDW_DEFAULT_METHOD_LITERAL",
         "IDW_DEFAULT_R",
         "IDW_DEFAULT_W",
+        "IDW_LEGACY_METHOD_LITERAL",
+        "get_idw_radius_for_platform",
     }
     assert set(idw_methods.__all__) == expected
 

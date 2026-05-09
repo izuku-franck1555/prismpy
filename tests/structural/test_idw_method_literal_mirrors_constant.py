@@ -26,23 +26,37 @@ from prismpy.standards.idw_methods import IDW_DEFAULT_METHOD_LITERAL
 
 
 def test_interpolation_method_literal_arg_equals_canonical_constant() -> None:
-    """The Literal annotation on the schema field carries exactly one
-    arg — the canonical method identifier. Use ``model_fields`` +
-    ``typing.get_args`` to introspect at runtime."""
+    """The Literal annotation on the schema field MUST carry the
+    Sprint E.3 migration-window union per AC-E3-11 sub-2 absorbed —
+    exactly two args: the post-E.3 canonical
+    :data:`IDW_CANONICAL_METHOD_LITERAL` (``"idw"``) AND the legacy
+    pre-E.3 :data:`IDW_LEGACY_METHOD_LITERAL`
+    (``"idw_k4_r15km_w_inverse_dist_sq"``).
+
+    Post-migration tightening (V3+ task) drops the legacy literal
+    from the union; this pin asserts the migration-window
+    coexistence so a refactor that drops the canonical literal
+    early fires loud + a refactor that drops the legacy literal
+    early fires loud (legacy rows still need the literal until
+    the prismweb-side migration ``0024`` ships)."""
+    from prismpy.standards.idw_methods import (
+        IDW_CANONICAL_METHOD_LITERAL,
+        IDW_LEGACY_METHOD_LITERAL,
+    )
+
     field_info = InterpolatedCellRecord.model_fields["interpolation_method"]
     annotation = field_info.annotation
-    literal_args = typing.get_args(annotation)
-    assert len(literal_args) == 1, (
-        f"interpolation_method Literal MUST have exactly one arg "
-        f"(MVP-fixed canonical method per AC-E2-19); got "
-        f"{len(literal_args)}: {literal_args}"
-    )
-    assert literal_args[0] == IDW_DEFAULT_METHOD_LITERAL, (
+    literal_args = set(typing.get_args(annotation))
+    expected = {
+        IDW_CANONICAL_METHOD_LITERAL,
+        IDW_LEGACY_METHOD_LITERAL,
+    }
+    assert literal_args == expected, (
         f"InterpolatedCellRecord.interpolation_method Literal "
-        f"({literal_args[0]!r}) drifted from canonical constant "
-        f"IDW_DEFAULT_METHOD_LITERAL ({IDW_DEFAULT_METHOD_LITERAL!r}) "
-        f"at prismpy/standards/idw_methods.py. Per durable §24 "
-        f"canonical-source-or-pin: the schema mirrors the canonical "
-        f"constant; update both atomically when extending the method "
-        f"vocabulary."
+        f"args {sorted(literal_args)} drifted from canonical "
+        f"migration-window union {sorted(expected)} at "
+        f"prismpy/standards/idw_methods.py. Per durable §24 + "
+        f"AC-E3-11 sub-2: the schema mirrors the canonical "
+        f"constants; update both atomically when extending the "
+        f"method vocabulary."
     )

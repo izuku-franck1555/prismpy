@@ -187,23 +187,27 @@ def test_empty_input_returns_empty_dict() -> None:
 
 
 def test_single_decision_returns_that_decision() -> None:
+    """Sprint E.3 AC-E3-6 reshape: keys are now ``(cell_id,
+    check_id)`` tuples. The fixture's ``check_id`` is
+    ``"value_range_precip"`` (per ``_decision`` factory)."""
     a = _decision(cell_id="c1", sequence_number=1)
     result = current_decisions([a])
-    assert result == {"c1": a}
+    assert result == {("c1", "value_range_precip"): a}
 
 
 def test_two_decisions_same_cell_most_recent_wins() -> None:
-    """When two decisions land on the same cell, the most-recent
-    (later timestamp) wins per (timestamp, sequence_number) ordering."""
+    """When two decisions land on the same ``(cell_id, check_id)``
+    pair, the most-recent (later timestamp) wins per
+    (timestamp, sequence_number) ordering."""
     a = _decision(cell_id="c1", sequence_number=1, timestamp=_ts(1))
     b = _decision(cell_id="c1", sequence_number=2, timestamp=_ts(2))
     result = current_decisions([a, b])
-    assert result == {"c1": b}
+    assert result == {("c1", "value_range_precip"): b}
 
 
 def test_apply_then_revert_filters_both() -> None:
     """Drill I (a): write A → revert A → both filtered;
-    cell maps to None."""
+    pair maps to None."""
     a = _decision(cell_id="c1", sequence_number=1, timestamp=_ts(1))
     revert_b = _decision(
         cell_id="c1",
@@ -212,7 +216,7 @@ def test_apply_then_revert_filters_both() -> None:
         revert_of=a.decision_id,
     )
     result = current_decisions([a, revert_b])
-    assert result == {"c1": None}
+    assert result == {("c1", "value_range_precip"): None}
 
 
 def test_apply_revert_apply_chain_returns_third_decision() -> None:
@@ -226,7 +230,7 @@ def test_apply_revert_apply_chain_returns_third_decision() -> None:
     )
     c = _decision(cell_id="c1", sequence_number=3, timestamp=_ts(3))
     result = current_decisions([a, revert_b, c])
-    assert result == {"c1": c}
+    assert result == {("c1", "value_range_precip"): c}
 
 
 def test_shuffled_input_produces_same_output_as_sorted(
@@ -268,12 +272,14 @@ def test_same_timestamp_resolves_by_sequence_number() -> None:
         revert_of=a.decision_id,
     )
     # Both forward and reverse input order should produce same result.
-    assert current_decisions([a, revert_b]) == {"c1": None}
-    assert current_decisions([revert_b, a]) == {"c1": None}
+    assert current_decisions([a, revert_b]) == {("c1", "value_range_precip"): None}
+    assert current_decisions([revert_b, a]) == {("c1", "value_range_precip"): None}
 
 
 def test_multi_cell_independent_state() -> None:
-    """Different cells have independent decision histories."""
+    """Different cells have independent decision histories. The
+    tuple-keyed reshape per AC-E3-6 surfaces them as distinct
+    ``(cell_id, check_id)`` pairs."""
     a1 = _decision(cell_id="c1", sequence_number=1, timestamp=_ts(1))
     a2 = _decision(cell_id="c2", sequence_number=2, timestamp=_ts(2))
     revert_a1 = _decision(
@@ -283,13 +289,17 @@ def test_multi_cell_independent_state() -> None:
         revert_of=a1.decision_id,
     )
     result = current_decisions([a1, a2, revert_a1])
-    assert result == {"c1": None, "c2": a2}
+    assert result == {
+        ("c1", "value_range_precip"): None,
+        ("c2", "value_range_precip"): a2,
+    }
 
 
 def test_apply_revert_remaining_counter_pattern() -> None:
     """Drill I (d) — apply N decisions on N distinct cells; revert
-    one; assert N-1 cells have current decisions + 1 cell maps to
-    None. Models AC-E2-9 remaining-counter math."""
+    one; assert N-1 pairs have current decisions + 1 pair maps to
+    None. Models AC-E2-9 remaining-counter math + Sprint E.3
+    AC-E3-6 tuple-keyed counter LOCK."""
     decisions = [
         _decision(cell_id=f"c{i}", sequence_number=i, timestamp=_ts(i))
         for i in range(1, 11)
@@ -302,11 +312,47 @@ def test_apply_revert_remaining_counter_pattern() -> None:
         revert_of=decisions[4].decision_id,
     )
     result = current_decisions(decisions + [revert])
-    # 10 cells total; c5 maps to None; others map to their decisions.
-    active_cells = [cell_id for cell_id, decision in result.items() if decision is not None]
-    inactive_cells = [cell_id for cell_id, decision in result.items() if decision is None]
-    assert len(active_cells) == 9
-    assert inactive_cells == ["c5"]
+    # 10 pairs total; c5 maps to None; others map to their decisions.
+    active_pairs = [key for key, decision in result.items() if decision is not None]
+    inactive_pairs = [key for key, decision in result.items() if decision is None]
+    assert len(active_pairs) == 9
+    assert inactive_pairs == [("c5", "value_range_precip")]
+
+
+def test_multi_check_coexistence_per_cell() -> None:
+    """Sprint E.3 AC-E3-6 NEW: a single cell can carry multiple
+    active decisions on different ``check_id``s. Override on
+    ``value_range_tmax`` AND Acknowledge on ``value_range_tmin``
+    on the same cell coexist as separate tuple-keyed entries.
+
+    This is the core motivation for the reshape — Drill-E3-K-style
+    multi-check coexistence per cell that the Sprint E.2 P2
+    cell-only-keyed reader silently collapsed."""
+    a_tmax = _decision(
+        cell_id="c1",
+        sequence_number=1,
+        timestamp=_ts(1),
+        action="acknowledge",
+    )
+    # Manually override the fixture's check_id to a different value.
+    b_tmin = CellDecisionRecord(
+        decision_id=uuid4(),
+        cell_id="c1",
+        action="acknowledge",
+        check_id="value_range_tmin",
+        timestamp=_ts(2),
+        user_identity="test-user",
+        method_or_rationale="separate check on same cell",
+        sequence_number=2,
+    )
+    result = current_decisions([a_tmax, b_tmin])
+    assert result == {
+        ("c1", "value_range_precip"): a_tmax,
+        ("c1", "value_range_tmin"): b_tmin,
+    }
+    # The user-visible counter (decided_pair_count per AC-E3-6
+    # counter semantic LOCK) is the length of the dict.
+    assert len(result) == 2
 
 
 def test_dunder_all_lists_canonical_exports() -> None:

@@ -53,6 +53,13 @@ from prismpy.models.crop import CropParameters, CropCalendar
 from prismpy.models.region import Region
 from prismpy.models.soil import SoilProfile
 from prismpy.provenance.tracker import DecisionType, ProvenanceTracker
+# Sprint E.3 AC-E3-9 — cockpit override dispatch helper. The
+# climate / soil / management per-cell write sites in this
+# translator route raw values through ``apply_override`` before
+# writing per-cell platform files; with no sidecar the helper is
+# a no-op short-circuit on the raw value, preserving Sprint E.2
+# era output byte-equivalent for runs without overrides.
+from prismpy.translators._shared.cockpit_overrides import apply_override
 from prismpy.translators.base import (
     BaseTranslator,
     SarraPyTranslatorBase,
