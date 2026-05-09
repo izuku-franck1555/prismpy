@@ -50,13 +50,35 @@ comparisons).
 
 from __future__ import annotations
 
-from typing import Optional, TypeVar, Union
+from typing import FrozenSet, Optional, TypeVar, Union
 
 from prismpy.cockpit.cockpit_overrides_writer import CockpitOverrideSidecar
 from prismpy.models.interpolated_cell import CellID, InterpolatedCellRecord
 
 
 T = TypeVar("T", float, int, str)
+
+
+# ── Platform override-coverage exemption registry (builder CA-5) ─────
+
+
+# Sprint E.3 AC-E3-9 sub-4 + builder grounding-pass CA-5 absorbed.
+# The structural pin at
+# ``tests/structural/test_translator_platform_coverage.py``
+# asserts every ``Platform.*`` enum member NOT in this set has
+# a corresponding ``apply_override`` import in its translator
+# module. New Platform.* additions either get override coverage
+# OR an explicit exemption with rationale comment here.
+#
+# DSSAT is the family-base that PYTHIA + CRAFT translators use
+# internally — it's NOT a separately-translated platform per
+# the AC-E3-9 contract text. Override wiring lives at the
+# PYTHIA / CRAFT translator level (which delegate to DSSAT for
+# the platform-specific output writers); DSSAT itself doesn't
+# expose its own translator module to wire.
+_PLATFORM_OVERRIDE_EXEMPTIONS: FrozenSet[str] = frozenset({
+    "DSSAT",  # family-base used by PYTHIA + CRAFT internally
+})
 
 
 def apply_override(
@@ -121,5 +143,6 @@ def apply_override(
 
 
 __all__ = [
+    "_PLATFORM_OVERRIDE_EXEMPTIONS",
     "apply_override",
 ]
