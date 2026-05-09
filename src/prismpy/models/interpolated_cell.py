@@ -92,10 +92,22 @@ class InterpolatedCellRecord(BaseModel):
         validate_assignment=True,
     )
 
-    interpolation_method: Literal["idw_k4_r15km_w_inverse_dist_sq"]
-    """Canonical method identifier. Mirror-pinned to
-    ``IDW_DEFAULT_METHOD_LITERAL`` (AC-E2-19) via
-    ``test_idw_method_literal_mirrors_constant.py``.
+    interpolation_method: Literal["idw", "idw_k4_r15km_w_inverse_dist_sq"]
+    """Canonical kernel-family identifier. Sprint E.3 AC-E3-11
+    extends the Literal to a 2-arg union covering BOTH the post-E.3
+    canonical ``"idw"`` (kernel-family handle) AND the legacy pre-E.3
+    parameter-encoded ``"idw_k4_r15km_w_inverse_dist_sq"`` (accepted
+    during the migration window). Per-record parameters
+    (``radius_km`` / ``k`` / ``weight_power`` below) carry the
+    actual numeric values so a future kernel-family extension
+    (e.g., kriging) can land here without restating the parameter
+    surface.
+
+    The Django migration ``0024_interpolated_cell_record_schema_extension.py``
+    (ships at AC-E3-16 prismweb-side per builder DELTA-CA-2)
+    rewrites legacy rows to ``"idw"`` post-deployment; the post-
+    migration tightening drops the legacy literal from this Union
+    (V3+ task).
     """
 
     source_cells: list[CellID] = Field(min_length=1)
@@ -136,6 +148,29 @@ class InterpolatedCellRecord(BaseModel):
     list is valid (no caveats apply). Each code is validated
     against the canonical ``CaveatCode`` Literal (per §0.2 #7).
     """
+
+    radius_km: float = Field(default=15.0, gt=0.0)
+    """Per-record IDW search radius (km). Sprint E.3 AC-E3-11
+    canonical-source — the methods-text generator reads this
+    field rather than parsing the legacy literal pattern. Per
+    :data:`prismpy.standards.idw_methods.IDW_RADIUS_BY_PLATFORM`:
+    SARRA-Py / CRAFT = 15 km, PYTHIA = 25 km, ACEA = 100 km
+    (CMS CA-1 BLOCKING absorbed). Default 15.0 preserves backward
+    compatibility for legacy rows + pre-E.3 fixtures during the
+    migration window; the prismweb-side migration ``0024``
+    rewrites legacy rows with the platform-correct radius before
+    the post-migration tightening fires."""
+
+    k: int = Field(default=4, ge=1)
+    """Per-record nearest-neighbour count. Sprint E.3 AC-E3-11
+    canonical-source. Default 4 matches Sprint E.2 era
+    :data:`prismpy.standards.idw_methods.IDW_DEFAULT_K`."""
+
+    weight_power: float = Field(default=2.0, gt=0.0)
+    """Per-record inverse-distance weighting exponent. Sprint E.3
+    AC-E3-11 canonical-source. Default 2.0 (Shepard's original
+    formulation) matches Sprint E.2 era
+    :data:`prismpy.standards.idw_methods.IDW_DEFAULT_W`."""
 
     @model_validator(mode="after")
     def _validate_ci_ordering(self) -> "InterpolatedCellRecord":
