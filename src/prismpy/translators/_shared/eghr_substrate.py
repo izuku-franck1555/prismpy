@@ -26,17 +26,19 @@ and the ``.SOL`` cannot drift apart on which cell maps to which profile
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import logging
 import sqlite3
 from pathlib import Path
-from typing import Dict, Mapping, Tuple
+from typing import Dict, Mapping, Optional, Tuple
 
 import numpy as np
 import rasterio
 from pydantic import BaseModel, ConfigDict, Field
 from rasterio.transform import from_bounds
 
+from prismpy.cockpit.cockpit_overrides_writer import CockpitOverrideSidecar
 from prismpy.models.region import Region
 from prismpy.models.soil import SoilLayer, SoilProfile
 from prismpy.models.spatial import SpatialGrid
@@ -186,12 +188,146 @@ def assign_cell_to_profile_id(
     return cell_to_profile_id, profiles_by_id
 
 
+# Sprint E.3 fixup +15 (F-BN Boundary 3) — variable_key → SoilLayer field
+# mapping. The cockpit registry at
+# ``prismpy.standards.override_value_shapes.OVERRIDE_VALUE_SHAPES`` uses
+# canonical variable_keys (e.g., ``soil_sand_pct``) that map to attribute
+# names on :class:`SoilLayer` (e.g., ``sand``). Override targets the
+# top-most layer in the profile (typically the surface 0–30 cm horizon
+# DSSAT cares about most for emergence / early-stage water relations).
+# Per durable §24 canonical-source-or-pin: the mapping lives here once.
+_SOIL_OVERRIDE_VARIABLE_KEYS: Dict[str, str] = {
+    "soil_sand_pct": "sand",
+    "soil_clay_pct": "clay",
+    "soil_organic_carbon_pct": "organic_carbon",
+    "soil_ph": "ph",
+    "soil_bulk_density_g_cm3": "bulk_density",
+}
+
+
+def _apply_soil_overrides_to_assignment(
+    *,
+    cell_to_profile_id: Dict[int, int],
+    profiles_by_id: Dict[int, SoilProfile],
+    sidecar: CockpitOverrideSidecar,
+) -> Tuple[Dict[int, int], Dict[int, SoilProfile]]:
+    """Synthesize per-cell soil profiles for cells with sidecar overrides.
+
+    Sprint E.3 fixup +15 (F-BN Boundary 3). The cockpit sidecar maps
+    ``(cell_id, variable_key)`` to an override value (e.g., persona
+    documents ``soil_sand_pct=88.0`` on cell 4374122 based on a
+    cited Mathon et al. 2002 field measurement). The eGHR substrate
+    builder deduplicates cells with identical raw soil profiles into
+    a shared profile id, so an in-place mutation of the shared profile
+    would silently affect every other cell using that profile —
+    honest-signal floor per ``feedback_no_data_cooking.md``.
+
+    This helper splits the affected cells off into per-cell synthetic
+    profiles: each overridden cell gets a deepcopy of its current
+    profile with the override applied to the top layer, assigned a
+    fresh profile id starting at ``max(existing) + 1``. The original
+    profile stays intact for every non-overridden cell that shares
+    it.
+
+    Args:
+        cell_to_profile_id: Output of :func:`assign_cell_to_profile_id`
+            — mapping ``cell_id → profile_id``.
+        profiles_by_id: Output of :func:`assign_cell_to_profile_id`
+            — registry of deduplicated profiles keyed by id.
+        sidecar: Validated cockpit override sidecar carrying
+            ``(cell_id, variable_key, value)`` triples per AC-E3-7.
+
+    Returns:
+        Tuple ``(cell_to_profile_id, profiles_by_id)`` with the
+        overridden cells split into synthetic profiles. Returns the
+        inputs unchanged if no sidecar entries match a known soil
+        variable_key on a cell present in ``cell_to_profile_id``.
+
+    The helper is PURE — does NOT mutate the input dicts. Caller
+    reassigns the result. ``copy.deepcopy`` is used on the
+    :class:`SoilProfile` instances so mutating a layer attribute on
+    the synthesized copy cannot leak back to the shared registry.
+    """
+    # Group sidecar entries by cell_id, keep only entries whose
+    # variable_key is in the soil registry (climate entries skip this
+    # helper). ``cell_id`` arrives as str in the sidecar; the
+    # cell_to_profile_id keys are int — defensive int-cast per
+    # durable §27 producer-consumer parity.
+    soil_overrides_by_cell: Dict[int, Dict[str, float]] = {}
+    for entry in sidecar.overrides:
+        if entry.variable_key not in _SOIL_OVERRIDE_VARIABLE_KEYS:
+            continue
+        try:
+            cell_id_int = int(entry.cell_id)
+        except (TypeError, ValueError):
+            continue
+        if cell_id_int not in cell_to_profile_id:
+            continue
+        bucket = soil_overrides_by_cell.setdefault(cell_id_int, {})
+        bucket[entry.variable_key] = float(entry.value)
+
+    if not soil_overrides_by_cell:
+        return cell_to_profile_id, profiles_by_id
+
+    # Build new dicts so the helper is non-mutating (caller's
+    # references stay valid until reassignment).
+    new_cell_to_profile_id = dict(cell_to_profile_id)
+    new_profiles_by_id = dict(profiles_by_id)
+    next_profile_id = (max(new_profiles_by_id) if new_profiles_by_id else 0) + 1
+
+    for cell_id_int, overrides_for_cell in sorted(soil_overrides_by_cell.items()):
+        current_profile_id = new_cell_to_profile_id[cell_id_int]
+        base_profile = new_profiles_by_id.get(current_profile_id)
+        if base_profile is None or not base_profile.layers:
+            # Defensive — should never happen given assign_cell_to_profile_id
+            # only writes (cell, profile) when the profile exists with
+            # at least one layer, but guards prevent a crash if the
+            # invariant ever drifts.
+            continue
+        synthesized = copy.deepcopy(base_profile)
+        top_layer = synthesized.layers[0]
+        for variable_key, override_value in sorted(overrides_for_cell.items()):
+            attr_name = _SOIL_OVERRIDE_VARIABLE_KEYS[variable_key]
+            setattr(top_layer, attr_name, override_value)
+        # Recompute silt if sand or clay changed so the layer's
+        # sand+clay+silt=100 invariant holds (matches the
+        # SoilLayer.__post_init__ behavior on construction).
+        if "soil_sand_pct" in overrides_for_cell or "soil_clay_pct" in overrides_for_cell:
+            top_layer.silt = max(
+                0.0,
+                100.0 - (top_layer.sand or 0.0) - (top_layer.clay or 0.0),
+            )
+        # Force re-derivation of hydraulic properties on the
+        # overridden layer so wilting_point / field_capacity /
+        # saturated_wc track the new texture (the builder later
+        # recomputes via estimate_hydraulic_properties if these
+        # are None; clearing here triggers that path).
+        top_layer.wilting_point = None
+        top_layer.field_capacity = None
+        top_layer.saturated_wc = None
+
+        new_profiles_by_id[next_profile_id] = synthesized
+        new_cell_to_profile_id[cell_id_int] = next_profile_id
+        logger.info(
+            "Applied cockpit soil override to cell %d: profile %d → "
+            "synthetic profile %d (overrides=%s)",
+            cell_id_int,
+            current_profile_id,
+            next_profile_id,
+            sorted(overrides_for_cell.keys()),
+        )
+        next_profile_id += 1
+
+    return new_cell_to_profile_id, new_profiles_by_id
+
+
 def build_eghr_substrate(
     grid: SpatialGrid,
     profiles_by_cell: Mapping[int, SoilProfile],
     country_code: str,
     region: Region,
     output_dir: Path,
+    cockpit_override_sidecar: Optional[CockpitOverrideSidecar] = None,
 ) -> EghrSubstrateResult:
     """Build the three eGHR substrate artifacts in ``output_dir``.
 
@@ -231,6 +367,20 @@ def build_eghr_substrate(
     cell_to_profile_id, profiles_by_id = assign_cell_to_profile_id(
         grid, profiles_by_cell
     )
+
+    # Step 1.5: Sprint E.3 fixup +15 (F-BN Boundary 3) — apply per-cell
+    # soil overrides from the cockpit sidecar. The override semantic is
+    # "synthesize a new profile for the overridden cell and re-point its
+    # cell_to_profile_id entry at the new profile" — over-broad in-place
+    # mutation of a shared profile would silently affect every other cell
+    # using that profile (honest-signal floor per
+    # ``feedback_no_data_cooking.md``).
+    if cockpit_override_sidecar is not None and cockpit_override_sidecar.overrides:
+        cell_to_profile_id, profiles_by_id = _apply_soil_overrides_to_assignment(
+            cell_to_profile_id=cell_to_profile_id,
+            profiles_by_id=profiles_by_id,
+            sidecar=cockpit_override_sidecar,
+        )
 
     # Step 2: write the .SOL via the canonical writer. The eGHR substrate
     # uses a different file-header suffix and source label so a manual

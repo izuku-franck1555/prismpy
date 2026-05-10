@@ -365,6 +365,28 @@ class AceaTranslator(AceaTranslatorBase):
         warnings = []
         output_files = []
 
+        # Sprint E.3 fixup +15 (F-BN Boundary 3) — ACEA translator is
+        # in the PYTHIA-only ship's deferred-translator set per the
+        # team-lead's scope guard. Surface a runtime warning whenever
+        # the cockpit override sidecar is non-empty so the persona
+        # gets an honest signal that their override decisions are NOT
+        # being applied to ACEA canonical files; full wiring lands in
+        # Phase 4.6.
+        cockpit_sidecar = getattr(self, "cockpit_override_sidecar", None)
+        if cockpit_sidecar is not None and cockpit_sidecar.overrides:
+            warnings.append(
+                f"Cockpit override sidecar carries {len(cockpit_sidecar.overrides)} "
+                "entries but ACEA value-replacement wiring is not yet "
+                "implemented; values will NOT be applied to canonical ACEA "
+                "files. Ship in Phase 4.6 per Sprint E.3 fixup +15 scope guard."
+            )
+            self.logger.warning(
+                "ACEA translator: cockpit override sidecar present (%d entries) "
+                "but value-replacement wiring deferred to Phase 4.6 — persona's "
+                "documented overrides will NOT surface in this ACEA package.",
+                len(cockpit_sidecar.overrides),
+            )
+
         # Validate input data
         input_errors = self.validate_input_data(data)
         if input_errors:
