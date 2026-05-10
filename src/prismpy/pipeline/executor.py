@@ -2804,6 +2804,14 @@ class TranslationPipeline:
         try:
             payload = sidecar_path.read_text(encoding="utf-8")
             sidecar = CockpitOverrideSidecar.model_validate_json(payload)
+        except PipelineCancelled:
+            # Cancel-discipline carve-out per test_cooperative_cancellation
+            # F-9B orchestrator-convention backstop: ``_load_*`` methods
+            # are auto cancel-hot. The read + Pydantic validate path here
+            # is cancel-inert (no network, no long compute) but the
+            # carve-out is required to satisfy the structural pin without
+            # an explicit ORCHESTRATOR_EXEMPTIONS entry.
+            raise
         except Exception as exc:
             self.logger.warning(
                 "Could not load cockpit override sidecar from %s: %s. "
