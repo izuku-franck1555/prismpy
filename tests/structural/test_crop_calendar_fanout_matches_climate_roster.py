@@ -306,6 +306,46 @@ class TestProducerSourceShape(unittest.TestCase):
             '(durable §27).',
         )
 
+    def test_producer_does_not_filter_negative_sentinel(self):
+        # Codex round-4 MEDIUM-2 absorption — guard against a
+        # regression that re-introduces ``cid >= 0`` to the executor
+        # crop_calendar fan-out. The negative sentinel ``-1`` from
+        # ``_create_placeholder_climate`` MUST survive the executor
+        # filter so PYTHIA / ACEA / CRAFT pass
+        # ``BaseTranslator.validate_input_data`` (which rejects a
+        # falsy ``data.crop_calendar``) before
+        # ``_surface_per_cell_climate`` ever runs. Helper-side
+        # filtering at ``translators/base.py`` removes the sentinel
+        # from the final consumer-visible calendar; the executor's
+        # job is only to keep the sentinel alive long enough for
+        # validation.
+        crop_calendar_block = self._extract_crop_calendar_block()
+        # Strip Python comments before the regex check. The
+        # executor's contract docstring at line ~787 references the
+        # helper-side ``isinstance(cid, int) and cid >= 0`` filter
+        # as part of its narrative — that prose mention is correct
+        # and must not trip this assertion. We only want to catch
+        # an actual code-level re-introduction of the executor-
+        # side filter.
+        code_only = re.sub(
+            r'#.*$', '', crop_calendar_block, flags=re.MULTILINE,
+        )
+        self.assertNotRegex(
+            code_only,
+            r'cid\s*>=\s*0',
+            'pipeline/executor.py crop_calendar block must NOT '
+            'filter ``cid >= 0`` in CODE — that filter was removed '
+            'in F-CK round-3 absorption because it emptied the '
+            'calendar for sentinel-only climate '
+            '(``{-1: placeholder}`` from '
+            '``_create_placeholder_climate``), causing PYTHIA / '
+            'ACEA / CRAFT to fail ``validate_input_data`` before '
+            'ever calling ``_surface_per_cell_climate``. The '
+            'helper-side filter at ``translators/base.py:364`` is '
+            'what removes the sentinel from the FINAL consumer-'
+            'visible calendar; the executor must NOT pre-empt it.',
+        )
+
     def _extract_crop_calendar_block(self):
         # Capture from the ``if self.config.crop.calendar:`` guard
         # to the next ``except`` so the assertions scope to the
