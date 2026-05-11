@@ -1860,26 +1860,72 @@ def _check_coverage_climate_cells(unified_data) -> Dict[str, Any]:
         if unified_data and hasattr(unified_data, 'climate')
         else {}
     )
-    # G7 §2 — when the climate axis is fully unavailable (empty
-    # dict, neither per-cell records nor file-based directories),
-    # emit unavailable instead of fail. The prior behavior listed
-    # every grid cell in ``affected_cells``, which fed the per-cell
-    # pivot a climate-fail entry for every cell — a direct
-    # violation of the §1 per-axis invariant 3 (climate fails on a
-    # cell whose climate axis is unavailable). Partial coverage
+    # F-CO honest-signal rollup — full axis unavailability with a
+    # populated grid emits FAIL (not unavailable) so the top-level
+    # rollup matches the per-cell view.
+    #
+    # Prior behaviour (G7 §2): emit ``unavailable`` so per-cell
+    # invariants didn't fan out to every cell. The intent was
+    # right (don't flood the per-cell pivot with axis-level
+    # failures), but the consequence at the rollup was wrong:
+    # ``run_scientific_validation`` at lines 184-196 filters
+    # ``unavailable`` out of the ``runnable`` set, so the rollup
+    # only sees the surviving axis-agnostic checks (e.g.,
+    # ``_check_coverage_global`` may emit ``warning`` for a
+    # partial substrate). End state: overall_result='warning'
+    # while per-cell validation_status='fail' on every cell —
+    # the cockpit, banner, and certificate all under-report the
+    # severity (warning-auditor §6.2 RCA: F-AG NEW manifestation
+    # at retrieval-failure axis, distinct from F-AG's original
+    # post-translate site).
+    #
+    # The honest signal is FAIL with affected_cells = all grid
+    # cells. The per-axis invariant the G7 §2 design wanted to
+    # preserve is still satisfied because: (a) we emit a single
+    # per-cell record covering the whole grid, NOT one fail per
+    # validator-axis combination, and (b) ``cause`` discriminator
+    # marks the failure as axis-level so the cockpit drawer can
+    # render the unavailability narrative ("no climate fetched")
+    # rather than per-cell-anomaly framing. Partial coverage
     # (some cells missing) keeps the existing fail+affected_cells
-    # path; the per-axis invariant only forbids the AXIS-fully-
-    # unavailable case from emitting climate fails.
+    # path below — Layer 1 here only addresses the axis-FULLY-
+    # unavailable case where the rollup was blind.
     if not _has_climate_data(climate):
-        return _unavailable(
-            check_id="coverage_climate_cells",
-            scope="per_cell",
-            cause="no_climate_fetch",
-            details={
-                "n_total": grid.n_cells,
-                "n_missing": 0,
+        all_cell_ids = sorted({c.cell_id for c in grid.cells})
+        n_total = len(all_cell_ids)
+        return {
+            "check": "coverage_climate_cells",
+            "scope": "per_cell",
+            "result": "fail",
+            "summary": (
+                f"0/{n_total} cells covered by climate data "
+                f"(climate axis fully unavailable)"
+            ),
+            "manuscript_claim": "Section 2.5: per-cell coverage check",
+            "details": {
+                "n_total": n_total,
+                "n_missing": n_total,
+                "affected_cells": all_cell_ids,
+                # F-CO honest-signal — ``cause`` discriminator marks
+                # this as axis-level unavailability so the cockpit
+                # drawer renders "climate axis not fetched" rather
+                # than per-cell-anomaly framing. ICASA / MISDAT
+                # provenance preserved on the record so Dr. Kofi's
+                # audit-grep continuity is unaffected.
+                "cause": "no_climate_fetch",
+                "icasa_misdat": True,
+                "violation_details": [
+                    {
+                        "cell_id": cid, "layer_idx": None,
+                        "variable": "climate",
+                        "date": None,
+                        "value": None,
+                        "unit": None, "bounds": None,
+                    }
+                    for cid in all_cell_ids
+                ],
             },
-        )
+        }
     if _is_file_based_climate(climate):
         return {
             "check": "coverage_climate_cells",
@@ -1977,19 +2023,46 @@ def _check_coverage_soil_cells(unified_data) -> Dict[str, Any]:
         if unified_data and hasattr(unified_data, 'soil')
         else {}
     )
-    # G7 §2 — mirror of the climate-side guard: fully-unavailable
-    # soil emits unavailable instead of a fail-every-cell record
-    # that would violate the §1 per-axis invariant 3.
+    # F-CO honest-signal rollup — symmetric mirror of the climate-
+    # side split at ``_check_coverage_climate_cells``: full axis
+    # unavailability with a populated grid emits FAIL (not
+    # unavailable) so the top-level rollup matches the per-cell
+    # view. See the climate-side comment above for the full RCA
+    # (warning-auditor §6.2: rollup filters ``unavailable`` out of
+    # the runnable set, masking 0/N coverage as warning).
     if not _has_soil_data(soil):
-        return _unavailable(
-            check_id="coverage_soil_cells",
-            scope="per_cell",
-            cause="no_soil_match",
-            details={
-                "n_total": grid.n_cells,
-                "n_missing": 0,
+        all_cell_ids = sorted({c.cell_id for c in grid.cells})
+        n_total = len(all_cell_ids)
+        return {
+            "check": "coverage_soil_cells",
+            "scope": "per_cell",
+            "result": "fail",
+            "summary": (
+                f"0/{n_total} cells covered by soil data "
+                f"(soil axis fully unavailable)"
+            ),
+            "manuscript_claim": "Section 2.5: per-cell coverage check",
+            "details": {
+                "n_total": n_total,
+                "n_missing": n_total,
+                "affected_cells": all_cell_ids,
+                # F-CO honest-signal — ``cause`` discriminator marks
+                # axis-level unavailability for the cockpit drawer
+                # (see climate-side comment for the contract).
+                "cause": "no_soil_match",
+                "icasa_misdat": True,
+                "violation_details": [
+                    {
+                        "cell_id": cid, "layer_idx": None,
+                        "variable": "soil",
+                        "date": None,
+                        "value": None,
+                        "unit": None, "bounds": None,
+                    }
+                    for cid in all_cell_ids
+                ],
             },
-        )
+        }
 
     grid_ids = {c.cell_id for c in grid.cells}
     missing = set()

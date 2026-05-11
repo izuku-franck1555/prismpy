@@ -427,24 +427,51 @@ class TestCoverageGlobalShortCircuit:
 
 
 class TestCoveragePerCellShortCircuit:
-    """Per-cell coverage is the load-bearing trigger for the §1
-    invariant 3 violation if not short-circuited — the prior
-    shape listed every grid cell in ``affected_cells``, which fed
-    the per-cell pivot a climate fail entry on every cell whose
-    climate axis was, by definition, unavailable."""
+    """F-CO honest-signal rollup — INVERTED from the prior G7 §2
+    contract. Full axis unavailability with a populated grid now
+    emits ``fail`` (not ``unavailable``) so the top-level rollup
+    at ``run_scientific_validation`` matches the per-cell view.
+    The rollup filters ``unavailable`` out of the ``runnable``
+    set; emitting unavailable for a 0/N coverage path made
+    overall_result='warning' while per-cell validation_status='fail'
+    on every cell (warning-auditor §6.2 RCA: F-AG NEW manifestation
+    at retrieval-failure axis).
 
-    def test_climate_axis_fully_missing_emits_unavailable(self):
+    The §1 per-axis invariant 3 the G7 §2 design intended to
+    protect is still satisfied: the fail record is a SINGLE
+    per-cell entry covering the whole grid (not one fail per
+    validator-axis cross product), and the ``cause`` discriminator
+    marks it as axis-level so the cockpit drawer renders the
+    unavailability narrative rather than per-cell-anomaly framing.
+    """
+
+    def test_climate_axis_fully_missing_emits_fail(self):
+        # F-CO Layer 1 — when climate is empty and grid has cells,
+        # emit fail with affected_cells = all grid cells.
         unified = _make_unified(climate={}, soil={0: _make_profile()})
         check = _check_coverage_climate_cells(unified)
-        assert check["result"] == "unavailable"
-        # n_total is preserved so the consumer can still anchor the
-        # absence to the grid scale.
+        assert check["result"] == "fail"
+        # n_total + n_missing both anchor to the grid size, so the
+        # consumer can render "0/N covered" honestly.
         assert check["details"]["n_total"] == 2
+        assert check["details"]["n_missing"] == 2
+        assert len(check["details"]["affected_cells"]) == 2
+        # ``cause`` discriminator preserved so the cockpit drawer
+        # renders the axis-level absence rather than per-cell
+        # anomaly framing.
+        assert check["details"]["cause"] == "no_climate_fetch"
+        # ICASA / MISDAT provenance preserved on the record so
+        # Dr. Kofi's audit-grep continuity is unaffected.
+        assert check["details"]["icasa_misdat"] is True
 
-    def test_soil_axis_fully_missing_emits_unavailable(self):
+    def test_soil_axis_fully_missing_emits_fail(self):
+        # F-CO Layer 1 symmetric mirror for soil.
         unified = _make_unified(soil={})
         check = _check_coverage_soil_cells(unified)
-        assert check["result"] == "unavailable"
+        assert check["result"] == "fail"
+        assert check["details"]["cause"] == "no_soil_match"
+        assert check["details"]["icasa_misdat"] is True
+        assert check["details"]["n_missing"] == check["details"]["n_total"]
 
     def test_partial_climate_coverage_still_emits_fail(self):
         """Mixed availability — the validator runs and reports the
