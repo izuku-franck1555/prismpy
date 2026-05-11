@@ -66,11 +66,11 @@ _STDLIB_PACKAGES = frozenset({
     "concurrent", "contextlib", "copy", "csv", "dataclasses", "datetime",
     "decimal", "enum", "functools", "glob", "gzip", "hashlib", "io",
     "itertools", "json", "locale", "logging", "math",
-    "multiprocessing", "numbers", "os", "pathlib", "pickle", "platform", "queue",
-    "re", "shutil", "signal", "socket", "sqlite3", "ssl", "stat",
-    "string", "struct", "subprocess", "sys", "tempfile", "textwrap",
-    "threading", "time", "traceback", "tomllib", "types", "typing",
-    "unicodedata", "unittest", "urllib", "uuid", "warnings",
+    "multiprocessing", "numbers", "os", "pathlib", "pickle", "platform",
+    "queue", "random", "re", "shutil", "signal", "socket", "sqlite3",
+    "ssl", "stat", "string", "struct", "subprocess", "sys", "tempfile",
+    "textwrap", "threading", "time", "traceback", "tomllib", "types",
+    "typing", "unicodedata", "unittest", "urllib", "uuid", "warnings",
     "weakref", "xml", "zipfile",
 })
 

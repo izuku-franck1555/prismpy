@@ -1854,8 +1854,9 @@ class AceaTranslator(AceaTranslatorBase):
     ) -> List[Path]:
         """Handle GAEZ data - download if needed, copy to output.
 
-        Downloads GAEZ crop suitability data from FAO S3 bucket if not
-        cached, then copies to the package output directory.
+        Downloads GAEZ crop suitability data from FAO's production Esri
+        Image Service if not cached, then copies to the package output
+        directory.
 
         Args:
             crop_name: Crop name (e.g., 'Wheat')
@@ -1864,8 +1865,16 @@ class AceaTranslator(AceaTranslatorBase):
 
         Returns:
             List of output file paths
+
+        Raises:
+            GAEZDownloadError: When any raster in the auto-download fan-out
+                fails (per AC-F-CP-10 + F-AG-class fail-loud contract).
+                The caller (the orchestrator) propagates this to
+                ``TranslationResult(success=False)`` so the top-level
+                pipeline status reflects the failure honestly instead of
+                masquerading as ``complete`` with an empty GAEZ payload.
         """
-        from prismpy.sources.gaez.downloader import GAEZDownloader
+        from prismpy.sources.gaez import GAEZDownloadError, GAEZDownloader
 
         output_dir = self.output_dir / "gaez"
         output_files = []
@@ -1898,7 +1907,7 @@ class AceaTranslator(AceaTranslatorBase):
                 logger.info(f"Copied {len(output_files)} GAEZ files to package")
             return output_files
 
-        # Auto-download if enabled
+        # Auto-download if enabled — fail-loud per AC-F-CP-10.
         if auto_download:
             logger.info(f"Auto-downloading GAEZ data for {crop_name}...")
             downloader = GAEZDownloader()
@@ -1915,29 +1924,35 @@ class AceaTranslator(AceaTranslatorBase):
                 # Mirror the climate-source carve-outs (executor.py +
                 # tamsat.py + agera5.py): an undeclared / vendor-build-
                 # broken transitive dep is a configuration error, not
-                # a runtime data error. Letting it surface as ``GAEZ
-                # download failed: {e}`` would re-create the silent-
-                # skip class the F-AL substrate-hardening sweep
-                # closed at the GAEZDownloader.._download_with_retry
-                # entry. Per durable lesson #6 + #20, propagate so
-                # pip / CI / startup surfaces the missing dep loudly.
+                # a runtime data error. Per durable lesson #6 + #20,
+                # propagate so pip / CI / startup surfaces the missing
+                # dep loudly.
                 raise
-            except Exception as e:
-                logger.warning(f"GAEZ download failed: {e}")
+            except GAEZDownloadError:
+                # Per AC-F-CP-10 + F-AG-class precedent: GAEZ retrieval
+                # failures MUST propagate. The previous ``logger.warning``
+                # swallow was the source of the silent-skip class — a
+                # 0/216 raster fetch with status='complete' violates the
+                # honest-signal floor (durable §28). Re-raise; the
+                # ACEATranslator orchestrator catches at the top of
+                # ``translate`` and downgrades ``TranslationResult`` to
+                # ``success=False``, which propagates through executor
+                # to ``PipelineRun.status='error'``.
+                raise
 
         return output_files
 
     def _get_gaez_cultivars(self, crop_name: str) -> List[str]:
-        """Get GAEZ cultivar names for a crop."""
-        cultivar_map = {
-            'Maize': ['Highland_maize', 'Lowland_maize', 'Temperate_maize', 'Maize'],
-            'Corn': ['Highland_maize', 'Lowland_maize', 'Temperate_maize', 'Maize'],
-            'Wheat': ['Spring_wheat', 'Winter_wheat'],
-            'Rice': ['Wetland_rice', 'Dryland_rice'],
-            'Sorghum': ['Highland_sorghum', 'Lowland_sorghum'],
-            'Millet': ['Pearl_millet', 'Foxtail_millet'],
-        }
-        return cultivar_map.get(crop_name, [crop_name])
+        """Get GAEZ cultivar names for a crop.
+
+        Imports the canonical map from ``prismpy.sources.gaez`` rather than
+        redefining locally — per durable §24 + WA CA-2 the cultivar roster
+        has a single source of truth. The structural pin
+        ``test_no_inline_cultivar_map_redefinition`` walks this module to
+        assert no future edit re-introduces an inline ``cultivar_map``.
+        """
+        from prismpy.sources.gaez import GAEZ_CULTIVAR_MAP
+        return GAEZ_CULTIVAR_MAP.get(crop_name, [crop_name])
 
     def _generate_install_script(self, data: UnifiedData) -> Path:
         """Generate install.py script for the package.
@@ -2858,15 +2873,10 @@ if __name__ == "__main__":
         # Format grid cells list
         gridcells_str = self._format_gridcells(cell_ids_30arcmin)
 
-        # Crop mappings
-        gaez_cultivar_map = {
-            'Maize': ['Highland_maize', 'Lowland_maize', 'Maize', 'Temperate_maize'],
-            'Wheat': ['Spring_wheat', 'Winter_wheat'],
-            'Rice': ['Wetland_rice', 'Dryland_rice'],
-            'Sorghum': ['Highland_sorghum', 'Lowland_sorghum'],
-            'Millet': ['Pearl_millet', 'Foxtail_millet'],
-        }
-        crop_gaez = gaez_cultivar_map.get(crop_name, [crop_name])
+        # Crop mappings — import canonical from prismpy.sources.gaez per
+        # durable §24 + WA CA-2 (no inline cultivar_map redefinition).
+        from prismpy.sources.gaez import GAEZ_CULTIVAR_MAP
+        crop_gaez = GAEZ_CULTIVAR_MAP.get(crop_name, [crop_name])
 
         spam_code_map = {
             'Maize': 'maiz', 'Wheat': 'whea', 'Rice': 'rice',
