@@ -412,8 +412,22 @@ class TestCarveOutRegression:
         # ``cockpit_override_sidecar = self._load_cockpit_override_sidecar()``
         # call + ``translator.cockpit_override_sidecar = ...`` assignment
         # into ``_execute_translate`` (~27 lines: load call + comment +
-        # threading assignment + comment + closing context).
-        ("src/prismpy/pipeline/executor.py", 2733),
+        # threading assignment + comment + closing context). Then
+        # 2733 → 2774 after F-CK hot-fix +17 fan-out replaced the
+        # single-key ``{0: CropCalendar(...)}`` producer at line 752
+        # with an explicit ``climate_cell_ids`` filter + dict
+        # comprehension over the climate cell roster (~41 lines:
+        # 25-line F-CK contract docstring + path-dict ``isinstance``
+        # filter + comprehension + closing). Then 2774 → 2788 after
+        # the F-CK round-3 codex absorption replaced the ``cid >= 0``
+        # filter with ``isinstance(cid, int)``-only and rewrote the
+        # surrounding comment to document the sentinel-retention
+        # contract (~14 lines: extended F-CK round-3 docstring
+        # explaining why ``-1`` sentinels must survive the executor
+        # fan-out so PYTHIA / ACEA pass ``validate_input_data``).
+        # Same try block, new line number per durable §27
+        # producer-consumer parity.
+        ("src/prismpy/pipeline/executor.py", 2788),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed

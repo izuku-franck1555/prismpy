@@ -749,15 +749,70 @@ class TranslationPipeline:
                 # Create default crop parameters
                 data["crop_params"] = self._create_default_crop_params()
 
-            # Load crop calendar if available
+            # Load crop calendar if available.
+            #
+            # F-CK hot-fix +17 — fan the project-level wizard calendar
+            # across the climate cell roster so the consumer-side
+            # per-cell lookup in
+            # ``cockpit.observed_values_writer._growing_season_window``
+            # (line ~260) finds an entry for every cell ID. Before this
+            # fix, the producer emitted a single ``{0: CropCalendar(...)}``
+            # synthetic-key dict, and the consumer's
+            # ``cell_id not in crop_calendar`` query raised ``ValueError``
+            # on every real cell ID (e.g. 4184036). The retrieve stage
+            # caught it as a warning, and the downstream
+            # ``cockpit_observed_values.json`` shipped empty on every
+            # package build (100% prevalence).
+            #
+            # Per durable §27 producer-consumer vocabulary parity +
+            # durable §24 canonical-source-or-pin: every cell in the
+            # ``data["climate"]`` roster MUST have a matching entry in
+            # ``data["crop_calendar"]`` (CMS §9.4). Edge case — if
+            # ``data["climate"]`` is empty (no cells retrieved), the
+            # fan-out yields an empty dict; the consumer handles that
+            # cleanly (empty cells block, no regression).
             if self.config.crop.calendar:
+                project_planting_doy = self.config.crop.calendar.planting_doy
+                project_maturity_doy = self.config.crop.calendar.maturity_doy
+                # Filter to int cell IDs only — string keys (path-dict
+                # shape like ``{"rainfall_dir": ..., "agera5_dir": ...}``
+                # per the ``UnifiedData.climate`` Union) must NOT enter
+                # ``CropCalendar.location_id`` (typed ``int``).
+                #
+                # F-CK round-3 absorption (HIGH): the negative sentinel
+                # cell ID ``-1`` from ``_create_placeholder_climate`` is
+                # RETAINED so PYTHIA / ACEA pass
+                # ``BaseTranslator.validate_input_data`` — which rejects
+                # a falsy ``data.crop_calendar`` before the translator
+                # ever calls ``_surface_per_cell_climate``. The helper
+                # then drops the ``-1`` calendar entry alongside the
+                # ``-1`` climate sentinel and re-fans the calendar
+                # across the real cell roster surfaced from self-download
+                # (CRAFT / PYTHIA / ACEA paths). The end state seen by
+                # the consumer at
+                # ``cockpit.observed_values_writer._growing_season_window``
+                # is real-cell-keyed in every case.
+                #
+                # For SARRA-Py + any translator with real-cell climate
+                # already populated at retrieve time, the fan-out
+                # directly produces real-cell calendar entries; no
+                # sentinel passes through. The helper's
+                # ``isinstance(cid, int) and cid >= 0`` filter (see
+                # ``translators/base.py``) is what excludes the
+                # sentinel from the final consumer-visible calendar.
+                climate_cell_ids = [
+                    cid
+                    for cid in (data.get("climate") or {}).keys()
+                    if isinstance(cid, int)
+                ]
                 data["crop_calendar"] = {
-                    0: CropCalendar(
-                        location_id=0,
-                        planting_doy=self.config.crop.calendar.planting_doy,
-                        maturity_doy=self.config.crop.calendar.maturity_doy,
+                    cell_id: CropCalendar(
+                        location_id=cell_id,
+                        planting_doy=project_planting_doy,
+                        maturity_doy=project_maturity_doy,
                         source="config",
                     )
+                    for cell_id in climate_cell_ids
                 }
 
         except PipelineCancelled:
