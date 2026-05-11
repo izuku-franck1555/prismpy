@@ -1901,7 +1901,24 @@ def _check_coverage_climate_cells(unified_data) -> Dict[str, Any]:
                 f"0/{n_total} cells covered by climate data "
                 f"(climate axis fully unavailable)"
             ),
-            "manuscript_claim": "Section 2.5: per-cell coverage check",
+            # F-CO codex round-1 LOW absorption — keep the ICASA /
+            # MISDAT tokens in the ``manuscript_claim`` STRING (not
+            # just in ``details.icasa_misdat``). Dr. Kofi's audit
+            # grep workflow searches the manuscript_claim text for
+            # the standards lineage; the ``_unavailable()`` helper
+            # has an explicit logger.warning guard at
+            # scientific.py:917-923 for records that drop the
+            # anchor — a fail record on an axis-level absence
+            # carries the same audit-trail responsibility as an
+            # unavailable record at the same site.
+            "manuscript_claim": (
+                "Section 2.5: per-cell coverage check. "
+                "Per ICASA MISDAT convention, full-axis "
+                "unavailability is reported as one axis-level fail "
+                "with affected_cells covering the entire grid; "
+                "the fail discriminator preserves the audit-trail "
+                "anchor while signalling rollup-level severity."
+            ),
             "details": {
                 "n_total": n_total,
                 "n_missing": n_total,
@@ -2041,7 +2058,18 @@ def _check_coverage_soil_cells(unified_data) -> Dict[str, Any]:
                 f"0/{n_total} cells covered by soil data "
                 f"(soil axis fully unavailable)"
             ),
-            "manuscript_claim": "Section 2.5: per-cell coverage check",
+            # F-CO codex round-1 LOW absorption — symmetric mirror
+            # of the climate-side ICASA / MISDAT manuscript_claim
+            # anchor (see climate-side comment above for the audit-
+            # trail rationale).
+            "manuscript_claim": (
+                "Section 2.5: per-cell coverage check. "
+                "Per ICASA MISDAT convention, full-axis "
+                "unavailability is reported as one axis-level fail "
+                "with affected_cells covering the entire grid; "
+                "the fail discriminator preserves the audit-trail "
+                "anchor while signalling rollup-level severity."
+            ),
             "details": {
                 "n_total": n_total,
                 "n_missing": n_total,

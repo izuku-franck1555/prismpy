@@ -81,6 +81,27 @@ class TestPerCellCoverageFullAxisUnavailableEmitsFail(unittest.TestCase):
         # ICASA / MISDAT provenance preserved on the fail record so
         # the cockpit's axis-level absence narrative still renders.
         self.assertTrue(check["details"]["icasa_misdat"])
+        # F-CO codex round-1 LOW absorption — Dr. Kofi's audit-grep
+        # workflow searches the ``manuscript_claim`` STRING (not
+        # just ``details.icasa_misdat``) for the ICASA / MISDAT
+        # tokens that ``_unavailable()`` treats as the audit-trail
+        # anchor. The F-CO fail records carry the same axis-level
+        # absence narrative as an ``unavailable`` record at the
+        # same site, so the anchor must survive in the string.
+        self.assertIn(
+            "ICASA", check["manuscript_claim"],
+            "F-CO fail records MUST keep the ICASA token in "
+            "``manuscript_claim`` so Dr. Kofi's audit-grep "
+            "workflow finds the standards lineage. The "
+            "``_unavailable()`` helper guards this contract via "
+            "``logger.warning`` at scientific.py:917-923; the fail "
+            "path carries the same audit-trail responsibility.",
+        )
+        self.assertIn(
+            "MISDAT", check["manuscript_claim"],
+            "F-CO fail records MUST keep the MISDAT token in "
+            "``manuscript_claim`` (paired anchor with ICASA).",
+        )
 
     def test_soil_fully_empty_emits_fail_with_all_cells_affected(self):
         unified = _make_unified(n_cells=8, climate={0: None}, soil={})
@@ -94,6 +115,10 @@ class TestPerCellCoverageFullAxisUnavailableEmitsFail(unittest.TestCase):
         self.assertEqual(check["details"]["n_missing"], 8)
         self.assertEqual(check["details"]["cause"], "no_soil_match")
         self.assertTrue(check["details"]["icasa_misdat"])
+        # F-CO codex round-1 LOW absorption — symmetric audit-grep
+        # anchor pin (see climate-side test for the contract).
+        self.assertIn("ICASA", check["manuscript_claim"])
+        self.assertIn("MISDAT", check["manuscript_claim"])
 
     def test_grid_none_emits_info_not_fail(self):
         # Defensive — when the grid itself is unavailable, the
