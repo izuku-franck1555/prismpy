@@ -309,10 +309,19 @@ class BaseTranslator(ABC):
         """
         if not climate_by_cell_id or not isinstance(data.climate, dict):
             return
+        # F-CK hot-fix +17 codex round-2 MEDIUM absorption — guard the
+        # ``cid >= 0`` check behind ``isinstance(cid, int)`` so a
+        # mixed-key climate dict (e.g. a translator that accidentally
+        # merges existing path-dict keys with int-keyed downloads
+        # before calling the helper) cannot TypeError on
+        # ``str >= 0``. The type hint says int, but the guard is
+        # cheap defense in depth; it parallels the calendar re-fan
+        # filter below.
         real = {
             cid: ts
             for cid, ts in climate_by_cell_id.items()
-            if cid >= 0
+            if isinstance(cid, int)
+            and cid >= 0
             and hasattr(ts, "records")
             and ts.records
         }
@@ -323,6 +332,46 @@ class BaseTranslator(ABC):
         # consumers (validators, cell-summary writer) do not iterate
         # the synthetic ``-1`` cell alongside the real grid IDs.
         data.climate.pop(-1, None)
+
+        # F-CK hot-fix +17 — re-fan ``data.crop_calendar`` across the
+        # post-surfacing climate roster.
+        #
+        # CRAFT / PYTHIA / ACEA self-download per-cell weather at
+        # translate time. The retrieve stage's calendar fan-out at
+        # ``pipeline/executor.py`` produces a calendar keyed by the
+        # retrieve-time climate roster (the ``{-1: placeholder}``
+        # sentinel for those translators). After this helper drops
+        # the ``-1`` sentinel and adds the real cell IDs, the
+        # consumer at ``cockpit/observed_values_writer.py:260`` then
+        # queries ``cell_id not in crop_calendar`` for those real
+        # cells — and raises ``ValueError`` unless we re-fan here.
+        # Without the re-fan, the producer-consumer vocabulary
+        # drifts (durable §27) and every package build emits an
+        # empty ``cockpit_observed_values.json`` (CMS §9.4 violation).
+        #
+        # Source of truth: ``self.config.crop.calendar`` carries the
+        # canonical wizard-supplied planting / maturity doys. Reading
+        # the config directly (rather than copying from an existing
+        # calendar entry) keeps the helper independent of the
+        # retrieve stage's emit shape — if the upstream changes the
+        # placeholder key or skips the retrieve-stage fan-out
+        # entirely, the helper still produces the right calendar.
+        crop_calendar_config = getattr(
+            getattr(getattr(self, "config", None), "crop", None),
+            "calendar",
+            None,
+        )
+        if crop_calendar_config is not None:
+            data.crop_calendar = {
+                cid: CropCalendar(
+                    location_id=cid,
+                    planting_doy=crop_calendar_config.planting_doy,
+                    maturity_doy=crop_calendar_config.maturity_doy,
+                    source="config",
+                )
+                for cid in data.climate.keys()
+                if isinstance(cid, int) and cid >= 0
+            }
 
 
 class SarraPyTranslatorBase(BaseTranslator):
