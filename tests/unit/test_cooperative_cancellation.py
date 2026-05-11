@@ -407,8 +407,13 @@ class TestCarveOutRegression:
         # cumulative shift forward). Then 2695 → 2706 after the
         # F-AL scope-extension added an ``except (ImportError,
         # ModuleNotFoundError)`` carve-out to the pygadm fallback
-        # in ``_execute_retrieve`` (~11 lines).
-        ("src/prismpy/pipeline/executor.py", 2706),
+        # in ``_execute_retrieve`` (~11 lines). Then 2706 → 2733
+        # after Sprint E.3 fixup +15 (F-BN Boundary 2) added the
+        # ``cockpit_override_sidecar = self._load_cockpit_override_sidecar()``
+        # call + ``translator.cockpit_override_sidecar = ...`` assignment
+        # into ``_execute_translate`` (~27 lines: load call + comment +
+        # threading assignment + comment + closing context).
+        ("src/prismpy/pipeline/executor.py", 2733),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed

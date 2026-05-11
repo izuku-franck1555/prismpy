@@ -2639,6 +2639,21 @@ class TranslationPipeline:
         results = {}
         enabled_platforms = self.config.get_enabled_platforms()
 
+        # Sprint E.3 fixup +15 (F-BN Boundary 2) — load the cockpit
+        # override sidecar from the run's output directory once, then
+        # thread to every translator below. The producer side (prismweb
+        # ``core/tasks.py`` right after the per-run ``outdir`` is
+        # created) emits ``cockpit_overrides.json`` from the derived
+        # run's ``config_snapshot.cockpit_overrides_at_launch`` block
+        # so a documented Sahel hot-day extreme tmax surfaces at the
+        # per-cell weather-file write site instead of the validator-
+        # flagged raw value. ``None`` is the all-original-run case;
+        # ``apply_override`` short-circuits to the raw value when the
+        # sidecar is None or carries no entry for the
+        # ``(cell_id, variable_key)`` pair, so the absence of an
+        # override is transparent to every translator.
+        cockpit_override_sidecar = self._load_cockpit_override_sidecar()
+
         for platform in enabled_platforms:
             self.logger.info(f"  Translating for {platform.value}")
 
@@ -2652,6 +2667,18 @@ class TranslationPipeline:
                 # the progress_callback pattern above and avoids
                 # invalidating BaseTranslator.translate()'s signature.
                 translator.cancel_check = getattr(self, '_cancel_check', None)
+
+                # Sprint E.3 fixup +15 (F-BN Boundary 2) — thread the
+                # loaded sidecar onto the translator as a runtime
+                # attribute (mirrors the progress_callback +
+                # cancel_check pattern above). PYTHIA reads the
+                # attribute at its per-cell WTH + soil-profile write
+                # sites; CRAFT / SARRA-Py / ACEA read it at translator
+                # init to emit the deferred-wiring runtime warning per
+                # the dispatch's scope-guard text. Translators that
+                # ignore the attribute behave identically to the no-
+                # override baseline — the attribute is additive.
+                translator.cockpit_override_sidecar = cockpit_override_sidecar
 
                 # V2-19: start a dedicated artifact for this platform's translation
                 # output. This gives the FORMAT_CHOICE decision emitted by the
@@ -2733,6 +2760,85 @@ class TranslationPipeline:
                 )
 
         return results
+
+    def _load_cockpit_override_sidecar(self):
+        """Load the cockpit override sidecar from the run's output dir.
+
+        Sprint E.3 fixup +15 (F-BN Boundary 2). The producer side
+        (prismweb ``core/tasks.py`` right after the per-run output
+        directory is created) emits ``cockpit_overrides.json`` from
+        the derived run's
+        ``config_snapshot.cockpit_overrides_at_launch`` block. This
+        consumer-side reader validates via the canonical Pydantic
+        contract at
+        :class:`prismpy.cockpit.cockpit_overrides_writer.CockpitOverrideSidecar`
+        so a torn or schema-drifted file fires loud rather than
+        silently mis-applying overrides.
+
+        Returns:
+            The validated :class:`CockpitOverrideSidecar` or ``None``
+            for runs without an override sidecar (every original run +
+            every retry; only derived-runs from
+            ``commit_decision_snapshot`` carry the file). ``None`` is
+            the universal short-circuit on the translator side — every
+            ``apply_override`` call returns the raw value unchanged
+            when the sidecar is ``None``.
+
+        Failure mode (sidecar exists but Pydantic validation fails):
+        the executor logs a WARNING + returns ``None`` so the
+        translation continues with raw values rather than crashing
+        the pipeline. The intent: a sidecar drift bug should NOT
+        block the persona from at least getting the unmodified
+        package; the warning surfaces in pipeline logs for diagnosis.
+        Honest-signal floor per ``feedback_no_data_cooking.md``.
+        """
+        from pathlib import Path
+        from prismpy.cockpit.cockpit_overrides_writer import (
+            CockpitOverrideSidecar,
+        )
+
+        sidecar_path = Path(self.config.output.base_dir) / "cockpit_overrides.json"
+        if not sidecar_path.is_file():
+            return None
+
+        try:
+            payload = sidecar_path.read_text(encoding="utf-8")
+            sidecar = CockpitOverrideSidecar.model_validate_json(payload)
+        except PipelineCancelled:
+            # Cancel-discipline carve-out per test_cooperative_cancellation
+            # F-9B orchestrator-convention backstop: ``_load_*`` methods
+            # are auto cancel-hot. The read + Pydantic validate path here
+            # is cancel-inert (no network, no long compute) but the
+            # carve-out is required to satisfy the structural pin without
+            # an explicit ORCHESTRATOR_EXEMPTIONS entry.
+            raise
+        except Exception as exc:
+            self.logger.warning(
+                "Could not load cockpit override sidecar from %s: %s. "
+                "Continuing translation with raw values; persona's "
+                "documented overrides will NOT be applied to per-cell "
+                "weather / soil output for this run.",
+                sidecar_path,
+                exc,
+            )
+            return None
+
+        if not sidecar.overrides:
+            # Empty-array sidecar — all-reverted-bulk path per writer
+            # MED-2. Treat as None at the translator boundary so the
+            # short-circuit path fires without walking the empty list
+            # at every per-cell write site.
+            return None
+
+        self.logger.info(
+            "Loaded cockpit override sidecar from %s: %d entries "
+            "across %d cells (schema_version=%s).",
+            sidecar_path,
+            len(sidecar.overrides),
+            len({entry.cell_id for entry in sidecar.overrides}),
+            sidecar.schema_version,
+        )
+        return sidecar
 
     def _execute_remediation(
         self,

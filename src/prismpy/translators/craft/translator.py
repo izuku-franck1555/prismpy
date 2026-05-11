@@ -118,6 +118,29 @@ class CraftTranslator(CraftTranslatorBase):
         warnings = []
         output_files = []
 
+        # Sprint E.3 fixup +15 (F-BN Boundary 3) — CRAFT translator is
+        # in the PYTHIA-only ship's deferred-translator set per the
+        # team-lead's scope guard. Surface a runtime warning whenever
+        # the cockpit override sidecar is non-empty so the persona
+        # gets an honest signal that their override decisions are NOT
+        # being applied to CRAFT canonical files; full wiring lands in
+        # Phase 4.6 once the PYTHIA path is empirically green.
+        cockpit_sidecar = getattr(self, "cockpit_override_sidecar", None)
+        if cockpit_sidecar is not None and cockpit_sidecar.overrides:
+            warnings.append(
+                f"Cockpit override sidecar carries {len(cockpit_sidecar.overrides)} "
+                "entries but CRAFT value-replacement wiring is not yet "
+                "implemented; values will NOT be applied to canonical CRAFT "
+                "files (WTH / SOL). Ship in Phase 4.6 per Sprint E.3 fixup "
+                "+15 scope guard."
+            )
+            self.logger.warning(
+                "CRAFT translator: cockpit override sidecar present (%d entries) "
+                "but value-replacement wiring deferred to Phase 4.6 — persona's "
+                "documented overrides will NOT surface in this CRAFT package.",
+                len(cockpit_sidecar.overrides),
+            )
+
         # Initialize GADM-filtered cell tracking
         # This will be populated by _generate_craft_schema() if GADM is used
         # All management files will use these cells for consistency

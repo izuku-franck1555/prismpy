@@ -532,12 +532,27 @@ class PythiaTranslator(PythiaTranslatorBase):
         # Late import — see CRAFT translator for the rationale.
         from prismpy.harmonize.climate_kind import ClimateKind as _ClimateKind
         from prismpy.harmonize.tetens import derive_tdew_for_record_or
+        from prismpy.translators._shared.cockpit_overrides import apply_override
 
         if climate_kind is None:
             climate_kind = _ClimateKind.OBSERVED
         is_projection = climate_kind == _ClimateKind.PROJECTION
         output_files = []
         weather_dir = self.output_dir / "weather"
+
+        # Sprint E.3 fixup +15 (F-BN Boundary 3) — read the loaded
+        # cockpit override sidecar from the translator attribute the
+        # executor sets at ``_execute_translate`` entry. ``None`` is
+        # the universal short-circuit; ``apply_override`` below
+        # returns the raw record-field value unchanged in that case.
+        # v1 semantic per team-lead disposition 3: a season-aggregate
+        # override (e.g.,
+        # ``tmax_growing_season_mean=999.0``) is applied as a
+        # per-day constant — every daily record's tmax becomes the
+        # override value. Persona-documented-anomaly maps to
+        # season-aggregate by design; daily-variance preservation
+        # deferred to Phase 4.6 crop-modeling-specialist review.
+        cockpit_sidecar = getattr(self, "cockpit_override_sidecar", None)
 
         # Create a mapping of site_id to sequential number for unique file names
         site_ids = sorted(climate_data.keys())
@@ -589,6 +604,50 @@ class PythiaTranslator(PythiaTranslatorBase):
                     tmax = record.tmax if record.tmax is not None else MISDAT
                     tmin = record.tmin if record.tmin is not None else MISDAT
                     rain = record.precip if record.precip is not None else MISDAT
+
+                    # Sprint E.3 fixup +15 (F-BN Boundary 3) — per-cell
+                    # value-replacement override. v1 semantic: a
+                    # season-aggregate override on
+                    # ``<var>_growing_season_mean`` /
+                    # ``precip_growing_season_total`` applies as a
+                    # per-day constant — every record's field becomes
+                    # the override value. The new season-mean exactly
+                    # matches the override, so the validator no longer
+                    # flags the cell. Per team-lead disposition 3 +
+                    # AC #1 literal user-snippet reading per durable
+                    # §25. ``apply_override`` is a pure helper; the
+                    # sidecar=None short-circuit on the universal
+                    # no-override path makes the call free for runs
+                    # without overrides. ``str(site_id)`` matches the
+                    # sidecar entry's ``cell_id`` field per durable
+                    # §27 producer-consumer parity (sidecar carries
+                    # cell_id as str; site_id keys are ints).
+                    cell_id_str = str(site_id)
+                    tmax = apply_override(
+                        cell_id_str,
+                        "tmax_growing_season_mean",
+                        tmax,
+                        cockpit_sidecar,
+                    )
+                    tmin = apply_override(
+                        cell_id_str,
+                        "tmin_growing_season_mean",
+                        tmin,
+                        cockpit_sidecar,
+                    )
+                    rain = apply_override(
+                        cell_id_str,
+                        "precip_growing_season_total",
+                        rain,
+                        cockpit_sidecar,
+                    )
+                    srad = apply_override(
+                        cell_id_str,
+                        "srad_growing_season_mean",
+                        srad,
+                        cockpit_sidecar,
+                    )
+
                     if is_projection:
                         # Projection-source TDEW comes from Tetens
                         # (record.tdew preferred when supplied; rh +
@@ -2336,6 +2395,17 @@ class PythiaTranslator(PythiaTranslatorBase):
 
         region = data.region if data.region is not None else self._region_from_config()
 
+        # Sprint E.3 fixup +15 (F-BN Boundary 3) — thread the cockpit
+        # override sidecar through to the substrate builder so
+        # per-cell soil overrides synthesize fresh profiles before
+        # the canonical .SOL writer fires. ``None`` (the universal
+        # no-override case) preserves the pre-fixup byte-equivalent
+        # output. Per-cell synthetic profile generation per
+        # ``_apply_soil_overrides_to_assignment`` preserves the
+        # honest-signal floor — non-overridden cells sharing the
+        # base profile stay unaffected.
+        cockpit_sidecar = getattr(self, "cockpit_override_sidecar", None)
+
         try:
             result = build_eghr_substrate(
                 grid=data.grid,
@@ -2343,6 +2413,7 @@ class PythiaTranslator(PythiaTranslatorBase):
                 country_code=country_code,
                 region=region,
                 output_dir=self.output_dir,
+                cockpit_override_sidecar=cockpit_sidecar,
             )
         except Exception as exc:  # raised by writers / rasterio / sqlite3
             raise BuildEghrSubstrateError(
