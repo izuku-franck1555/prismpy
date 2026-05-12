@@ -425,9 +425,14 @@ class TestCarveOutRegression:
         # contract (~14 lines: extended F-CK round-3 docstring
         # explaining why ``-1`` sentinels must survive the executor
         # fan-out so PYTHIA / ACEA pass ``validate_input_data``).
-        # Same try block, new line number per durable §27
-        # producer-consumer parity.
-        ("src/prismpy/pipeline/executor.py", 2788),
+        # Then 2788 → 2799 after the Sprint F-CP fixup (AC-F-CP-14)
+        # routed ``_create_placeholder_climate`` through the canonical
+        # ``PLACEHOLDER_CLIMATE_SENTINEL_ID`` constant import and added
+        # a 5-line ``_real_n_locations`` helper at the
+        # ``_load_climate_data`` provenance emit (~11 lines cumulative
+        # shift forward in ``executor.py``). Same provenance try block,
+        # new line number per durable §27 producer-consumer parity.
+        ("src/prismpy/pipeline/executor.py", 2799),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed

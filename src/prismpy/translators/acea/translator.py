@@ -416,9 +416,18 @@ class AceaTranslator(AceaTranslatorBase):
             self._climate_name = climate_name
 
             # 1. Generate climate pickle files
-            # Check if we have enough climate data for all cells
-            n_climate = len(data.climate) if data.climate else 0
-            n_cells = len(cell_ids_30arcmin)
+            # AC-F-CP-12: gate on REAL 30-arcmin tile coverage, not raw dict
+            # size. The executor's placeholder injects a sentinel-keyed
+            # entry (PLACEHOLDER_CLIMATE_SENTINEL_ID) so raw ``len(data.
+            # climate)`` would equal 1 even though zero real tiles are
+            # covered — the broken gate falsely skipped the NASA POWER
+            # download. Compute real tile coverage via 5→30 parent mapping;
+            # download only missing tiles; raise typed ClimateDownloadError
+            # if the post-download retry still leaves gaps.
+            from prismpy.sources.climate import (
+                ClimateDownloadError,
+                is_real_climate_cell_id,
+            )
 
             climate_data = data.climate or {}
 
@@ -430,10 +439,31 @@ class AceaTranslator(AceaTranslatorBase):
                 download_enabled = getattr(platform_config, 'download_climate', True)
                 download_delay = getattr(platform_config, 'climate_download_delay', 2.0)
 
-            if n_climate < n_cells and data.grid and download_enabled:
-                # Download NASA POWER climate data for missing cells
-                logger.info(f"Insufficient climate data ({n_climate}/{n_cells} cells), "
-                           f"downloading from NASA POWER...")
+            # Compute REAL 30-arcmin tile coverage from current data.climate
+            # (which is 5-arcmin keyed post-download, sentinel-keyed when
+            # placeholder only). The helper excludes the sentinel; record
+            # validity (>1 records) excludes degenerate empty time-series.
+            real_30arcmin_tiles = {
+                self._cell_id_5arcmin_to_30arcmin_parent(k)
+                for k, ts in climate_data.items()
+                if is_real_climate_cell_id(k)
+                and hasattr(ts, 'records')
+                and len(ts.records) > 1
+            }
+            missing_tiles = set(cell_ids_30arcmin) - real_30arcmin_tiles
+
+            if missing_tiles and data.grid and download_enabled:
+                # Download NASA POWER climate data for the missing 30-arcmin
+                # tiles only. NASA POWER's native resolution is ~0.5°
+                # (30-arcmin), so multiple 5-arcmin cells within the same
+                # tile get identical data. Downloading only the missing
+                # subset preserves any existing real-cell coverage from
+                # retrieve-stage path-dict variants (matches CRAFT pattern).
+                logger.info(
+                    f"Climate coverage incomplete "
+                    f"({len(real_30arcmin_tiles)}/{len(cell_ids_30arcmin)} tiles) — "
+                    f"downloading from NASA POWER for {len(missing_tiles)} missing tiles..."
+                )
 
                 # Get date range from config (cross-year-aware)
                 start_year = self.config.temporal.start_year
@@ -443,10 +473,6 @@ class AceaTranslator(AceaTranslatorBase):
                 crop_cal = self.config.crop.calendar if self.config.crop else None
                 end_date = self.config.temporal.get_climate_end_date(crop_cal)
 
-                # Download climate for unique 30-arcmin cells only (not all 5-arcmin).
-                # NASA POWER's native resolution is ~0.5° (30-arcmin), so multiple
-                # 5-arcmin cells within the same 30-arcmin tile get identical data.
-                # This reduces API calls from ~244 to ~17 for Saint-Louis.
                 # Wire progress callback for substage reporting
                 def _acea_progress(current, total):
                     cb = getattr(self, 'progress_callback', None)
@@ -458,18 +484,49 @@ class AceaTranslator(AceaTranslatorBase):
                             f'cell {current} of {total}',
                         )
                 downloaded_climate = self._download_climate_30arcmin(
-                    data.grid, cell_ids_30arcmin, start_date, end_date,
+                    data.grid, sorted(missing_tiles), start_date, end_date,
                     request_delay=download_delay,
                     progress_callback=_acea_progress,
                 )
 
-                # Merge with existing climate data
+                # Merge with existing climate data (preserves existing real
+                # cells; does not discard partial pre-retrieved coverage).
                 if downloaded_climate:
                     climate_data = {**climate_data, **downloaded_climate}
                     logger.info(f"Climate data now has {len(climate_data)} locations")
-            elif n_climate < n_cells:
-                logger.warning(f"Insufficient climate data ({n_climate}/{n_cells} cells) "
-                             f"and download_climate is disabled")
+
+                # AC-F-CP-12 fail-loud per durable §28 + F-AG class
+                # precedent: re-compute coverage after merge. If tiles are
+                # still uncovered, raise the typed error so the pipeline
+                # status reflects the gap honestly (not a silent 'complete'
+                # with missing climate pickles in the package).
+                post_download_30arcmin_tiles = {
+                    self._cell_id_5arcmin_to_30arcmin_parent(k)
+                    for k, ts in climate_data.items()
+                    if is_real_climate_cell_id(k)
+                    and hasattr(ts, 'records')
+                    and len(ts.records) > 1
+                }
+                still_missing = set(cell_ids_30arcmin) - post_download_30arcmin_tiles
+                if still_missing:
+                    raise ClimateDownloadError(
+                        f"NASA POWER climate download incomplete: "
+                        f"{len(still_missing)}/{len(cell_ids_30arcmin)} tiles "
+                        f"unfetched after retry. Pipeline FAILS to surface "
+                        f"honest-signal per F-AG class.",
+                        missing_tiles=sorted(still_missing),
+                        source='nasa_power',
+                    )
+
+            elif missing_tiles:
+                # download_climate=False path — emit honest warning so the
+                # downstream Coverage validator fires correctly.
+                warnings.append(
+                    f"Climate coverage incomplete "
+                    f"({len(real_30arcmin_tiles)}/{len(cell_ids_30arcmin)} tiles) "
+                    f"and download_climate=False; package will fail Coverage "
+                    f"validator honestly."
+                )
 
             if climate_data:
                 climate_files = self._generate_climate_pickles(
@@ -657,6 +714,14 @@ class AceaTranslator(AceaTranslatorBase):
                 reference="prismpy.translators.acea.translator.translate",
             )
 
+        # AC-F-CP-13.5: n_climate_pickles counts REAL cells, not the
+        # sentinel placeholder. Importing inside the call site keeps this
+        # consistent with other metadata writer sites.
+        from prismpy.sources.climate import is_real_climate_cell_id
+        _real_climate_count = sum(
+            1 for k in (data.climate or {}).keys()
+            if is_real_climate_cell_id(k)
+        )
         result = self.create_result(
             success=True,
             output_files=output_files,
@@ -664,7 +729,7 @@ class AceaTranslator(AceaTranslatorBase):
             metadata={
                 "region": data.region.name,
                 "n_cells": len(cell_ids_30arcmin),
-                "n_climate_pickles": len(data.climate) if data.climate else 0,
+                "n_climate_pickles": _real_climate_count,
                 "cell_id_range": [min(cell_ids_30arcmin), max(cell_ids_30arcmin)]
                     if cell_ids_30arcmin else [0, 0],
             },
@@ -732,6 +797,26 @@ class AceaTranslator(AceaTranslatorBase):
         return self._generate_package_metadata(
             data, cell_ids, climate_name, output_files
         )
+
+    def _cell_id_5arcmin_to_30arcmin_parent(self, cell_id_5: int) -> int:
+        """Map a 5-arcmin cell ID to its parent 30-arcmin tile ID.
+
+        5-arcmin grid: 4320 cols × 2160 rows. 30-arcmin grid: 720 cols ×
+        360 rows. The reduction factor is 6× per axis.
+
+        AC-F-CP-12 uses this mapping in the climate gate's set-difference
+        coverage check: ``data.climate`` is 5-arcmin keyed post-download
+        (see ``_download_climate_30arcmin``'s post-loop fanout that maps
+        30-arcmin tile downloads back to 5-arcmin ``cell.cell_id`` keys);
+        the gate computes ``real_30arcmin_tiles = {parent(k) for k in
+        real_keys}`` to honestly answer "which tiles are covered" before
+        deciding what to fetch.
+        """
+        row_5 = cell_id_5 // self.GRID_COLS_5ARCMIN
+        col_5 = cell_id_5 % self.GRID_COLS_5ARCMIN
+        row_30 = row_5 // 6
+        col_30 = col_5 // 6
+        return row_30 * self.GRID_COLS_30ARCMIN + col_30
 
     def _compute_30arcmin_cell_ids(self, grid: Optional[SpatialGrid]) -> List[int]:
         """Compute UNIQUE 30-arcmin cell IDs from grid.
@@ -869,14 +954,19 @@ class AceaTranslator(AceaTranslatorBase):
         # Map 5-arcmin to 30-arcmin if needed
         id_mapping = self._create_id_mapping(climate_data.keys(), cell_ids_30arcmin)
 
-        for loc_id, ts in climate_data.items():
-            # Get 30-arcmin cell ID
-            cell_id_30 = id_mapping.get(loc_id, loc_id)
+        from prismpy.sources.climate import is_real_climate_cell_id
 
-            # Skip placeholder cells (negative IDs)
-            if loc_id < 0:
+        for loc_id, ts in climate_data.items():
+            # Skip placeholder cells (sentinel keys, non-int keys) per the
+            # canonical helper. Replaces the prior raw ``loc_id < 0`` check
+            # so the sentinel-discipline convention has a single source
+            # of truth (durable §24 + AC-F-CP-14).
+            if not is_real_climate_cell_id(loc_id):
                 logger.debug(f"Skipping placeholder climate data (ID={loc_id})")
                 continue
+
+            # Get 30-arcmin cell ID
+            cell_id_30 = id_mapping.get(loc_id, loc_id)
 
             # Extract arrays
             tmax = np.array([r.tmax for r in ts.records], dtype=np.float32)

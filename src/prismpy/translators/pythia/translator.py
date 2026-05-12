@@ -203,16 +203,30 @@ class PythiaTranslator(PythiaTranslatorBase):
                 output_files.append(shape_file)
 
             # 2. Generate weather files (.WTH)
-            # Download from NASA POWER if not enough data for all sites
-            logger.info("Step 2/8: Generating weather files...")
-            climate_data = data.climate
-            n_sites = len(data.grid.cells) if data.grid else 0
+            # AC-F-CP-13: align PYTHIA gate to canonical pattern — gate on
+            # REAL-cell coverage (sentinel excluded), set-difference to
+            # find missing sites, download only the missing subset, and
+            # merge with existing real climate so a partial pre-retrieve
+            # state is preserved (no double-fetch).
+            from prismpy.sources.climate import is_real_climate_cell_id
 
-            # Check if we have enough climate data for all sites
-            n_climate = len(climate_data) if climate_data else 0
-            if n_climate < n_sites and data.grid:
-                logger.info(f"Insufficient climate data ({n_climate}/{n_sites} sites), "
-                           f"downloading from NASA POWER...")
+            logger.info("Step 2/8: Generating weather files...")
+            climate_data = data.climate or {}
+            all_site_keys = (
+                {c.cell_id for c in data.grid.cells} if data.grid else set()
+            )
+            real_climate_keys = {
+                k for k, ts in climate_data.items()
+                if is_real_climate_cell_id(k)
+                and hasattr(ts, 'records') and len(ts.records) > 1
+            }
+            missing_sites = all_site_keys - real_climate_keys
+            if missing_sites and data.grid:
+                logger.info(
+                    f"Climate coverage incomplete "
+                    f"({len(real_climate_keys)}/{len(all_site_keys)} sites) — "
+                    f"downloading from NASA POWER for {len(missing_sites)} missing sites..."
+                )
                 # Wire progress callback for substage reporting
                 def _pythia_progress(current, total):
                     cb = getattr(self, 'progress_callback', None)
@@ -223,7 +237,15 @@ class PythiaTranslator(PythiaTranslatorBase):
                             current, total,
                             f'site {current} of {total}',
                         )
-                climate_data = self._download_site_weather(data, progress_callback=_pythia_progress)
+                downloaded = self._download_site_weather(
+                    data,
+                    subset_site_ids=sorted(missing_sites),
+                    progress_callback=_pythia_progress,
+                )
+                # Merge with existing real climate (preserves partial
+                # pre-retrieve coverage; doesn't discard).
+                if downloaded:
+                    climate_data = {**climate_data, **downloaded}
 
             if climate_data:
                 weather_files = self._generate_weather_files(climate_data)
@@ -2553,12 +2575,18 @@ class PythiaTranslator(PythiaTranslatorBase):
         self,
         data: UnifiedData,
         progress_callback: Optional[callable] = None,
+        subset_site_ids: Optional[List[int]] = None,
     ) -> Dict[int, 'ClimateTimeSeries']:
-        """Download NASA POWER weather data for all grid sites.
+        """Download NASA POWER weather data for grid sites.
 
         Args:
             data: UnifiedData with grid info
             progress_callback: Optional callback(current, total) for progress
+            subset_site_ids: Optional list of cell IDs to fetch. If provided,
+                only those sites are downloaded (used by the AC-F-CP-13 gate
+                to fetch the missing-sites subset rather than re-downloading
+                every site). If ``None`` (legacy callers), every grid cell
+                is fetched.
 
         Returns:
             Dictionary mapping site_id to ClimateTimeSeries
@@ -2605,9 +2633,16 @@ class PythiaTranslator(PythiaTranslatorBase):
         )
         source = NASAPowerSource(config=nasa_config)
 
-        # Download for each grid cell
+        # Download for each grid cell. When ``subset_site_ids`` is provided
+        # (AC-F-CP-13 gate path), restrict to that subset so the caller can
+        # skip already-fetched sites.
         climate_data = {}
-        cells = data.grid.cells if data.grid else []
+        all_cells = data.grid.cells if data.grid else []
+        if subset_site_ids is not None:
+            wanted = set(subset_site_ids)
+            cells = [c for c in all_cells if c.cell_id in wanted]
+        else:
+            cells = all_cells
         total = len(cells)
 
         logger.info(f"Downloading NASA POWER weather for {total} sites ({start_date} to {end_date})")

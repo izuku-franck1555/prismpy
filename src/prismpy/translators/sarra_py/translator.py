@@ -291,13 +291,22 @@ class SarraPyTranslator(SarraPyTranslatorBase):
                 ),
             )
 
+        # AC-F-CP-13.5: n_climate_locations counts REAL cells, not the
+        # sentinel placeholder. The non-int safety of is_real_climate_cell_id
+        # also keeps the SARRA-Py path-dict variants (string keys like
+        # ``rainfall_dir`` / ``agera5_dir``) from inflating the count.
+        from prismpy.sources.climate import is_real_climate_cell_id
+        _real_climate_locations = sum(
+            1 for k in (data.climate or {}).keys()
+            if is_real_climate_cell_id(k)
+        )
         result = self.create_result(
             success=True,
             output_files=output_files,
             warnings=warnings,
             metadata={
                 "region": data.region.name,
-                "n_climate_locations": len(data.climate) if data.climate else 0,
+                "n_climate_locations": _real_climate_locations,
                 "n_soil_profiles": len(data.soil) if data.soil else 0,
             },
         )
