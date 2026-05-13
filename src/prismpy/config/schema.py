@@ -808,9 +808,13 @@ class ManagementConfig(BaseModel):
         gt=0,
         description="Row spacing in centimeters"
     )
-    sowing_mode: Literal["opportunistic", "fixed_date"] = Field(
+    sowing_mode: Literal["opportunistic", "fixed_date", "fixed"] = Field(
         default="opportunistic",
-        description="Sowing mode: opportunistic (wait for rain) or fixed_date"
+        description=(
+            "Sowing mode: opportunistic (wait for rain) or fixed_date "
+            "('fixed' accepted as backward-compat alias per F-DJ 2026-05-13; "
+            "normalized to 'fixed_date' at schema boundary)."
+        ),
     )
     sowing_threshold_mm: float = Field(
         default=10.0,
@@ -855,6 +859,21 @@ class ManagementConfig(BaseModel):
         description="Default DSSAT cultivar code (e.g., 'GH0010' for OBATANPA maize). "
                     "Can be overridden per zone via management_zones."
     )
+
+    @field_validator("sowing_mode")
+    @classmethod
+    def _normalize_sowing_mode(cls, v: str) -> str:
+        """Accept 'fixed' as backward-compat alias for 'fixed_date' per F-DJ.
+
+        Producer (prismweb wizard Alpine template at
+        ``prismweb/templates/wizard/crop.html:285-286``) historically emits
+        ``'fixed'``; canonical value is ``'fixed_date'``. Normalize at
+        schema boundary to avoid drift downstream (per durable §27
+        producer-consumer parity).
+        """
+        if v == "fixed":
+            return "fixed_date"
+        return v
 
 
 # =============================================================================
