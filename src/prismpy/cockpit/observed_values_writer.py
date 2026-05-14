@@ -91,6 +91,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from prismpy.cells.cell_id_validation import is_real_climate_cell_id
 from prismpy.models.climate import ClimateRecord
 from prismpy.models.crop import CropCalendar
 from prismpy.models.soil import SoilProfile
@@ -481,8 +482,23 @@ def write_observed_values_json(
         )
 
     # Per-cell payload assembly.
+    #
+    # F-DL AC-DL-2 — filter to real-cell IDs before the union+sort.
+    # ``climate`` may be a path-dict (SARRA-Py: ``{"rainfall_dir":
+    # Path(...), ...}``) and ``soil`` may carry int or str keys
+    # depending on whether harmonize ran. A bare
+    # ``set(climate.keys()) | set(soil.keys())`` then mixes str and
+    # int keys, and ``sorted()`` on that mixed set raises
+    # ``TypeError: '<' not supported between instances of 'int' and
+    # 'str'`` on Python 3. Filtering through
+    # ``is_real_climate_cell_id`` drops the path-dict vocabulary
+    # before any cross-type comparison; the writer's emit shape
+    # downstream is unchanged on real-cell inputs.
     cells_block: Dict[str, Dict[str, Any]] = {}
-    all_cell_ids = set(climate.keys()) | set(soil.keys())
+    all_cell_ids = {
+        cid for cid in (set(climate.keys()) | set(soil.keys()))
+        if is_real_climate_cell_id(cid)
+    }
     for cell_id in sorted(all_cell_ids):
         ts = climate.get(cell_id)
         profile = soil.get(cell_id)

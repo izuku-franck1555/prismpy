@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 import logging
 
+from prismpy.cells.cell_id_validation import is_real_climate_cell_id
 from prismpy.config.schema import ProjectConfig, Platform
 from prismpy.models.region import Region
 from prismpy.models.spatial import SpatialGrid
@@ -317,11 +318,15 @@ class BaseTranslator(ABC):
         # ``str >= 0``. The type hint says int, but the guard is
         # cheap defense in depth; it parallels the calendar re-fan
         # filter below.
+        # F-DL AC-DL-3 site 1 — route real-cell predicate through
+        # the canonical helper (durable §24 canonical-source). The
+        # ``hasattr(ts, "records") and ts.records`` guard remains
+        # for the data-shape check (separate concern from cell-id
+        # vocabulary).
         real = {
             cid: ts
             for cid, ts in climate_by_cell_id.items()
-            if isinstance(cid, int)
-            and cid >= 0
+            if is_real_climate_cell_id(cid)
             and hasattr(ts, "records")
             and ts.records
         }
@@ -362,6 +367,12 @@ class BaseTranslator(ABC):
             None,
         )
         if crop_calendar_config is not None:
+            # F-DL AC-DL-3 site 2 — same canonical helper drives the
+            # ``crop_calendar`` re-fan. The cell-id vocabulary
+            # invariant is identical to site 1 above; keeping both
+            # call sites on the canonical predicate avoids future
+            # drift where the per-cell filter widens but the fanout
+            # filter doesn't (or vice versa).
             data.crop_calendar = {
                 cid: CropCalendar(
                     location_id=cid,
@@ -370,7 +381,7 @@ class BaseTranslator(ABC):
                     source="config",
                 )
                 for cid in data.climate.keys()
-                if isinstance(cid, int) and cid >= 0
+                if is_real_climate_cell_id(cid)
             }
 
 
