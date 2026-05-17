@@ -23,30 +23,75 @@ prismpy source MUST be either
 * (c) listed in ``WHITELIST`` with a committed rationale.
 
 TARGET_CALLS covers the four primitive resource-acquisition surfaces
-that share the libhdf5 close-path:
+that share the libhdf5 close-path; ``TARGET_MODULES`` is the set of
+canonical module names (whatever Python sees in ``sys.modules`` after
+``import <name>``):
 
-* ``xr.open_dataset`` / ``xarray.open_dataset``
-* ``xr.open_mfdataset`` / ``xarray.open_mfdataset``
+* ``xarray.open_dataset`` / ``xarray.open_mfdataset``
 * ``netCDF4.Dataset`` (direct constructor)
 * ``h5py.File`` (direct HDF5 usage)
 
-Empirical count at PR1 (verified by builder grounding):
-* `xr.open_dataset`: 3 sites (smoking gun + hwsd + tamsat)
-* All other TARGET_CALLS patterns: 0 sites in production code
-The walker defends against future introduction of any pattern.
+The walker matches both the canonical receiver name (``xarray.``,
+``netCDF4.``, ``h5py.``) AND any local alias bound via
+``import <canonical> as <alias>`` (e.g., ``import netCDF4 as nc``
+→ ``nc.Dataset(...)``). Alias tracking is per-scope — see the
+"Alias tracking" section below — and walks both module-level
+imports and function-local imports (the common lazy-import idiom
+``try: import netCDF4 as nc except ImportError: ...``).
+
+Alias tracking (alias-extension amendment):
+production code at ``translators/acea/translator.py:1264, 1454, 1997``
+binds ``import netCDF4 as nc`` inside a function-local
+``try/except`` and then writes ``nc.Dataset(...)`` later in the same
+method (5 sites: L1319, L1625, L2006, L2015, L2043). The receiver
+of these constructor calls is ``ast.Name(id="nc")``. Pre-extension
+the walker only matched receivers whose ``id`` was one of the
+canonical names declared in ``TARGET_CALLS`` (e.g., ``netCDF4``);
+``"nc"`` was not in that set, so the walker returned zero hits for
+every production ``nc.Dataset`` call and the pin assertion passed
+vacuously. A future regression to the smoking-gun module that
+uses ``import xarray as xx`` (or any non-canonical alias name)
+would also slip through. The alias-extension walks every
+``ast.Import`` and ``ast.ImportFrom`` reachable without crossing a
+function boundary in the relevant scope, maps each
+``import <canonical> as <alias>`` to ``alias → canonical``, and
+resolves the receiver name through that map before checking
+``TARGET_CALLS`` membership. Function-local imports apply only
+within their enclosing function; module-level imports inherit
+into every function in the module. Per F-DL Pin DL-1 cycle-6
+alias-tracking pattern (caught BL-1 codex R-independent at
+``observed_values_writer.py:499``).
+
+Empirical count at the alias-extension commit (verified by
+post-extension run against the source tree):
+* ``xr.open_dataset`` — 3 sites (smoking gun + hwsd + tamsat),
+  all safely managed (with / try-finally).
+* ``nc.Dataset`` — 5 sites in ``translators/acea/translator.py``
+  (newly visible after alias tracking). Sibling-swept per durable
+  §20: each wrapped in a ``with`` block in the same commit as the
+  walker extension (or whitelisted with rationale per scope-amend
+  decision).
+* ``xr.open_mfdataset`` / ``h5py.File`` / canonical
+  ``xarray.open_dataset`` / ``netCDF4.Dataset`` — 0 sites in
+  production. The walker defends against future introduction of
+  any pattern through any alias.
 
 Anti-mutation probes at the bottom of this file flex the walker
 against synthetic source strings so regressions in the walker itself
 are caught alongside regressions in the prismpy source it scans.
+Cycle-alias adds Name-receiver alias probes for both module-level
+``import xarray as xa`` AND function-local
+``import netCDF4 as nc`` patterns.
 
 Per F-DP contract LOCKED cycle-4 §Z.1 + §X.3 + §C Pin DP-1 base
-logic + infrastructure_rules.md durable §24.
+logic + alias-extension CORRECTION + infrastructure_rules.md
+durable §20 sibling-sweep + §24 canonical source.
 """
 from __future__ import annotations
 
 import ast
 from pathlib import Path
-from typing import Iterator, List, Optional, Set, Tuple
+from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 import pytest
 
@@ -60,18 +105,27 @@ PRISMPY_SRC = Path(__file__).resolve().parents[2] / "src" / "prismpy"
 # ── Target call patterns ───────────────────────────────────────────
 
 
-# Each entry = (module_name, attribute_name). Walker matches
-# `Attribute(value=Name(id=module_name), attr=attribute_name)` ASTs
-# inside Call nodes. Per §X.3 cycle-2 expansion: 4 primitive surfaces
-# that share the libhdf5 close-path.
+# Each entry = (canonical_module_name, attribute_name). Walker
+# matches ``Attribute(value=Name(id=R), attr=attribute_name)`` ASTs
+# inside Call nodes, AFTER resolving ``R`` through the per-scope
+# import-alias map (so ``nc.Dataset(...)`` resolves to
+# ``(netCDF4, Dataset)`` when ``import netCDF4 as nc`` is in scope).
+# Per §X.3 cycle-2 expansion: 4 primitive surfaces that share the
+# libhdf5 close-path. Aliases are not duplicated as separate entries
+# — the alias map handles that — so adding a new TARGET_CALLS entry
+# is a one-line change.
 TARGET_CALLS: Tuple[Tuple[str, str], ...] = (
-    ("xr", "open_dataset"),
     ("xarray", "open_dataset"),
-    ("xr", "open_mfdataset"),
     ("xarray", "open_mfdataset"),
     ("netCDF4", "Dataset"),
     ("h5py", "File"),
 )
+
+
+# Canonical module names referenced by TARGET_CALLS. Derived once so
+# the alias collector can short-circuit on imports whose target
+# module is irrelevant to Pin DP-1's scope.
+TARGET_MODULES: Set[str] = {module for module, _ in TARGET_CALLS}
 
 
 # Format: "src/prismpy/<relative path>.py:<lineno>" strings. Empty at
@@ -84,9 +138,97 @@ WHITELIST: Set[str] = set()
 # ── AST helpers ────────────────────────────────────────────────────
 
 
-def _is_target_call(node: ast.AST) -> Optional[Tuple[str, str]]:
-    """If ``node`` is a Call whose ``func`` is ``Attribute(Name(X), Y)``
-    and ``(X, Y)`` is in ``TARGET_CALLS``, return that tuple. Else None.
+def _walk_skipping_nested_scopes(scope_node: ast.AST) -> Iterator[ast.AST]:
+    """Yield every descendant of ``scope_node`` EXCEPT nodes inside a
+    nested ``FunctionDef`` / ``AsyncFunctionDef``. The ``scope_node``
+    itself is yielded so callers can match against the scope's own
+    header attributes when needed.
+
+    Used by ``_collect_import_aliases_in_scope`` so a module-level
+    walk does not absorb function-local imports (which belong to the
+    function scope, not the module scope), and so a function-local
+    walk does not absorb imports from nested helper functions.
+
+    The walk descends into all other compound nodes (``If``, ``Try``,
+    ``With``, ``For``, ``While``, ``ClassDef`` body for class-level
+    statements). The intent is "everything reachable from this scope
+    without crossing a function boundary".
+    """
+    yield scope_node
+    for child in ast.iter_child_nodes(scope_node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        yield from _walk_skipping_nested_scopes(child)
+
+
+def _collect_import_aliases_in_scope(
+    scope_node: ast.AST,
+) -> Dict[str, str]:
+    """Walk ``scope_node`` (without crossing nested function
+    boundaries) and return ``{local_name → canonical_module_name}``
+    for every ``import <canonical> [as <alias>]`` and
+    ``from <pkg> import <canonical> [as <alias>]`` that binds a name
+    referring to one of ``TARGET_MODULES``.
+
+    Two import idioms recognized:
+
+    1. **Plain import**: ``import xarray`` → ``{"xarray": "xarray"}``;
+       ``import netCDF4 as nc`` → ``{"nc": "netCDF4"}``.
+       Sub-modules (``import xarray.something as xr``) are walked
+       through the root: the canonical key tracked is the root
+       module so the alias resolves to the same name Pin DP-1
+       enforces. Only roots in ``TARGET_MODULES`` produce an entry.
+
+    2. **From-import of submodule**:
+       ``from xarray import open_dataset`` is rare in production but
+       would bind the function ``open_dataset`` directly to a Name
+       in the local scope, sidestepping the receiver pattern Pin
+       DP-1 matches against. This case is NOT tracked here — it is
+       documented in the limitations section of the module
+       docstring; if it appears in production, extend the walker
+       with a "function-callable alias" map.
+
+    The identity mapping (``"xarray" → "xarray"``) is intentional:
+    it lets the matcher resolve a bare ``import xarray; xarray.
+    open_dataset(...)`` site the same way it resolves an aliased
+    one, without a separate code path. ``import netCDF4`` (no alias)
+    therefore still works even though there are no such sites in
+    production today.
+
+    Per alias-extension CORRECTION (F-DL Pin DL-1 cycle-6 precedent).
+    """
+    aliases: Dict[str, str] = {}
+    for node in _walk_skipping_nested_scopes(scope_node):
+        if not isinstance(node, ast.Import):
+            continue
+        for alias in node.names:
+            # ``alias.name`` is the dotted module path; the root is
+            # what ``sys.modules`` keys against and what Pin DP-1
+            # asserts against.
+            root_canonical = alias.name.split(".", 1)[0]
+            if root_canonical not in TARGET_MODULES:
+                continue
+            local_name = alias.asname or alias.name
+            # Strip dotted-form local names (``import xarray.foo``
+            # binds ``xarray`` in the local scope, not ``xarray.foo``).
+            local_name = local_name.split(".", 1)[0]
+            aliases[local_name] = root_canonical
+    return aliases
+
+
+def _is_target_call(
+    node: ast.AST,
+    module_aliases: Optional[Dict[str, str]] = None,
+) -> Optional[Tuple[str, str]]:
+    """If ``node`` is a Call whose ``func`` is ``Attribute(Name(R), Y)``
+    and ``(canonical_of(R), Y)`` is in ``TARGET_CALLS``, return that
+    tuple. Else None.
+
+    ``canonical_of(R)`` resolves ``R`` through ``module_aliases``
+    (e.g., ``nc → netCDF4`` when ``import netCDF4 as nc`` is in
+    scope). When ``module_aliases`` is None or missing the receiver,
+    the receiver name is used verbatim — preserving direct matches
+    on canonical names (``netCDF4.Dataset(...)`` with no aliasing).
     """
     if not isinstance(node, ast.Call):
         return None
@@ -95,7 +237,11 @@ def _is_target_call(node: ast.AST) -> Optional[Tuple[str, str]]:
         return None
     if not isinstance(func.value, ast.Name):
         return None
-    pair = (func.value.id, func.attr)
+    receiver = func.value.id
+    canonical_receiver = (
+        module_aliases.get(receiver, receiver) if module_aliases else receiver
+    )
+    pair = (canonical_receiver, func.attr)
     return pair if pair in TARGET_CALLS else None
 
 
@@ -223,16 +369,50 @@ def _collect_try_finally_protected_calls(tree: ast.AST) -> Set[int]:
 
 def _violations_in(source: str, source_label: str) -> List[str]:
     """Return human-readable violation strings for ``source``. Empty
-    list when every TARGET_CALLS site is safely managed."""
+    list when every TARGET_CALLS site is safely managed.
+
+    The matcher runs per-scope so each Call is checked against the
+    alias map visible at its position: module-level imports are
+    inherited by every function in the module, function-local
+    imports apply only inside that function (the common lazy-import
+    idiom). Per alias-extension CORRECTION.
+    """
     try:
         tree = ast.parse(source, filename=source_label)
     except SyntaxError as exc:  # noqa: BLE001 — surface parse errors
         pytest.fail(f"AST parse failed for {source_label}: {exc}")
 
-    # Collect every TARGET_CALLS-matching Call and its safety status
+    # Module-level alias map — shared by every function in the file.
+    module_aliases = _collect_import_aliases_in_scope(tree)
+
+    # Memoise the merged alias map per function scope. The scope
+    # node's ``id()`` is stable for the lifetime of the tree.
+    scope_aliases_cache: Dict[int, Dict[str, str]] = {
+        id(tree): module_aliases,
+    }
+
+    def _aliases_for_scope(scope_node: ast.AST) -> Dict[str, str]:
+        key = id(scope_node)
+        cached = scope_aliases_cache.get(key)
+        if cached is not None:
+            return cached
+        # Function-local imports inherit + may shadow module-level
+        # entries (the same alias name rebound inside the function).
+        local = _collect_import_aliases_in_scope(scope_node)
+        merged = {**module_aliases, **local}
+        scope_aliases_cache[key] = merged
+        return merged
+
+    # Collect every TARGET_CALLS-matching Call (after alias
+    # resolution against the Call's enclosing scope) and its safety
+    # status.
     matches: List[Tuple[ast.Call, int]] = []
     for node in ast.walk(tree):
-        if _is_target_call(node) is not None and isinstance(node, ast.Call):
+        if not isinstance(node, ast.Call):
+            continue
+        scope = _enclosing_scope_by_lineno(node, tree)
+        aliases = _aliases_for_scope(scope)
+        if _is_target_call(node, aliases) is not None:
             matches.append((node, node.lineno))
     if not matches:
         return []
@@ -294,12 +474,17 @@ def test_prismpy_source_root_exists() -> None:
 def test_all_target_calls_in_prismpy_are_safely_managed() -> None:
     """Pin DP-1 main assertion: every TARGET_CALLS site under
     ``prismpy/src/prismpy/`` MUST be safely managed (case a / b /
-    or whitelist). Currently expected to PASS — the 3 known sites
-    are all wrapped post-AC-DP-1a:
+    or whitelist). Currently expected to PASS — the 5 known sites
+    (3 xarray + 2 netCDF4-via-alias) are all wrapped:
 
     * `vendor/sarra_data_download/get_AgERA5_data.py:273` — with
-    * `sources/soil/hwsd.py:438` — with
+      (AC-DP-1a smoking gun)
+    * `sources/soil/hwsd.py:438` — with (AC-DP-1a sibling)
     * `sources/climate/tamsat.py:1010` — try/finally + ds.close()
+    * `translators/acea/translator.py:1319` — with (alias-extension
+      sibling-sweep; ``import netCDF4 as nc`` newly tracked)
+    * `translators/acea/translator.py:1625` — with (alias-extension
+      sibling-sweep; same alias)
 
     Anti-mutation: temporarily removing the `with` from any of these
     sites makes this test fail with a clear file:line + call-text
@@ -457,10 +642,13 @@ def test_anti_mutation_whitelist_suppresses() -> None:
     (so a future legitimate carve-out can be added)."""
     label = "synthetic/whitelisted.py"
     # Find the lineno of the bare call to compute the whitelist key.
+    # Resolve the synthetic's ``import xarray as xr`` alias so the
+    # matcher recognises ``xr.open_dataset`` as a canonical target.
     tree = ast.parse(_BARE_OPEN_FORM, filename=label)
+    aliases = _collect_import_aliases_in_scope(tree)
     lineno = next(
         node.lineno for node in ast.walk(tree)
-        if _is_target_call(node) is not None
+        if _is_target_call(node, aliases) is not None
     )
     WHITELIST.add(f"{label}:{lineno}")
     try:
@@ -470,3 +658,173 @@ def test_anti_mutation_whitelist_suppresses() -> None:
         )
     finally:
         WHITELIST.discard(f"{label}:{lineno}")
+
+
+# ── Alias-extension anti-mutation probes ───────────────────────────
+
+
+_BARE_NETCDF4_ALIAS_FORM = """
+import netCDF4 as nc
+def f(p):
+    ds = nc.Dataset(p, 'r')
+    return ds.variables
+"""
+
+_WITH_NETCDF4_ALIAS_FORM = """
+import netCDF4 as nc
+def f(p):
+    with nc.Dataset(p, 'r') as ds:
+        return list(ds.variables)
+"""
+
+_BARE_XARRAY_NONSTANDARD_ALIAS_FORM = """
+import xarray as xa
+def f(p):
+    ds = xa.open_dataset(p)
+    return ds.values
+"""
+
+_FUNCTION_LOCAL_BARE_NETCDF4_ALIAS_FORM = """
+def f(p):
+    import netCDF4 as nc
+    ds = nc.Dataset(p, 'r')
+    return ds.variables
+"""
+
+_TRY_EXCEPT_BARE_NETCDF4_ALIAS_FORM = """
+def f(p):
+    try:
+        import netCDF4 as nc
+    except ImportError:
+        return None
+    ds = nc.Dataset(p, 'r')
+    return ds.variables
+"""
+
+_FUNCTION_LOCAL_WITH_NETCDF4_ALIAS_FORM = """
+def f(p):
+    import netCDF4 as nc
+    with nc.Dataset(p, 'r') as ds:
+        return list(ds.variables)
+"""
+
+_NESTED_FUNCTION_ALIAS_DOES_NOT_LEAK = """
+def outer(p):
+    import netCDF4 as nc
+    with nc.Dataset(p, 'r') as ds:
+        return list(ds.variables)
+
+def sibling(p):
+    # ``nc`` is NOT in scope here; this `nc.Dataset(...)` would be
+    # a NameError at runtime, but for the walker it must still be
+    # treated as a Name receiver with no resolvable canonical
+    # mapping (i.e., not a TARGET_CALLS match, NOT a false-positive
+    # leak from outer()).
+    ds = nc.Dataset(p, 'r')
+    return ds.variables
+"""
+
+
+def test_anti_mutation_bare_netcdf4_alias_fails() -> None:
+    """Alias-extension primary regression: ``import netCDF4 as nc``
+    followed by a bare ``ds = nc.Dataset(...)`` MUST violate. The
+    pre-extension walker matched only canonical receivers
+    (``netCDF4.Dataset``), so this synthetic — and the production
+    sites at ``translators/acea/translator.py`` it mirrors —
+    silently passed. A regression that drops alias resolution
+    would re-introduce that silent-pass and this test would fail
+    loud."""
+    violations = _violations_in(
+        _BARE_NETCDF4_ALIAS_FORM, "synthetic/bare_nc_alias.py"
+    )
+    assert len(violations) == 1, violations
+    assert "nc.Dataset" in violations[0]
+    assert "synthetic/bare_nc_alias.py" in violations[0]
+
+
+def test_anti_mutation_with_netcdf4_alias_passes() -> None:
+    """The ``with`` form of an aliased ``nc.Dataset(...)`` site is
+    safely managed (case (a)). Walker reports zero violations.
+    Pins that the alias resolution does not break the ``with``
+    detection path."""
+    assert _violations_in(
+        _WITH_NETCDF4_ALIAS_FORM, "synthetic/with_nc_alias.py"
+    ) == []
+
+
+def test_anti_mutation_bare_xarray_nonstandard_alias_fails() -> None:
+    """A non-canonical xarray alias (``import xarray as xa``) MUST be
+    resolved the same as the canonical ``xr``. Pre-extension the
+    walker had ``("xr", "open_dataset")`` hard-coded in TARGET_CALLS
+    and would silently pass ``xa.open_dataset(...)``. The
+    alias-aware matcher resolves ``xa → xarray`` and fires the
+    violation."""
+    violations = _violations_in(
+        _BARE_XARRAY_NONSTANDARD_ALIAS_FORM, "synthetic/bare_xa.py"
+    )
+    assert len(violations) == 1, violations
+    assert "xa.open_dataset" in violations[0]
+
+
+def test_anti_mutation_function_local_bare_netcdf4_alias_fails() -> None:
+    """Function-local ``import netCDF4 as nc`` (the production lazy
+    -import idiom at ``translators/acea/translator.py:1264``) MUST
+    still resolve ``nc → netCDF4`` within the same function body.
+    Confirms ``_collect_import_aliases_in_scope`` walks function-
+    local imports, not just module-level ones."""
+    violations = _violations_in(
+        _FUNCTION_LOCAL_BARE_NETCDF4_ALIAS_FORM,
+        "synthetic/fn_local_nc.py",
+    )
+    assert len(violations) == 1, violations
+    assert "nc.Dataset" in violations[0]
+
+
+def test_anti_mutation_try_except_bare_netcdf4_alias_fails() -> None:
+    """The production idiom at ``translators/acea/translator.py:1997``
+    wraps the import in ``try/except ImportError`` (defensive against
+    missing netCDF4). The walker's scope walk MUST descend into the
+    try-body so the alias is collected even when conditionally
+    imported. Empirically: the 3 ``import netCDF4 as nc`` sites in
+    production all use this pattern; if the walker skips try-bodies
+    they all bypass."""
+    violations = _violations_in(
+        _TRY_EXCEPT_BARE_NETCDF4_ALIAS_FORM,
+        "synthetic/try_except_nc.py",
+    )
+    assert len(violations) == 1, violations
+    assert "nc.Dataset" in violations[0]
+
+
+def test_anti_mutation_function_local_with_netcdf4_alias_passes() -> None:
+    """Function-local alias + ``with``-wrapped call is safely managed.
+    Pins that alias resolution does not turn a legitimate
+    ``with nc.Dataset(...)`` into a false positive."""
+    assert _violations_in(
+        _FUNCTION_LOCAL_WITH_NETCDF4_ALIAS_FORM,
+        "synthetic/fn_local_with_nc.py",
+    ) == []
+
+
+def test_nested_function_alias_does_not_leak() -> None:
+    """Per-function scoping: an alias defined inside ``outer()`` MUST
+    NOT be visible inside ``sibling()``. The walker collects aliases
+    per enclosing scope; a leak from ``outer`` into ``sibling`` would
+    cause ``nc.Dataset`` in ``sibling`` to resolve to
+    ``netCDF4.Dataset`` and report a violation. Without the leak,
+    the bare ``nc.Dataset`` in ``sibling`` is treated as an unknown
+    receiver and silently passes (the runtime NameError is a
+    separate Python concern, not a Pin DP-1 invariant).
+
+    This pin guards against a regression where the alias collector
+    walks across function boundaries and creates ghost mappings."""
+    violations = _violations_in(
+        _NESTED_FUNCTION_ALIAS_DOES_NOT_LEAK,
+        "synthetic/nested_no_leak.py",
+    )
+    # ``outer`` is `with`-protected → 0 violations from there.
+    # ``sibling`` has no in-scope alias for ``nc`` → walker does
+    # not recognise it as a TARGET_CALLS site → 0 violations.
+    assert violations == [], (
+        f"Alias leaked across function boundaries: {violations}"
+    )
