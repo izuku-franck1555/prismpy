@@ -2457,69 +2457,70 @@ if __name__ == "__main__":
         for irr_type in ['rf', 'ir']:
             nc_path = calendar_dir / f"{crop_short}_{irr_type}_crop_calendar.nc"
 
-            nc = Dataset(str(nc_path), 'w', format='NETCDF4')
+            # `with` wrap releases the handle per iteration; matches
+            # the AC-DP-1a discipline applied to the AgERA5 smoking
+            # gun + `_generate_soil_netcdf*` siblings above.
+            with Dataset(str(nc_path), 'w', format='NETCDF4') as nc:
+                # Create dimensions
+                nc.createDimension('lat', self.GRID_ROWS_30ARCMIN)
+                nc.createDimension('lon', self.GRID_COLS_30ARCMIN)
 
-            # Create dimensions
-            nc.createDimension('lat', self.GRID_ROWS_30ARCMIN)
-            nc.createDimension('lon', self.GRID_COLS_30ARCMIN)
+                # Create coordinate variables
+                lat_var = nc.createVariable('lat', 'f8', ('lat',))
+                lat_var.long_name = 'latitude'
+                lat_var.units = 'degrees_north'
+                lat_var[:] = np.arange(89.75, -90, -0.5)
 
-            # Create coordinate variables
-            lat_var = nc.createVariable('lat', 'f8', ('lat',))
-            lat_var.long_name = 'latitude'
-            lat_var.units = 'degrees_north'
-            lat_var[:] = np.arange(89.75, -90, -0.5)
+                lon_var = nc.createVariable('lon', 'f8', ('lon',))
+                lon_var.long_name = 'longitude'
+                lon_var.units = 'degrees_east'
+                lon_var[:] = np.arange(-179.75, 180, 0.5)
 
-            lon_var = nc.createVariable('lon', 'f8', ('lon',))
-            lon_var.long_name = 'longitude'
-            lon_var.units = 'degrees_east'
-            lon_var[:] = np.arange(-179.75, 180, 0.5)
+                # Create data variables with fill value
+                planting_var = nc.createVariable(
+                    'planting_day', 'i2', ('lat', 'lon'),
+                    fill_value=-9999, zlib=True, complevel=6
+                )
+                planting_var.long_name = 'Planting day of year'
+                planting_var.units = 'day'
+                planting_var.valid_range = np.array([1, 366], dtype='i2')
 
-            # Create data variables with fill value
-            planting_var = nc.createVariable(
-                'planting_day', 'i2', ('lat', 'lon'),
-                fill_value=-9999, zlib=True, complevel=6
-            )
-            planting_var.long_name = 'Planting day of year'
-            planting_var.units = 'day'
-            planting_var.valid_range = np.array([1, 366], dtype='i2')
+                maturity_var = nc.createVariable(
+                    'maturity_day', 'i2', ('lat', 'lon'),
+                    fill_value=-9999, zlib=True, complevel=6
+                )
+                maturity_var.long_name = 'Maturity day of year'
+                maturity_var.units = 'day'
+                maturity_var.valid_range = np.array([1, 366], dtype='i2')
 
-            maturity_var = nc.createVariable(
-                'maturity_day', 'i2', ('lat', 'lon'),
-                fill_value=-9999, zlib=True, complevel=6
-            )
-            maturity_var.long_name = 'Maturity day of year'
-            maturity_var.units = 'day'
-            maturity_var.valid_range = np.array([1, 366], dtype='i2')
+                # Initialize with fill values
+                planting_data = np.full((self.GRID_ROWS_30ARCMIN, self.GRID_COLS_30ARCMIN),
+                                        -9999, dtype='i2')
+                maturity_data = np.full((self.GRID_ROWS_30ARCMIN, self.GRID_COLS_30ARCMIN),
+                                        -9999, dtype='i2')
 
-            # Initialize with fill values
-            planting_data = np.full((self.GRID_ROWS_30ARCMIN, self.GRID_COLS_30ARCMIN),
-                                    -9999, dtype='i2')
-            maturity_data = np.full((self.GRID_ROWS_30ARCMIN, self.GRID_COLS_30ARCMIN),
-                                    -9999, dtype='i2')
+                # Fill data for cells in our grid
+                for cell_id, cal in calendar_by_cell.items():
+                    row, col = self._cell_id_to_row_col(cell_id)
+                    if 0 <= row < self.GRID_ROWS_30ARCMIN and 0 <= col < self.GRID_COLS_30ARCMIN:
+                        planting_data[row, col] = cal.planting_doy
+                        # Use harvest_doy if available, otherwise maturity_doy
+                        harvest = cal.harvest_doy if cal.harvest_doy else cal.maturity_doy
+                        maturity_data[row, col] = harvest
 
-            # Fill data for cells in our grid
-            for cell_id, cal in calendar_by_cell.items():
-                row, col = self._cell_id_to_row_col(cell_id)
-                if 0 <= row < self.GRID_ROWS_30ARCMIN and 0 <= col < self.GRID_COLS_30ARCMIN:
-                    planting_data[row, col] = cal.planting_doy
-                    # Use harvest_doy if available, otherwise maturity_doy
-                    harvest = cal.harvest_doy if cal.harvest_doy else cal.maturity_doy
-                    maturity_data[row, col] = harvest
+                planting_var[:, :] = planting_data
+                maturity_var[:, :] = maturity_data
 
-            planting_var[:, :] = planting_data
-            maturity_var[:, :] = maturity_data
+                # Global attributes
+                nc.title = f"{crop_short.upper()} {'Rainfed' if irr_type == 'rf' else 'Irrigated'} Crop Calendar"
+                nc.source = "prismpy framework"
+                nc.conventions = "CF-1.6"
+                nc.calendar_type = "rainfed" if irr_type == "rf" else "irrigated"
+                nc.grid_resolution = "30-arcmin (0.5 degree)"
+                nc.grid_dimensions = "360 x 720 (global)"
+                nc.cells_with_data = len(calendar_by_cell)
+                nc.institution = "prismpy"
 
-            # Global attributes
-            nc.title = f"{crop_short.upper()} {'Rainfed' if irr_type == 'rf' else 'Irrigated'} Crop Calendar"
-            nc.source = "prismpy framework"
-            nc.conventions = "CF-1.6"
-            nc.calendar_type = "rainfed" if irr_type == "rf" else "irrigated"
-            nc.grid_resolution = "30-arcmin (0.5 degree)"
-            nc.grid_dimensions = "360 x 720 (global)"
-            nc.cells_with_data = len(calendar_by_cell)
-            nc.institution = "prismpy"
-
-            nc.close()
             output_files.append(nc_path)
             logger.debug(f"Generated crop calendar NetCDF: {nc_path}")
 
@@ -2607,56 +2608,56 @@ if __name__ == "__main__":
         for irr_type in ['rf', 'ir']:
             nc_path = params_dir / f"{crop_short}_{irr_type}_crop_parameters.nc"
 
-            nc = Dataset(str(nc_path), 'w', format='NETCDF4')
+            # Same handle-release discipline as
+            # ``_generate_crop_calendar_netcdf`` above.
+            with Dataset(str(nc_path), 'w', format='NETCDF4') as nc:
+                # Create dimensions
+                nc.createDimension('lat', self.GRID_ROWS_30ARCMIN)
+                nc.createDimension('lon', self.GRID_COLS_30ARCMIN)
 
-            # Create dimensions
-            nc.createDimension('lat', self.GRID_ROWS_30ARCMIN)
-            nc.createDimension('lon', self.GRID_COLS_30ARCMIN)
+                # Create coordinate variables
+                lat_var = nc.createVariable('lat', 'f8', ('lat',))
+                lat_var.long_name = 'latitude'
+                lat_var.units = 'degrees_north'
+                lat_var[:] = np.arange(89.75, -90, -0.5)
 
-            # Create coordinate variables
-            lat_var = nc.createVariable('lat', 'f8', ('lat',))
-            lat_var.long_name = 'latitude'
-            lat_var.units = 'degrees_north'
-            lat_var[:] = np.arange(89.75, -90, -0.5)
+                lon_var = nc.createVariable('lon', 'f8', ('lon',))
+                lon_var.long_name = 'longitude'
+                lon_var.units = 'degrees_east'
+                lon_var[:] = np.arange(-179.75, 180, 0.5)
 
-            lon_var = nc.createVariable('lon', 'f8', ('lon',))
-            lon_var.long_name = 'longitude'
-            lon_var.units = 'degrees_east'
-            lon_var[:] = np.arange(-179.75, 180, 0.5)
+                # Create data variables for each parameter
+                for param_name, (long_name, units) in param_metadata.items():
+                    param_var = nc.createVariable(
+                        param_name, 'f4', ('lat', 'lon'),
+                        fill_value=np.nan, zlib=True, complevel=6
+                    )
+                    param_var.long_name = long_name
+                    param_var.units = units
 
-            # Create data variables for each parameter
-            for param_name, (long_name, units) in param_metadata.items():
-                param_var = nc.createVariable(
-                    param_name, 'f4', ('lat', 'lon'),
-                    fill_value=np.nan, zlib=True, complevel=6
-                )
-                param_var.long_name = long_name
-                param_var.units = units
+                    # Initialize with fill values
+                    param_data = np.full((self.GRID_ROWS_30ARCMIN, self.GRID_COLS_30ARCMIN),
+                                         np.nan, dtype='f4')
 
-                # Initialize with fill values
-                param_data = np.full((self.GRID_ROWS_30ARCMIN, self.GRID_COLS_30ARCMIN),
-                                     np.nan, dtype='f4')
+                    # Fill data for cells in our grid with uniform value
+                    value = params_dict.get(param_name, np.nan)
+                    for cell_id in cell_ids_30arcmin:
+                        row, col = self._cell_id_to_row_col(cell_id)
+                        if 0 <= row < self.GRID_ROWS_30ARCMIN and 0 <= col < self.GRID_COLS_30ARCMIN:
+                            param_data[row, col] = value
 
-                # Fill data for cells in our grid with uniform value
-                value = params_dict.get(param_name, np.nan)
-                for cell_id in cell_ids_30arcmin:
-                    row, col = self._cell_id_to_row_col(cell_id)
-                    if 0 <= row < self.GRID_ROWS_30ARCMIN and 0 <= col < self.GRID_COLS_30ARCMIN:
-                        param_data[row, col] = value
+                    param_var[:, :] = param_data
 
-                param_var[:, :] = param_data
+                # Global attributes
+                nc.title = f"{crop_short.upper()} {'Rainfed' if irr_type == 'rf' else 'Irrigated'} Crop Parameters"
+                nc.source = "prismpy framework"
+                nc.conventions = "CF-1.6"
+                nc.param_type = "rainfed" if irr_type == "rf" else "irrigated"
+                nc.grid_resolution = "30-arcmin (0.5 degree)"
+                nc.grid_dimensions = "360 x 720 (global)"
+                nc.cells_with_data = len(cell_ids_30arcmin)
+                nc.institution = "prismpy"
 
-            # Global attributes
-            nc.title = f"{crop_short.upper()} {'Rainfed' if irr_type == 'rf' else 'Irrigated'} Crop Parameters"
-            nc.source = "prismpy framework"
-            nc.conventions = "CF-1.6"
-            nc.param_type = "rainfed" if irr_type == "rf" else "irrigated"
-            nc.grid_resolution = "30-arcmin (0.5 degree)"
-            nc.grid_dimensions = "360 x 720 (global)"
-            nc.cells_with_data = len(cell_ids_30arcmin)
-            nc.institution = "prismpy"
-
-            nc.close()
             output_files.append(nc_path)
             logger.debug(f"Generated crop params NetCDF: {nc_path}")
 

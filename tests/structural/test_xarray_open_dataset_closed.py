@@ -163,86 +163,145 @@ def _walk_skipping_nested_scopes(scope_node: ast.AST) -> Iterator[ast.AST]:
 
 def _collect_import_aliases_in_scope(
     scope_node: ast.AST,
-) -> Dict[str, str]:
+) -> Tuple[Dict[str, str], Dict[str, Tuple[str, str]]]:
     """Walk ``scope_node`` (without crossing nested function
-    boundaries) and return ``{local_name → canonical_module_name}``
-    for every ``import <canonical> [as <alias>]`` and
-    ``from <pkg> import <canonical> [as <alias>]`` that binds a name
-    referring to one of ``TARGET_MODULES``.
+    boundaries) and return ``(module_aliases, callable_aliases)``:
 
-    Two import idioms recognized:
+    - ``module_aliases``: ``{local_name → canonical_module_name}`` for
+      every ``import <canonical> [as <alias>]`` that binds a name
+      referring to one of ``TARGET_MODULES``. Resolves
+      ``alias.Attr(...)`` Calls through the receiver name.
 
-    1. **Plain import**: ``import xarray`` → ``{"xarray": "xarray"}``;
+    - ``callable_aliases``: ``{local_name → (canonical_module,
+      canonical_attr)}`` for every ``from <canonical> import <Attr>
+      [as <alias>]`` whose ``(<canonical>, <Attr>)`` matches a
+      TARGET_CALLS entry. Resolves direct ``alias(...)`` Calls that
+      bypass the receiver pattern entirely (the production
+      ``from netCDF4 import Dataset; Dataset(...)`` shape at
+      ``translators/acea/translator.py:2425, 2577``).
+
+    Three import idioms recognized:
+
+    1. **Plain import** (module_aliases):
+       ``import xarray`` → ``{"xarray": "xarray"}``;
        ``import netCDF4 as nc`` → ``{"nc": "netCDF4"}``.
-       Sub-modules (``import xarray.something as xr``) are walked
+       Sub-modules (``import xarray.something as xr``) walk
        through the root: the canonical key tracked is the root
        module so the alias resolves to the same name Pin DP-1
        enforces. Only roots in ``TARGET_MODULES`` produce an entry.
 
-    2. **From-import of submodule**:
-       ``from xarray import open_dataset`` is rare in production but
-       would bind the function ``open_dataset`` directly to a Name
-       in the local scope, sidestepping the receiver pattern Pin
-       DP-1 matches against. This case is NOT tracked here — it is
-       documented in the limitations section of the module
-       docstring; if it appears in production, extend the walker
-       with a "function-callable alias" map.
+    2. **From-import of callable** (callable_aliases):
+       ``from netCDF4 import Dataset`` →
+       ``{"Dataset": ("netCDF4", "Dataset")}``;
+       ``from netCDF4 import Dataset as DS`` →
+       ``{"DS": ("netCDF4", "Dataset")}``. Only registered when the
+       ``(<from-module>, <imported-name>)`` pair is in
+       ``TARGET_CALLS``. Relative imports (``from . import x``)
+       are not tracked — relative imports never resolve to one of
+       ``TARGET_MODULES``.
 
-    The identity mapping (``"xarray" → "xarray"``) is intentional:
-    it lets the matcher resolve a bare ``import xarray; xarray.
-    open_dataset(...)`` site the same way it resolves an aliased
-    one, without a separate code path. ``import netCDF4`` (no alias)
-    therefore still works even though there are no such sites in
-    production today.
+    3. **Star imports** (``from netCDF4 import *``) are NOT tracked.
+       They bind whatever names ``netCDF4`` chooses to export and
+       require runtime introspection to enumerate. No production
+       site in prismpy uses this for TARGET_MODULES.
 
-    Per alias-extension CORRECTION (F-DL Pin DL-1 cycle-6 precedent).
+    The identity mapping (``"xarray" → "xarray"``) in
+    ``module_aliases`` is intentional: it lets the matcher resolve a
+    bare ``import xarray; xarray.open_dataset(...)`` site the same
+    way it resolves an aliased one, without a separate code path.
+    ``import netCDF4`` (no alias) therefore still works even though
+    there are no such sites in production today.
+
+    Per alias-extension CORRECTION + F-DP-1 codex BLOCKING
+    (from-import direct-callable pattern, F-DL Pin DL-1 cycle-6
+    alias-tracking pattern).
     """
-    aliases: Dict[str, str] = {}
+    module_aliases: Dict[str, str] = {}
+    callable_aliases: Dict[str, Tuple[str, str]] = {}
     for node in _walk_skipping_nested_scopes(scope_node):
-        if not isinstance(node, ast.Import):
-            continue
-        for alias in node.names:
-            # ``alias.name`` is the dotted module path; the root is
-            # what ``sys.modules`` keys against and what Pin DP-1
-            # asserts against.
-            root_canonical = alias.name.split(".", 1)[0]
-            if root_canonical not in TARGET_MODULES:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                # ``alias.name`` is the dotted module path; the root
+                # is what ``sys.modules`` keys against and what Pin
+                # DP-1 asserts against.
+                root_canonical = alias.name.split(".", 1)[0]
+                if root_canonical not in TARGET_MODULES:
+                    continue
+                local_name = alias.asname or alias.name
+                # Strip dotted-form local names (``import xarray.foo``
+                # binds ``xarray`` in the local scope, not
+                # ``xarray.foo``).
+                local_name = local_name.split(".", 1)[0]
+                module_aliases[local_name] = root_canonical
+        elif isinstance(node, ast.ImportFrom):
+            # Relative imports (``from . import x``, ``from ..pkg
+            # import x``) never resolve to TARGET_MODULES; skip.
+            if node.level != 0:
                 continue
-            local_name = alias.asname or alias.name
-            # Strip dotted-form local names (``import xarray.foo``
-            # binds ``xarray`` in the local scope, not ``xarray.foo``).
-            local_name = local_name.split(".", 1)[0]
-            aliases[local_name] = root_canonical
-    return aliases
+            module_name = node.module
+            if module_name is None or module_name not in TARGET_MODULES:
+                continue
+            for alias in node.names:
+                imported_attr = alias.name
+                # ``from netCDF4 import *`` — alias.name == "*"; not
+                # tracked (cannot enumerate bound names statically).
+                if imported_attr == "*":
+                    continue
+                pair = (module_name, imported_attr)
+                if pair not in TARGET_CALLS:
+                    continue
+                local_name = alias.asname or imported_attr
+                callable_aliases[local_name] = pair
+    return module_aliases, callable_aliases
 
 
 def _is_target_call(
     node: ast.AST,
     module_aliases: Optional[Dict[str, str]] = None,
+    callable_aliases: Optional[Dict[str, Tuple[str, str]]] = None,
 ) -> Optional[Tuple[str, str]]:
-    """If ``node`` is a Call whose ``func`` is ``Attribute(Name(R), Y)``
-    and ``(canonical_of(R), Y)`` is in ``TARGET_CALLS``, return that
-    tuple. Else None.
+    """If ``node`` is a Call matching a TARGET_CALLS shape (directly
+    OR via a tracked alias / from-import callable), return the
+    canonical ``(module, attr)`` tuple. Else None.
 
-    ``canonical_of(R)`` resolves ``R`` through ``module_aliases``
-    (e.g., ``nc → netCDF4`` when ``import netCDF4 as nc`` is in
-    scope). When ``module_aliases`` is None or missing the receiver,
-    the receiver name is used verbatim — preserving direct matches
-    on canonical names (``netCDF4.Dataset(...)`` with no aliasing).
+    Two patterns recognized:
+
+    1. **Attribute-receiver** (``import X [as alias]; alias.Attr(...)``):
+       ``func`` is ``Attribute(Name(R), Y)``; resolve ``R`` through
+       ``module_aliases``; pair ``(canonical_R, Y)`` must be in
+       TARGET_CALLS. Preserves direct matches on canonical names
+       (``netCDF4.Dataset(...)`` with no aliasing).
+
+    2. **Direct callable** (``from X import Attr [as alias]; alias(...)``):
+       ``func`` is ``Name(C)``; ``C`` must be in
+       ``callable_aliases`` whose value is in TARGET_CALLS. Catches
+       the F-DP-1 codex-flagged production sites at
+       ``translators/acea/translator.py:2460, 2610`` that imported
+       ``Dataset`` directly from ``netCDF4`` and bypassed the
+       receiver-only matcher.
     """
     if not isinstance(node, ast.Call):
         return None
     func = node.func
-    if not isinstance(func, ast.Attribute):
-        return None
-    if not isinstance(func.value, ast.Name):
-        return None
-    receiver = func.value.id
-    canonical_receiver = (
-        module_aliases.get(receiver, receiver) if module_aliases else receiver
-    )
-    pair = (canonical_receiver, func.attr)
-    return pair if pair in TARGET_CALLS else None
+
+    # Pattern 1: Attribute-receiver — `<R>.<Y>(...)`
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+        receiver = func.value.id
+        canonical_receiver = (
+            module_aliases.get(receiver, receiver) if module_aliases else receiver
+        )
+        pair = (canonical_receiver, func.attr)
+        if pair in TARGET_CALLS:
+            return pair
+
+    # Pattern 2: Direct callable — `<C>(...)` where C is a tracked
+    # from-import alias.
+    if isinstance(func, ast.Name) and callable_aliases:
+        pair = callable_aliases.get(func.id)
+        if pair is not None and pair in TARGET_CALLS:
+            return pair
+
+    return None
 
 
 def _walk_stmts(stmts: List[ast.stmt]) -> Iterator[ast.AST]:
@@ -289,30 +348,72 @@ def _enclosing_scope_by_lineno(node: ast.AST, tree: ast.AST) -> ast.AST:
     return best
 
 
-def _collect_try_finally_protected_calls(tree: ast.AST) -> Set[int]:
-    """Function-scope-local matching (cycle-1.5 SF-2 codex absorption):
-    for each ``Assign(target=Name(X), value=TARGET_CALL)``, find its
-    enclosing ``FunctionDef`` (or module). Collect ``X.close()``
-    targets from any ``Try.finalbody`` whose enclosing scope is the
-    SAME function/module. Mark the Assign's Call as protected only
-    when ``X`` appears in that scope-local close set.
+def _close_names_in_finalbody(try_node: ast.Try) -> Set[str]:
+    """Return the set of names ``X`` for which ``X.close()`` appears
+    as a top-level call in ``try_node.finalbody``. Walks every
+    statement in the finalbody (including nested compound nodes)
+    so a ``with`` / ``if`` / ``try`` block inside the finalbody
+    that calls ``X.close()`` is recognised.
+    """
+    closed: Set[str] = set()
+    if not try_node.finalbody:
+        return closed
+    for fnode in _walk_stmts(try_node.finalbody):
+        if (
+            isinstance(fnode, ast.Expr)
+            and isinstance(fnode.value, ast.Call)
+            and isinstance(fnode.value.func, ast.Attribute)
+            and fnode.value.func.attr == "close"
+            and isinstance(fnode.value.func.value, ast.Name)
+        ):
+            closed.add(fnode.value.func.value.id)
+    return closed
 
-    Pattern matched (the textbook tamsat case at
-    ``sources/climate/tamsat.py:1010``)::
+
+def _collect_try_finally_protected_calls(tree: ast.AST) -> Set[int]:
+    """An ``Assign(target=Name(X), value=TARGET_CALL)`` is protected
+    by try/finally ONLY when the Assign sits inside some Try ``T``'s
+    body (possibly through compound nesting BUT not through a
+    function boundary) AND ``T`` itself or some Try nested inside
+    ``T.body`` calls ``X.close()`` in its ``finalbody``.
+
+    The previous (pre-F-DP-2) heuristic walked all Tries in the
+    Assign's enclosing function scope and unioned their finalbody
+    close-sets, which mis-flagged this synthetic as protected even
+    though the Assign sits OUTSIDE the protecting Try::
+
+        def f(p):
+            ds = xr.open_dataset(p)   # outside any try; LEAKS
+            try:
+                pass
+            finally:
+                ds.close()            # unrelated close on same name
+
+    F-DP-2 codex empirical probe confirmed the false-pass. The fix
+    requires that the Assign actually lives in a Try's body — a
+    finalbody-only close in a sibling Try cannot protect an open
+    that was never entered through that Try's try-region.
+
+    The tamsat pattern at ``sources/climate/tamsat.py`` (outer Try
+    body containing the Assign + a nested inner Try whose finalbody
+    closes the name) remains protected: the inner Try is inside the
+    outer Try's body, so walking the outer Try's body picks it up.
+
+    Pattern matched (the textbook tamsat case)::
 
         def phase2_convert_nc_to_tif(...):
             try:                                # outer try
-                ds = xr.open_dataset(str(nc))   # this Call protected
-                try:                            # inner try (same fn)
+                ds = xr.open_dataset(str(nc))   # Assign in OUTER body
+                try:                            # inner try
                     ds_cropped = ds.where(...)
                     ...
                 finally:
-                    ds.close()                  # close in same fn
+                    ds.close()                  # close in INNER finalbody
             except ...:
                 ...
 
-    Pre-SF-2 the walker used module-wide name matching, which would
-    false-accept this cross-function pattern::
+    Cross-function close (existing carve-out preserved by the
+    function-boundary skip in ``_walk_skipping_nested_scopes``)::
 
         def f(p):
             ds = xr.open_dataset(p)   # bare; NOT protected
@@ -320,49 +421,43 @@ def _collect_try_finally_protected_calls(tree: ast.AST) -> Set[int]:
         def g():
             try: pass
             finally:
-                ds.close()            # unrelated close on same name
+                ds.close()            # in sibling function — invisible
 
-    Scoping the close lookup to the Assign's enclosing function fixes
-    both the false-negative (tamsat nested-try) and the false-positive
-    (cross-function close) classes.
+    Per cycle-1.5 SF-2 + F-DP-2 codex BLOCKING tightening.
     """
     protected: Set[int] = set()
 
-    # Memoise (scope_id → close_names) so the scope-walk cost is O(N)
-    # not O(N²) on modules with many Assigns.
-    scope_to_closed: dict = {}
-
-    for node in ast.walk(tree):
-        if not (
-            isinstance(node, ast.Assign)
-            and isinstance(node.value, ast.Call)
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-        ):
+    for try_node in ast.walk(tree):
+        if not isinstance(try_node, ast.Try) or not try_node.body:
             continue
 
-        scope = _enclosing_scope_by_lineno(node, tree)
-        scope_key = id(scope)
-        if scope_key not in scope_to_closed:
-            closed: Set[str] = set()
-            for tnode in ast.walk(tree):
-                if not isinstance(tnode, ast.Try) or not tnode.finalbody:
-                    continue
-                if _enclosing_scope_by_lineno(tnode, tree) is not scope:
-                    continue
-                for fnode in _walk_stmts(tnode.finalbody):
-                    if (
-                        isinstance(fnode, ast.Expr)
-                        and isinstance(fnode.value, ast.Call)
-                        and isinstance(fnode.value.func, ast.Attribute)
-                        and fnode.value.func.attr == "close"
-                        and isinstance(fnode.value.func.value, ast.Name)
-                    ):
-                        closed.add(fnode.value.func.value.id)
-            scope_to_closed[scope_key] = closed
+        # Build the close-name set covering this Try and every Try
+        # nested inside this Try's body (within the same function
+        # scope). Walking each body stmt with
+        # ``_walk_skipping_nested_scopes`` enforces the
+        # function-boundary cut.
+        closed_names: Set[str] = _close_names_in_finalbody(try_node)
+        for body_stmt in try_node.body:
+            for sub in _walk_skipping_nested_scopes(body_stmt):
+                if isinstance(sub, ast.Try) and sub is not try_node:
+                    closed_names |= _close_names_in_finalbody(sub)
 
-        if node.targets[0].id in scope_to_closed[scope_key]:
-            protected.add(id(node.value))
+        if not closed_names:
+            continue
+
+        # Find Assigns inside THIS Try's body (skipping nested
+        # function scopes) whose target name is in ``closed_names``.
+        for body_stmt in try_node.body:
+            for sub in _walk_skipping_nested_scopes(body_stmt):
+                if not (
+                    isinstance(sub, ast.Assign)
+                    and isinstance(sub.value, ast.Call)
+                    and len(sub.targets) == 1
+                    and isinstance(sub.targets[0], ast.Name)
+                ):
+                    continue
+                if sub.targets[0].id in closed_names:
+                    protected.add(id(sub.value))
 
     return protected
 
@@ -382,24 +477,33 @@ def _violations_in(source: str, source_label: str) -> List[str]:
     except SyntaxError as exc:  # noqa: BLE001 — surface parse errors
         pytest.fail(f"AST parse failed for {source_label}: {exc}")
 
-    # Module-level alias map — shared by every function in the file.
-    module_aliases = _collect_import_aliases_in_scope(tree)
+    # Module-level alias maps — shared by every function in the file.
+    module_aliases, module_callable_aliases = (
+        _collect_import_aliases_in_scope(tree)
+    )
 
-    # Memoise the merged alias map per function scope. The scope
+    # Memoise the merged alias maps per function scope. The scope
     # node's ``id()`` is stable for the lifetime of the tree.
-    scope_aliases_cache: Dict[int, Dict[str, str]] = {
-        id(tree): module_aliases,
+    scope_aliases_cache: Dict[
+        int, Tuple[Dict[str, str], Dict[str, Tuple[str, str]]]
+    ] = {
+        id(tree): (module_aliases, module_callable_aliases),
     }
 
-    def _aliases_for_scope(scope_node: ast.AST) -> Dict[str, str]:
+    def _aliases_for_scope(
+        scope_node: ast.AST,
+    ) -> Tuple[Dict[str, str], Dict[str, Tuple[str, str]]]:
         key = id(scope_node)
         cached = scope_aliases_cache.get(key)
         if cached is not None:
             return cached
         # Function-local imports inherit + may shadow module-level
         # entries (the same alias name rebound inside the function).
-        local = _collect_import_aliases_in_scope(scope_node)
-        merged = {**module_aliases, **local}
+        local_module, local_callable = _collect_import_aliases_in_scope(scope_node)
+        merged = (
+            {**module_aliases, **local_module},
+            {**module_callable_aliases, **local_callable},
+        )
         scope_aliases_cache[key] = merged
         return merged
 
@@ -411,8 +515,8 @@ def _violations_in(source: str, source_label: str) -> List[str]:
         if not isinstance(node, ast.Call):
             continue
         scope = _enclosing_scope_by_lineno(node, tree)
-        aliases = _aliases_for_scope(scope)
-        if _is_target_call(node, aliases) is not None:
+        mod_aliases, call_aliases = _aliases_for_scope(scope)
+        if _is_target_call(node, mod_aliases, call_aliases) is not None:
             matches.append((node, node.lineno))
     if not matches:
         return []
@@ -474,17 +578,21 @@ def test_prismpy_source_root_exists() -> None:
 def test_all_target_calls_in_prismpy_are_safely_managed() -> None:
     """Pin DP-1 main assertion: every TARGET_CALLS site under
     ``prismpy/src/prismpy/`` MUST be safely managed (case a / b /
-    or whitelist). Currently expected to PASS — the 5 known sites
-    (3 xarray + 2 netCDF4-via-alias) are all wrapped:
+    or whitelist). Currently expected to PASS — 7 known sites
+    (3 xarray + 4 netCDF4 via alias / from-import) are all wrapped:
 
     * `vendor/sarra_data_download/get_AgERA5_data.py:273` — with
       (AC-DP-1a smoking gun)
     * `sources/soil/hwsd.py:438` — with (AC-DP-1a sibling)
     * `sources/climate/tamsat.py:1010` — try/finally + ds.close()
-    * `translators/acea/translator.py:1319` — with (alias-extension
-      sibling-sweep; ``import netCDF4 as nc`` newly tracked)
-    * `translators/acea/translator.py:1625` — with (alias-extension
-      sibling-sweep; same alias)
+    * `translators/acea/translator.py:1321` — with (alias-extension
+      sibling-sweep; ``import netCDF4 as nc`` shape)
+    * `translators/acea/translator.py:1627` — with (alias-extension
+      sibling-sweep; same alias shape)
+    * `translators/acea/translator.py:2460` — with (F-DP-1 codex
+      BLOCKING sibling-sweep; ``from netCDF4 import Dataset`` shape)
+    * `translators/acea/translator.py:2610` — with (F-DP-1 codex
+      BLOCKING sibling-sweep; same from-import shape)
 
     Anti-mutation: temporarily removing the `with` from any of these
     sites makes this test fail with a clear file:line + call-text
@@ -645,10 +753,10 @@ def test_anti_mutation_whitelist_suppresses() -> None:
     # Resolve the synthetic's ``import xarray as xr`` alias so the
     # matcher recognises ``xr.open_dataset`` as a canonical target.
     tree = ast.parse(_BARE_OPEN_FORM, filename=label)
-    aliases = _collect_import_aliases_in_scope(tree)
+    module_aliases, callable_aliases = _collect_import_aliases_in_scope(tree)
     lineno = next(
         node.lineno for node in ast.walk(tree)
-        if _is_target_call(node, aliases) is not None
+        if _is_target_call(node, module_aliases, callable_aliases) is not None
     )
     WHITELIST.add(f"{label}:{lineno}")
     try:
@@ -828,3 +936,200 @@ def test_nested_function_alias_does_not_leak() -> None:
     assert violations == [], (
         f"Alias leaked across function boundaries: {violations}"
     )
+
+
+# ── From-import (direct-callable) anti-mutation probes ─────────────
+
+
+_BARE_FROM_DATASET_FORM = """
+from netCDF4 import Dataset
+def f(p):
+    ds = Dataset(p, 'r')
+    return ds.variables
+"""
+
+_BARE_FROM_DATASET_AS_FORM = """
+from netCDF4 import Dataset as DS
+def f(p):
+    ds = DS(p, 'r')
+    return ds.variables
+"""
+
+_WITH_FROM_DATASET_FORM = """
+from netCDF4 import Dataset
+def f(p):
+    with Dataset(p, 'r') as ds:
+        return list(ds.variables)
+"""
+
+_FUNCTION_LOCAL_BARE_FROM_DATASET_FORM = """
+def f(p):
+    try:
+        from netCDF4 import Dataset
+    except ImportError:
+        return None
+    nc = Dataset(p, 'w', format='NETCDF4')
+    nc.createDimension('lat', 360)
+    nc.close()
+    return p
+"""
+
+_BARE_FROM_OPEN_DATASET_FORM = """
+from xarray import open_dataset
+def f(p):
+    ds = open_dataset(p)
+    return ds.values
+"""
+
+
+def test_anti_mutation_bare_from_dataset_fails() -> None:
+    """F-DP-1 codex BLOCKING regression: ``from netCDF4 import Dataset``
+    binds ``Dataset`` directly as a callable in the local scope. A
+    bare ``ds = Dataset(p, 'r')`` then sidesteps the receiver
+    pattern entirely (``func`` is ``Name("Dataset")``, not
+    ``Attribute``). The pre-F-DP-1 walker silently passed this shape
+    on the production sites at ``translators/acea/translator.py:2460,
+    2610``. The callable-alias matcher resolves ``Dataset`` →
+    ``("netCDF4", "Dataset")`` via the from-import map and fires
+    the violation."""
+    violations = _violations_in(
+        _BARE_FROM_DATASET_FORM, "synthetic/bare_from_ds.py"
+    )
+    assert len(violations) == 1, violations
+    assert "Dataset" in violations[0]
+    assert "synthetic/bare_from_ds.py" in violations[0]
+
+
+def test_anti_mutation_bare_from_dataset_as_alias_fails() -> None:
+    """Same as above but with an explicit ``as`` alias. The
+    callable-alias map MUST register the ``DS`` local name pointing
+    at ``("netCDF4", "Dataset")`` so the bare ``DS(p)`` Call
+    resolves correctly."""
+    violations = _violations_in(
+        _BARE_FROM_DATASET_AS_FORM, "synthetic/bare_from_ds_as.py"
+    )
+    assert len(violations) == 1, violations
+    assert "DS" in violations[0]
+
+
+def test_anti_mutation_with_from_dataset_passes() -> None:
+    """The ``with`` form of a from-imported ``Dataset(...)`` site is
+    safely managed (case (a)). Walker reports zero violations.
+    Pins that the from-import resolution does not break the
+    ``with`` detection path."""
+    assert _violations_in(
+        _WITH_FROM_DATASET_FORM, "synthetic/with_from_ds.py"
+    ) == []
+
+
+def test_anti_mutation_function_local_bare_from_dataset_fails() -> None:
+    """Mirror of the production shape at ``translators/acea/
+    translator.py:2425+`` and ``:2577+``: function-local
+    ``try: from netCDF4 import Dataset except ImportError`` followed
+    by bare ``nc = Dataset(...)``. The walker MUST collect the
+    from-import alias from the try-body and resolve the subsequent
+    Call."""
+    violations = _violations_in(
+        _FUNCTION_LOCAL_BARE_FROM_DATASET_FORM,
+        "synthetic/fn_local_from_ds.py",
+    )
+    assert len(violations) == 1, violations
+    assert "Dataset" in violations[0]
+
+
+def test_anti_mutation_bare_from_open_dataset_fails() -> None:
+    """The from-import pattern applies to every TARGET_CALLS entry,
+    not just ``netCDF4.Dataset``. Pins that ``from xarray import
+    open_dataset`` is also recognised; would catch a future
+    production site that switches to this idiom."""
+    violations = _violations_in(
+        _BARE_FROM_OPEN_DATASET_FORM, "synthetic/bare_from_xr_od.py"
+    )
+    assert len(violations) == 1, violations
+    assert "open_dataset" in violations[0]
+
+
+# ── Try/finally tightening (F-DP-2) anti-mutation probes ───────────
+
+
+_BARE_OPEN_OUTSIDE_TRY_WITH_UNRELATED_FINALLY = """
+import xarray as xr
+def f(p):
+    ds = xr.open_dataset(p)
+    x = ds.values
+    try:
+        pass
+    finally:
+        ds.close()
+    return x
+"""
+
+_OPEN_INSIDE_TRY_BODY_CLOSE_IN_SAME_FINALLY = """
+import xarray as xr
+def f(p):
+    try:
+        ds = xr.open_dataset(p)
+        x = ds.values
+    finally:
+        ds.close()
+    return x
+"""
+
+_OPEN_INSIDE_OUTER_TRY_CLOSE_IN_NESTED_FINALLY = """
+import xarray as xr
+def f(p):
+    try:
+        ds = xr.open_dataset(p)
+        try:
+            cropped = ds.where(ds > 0)
+        finally:
+            ds.close()
+    except Exception:
+        return None
+    return cropped
+"""
+
+
+def test_anti_mutation_bare_open_outside_try_unrelated_finally_fails() -> None:
+    """F-DP-2 codex BLOCKING regression: an open OUTSIDE any
+    try-body is NOT protected by a same-function-scope try/finally
+    that closes the same name. The pre-F-DP-2 walker unioned
+    finalbody close-names across every Try in the function scope,
+    which mis-flagged this synthetic as protected. The post-F-DP-2
+    walker requires the Assign to live inside the protecting Try's
+    body — the Assign here is at function-top-level, the try/finally
+    is a sibling statement, so protection does NOT apply.
+
+    Codex empirical probe at builder self-codex round (mechanically
+    failed) was caught by the team-lead independent codex round."""
+    violations = _violations_in(
+        _BARE_OPEN_OUTSIDE_TRY_WITH_UNRELATED_FINALLY,
+        "synthetic/bare_outside_try.py",
+    )
+    assert len(violations) == 1, violations
+    assert "xr.open_dataset" in violations[0]
+    assert "synthetic/bare_outside_try.py" in violations[0]
+
+
+def test_anti_mutation_open_inside_try_same_finally_passes() -> None:
+    """Sanity: the canonical ``try: ds = open(); finally: ds.close()``
+    case (Assign in body + close in same Try's finalbody) MUST stay
+    protected after the F-DP-2 tightening. Catches over-tightening
+    regressions that would force every open into a ``with``."""
+    assert _violations_in(
+        _OPEN_INSIDE_TRY_BODY_CLOSE_IN_SAME_FINALLY,
+        "synthetic/open_in_try_close_same.py",
+    ) == []
+
+
+def test_anti_mutation_open_in_outer_try_close_in_nested_finally_passes() -> None:
+    """The tamsat pattern (outer Try body holding the open + inner
+    Try whose finalbody calls close) MUST stay protected. F-DP-2
+    tightening MUST NOT regress this — the walker handles nested
+    Tries inside the outer Try's body when computing the close-name
+    set, so the outer Assign sees the close from the inner
+    finalbody."""
+    assert _violations_in(
+        _OPEN_INSIDE_OUTER_TRY_CLOSE_IN_NESTED_FINALLY,
+        "synthetic/tamsat_pattern.py",
+    ) == []
