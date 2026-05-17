@@ -270,15 +270,24 @@ def convert_AgERA5_netcdf_to_geotiff(area, selected_area, variables, query=dt.to
 
             for nc_file in tqdm(nc_files) :
                 # d'après https://help.marine.copernicus.eu/en/articles/5029956-how-to-convert-netcdf-to-geotiff
-                nc_file_content = xr.open_dataset(os.path.join(extraction_path, nc_file))
-                xarray_variable_name = list(nc_file_content.keys())[0]
-                bT = nc_file_content[xarray_variable_name]
-                bT = bT.rio.set_spatial_dims(x_dim='lon', y_dim='lat')
-                bT.rio.crs
-                bT.rio.write_crs("epsg:4326", inplace=True)
+                # F-DP: open the netCDF dataset in a `with` block so the HDF5
+                # file handle is released synchronously at iteration boundary
+                # instead of being held by xarray's CachingFileManager LRU
+                # (which defaults to 128 entries; once full, every eviction
+                # triggers nc_close() and accumulating libhdf5 1.14.6 state
+                # collapses to SIGSEGV around iteration ~700-800). The
+                # rio.to_raster call stays INSIDE the with block — synchronous
+                # compute requires the dataset open; any future change that
+                # introduces dask chunks or `compute=False` makes this
+                # placement unsafe (dask would read after close).
+                with xr.open_dataset(os.path.join(extraction_path, nc_file)) as nc_file_content:
+                    xarray_variable_name = list(nc_file_content.keys())[0]
+                    bT = nc_file_content[xarray_variable_name]
+                    bT = bT.rio.set_spatial_dims(x_dim='lon', y_dim='lat')
+                    bT.rio.write_crs("epsg:4326", inplace=True)
 
-                filename = variable[0]+"_"+variable[1]+"_"+pd.to_datetime(nc_file_content.time.values[0]).strftime('%Y')+"_"+pd.to_datetime(nc_file_content.time.values[0]).strftime('%m')+"_"+pd.to_datetime(nc_file_content.time.values[0]).strftime('%d')+".tif"
-                bT.rio.to_raster(os.path.join(conversion_path, filename))
+                    filename = variable[0]+"_"+variable[1]+"_"+pd.to_datetime(nc_file_content.time.values[0]).strftime('%Y')+"_"+pd.to_datetime(nc_file_content.time.values[0]).strftime('%m')+"_"+pd.to_datetime(nc_file_content.time.values[0]).strftime('%d')+".tif"
+                    bT.rio.to_raster(os.path.join(conversion_path, filename))
 
 
     except Exception:

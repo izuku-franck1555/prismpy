@@ -199,4 +199,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = "-v"
+addopts = "-v -m 'not slow'"
+markers = [
+    "slow: tests requiring real CDS credentials and long wall-clock (~20-40 min). Excluded from FAST tier by the default `addopts` filter; run on-demand or nightly via `pytest -m slow`.",
+]

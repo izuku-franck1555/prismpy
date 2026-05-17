@@ -435,42 +435,51 @@ class HWSDSource(DataSource):
 
         profiles = {}
 
-        ds = xr.open_dataset(self.config.nc_path)
+        # F-DP: wrap the dataset in a `with` block so the HDF5 file
+        # handle is released even when the function returns early
+        # (the `if not var_map` branch below) OR when an exception
+        # escapes the inner sel/property loop. The pre-F-DP shape
+        # had an explicit `ds.close()` at the bottom + a bare early
+        # `return profiles` that bypassed it, plus no exception
+        # handling around the close at all — exception-unsafe per
+        # the §27 producer-consumer pattern (the producer here is
+        # the resource-acquisition; consumers are every subsequent
+        # statement). `with` makes the close happen on every exit
+        # path.
+        with xr.open_dataset(self.config.nc_path) as ds:
+            # Determine variable names (may vary by file)
+            var_map = {}
+            for internal, hwsd_name in self.VARIABLES.items():
+                if hwsd_name in ds:
+                    var_map[internal] = hwsd_name
+                elif hwsd_name.lower() in ds:
+                    var_map[internal] = hwsd_name.lower()
 
-        # Determine variable names (may vary by file)
-        var_map = {}
-        for internal, hwsd_name in self.VARIABLES.items():
-            if hwsd_name in ds:
-                var_map[internal] = hwsd_name
-            elif hwsd_name.lower() in ds:
-                var_map[internal] = hwsd_name.lower()
+            if not var_map:
+                self.logger.warning("No recognized variables in NetCDF")
+                return profiles
 
-        if not var_map:
-            self.logger.warning("No recognized variables in NetCDF")
-            return profiles
+            # Sample at coordinates
+            if cell_coords:
+                for i, (lat, lon) in enumerate(cell_coords):
+                    props = {}
+                    for internal, nc_var in var_map.items():
+                        try:
+                            val = float(ds[nc_var].sel(lat=lat, lon=lon, method="nearest"))
+                            props[internal] = val if not np.isnan(val) else None
+                        except Exception:
+                            props[internal] = None
 
-        # Sample at coordinates
-        if cell_coords:
-            for i, (lat, lon) in enumerate(cell_coords):
-                props = {}
-                for internal, nc_var in var_map.items():
-                    try:
-                        val = float(ds[nc_var].sel(lat=lat, lon=lon, method="nearest"))
-                        props[internal] = val if not np.isnan(val) else None
-                    except Exception:
-                        props[internal] = None
+                    if any(v is not None for v in props.values()):
+                        profiles[i] = self._create_profile_from_dict(
+                            cell_id=i, lat=lat, lon=lon, props=props, region=region
+                        )
+                    elif self.config.use_defaults:
+                        self._record_unavailable(
+                            i,
+                            cause=WarningCategory.SOIL_NO_HWSD_COVERAGE.value,
+                        )
 
-                if any(v is not None for v in props.values()):
-                    profiles[i] = self._create_profile_from_dict(
-                        cell_id=i, lat=lat, lon=lon, props=props, region=region
-                    )
-                elif self.config.use_defaults:
-                    self._record_unavailable(
-                        i,
-                        cause=WarningCategory.SOIL_NO_HWSD_COVERAGE.value,
-                    )
-
-        ds.close()
         return profiles
 
     def _create_profile_from_hwsd(
