@@ -119,65 +119,105 @@ def _collect_with_protected_calls(tree: ast.AST) -> Set[int]:
     return protected
 
 
-def _collect_try_finally_protected_calls(tree: ast.AST) -> Set[int]:
-    """Return ``id()`` of every Call node whose Assign target is later
-    closed by a matching ``<name>.close()`` in any ``finalbody`` of any
-    enclosing Try in the same module.
+def _enclosing_scope_by_lineno(node: ast.AST, tree: ast.AST) -> ast.AST:
+    """Return the smallest ``FunctionDef``/``AsyncFunctionDef`` whose
+    ``[lineno, end_lineno]`` range contains ``node.lineno``. Falls back
+    to the module if no enclosing function exists.
 
-    The walker matches the textbook tamsat pattern (smoking-gun-adjacent
-    `sources/climate/tamsat.py:1010`) where the assign sits in an
-    OUTER try's body and the close lives in an INNER try's finalbody::
-
-        try:                                # outer try
-            ds = xr.open_dataset(str(nc))   # this Call is protected
-            try:                            # inner try
-                ds_cropped = ds.where(...)
-                ...
-            finally:
-                ds.close()                  # close lives here
-        except ...:
-            ...
-
-    Restricting the match to "same Try's body and finalbody" would
-    false-negative this case (and tamsat is contract §H sibling-sweep
-    NO CHANGE — must pass the pin without refactor). Module-wide
-    matching is acceptably permissive: a close in function F covering
-    an Assign in function G is exceptionally unlikely in prismpy
-    Python and would surface in code review.
+    Uses lineno containment instead of a parent-pointer chain so the
+    walker stays a pure read of the parsed ``ast.AST`` (no in-place
+    mutation of nodes). The ``end_lineno`` attribute is Python 3.8+;
+    prismpy's interpreter floor is 3.10 so always available.
     """
-    # First pass: every name that has `.close()` called on it inside
-    # any Try.finalbody anywhere in the module.
-    closed_names: Set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Try) or not node.finalbody:
+    best: ast.AST = tree
+    best_span = float("inf")
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        for fnode in _walk_stmts(node.finalbody):
-            if (
-                isinstance(fnode, ast.Expr)
-                and isinstance(fnode.value, ast.Call)
-                and isinstance(fnode.value.func, ast.Attribute)
-                and fnode.value.func.attr == "close"
-                and isinstance(fnode.value.func.value, ast.Name)
-            ):
-                closed_names.add(fnode.value.func.value.id)
+        end = getattr(fn, "end_lineno", fn.lineno)
+        if fn.lineno <= node.lineno <= end:
+            span = end - fn.lineno
+            if span < best_span:
+                best = fn
+                best_span = span
+    return best
 
-    if not closed_names:
-        return set()
 
-    # Second pass: every Assign(target=Name(X), value=Call(...)) where
-    # X is in the closed set. The Call (the rhs of the Assign) is the
-    # node we want to protect — its position in the AST is what
-    # ``_collect_target_calls`` finds.
+def _collect_try_finally_protected_calls(tree: ast.AST) -> Set[int]:
+    """Function-scope-local matching (cycle-1.5 SF-2 codex absorption):
+    for each ``Assign(target=Name(X), value=TARGET_CALL)``, find its
+    enclosing ``FunctionDef`` (or module). Collect ``X.close()``
+    targets from any ``Try.finalbody`` whose enclosing scope is the
+    SAME function/module. Mark the Assign's Call as protected only
+    when ``X`` appears in that scope-local close set.
+
+    Pattern matched (the textbook tamsat case at
+    ``sources/climate/tamsat.py:1010``)::
+
+        def phase2_convert_nc_to_tif(...):
+            try:                                # outer try
+                ds = xr.open_dataset(str(nc))   # this Call protected
+                try:                            # inner try (same fn)
+                    ds_cropped = ds.where(...)
+                    ...
+                finally:
+                    ds.close()                  # close in same fn
+            except ...:
+                ...
+
+    Pre-SF-2 the walker used module-wide name matching, which would
+    false-accept this cross-function pattern::
+
+        def f(p):
+            ds = xr.open_dataset(p)   # bare; NOT protected
+            return ds.values
+        def g():
+            try: pass
+            finally:
+                ds.close()            # unrelated close on same name
+
+    Scoping the close lookup to the Assign's enclosing function fixes
+    both the false-negative (tamsat nested-try) and the false-positive
+    (cross-function close) classes.
+    """
     protected: Set[int] = set()
+
+    # Memoise (scope_id → close_names) so the scope-walk cost is O(N)
+    # not O(N²) on modules with many Assigns.
+    scope_to_closed: dict = {}
+
     for node in ast.walk(tree):
-        if (
+        if not (
             isinstance(node, ast.Assign)
             and isinstance(node.value, ast.Call)
             and len(node.targets) == 1
             and isinstance(node.targets[0], ast.Name)
-            and node.targets[0].id in closed_names
         ):
+            continue
+
+        scope = _enclosing_scope_by_lineno(node, tree)
+        scope_key = id(scope)
+        if scope_key not in scope_to_closed:
+            closed: Set[str] = set()
+            for tnode in ast.walk(tree):
+                if not isinstance(tnode, ast.Try) or not tnode.finalbody:
+                    continue
+                if _enclosing_scope_by_lineno(tnode, tree) is not scope:
+                    continue
+                for fnode in _walk_stmts(tnode.finalbody):
+                    if (
+                        isinstance(fnode, ast.Expr)
+                        and isinstance(fnode.value, ast.Call)
+                        and isinstance(fnode.value.func, ast.Attribute)
+                        and fnode.value.func.attr == "close"
+                        and isinstance(fnode.value.func.value, ast.Name)
+                    ):
+                        closed.add(fnode.value.func.value.id)
+            scope_to_closed[scope_key] = closed
+
+        if node.targets[0].id in scope_to_closed[scope_key]:
             protected.add(id(node.value))
+
     return protected
 
 
@@ -333,6 +373,21 @@ def f(p):
     return fh['x']
 """
 
+_CROSS_FUNCTION_BARE_FORM = """
+import xarray as xr
+
+def f(p):
+    ds = xr.open_dataset(p)
+    return ds.values
+
+
+def g():
+    try:
+        pass
+    finally:
+        ds.close()
+"""
+
 
 def test_anti_mutation_with_form_passes() -> None:
     """The ``with`` form satisfies case (a). Walker reports zero
@@ -380,6 +435,20 @@ def test_anti_mutation_bare_h5py_fails() -> None:
     violations = _violations_in(_BARE_H5PY_FORM, "synthetic/h5.py")
     assert len(violations) == 1, violations
     assert "h5py.File" in violations[0]
+
+
+def test_anti_mutation_cross_function_close_does_not_protect() -> None:
+    """Cycle-1.5 SF-2 codex absorption: a ``<name>.close()`` in
+    function G MUST NOT protect a bare Assign of the same name in
+    function F. Pre-SF-2 the walker matched close-names module-wide
+    and would have falsely accepted this case; scope-local matching
+    fires correctly on the bare Assign in F."""
+    violations = _violations_in(
+        _CROSS_FUNCTION_BARE_FORM, "synthetic/cross.py"
+    )
+    assert len(violations) == 1, violations
+    assert "xr.open_dataset" in violations[0]
+    assert "synthetic/cross.py" in violations[0]
 
 
 def test_anti_mutation_whitelist_suppresses() -> None:

@@ -50,12 +50,22 @@ def _has_cds_credentials() -> bool:
     )
 
 
-# Expected output count for Maradi 2-year × 6-variable run:
-#   2 years × 6 variables × 365 days = 4380 .tif files.
-# The threshold is 4000 (not 4380) to absorb the ~3% slack the
-# vendor sometimes produces when one variable has a missing day in
-# the CDS archive — the SIGSEGV signature is "0 successful files
-# past iteration ~700-800", not "missing one day".
+# Expected output count for Maradi 2-year × 6-variable run, measured
+# at the ``2_conversion/AgERA5_<region>/<variable_pair>/`` stage that
+# the AgERA5 conversion loop writes into directly (the loop body
+# at ``convert_AgERA5_netcdf_to_geotiff:271-281`` — the F-DP smoking
+# gun surface). 6 variables × 2 years × 365 days = 4380 .tif files.
+# The 4000 floor absorbs the ~3% CDS missing-day slack a real
+# download sometimes produces; the SIGSEGV signature is "0
+# successful files past iteration ~700-800", not "missing one day".
+#
+# This is the layer the F-DP fix targets — relocation to the final
+# `<save_path>/AgERA5_<region>/` cache directory is done OUTSIDE
+# this subprocess by ``AgERA5Source._download_agera5`` (in
+# prismweb-side caller code), so the post-relocation path doesn't
+# exist after the subprocess completes. Asserting on the conversion
+# stage directly keeps the regression test focused on what F-DP
+# closes.
 EXPECTED_TIF_FLOOR = 4000
 
 # Subprocess wall-clock ceiling (~60 min). Real-CDS Maradi 2-year run
@@ -131,24 +141,30 @@ def test_agera5_two_year_conversion_no_sigsegv(tmp_path: Path) -> None:
             f"{cp.stdout[-2000:]}"
         )
 
-    # Output verification: per §X.5 cycle-2 deployment-engineer
-    # canary path correction, the finished cache lives at
-    # ``<save_path>/AgERA5_<selected_area>/`` after vendor relocates
-    # the staged files. The intermediate ``2_conversion/`` stage
-    # directories are wiped by the vendor after a successful
-    # relocate.
-    relocated_dir = tmp_path / "AgERA5_maradi"
-    assert relocated_dir.is_dir(), (
-        f"AC-DP-4: final relocated cache directory missing at "
-        f"{relocated_dir!r}; vendor likely failed mid-pipeline. "
+    # Output verification: assert on the ``2_conversion`` stage
+    # directly. That's the layer the AgERA5 conversion loop writes
+    # into (the F-DP smoking-gun surface at
+    # ``convert_AgERA5_netcdf_to_geotiff:271-281``). Post-relocation
+    # to ``<save_path>/AgERA5_<region>/`` is owned by the prismweb-
+    # side caller (``AgERA5Source._download_agera5``), NOT this
+    # vendor entry point, so the relocated dir doesn't exist after
+    # the subprocess completes. Asserting on ``2_conversion``
+    # exercises the regression class without depending on caller-
+    # side relocation logic.
+    conversion_dir = tmp_path / "2_conversion" / "AgERA5_maradi"
+    assert conversion_dir.is_dir(), (
+        f"AC-DP-4: ``2_conversion/AgERA5_maradi/`` directory missing "
+        f"at {conversion_dir!r}; vendor likely failed before the "
+        f"conversion stage completed for any variable. "
         f"Subprocess stderr tail:\n{cp.stderr[-2000:]}"
     )
 
-    total_tifs = list(relocated_dir.rglob("*.tif"))
+    total_tifs = list(conversion_dir.rglob("*.tif"))
     assert len(total_tifs) >= EXPECTED_TIF_FLOOR, (
         f"AC-DP-4: only {len(total_tifs)} .tif files found under "
-        f"{relocated_dir!r}; expected >= {EXPECTED_TIF_FLOOR} (2 "
-        f"years × 6 vars × ~365 days = ~4380). Partial completion "
-        "signals a non-SIGSEGV failure mode — likely a CDS request "
-        "failure for one or more (year, variable) pairs."
+        f"{conversion_dir!r}; expected >= {EXPECTED_TIF_FLOOR} "
+        f"(6 variables × 2 years × ~365 days = ~4380). Partial "
+        "completion signals a non-SIGSEGV failure mode (likely a CDS "
+        "request failure or pre-conversion crash) — distinct from "
+        "the SIGSEGV signature this test was written to catch."
     )

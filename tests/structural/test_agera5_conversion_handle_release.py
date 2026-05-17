@@ -169,25 +169,49 @@ def test_file_cache_attribute_importable() -> None:
 # ── Main invariant ─────────────────────────────────────────────────
 
 
+def _cache_keys_referencing(path: Path) -> list:
+    """Return every FILE_CACHE key whose serialised form contains
+    ``str(path)``. xarray's LRU keys are nested tuples/lists where
+    index 1 is a ``(file_path,)`` tuple; rather than depend on that
+    internal shape, we serialise each key with ``repr`` and substring-
+    match the test's tmp_path. Stable across xarray versions.
+    """
+    target = str(path)
+    return [k for k in FILE_CACHE.keys() if target in repr(k)]
+
+
 def test_convert_agera5_releases_handles_per_iteration(
     tmp_path: Path,
 ) -> None:
     """Pin DP-2 primary (cross-platform): after the real
     ``convert_AgERA5_netcdf_to_geotiff`` runs over 10 synthetic
-    netCDF inputs, the xarray process-wide ``FILE_CACHE`` MUST be at
-    or below its pre-call size (every Dataset closed per iteration
-    via the AC-DP-1a `with` block).
+    netCDF inputs, the xarray process-wide ``FILE_CACHE`` MUST NOT
+    contain any handle that references this test's ``tmp_path``
+    (every Dataset closed per iteration via the AC-DP-1a `with`
+    block, popped from the LRU before the iteration ends).
+
+    The assertion is scoped to keys referencing ``tmp_path``
+    (cycle-1.5 SF-1 codex absorption) rather than a global
+    ``len(FILE_CACHE)`` comparison. The latter can false-pass when a
+    prior unrelated test has filled xarray's LRU and a mutated
+    no-`with` conversion happens to evict OLD entries while
+    inserting NEW ones — the global size stays the same but a leak
+    is present. Scoping by tmp_path avoids that class.
 
     Anti-mutation: removing the `with` block from
-    ``get_AgERA5_data.py:273`` makes ``cache_size_after`` equal to
-    ``cache_size_before + 10`` (each iteration leaks a handle into
-    the LRU); the assertion fires.
+    ``get_AgERA5_data.py:273`` leaves 5-6 ``tmp_path``-referencing
+    entries in the cache (one per file the GC hasn't reclaimed
+    yet); the assertion fires citing each leaked path.
     """
     from prismpy.vendor.sarra_data_download import get_AgERA5_data
 
     _build_synthetic_netcdf_dataset(tmp_path, n_files=SYNTHETIC_N_FILES)
 
-    cache_size_before = len(FILE_CACHE)
+    # Snapshot pre-call cache keys that already reference tmp_path
+    # (should be empty; the fixture's own writes don't go through
+    # xarray). Recorded so the diff isolates handles leaked by the
+    # conversion loop, not by the fixture.
+    before_tmp_keys = _cache_keys_referencing(tmp_path)
 
     get_AgERA5_data.convert_AgERA5_netcdf_to_geotiff(
         area=None,
@@ -197,13 +221,14 @@ def test_convert_agera5_releases_handles_per_iteration(
         save_path=str(tmp_path),
     )
 
-    cache_size_after = len(FILE_CACHE)
-    assert cache_size_after <= cache_size_before, (
-        f"xarray FILE_CACHE grew from {cache_size_before} to "
-        f"{cache_size_after} after conversion of {SYNTHETIC_N_FILES} "
-        "synthetic files — Dataset handles leaked per iteration. "
+    after_tmp_keys = _cache_keys_referencing(tmp_path)
+    leaked = [k for k in after_tmp_keys if k not in before_tmp_keys]
+    assert not leaked, (
+        f"xarray FILE_CACHE retains {len(leaked)} handle(s) "
+        f"referencing {str(tmp_path)!r} after the conversion loop. "
         "The `with` block in convert_AgERA5_netcdf_to_geotiff must "
-        "be missing or broken (AC-DP-1a regression)."
+        "be missing or broken (AC-DP-1a regression). Leaked keys:\n"
+        + "\n".join(f"  {k!r}" for k in leaked[:5])
     )
 
     # Output verification — 10 .tif files at the converter's output path
@@ -218,6 +243,23 @@ def test_convert_agera5_releases_handles_per_iteration(
         f"Expected {SYNTHETIC_N_FILES} output .tif files at "
         f"{conversion_path!s}; got {len(output_tifs)}. "
         f"Files: {[p.name for p in output_tifs]}"
+    )
+
+
+def test_no_pre_existing_tmp_path_in_cache(tmp_path: Path) -> None:
+    """Anti-vacuous probe for the tmp_path-scoped assertion above.
+    Before the conversion loop runs, no FILE_CACHE key should
+    reference this test's ``tmp_path`` (the fixture writes via
+    ``netCDF4.Dataset`` directly, NOT via xarray). If a prior test
+    has somehow seeded keys referencing this path, the snapshot
+    logic would mis-classify them as leaks."""
+    _build_synthetic_netcdf_dataset(tmp_path, n_files=2)
+    assert _cache_keys_referencing(tmp_path) == [], (
+        "tmp_path-referencing keys exist in FILE_CACHE before the "
+        "conversion loop runs; the cycle-1.5 SF-1 snapshot logic "
+        "assumes a clean slate. Either the fixture is opening via "
+        "xarray (it should be using netCDF4.Dataset directly) or "
+        "tmp_path is being recycled across tests."
     )
 
 

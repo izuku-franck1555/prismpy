@@ -200,3 +200,6 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-v"
+markers = [
+    "slow: tests requiring real CDS credentials and long wall-clock (~20-40 min). Excluded from FAST tier; run on-demand or nightly via `pytest -m slow`.",
+]
