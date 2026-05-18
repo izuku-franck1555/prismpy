@@ -888,10 +888,27 @@ class AceaTranslator(AceaTranslatorBase):
         grid_cell_ids = set(cell_id_to_tile.keys())
         grid_tile_ids = set(cell_id_to_tile.values())
 
-        # tile_lookup admits only entries keyed by either a known grid
-        # cell id OR a known target tile id. The fold helper is NOT
-        # called on climate_data keys; coincidence-folding is avoided
-        # by construction.
+        # Two-pass admission. Each pass is keyed by a different
+        # admission space derived from grid.cells. The two passes
+        # MUST stay separate: a 5-arcmin-keyed input carries
+        # per-cell series that would collapse if we folded it onto
+        # the parent tile and then fanned the parent back out to
+        # children (last-write-wins on the tile slot, all sibling
+        # cells receive the LAST iterated child's series — silent
+        # per-cell data corruption).
+        #
+        # Pass 1: direct per-cell hits. ``climate_data`` keyed by a
+        # known 5-arcmin grid cell id writes straight into
+        # ``canonical[key]``; distinct sibling cells therefore keep
+        # distinct series even when they share a parent tile.
+        #
+        # Pass 2: tile-keyed fan-out. ``climate_data`` keyed by a
+        # known 30-arcmin tile id is the producer's "broadcast this
+        # series to every 5-arcmin child of the tile" intent; we
+        # admit those into ``tile_lookup`` and fan them out in the
+        # second loop, skipping cells already populated by Pass 1
+        # so a directly-keyed input is never overwritten by a
+        # broadcast that shares its parent.
         tile_lookup: Dict[int, "ClimateTimeSeries"] = {}
         for key, series in climate_data.items():
             if not is_real_climate_cell_id(key):
@@ -902,16 +919,27 @@ class AceaTranslator(AceaTranslatorBase):
                 and len(series.records) > 1
             ):
                 continue
-            if key in grid_tile_ids:
+            if key in grid_cell_ids:
+                # Direct per-cell admission. Writing straight to
+                # ``canonical`` preserves per-cell distinctness when
+                # multiple 5-arcmin children of the same parent
+                # tile carry different series.
+                canonical[key] = series
+            elif key in grid_tile_ids:
+                # Tile-keyed broadcast. Fan-out happens in the
+                # second loop below.
                 tile_lookup[key] = series
-            elif key in grid_cell_ids:
-                tile_lookup[cell_id_to_tile[key]] = series
             # Else: foreign key (not a known tile, not a known cell);
             # skip without folding so the Scenario B coincidence (a
             # foreign tile whose fold-by-coincidence lands on an
             # in-region target) cannot slip into the canonical dict.
 
         for cell in grid.cells:
+            if cell.cell_id in canonical:
+                # Pass 1 already populated this cell with its own
+                # series; do not overwrite with a tile-keyed
+                # broadcast that shares the parent tile.
+                continue
             tile = cell_id_to_tile[cell.cell_id]
             series = tile_lookup.get(tile)
             if series is not None:

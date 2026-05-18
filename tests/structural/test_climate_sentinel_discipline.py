@@ -792,6 +792,81 @@ class TestAceaCanonicalEmit(unittest.TestCase):
                 f"{target_tile} series.",
             )
 
+    def test_acea_canonicalize_preserves_per_cell_distinct_series(self):
+        """Behavioural anti-corruption pin — when ``climate_data`` is
+        already keyed by 5-arcmin grid cell and multiple cells share a
+        parent 30-arcmin tile, each cell MUST receive its own distinct
+        series.
+
+        Earlier shape stored every direct-keyed 5-arcmin entry under
+        ``tile_lookup[parent_tile]`` and then fanned the parent tile
+        back out to every child grid cell. Last-write-wins on the
+        tile slot collapsed all sibling cells to the LAST iterated
+        child's series — silent per-cell data corruption that is
+        invisible in the dict's coverage shape and impossible to
+        recover from downstream.
+
+        Currently latent in production callers (today's producers
+        emit one series per tile, fanned), but the trap waits for the
+        first producer that emits per-cell-distinct 5-arcmin series.
+        """
+        from prismpy.translators.acea.translator import AceaTranslator
+
+        inst = AceaTranslator.__new__(AceaTranslator)
+
+        class _GridCell:
+            def __init__(self, cell_id):
+                self.cell_id = cell_id
+
+        class _Grid:
+            def __init__(self, cells):
+                self.cells = cells
+
+        class _Ts:
+            def __init__(self, label):
+                self.label = label
+                self.records = [object(), object()]
+
+        # Three sibling 5-arcmin children of tile 7300 (same fixture
+        # math as the fan-out test above). Each child gets a distinct
+        # series so we can detect the corruption directly.
+        children = [259800, 259801, 259802]
+        target_tile = 7300
+        for c in children:
+            assert inst._cell_id_5arcmin_to_30arcmin_parent(c) == target_tile
+
+        ts_a = _Ts("CELL_259800")
+        ts_b = _Ts("CELL_259801")
+        ts_c = _Ts("CELL_259802")
+        climate_data = {
+            children[0]: ts_a,
+            children[1]: ts_b,
+            children[2]: ts_c,
+        }
+        grid = _Grid([_GridCell(c) for c in children])
+
+        canonical = inst._canonicalize_climate_by_grid_cells(climate_data, grid)
+
+        self.assertEqual(
+            set(canonical.keys()), set(children),
+            "_canonicalize_climate_by_grid_cells MUST emit one entry "
+            "per grid cell when climate_data is 5-arcmin direct-keyed.",
+        )
+        self.assertIs(
+            canonical[children[0]], ts_a,
+            f"Cell {children[0]} MUST keep its own ts_a; collapsed-to-"
+            "last-write-wins corruption would assign ts_c here.",
+        )
+        self.assertIs(
+            canonical[children[1]], ts_b,
+            f"Cell {children[1]} MUST keep its own ts_b; collapsed-to-"
+            "last-write-wins corruption would assign ts_c here.",
+        )
+        self.assertIs(
+            canonical[children[2]], ts_c,
+            f"Cell {children[2]} MUST keep its own ts_c.",
+        )
+
 
 class TestPythiaWeatherFilesParityWithSitesShapefile(unittest.TestCase):
     """Sketch D Part 2 — PYTHIA's ``_generate_weather_files`` must
