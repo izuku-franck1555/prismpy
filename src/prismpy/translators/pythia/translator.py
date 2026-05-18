@@ -281,7 +281,7 @@ class PythiaTranslator(PythiaTranslatorBase):
                 # the placeholder at -1 stays as the only entry and
                 # every real cell ends up has_climate=False even
                 # though .WTH files exist on disk.
-                self._surface_per_cell_climate(data, climate_data)
+                self._surface_per_cell_climate(data, real_climate_data)
             else:
                 warnings.append("No climate data available - weather files not generated")
 

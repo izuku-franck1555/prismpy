@@ -995,5 +995,165 @@ class TestPythiaWeatherFilesParityWithSitesShapefile(unittest.TestCase):
                 )
 
 
+class TestPythiaSurfaceCallUsesFilteredDict(unittest.TestCase):
+    """PYTHIA's call to ``_surface_per_cell_climate`` MUST pass the
+    records-validity-filtered dict (``real_climate_data``), not the raw
+    ``climate_data``. The producer filter at the per-translator gate
+    (``len(ts.records) > 1``) is strictly tighter than the consumer
+    helper filter (``ts.records`` truthy), so passing the raw dict
+    marks degenerate single-record cells as covered in ``data.climate``
+    without a corresponding ``.WTH`` file on disk."""
+
+    def test_pythia_surfaces_filtered_dict_not_raw(self):
+        """Structural pin — the surface call site inside
+        ``PythiaTranslator.translate`` MUST reference
+        ``real_climate_data``, never raw ``climate_data``."""
+        import inspect
+        import prismpy.translators.pythia.translator as pythia_mod
+
+        source = inspect.getsource(pythia_mod.PythiaTranslator.translate)
+        idx = source.index("_surface_per_cell_climate(data,")
+        surface_line = source[idx:idx + source[idx:].index(")") + 1]
+        self.assertIn(
+            "real_climate_data", surface_line,
+            "PYTHIA MUST pass `real_climate_data` (the filtered dict) "
+            "to _surface_per_cell_climate; passing raw `climate_data` "
+            "marks degenerate single-record cells as covered in "
+            "data.climate without writing .WTH files for them.",
+        )
+
+    def test_pythia_surface_drops_single_record_cells(self):
+        """Behavioural pin — when ``climate_data`` carries a mix of
+        multi-record, single-record, empty, and sentinel entries, the
+        post-filter producer roster and the consumer helper roster MUST
+        agree on the same cell set (only multi-record cells)."""
+        from prismpy.sources.climate import is_real_climate_cell_id
+
+        class _Empty:
+            records = []
+
+        class _Single:
+            records = [object()]
+
+        class _Multi:
+            records = [object(), object()]
+
+        climate_data = {
+            1001: _Multi(),
+            1002: _Single(),
+            1003: _Empty(),
+            -1: _Multi(),
+        }
+        real_climate_data = {
+            k: ts for k, ts in climate_data.items()
+            if is_real_climate_cell_id(k)
+            and hasattr(ts, "records")
+            and len(ts.records) > 1
+        }
+        surfaced = {
+            cid: ts for cid, ts in real_climate_data.items()
+            if is_real_climate_cell_id(cid)
+            and hasattr(ts, "records")
+            and ts.records
+        }
+        self.assertEqual(
+            set(surfaced.keys()), {1001},
+            "Post-filter producer roster and consumer helper roster "
+            "MUST agree: only multi-record cells survive. Single-record, "
+            "empty, and sentinel entries MUST be excluded.",
+        )
+
+
+class TestPythiaSurfaceCallEndToEnd(unittest.TestCase):
+    """End-to-end regression for the PYTHIA producer-consumer parity:
+    invokes the actual ``BaseTranslator._surface_per_cell_climate``
+    helper with the producer-filtered roster and asserts the resulting
+    ``data.climate`` state matches what ``.WTH`` files were emitted.
+    Exact-tolerance counterpart to ``TestPythiaSurfaceCallUsesFilteredDict``
+    behavioural pin."""
+
+    def _build_real_climate_data(self, climate_data):
+        from prismpy.sources.climate import is_real_climate_cell_id
+
+        return {
+            k: ts for k, ts in climate_data.items()
+            if is_real_climate_cell_id(k)
+            and hasattr(ts, "records")
+            and len(ts.records) > 1
+        }
+
+    def test_single_record_cell_absent_from_data_climate_after_surface(self):
+        """Single-record cell MUST NOT appear in ``data.climate`` after
+        the post-fix PYTHIA surface call. The producer filter rejects
+        it upstream so the consumer helper receives an empty roster and
+        the harmonize-stage placeholder remains in place unchanged."""
+        import types
+        from prismpy.translators.pythia.translator import PythiaTranslator
+
+        target_cell = 1001
+        placeholder_ts = object()
+
+        class _Single:
+            records = [object()]
+
+        climate_data = {target_cell: _Single()}
+        real_climate_data = self._build_real_climate_data(climate_data)
+
+        data = types.SimpleNamespace(climate={-1: placeholder_ts})
+        inst = PythiaTranslator.__new__(PythiaTranslator)
+
+        inst._surface_per_cell_climate(data, real_climate_data)
+
+        self.assertIsNone(
+            data.climate.get(target_cell),
+            "Single-record cell MUST NOT appear in data.climate after "
+            "the PYTHIA surface call — the producer filter excludes it "
+            "so no .WTH gets written for that cell.",
+        )
+        self.assertEqual(
+            data.climate, {-1: placeholder_ts},
+            "data.climate MUST remain at the harmonize-stage "
+            "placeholder when the producer-filtered roster is empty.",
+        )
+
+    def test_multi_record_cell_present_in_data_climate_after_surface(self):
+        """Multi-record cell MUST appear in ``data.climate`` after the
+        post-fix PYTHIA surface call with its records preserved exactly,
+        and the harmonize-stage ``-1`` placeholder MUST be dropped."""
+        import types
+        from prismpy.translators.pythia.translator import PythiaTranslator
+
+        target_cell = 1001
+        multi_records = [object(), object()]
+
+        class _Multi:
+            records = multi_records
+
+        climate_data = {target_cell: _Multi()}
+        real_climate_data = self._build_real_climate_data(climate_data)
+
+        data = types.SimpleNamespace(climate={-1: object()})
+        inst = PythiaTranslator.__new__(PythiaTranslator)
+
+        inst._surface_per_cell_climate(data, real_climate_data)
+
+        self.assertIn(
+            target_cell, data.climate,
+            "Multi-record cell MUST appear in data.climate after the "
+            "PYTHIA surface call — the producer filter admits it.",
+        )
+        self.assertEqual(
+            data.climate[target_cell].records, multi_records,
+            "Records list MUST be preserved exactly (no transformation "
+            "by the surface helper).",
+        )
+        self.assertNotIn(
+            -1, data.climate,
+            "Harmonize-stage placeholder at -1 MUST be dropped after "
+            "the surface call so downstream consumers do not iterate "
+            "the synthetic sentinel alongside real cells.",
+        )
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
