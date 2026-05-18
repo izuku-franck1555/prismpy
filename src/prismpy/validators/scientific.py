@@ -1779,7 +1779,14 @@ def _check_coverage(unified_data, config) -> Dict[str, Any]:
         n_climate_cells = n_cells  # treat as matching
         climate_format = "geotiff (region-wide)"
     else:
-        n_climate_cells = len(climate)
+        # AC-F-CP-13.5: count REAL cells only, not the sentinel
+        # placeholder injected at the retrieve stage. The
+        # ``is_real_climate_cell_id`` helper is non-int safe so dict
+        # variants with string keys (path-dict shape) are also excluded.
+        from prismpy.sources.climate import is_real_climate_cell_id
+        n_climate_cells = sum(
+            1 for k in (climate or {}).keys() if is_real_climate_cell_id(k)
+        )
         climate_format = "per_cell"
 
     # Check soil cell count matches grid (``soil`` already pulled

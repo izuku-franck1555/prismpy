@@ -310,19 +310,6 @@ class BaseTranslator(ABC):
         """
         if not climate_by_cell_id or not isinstance(data.climate, dict):
             return
-        # F-CK hot-fix +17 codex round-2 MEDIUM absorption — guard the
-        # ``cid >= 0`` check behind ``isinstance(cid, int)`` so a
-        # mixed-key climate dict (e.g. a translator that accidentally
-        # merges existing path-dict keys with int-keyed downloads
-        # before calling the helper) cannot TypeError on
-        # ``str >= 0``. The type hint says int, but the guard is
-        # cheap defense in depth; it parallels the calendar re-fan
-        # filter below.
-        # F-DL AC-DL-3 site 1 — route real-cell predicate through
-        # the canonical helper (durable §24 canonical-source). The
-        # ``hasattr(ts, "records") and ts.records`` guard remains
-        # for the data-shape check (separate concern from cell-id
-        # vocabulary).
         real = {
             cid: ts
             for cid, ts in climate_by_cell_id.items()

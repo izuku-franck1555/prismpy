@@ -203,12 +203,19 @@ class CraftTranslator(CraftTranslatorBase):
             # 2b. Download real NASA POWER weather for all cells and
             # generate per-cell weather files (V2-20: self-contained
             # packages — no external CRAFT GUI download needed).
+            #
+            # AC-F-CP-14: use the canonical ``is_real_climate_cell_id``
+            # helper instead of raw ``cid >= 0`` so the sentinel-discipline
+            # convention has a single source of truth.
+            from prismpy.sources.climate import is_real_climate_cell_id
+
             if data.grid:
                 climate_data = data.climate
                 n_cells = len(data.grid.cells)
                 n_climate = sum(
                     1 for cid, ts in (climate_data or {}).items()
-                    if cid >= 0 and hasattr(ts, 'records') and len(ts.records) > 1
+                    if is_real_climate_cell_id(cid)
+                    and hasattr(ts, 'records') and len(ts.records) > 1
                 )
 
                 if n_climate < n_cells:
@@ -232,7 +239,8 @@ class CraftTranslator(CraftTranslatorBase):
                 if climate_data:
                     real_climate = {
                         cid: ts for cid, ts in climate_data.items()
-                        if cid >= 0 and hasattr(ts, 'records') and len(ts.records) > 1
+                        if is_real_climate_cell_id(cid)
+                        and hasattr(ts, 'records') and len(ts.records) > 1
                     }
                     if real_climate:
                         weather_files = self._generate_weather_files(real_climate)
@@ -336,6 +344,13 @@ class CraftTranslator(CraftTranslatorBase):
                 reference="prismpy.translators.craft.translator.translate",
             )
 
+        # AC-F-CP-13.5: n_weather_files counts REAL cells, not the
+        # sentinel placeholder.
+        from prismpy.sources.climate import is_real_climate_cell_id
+        _real_weather_count = sum(
+            1 for k in (data.climate or {}).keys()
+            if is_real_climate_cell_id(k)
+        )
         result = self.create_result(
             success=True,
             output_files=output_files,
@@ -343,7 +358,7 @@ class CraftTranslator(CraftTranslatorBase):
             metadata={
                 "region": data.region.name,
                 "n_cells": len(data.grid.cells) if data.grid else 0,
-                "n_weather_files": len(data.climate) if data.climate else 0,
+                "n_weather_files": _real_weather_count,
                 "n_soil_profiles": len(data.soil) if data.soil else 0,
             },
         )

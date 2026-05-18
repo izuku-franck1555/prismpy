@@ -675,10 +675,18 @@ class TranslationPipeline:
             # V2-19: record the climate retrieval transformation so any
             # pending decisions recorded during _load_climate_data flush
             if self.provenance.enabled:
+                # AC-F-CP-13.5: n_locations counts REAL cells only, not the
+                # sentinel placeholder. Importing here keeps the module-level
+                # import surface flat.
+                from prismpy.sources.climate import is_real_climate_cell_id
+                _real_n_locations = sum(
+                    1 for k in (climate_data or {}).keys()
+                    if is_real_climate_cell_id(k)
+                )
                 self.provenance.record_retrieval(
                     source="climate_sources",
                     parameters={
-                        "n_locations": len(climate_data) if climate_data else 0,
+                        "n_locations": _real_n_locations,
                         "enabled_platforms": [
                             p.value for p in self.config.get_enabled_platforms()
                         ],
@@ -1283,20 +1291,23 @@ class TranslationPipeline:
             records.append(record)
             current_date += timedelta(days=1)
 
-        # Create single time series for region centroid
-        # Use sentinel cell ID -1 so it doesn't conflict with real cell IDs
+        # Create single time series for region centroid keyed by the
+        # canonical placeholder sentinel ID (see ``sources.climate.
+        # _sentinels`` per durable §24). Downstream consumers MUST filter
+        # this entry out of real-coverage counts via ``is_real_climate_cell_id``.
+        from prismpy.sources.climate import PLACEHOLDER_CLIMATE_SENTINEL_ID
         center_lat = (region.bounds.miny + region.bounds.maxy) / 2
         center_lon = (region.bounds.minx + region.bounds.maxx) / 2
 
         ts = ClimateTimeSeries(
-            location_id=-1,  # Sentinel ID - will be replaced by downloaded data
+            location_id=PLACEHOLDER_CLIMATE_SENTINEL_ID,
             lat=center_lat,
             lon=center_lon,
             source="placeholder",
             records=records,
         )
 
-        return {-1: ts}
+        return {PLACEHOLDER_CLIMATE_SENTINEL_ID: ts}
 
     def _load_soil_data(self, region: Region) -> Optional[Dict[str, Any]]:
         """Load soil data from iSDA source.

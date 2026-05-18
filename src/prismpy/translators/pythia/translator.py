@@ -203,16 +203,30 @@ class PythiaTranslator(PythiaTranslatorBase):
                 output_files.append(shape_file)
 
             # 2. Generate weather files (.WTH)
-            # Download from NASA POWER if not enough data for all sites
-            logger.info("Step 2/8: Generating weather files...")
-            climate_data = data.climate
-            n_sites = len(data.grid.cells) if data.grid else 0
+            # AC-F-CP-13: align PYTHIA gate to canonical pattern — gate on
+            # REAL-cell coverage (sentinel excluded), set-difference to
+            # find missing sites, download only the missing subset, and
+            # merge with existing real climate so a partial pre-retrieve
+            # state is preserved (no double-fetch).
+            from prismpy.sources.climate import is_real_climate_cell_id
 
-            # Check if we have enough climate data for all sites
-            n_climate = len(climate_data) if climate_data else 0
-            if n_climate < n_sites and data.grid:
-                logger.info(f"Insufficient climate data ({n_climate}/{n_sites} sites), "
-                           f"downloading from NASA POWER...")
+            logger.info("Step 2/8: Generating weather files...")
+            climate_data = data.climate or {}
+            all_site_keys = (
+                {c.cell_id for c in data.grid.cells} if data.grid else set()
+            )
+            real_climate_keys = {
+                k for k, ts in climate_data.items()
+                if is_real_climate_cell_id(k)
+                and hasattr(ts, 'records') and len(ts.records) > 1
+            }
+            missing_sites = all_site_keys - real_climate_keys
+            if missing_sites and data.grid:
+                logger.info(
+                    f"Climate coverage incomplete "
+                    f"({len(real_climate_keys)}/{len(all_site_keys)} sites) — "
+                    f"downloading from NASA POWER for {len(missing_sites)} missing sites..."
+                )
                 # Wire progress callback for substage reporting
                 def _pythia_progress(current, total):
                     cb = getattr(self, 'progress_callback', None)
@@ -223,10 +237,40 @@ class PythiaTranslator(PythiaTranslatorBase):
                             current, total,
                             f'site {current} of {total}',
                         )
-                climate_data = self._download_site_weather(data, progress_callback=_pythia_progress)
+                downloaded = self._download_site_weather(
+                    data,
+                    subset_site_ids=sorted(missing_sites),
+                    progress_callback=_pythia_progress,
+                )
+                # Merge with existing real climate (preserves partial
+                # pre-retrieve coverage; doesn't discard).
+                if downloaded:
+                    climate_data = {**climate_data, **downloaded}
 
-            if climate_data:
-                weather_files = self._generate_weather_files(climate_data)
+            # Filter the placeholder sentinel before writing .WTH files so
+            # output filenames map 1:1 to shapefile ``ID`` values. If the
+            # ``-1`` placeholder reaches ``_generate_weather_files``, its
+            # sorted index becomes ``1.WTH`` and every real site shifts
+            # away from the shapefile IDs PYTHIA uses to locate weather.
+            # Also drop entries whose time-series is empty or one-record
+            # (the partial-download / harmonize-degenerate shape) so the
+            # writer never sees a series it cannot turn into a valid
+            # ``.WTH`` file. The validity check mirrors the missing-sites
+            # gate above so both gates apply the same admissibility rule.
+            real_climate_data = {
+                k: ts for k, ts in climate_data.items()
+                if is_real_climate_cell_id(k)
+                and hasattr(ts, 'records')
+                and len(ts.records) > 1
+            }
+            if real_climate_data:
+                # Pass ``data.grid`` so the writer's sequential IDs
+                # match the sites shapefile's ``ID`` column. Missing-
+                # climate cells emit a sentinel WTH preserving the
+                # numbering instead of renumbering surviving sites.
+                weather_files = self._generate_weather_files(
+                    real_climate_data, grid=data.grid
+                )
                 output_files.extend(weather_files)
                 # F13 — surface per-cell climate back onto the shared
                 # UnifiedData so the cell-summary writer, per-cell
@@ -498,6 +542,7 @@ class PythiaTranslator(PythiaTranslatorBase):
         climate_data: Dict[int, ClimateTimeSeries],
         *,
         climate_kind: "ClimateKind" = None,
+        grid: Optional[SpatialGrid] = None,
     ) -> List[Path]:
         """Generate DSSAT .WTH weather files.
 
@@ -525,6 +570,18 @@ class PythiaTranslator(PythiaTranslatorBase):
             climate_kind: Source provenance discriminator. Defaults to
                 ``ClimateKind.OBSERVED`` for backward-compat with all
                 existing callers.
+            grid: Optional SpatialGrid. When provided, .WTH sequential
+                IDs match ``sites.shp`` (``enumerate(grid.cells,
+                start=1)``) so runtime lookups via the sites
+                shapefile's ``ID`` column resolve to the correct
+                weather file. Cells without a valid climate series
+                emit a sentinel WTH with the header only, no data
+                rows — the Coverage validator surfaces those as
+                missing-coverage honestly instead of silently
+                renumbering the surviving sites. When ``grid`` is
+                None, the writer falls back to ``sorted(climate_data
+                .keys())`` ordering for back-compat with callers that
+                pre-date the parity requirement.
 
         Returns:
             List of generated .WTH file paths
@@ -554,13 +611,55 @@ class PythiaTranslator(PythiaTranslatorBase):
         # deferred to Phase 4.6 crop-modeling-specialist review.
         cockpit_sidecar = getattr(self, "cockpit_override_sidecar", None)
 
-        # Create a mapping of site_id to sequential number for unique file names
-        site_ids = sorted(climate_data.keys())
-        site_to_seq = {sid: i + 1 for i, sid in enumerate(site_ids)}
+        # Build the emission roster. When ``grid`` is provided, the
+        # sequential IDs come from ``enumerate(grid.cells, start=1)``
+        # — the same numbering ``_generate_sites_shapefile`` uses for
+        # the shapefile ``ID`` column. PYTHIA's runtime expectation
+        # (``lookup_wth::<prefix>::vector::<shapefile>::ID``) is that
+        # ``<ID>.WTH`` exists for every shapefile row; missing-climate
+        # cells therefore get a sentinel WTH that preserves the
+        # numbering and lets the Coverage validator surface the gap.
+        # When ``grid`` is None, the legacy ``sorted(climate_data
+        # .keys())`` ordering is preserved for back-compat with any
+        # caller that pre-dates the parity contract.
+        emission_roster: List[Tuple[int, int, Optional[ClimateTimeSeries]]] = []
+        if grid is not None and grid.cells:
+            for seq_num, cell in enumerate(grid.cells, start=1):
+                emission_roster.append(
+                    (seq_num, cell.cell_id, climate_data.get(cell.cell_id))
+                )
+        else:
+            site_ids = sorted(climate_data.keys())
+            for seq_num, site_id in enumerate(site_ids, start=1):
+                emission_roster.append(
+                    (seq_num, site_id, climate_data[site_id])
+                )
 
-        for site_id, ts in climate_data.items():
-            # Use sequential number for unique file naming (1.WTH, 2.WTH, etc.)
-            seq_num = site_to_seq[site_id]
+        for seq_num, site_id, ts in emission_roster:
+            wth_path = weather_dir / f"{seq_num}.WTH"
+
+            # Sentinel emit for cells without a valid series: header
+            # only, no data rows. The Coverage validator reads the
+            # empty data section and surfaces missing-coverage
+            # honestly. Filename slot is preserved so the sites.shp
+            # ID → WTH lookup keeps working for every other cell.
+            if ts is None or not (
+                hasattr(ts, "records")
+                and ts.records
+                and len(ts.records) > 1
+            ):
+                with open(wth_path, "w") as f:
+                    f.write(f"{self.WTH_HEADER}\n\n")
+                    f.write(
+                        "@ INSI       LAT      LONG    ELEV   TAV   "
+                        "AMP REFHT WNDHT\n"
+                    )
+                    f.write(
+                        "@  DATE  SRAD  TMAX  TMIN  RAIN  TDEW  RHUM  WIND\n"
+                    )
+                output_files.append(wth_path)
+                continue
+
             station_code = f"{seq_num}"  # Use just the number
 
             # Calculate TAV (annual average temp) and AMP (amplitude)
@@ -2553,12 +2652,18 @@ class PythiaTranslator(PythiaTranslatorBase):
         self,
         data: UnifiedData,
         progress_callback: Optional[callable] = None,
+        subset_site_ids: Optional[List[int]] = None,
     ) -> Dict[int, 'ClimateTimeSeries']:
-        """Download NASA POWER weather data for all grid sites.
+        """Download NASA POWER weather data for grid sites.
 
         Args:
             data: UnifiedData with grid info
             progress_callback: Optional callback(current, total) for progress
+            subset_site_ids: Optional list of cell IDs to fetch. If provided,
+                only those sites are downloaded (used by the AC-F-CP-13 gate
+                to fetch the missing-sites subset rather than re-downloading
+                every site). If ``None`` (legacy callers), every grid cell
+                is fetched.
 
         Returns:
             Dictionary mapping site_id to ClimateTimeSeries
@@ -2605,9 +2710,16 @@ class PythiaTranslator(PythiaTranslatorBase):
         )
         source = NASAPowerSource(config=nasa_config)
 
-        # Download for each grid cell
+        # Download for each grid cell. When ``subset_site_ids`` is provided
+        # (AC-F-CP-13 gate path), restrict to that subset so the caller can
+        # skip already-fetched sites.
         climate_data = {}
-        cells = data.grid.cells if data.grid else []
+        all_cells = data.grid.cells if data.grid else []
+        if subset_site_ids is not None:
+            wanted = set(subset_site_ids)
+            cells = [c for c in all_cells if c.cell_id in wanted]
+        else:
+            cells = all_cells
         total = len(cells)
 
         logger.info(f"Downloading NASA POWER weather for {total} sites ({start_date} to {end_date})")
