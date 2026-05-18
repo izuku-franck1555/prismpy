@@ -25,7 +25,8 @@ introducing circular-import cascades — the
 """
 from __future__ import annotations
 
-from typing import Final
+from numbers import Integral
+from typing import Any, Final
 
 
 # Canonical sentinel ID for placeholder climate entries. The executor's
@@ -34,14 +35,35 @@ from typing import Final
 PLACEHOLDER_CLIMATE_SENTINEL_ID: Final[int] = -1
 
 
-def is_real_climate_cell_id(key) -> bool:
+def is_real_climate_cell_id(key: Any) -> bool:
     """Return True iff ``key`` is a real integer grid-cell ID.
 
-    Real grid-cell IDs are non-negative ints (5-arcmin: 0..9_331_199;
+    Real grid-cell IDs are non-negative integers (5-arcmin: 0..9_331_199;
     30-arcmin: 0..259_199). The placeholder sentinel
     ``PLACEHOLDER_CLIMATE_SENTINEL_ID`` (-1) returns ``False``; so does any
-    non-int key (e.g., SARRA-Py path-dict shape ``{"rainfall_dir": ...,
+    non-integral key (e.g., SARRA-Py path-dict shape ``{"rainfall_dir": ...,
     "agera5_dir": ...}``).
+
+    Accepts:
+
+    * Native ``int`` ≥ 0 (including ``0`` for the first grid cell of a
+      region).
+    * Any subclass of ``numbers.Integral`` (covers ``numpy.int64`` /
+      ``numpy.int32`` that the pandas / xarray pipelines may surface).
+      Production code may emit ``numpy.int64`` cell IDs that are NOT
+      ``isinstance(cid, int)`` but ARE ``isinstance(cid, Integral)``.
+
+    Rejects:
+
+    * Path-dict ``str`` keys (``"rainfall_dir"``, ``"agera5_dir"``, ...).
+    * Stringified cell IDs (``"3799258"``) — those need explicit coercion
+      before reaching this predicate.
+    * Negative sentinels (e.g., the ``-1`` placeholder).
+    * ``None``, ``float``, ``bytes``, list/tuple, and any other
+      non-integral type.
+    * ``True`` / ``False``: in Python ``isinstance(True, int)`` returns
+      ``True``, so the explicit ``bool`` guard prevents booleans from
+      masquerading as cell IDs.
 
     Examples:
         >>> is_real_climate_cell_id(0)
@@ -54,5 +76,15 @@ def is_real_climate_cell_id(key) -> bool:
         False
         >>> is_real_climate_cell_id(None)
         False
+        >>> is_real_climate_cell_id(True)
+        False
     """
-    return isinstance(key, int) and key >= 0
+    # ``bool(...)`` coerces the chained-AND result to Python ``True`` /
+    # ``False``. Without it, ``key >= 0`` on a ``numpy.int64`` returns
+    # ``numpy.True_`` (which compares equal to ``True`` but is NOT
+    # ``True is True`` for downstream identity checks).
+    return bool(
+        not isinstance(key, bool)
+        and isinstance(key, Integral)
+        and key >= 0
+    )
