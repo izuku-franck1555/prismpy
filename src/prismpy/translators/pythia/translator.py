@@ -252,9 +252,16 @@ class PythiaTranslator(PythiaTranslatorBase):
             # ``-1`` placeholder reaches ``_generate_weather_files``, its
             # sorted index becomes ``1.WTH`` and every real site shifts
             # away from the shapefile IDs PYTHIA uses to locate weather.
+            # Also drop entries whose time-series is empty or one-record
+            # (the partial-download / harmonize-degenerate shape) so the
+            # writer never sees a series it cannot turn into a valid
+            # ``.WTH`` file. The validity check mirrors the missing-sites
+            # gate above so both gates apply the same admissibility rule.
             real_climate_data = {
                 k: ts for k, ts in climate_data.items()
                 if is_real_climate_cell_id(k)
+                and hasattr(ts, 'records')
+                and len(ts.records) > 1
             }
             if real_climate_data:
                 weather_files = self._generate_weather_files(real_climate_data)

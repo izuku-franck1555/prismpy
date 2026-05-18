@@ -490,5 +490,143 @@ class TestAceaToleratesAlready30ArcminKeys(unittest.TestCase):
         )
 
 
+class TestAceaCoverageBoundedToRegion(unittest.TestCase):
+    """Codex R14 cycle-3: the ACEA tile-coverage computation must
+    intersect with the region's expected 30-arcmin tile set so a
+    stray foreign-region tile in ``climate_data`` cannot collapse
+    onto a target tile via the 5→30 parent helper and falsely
+    declare coverage complete."""
+
+    def test_acea_coverage_intersects_with_region_tile_set(self):
+        """Structural pin — both the gate computation and the
+        post-download verification end the tile-coverage
+        comprehension with ``& cell_ids_30arcmin_set`` so out-of-
+        region folds are dropped from the coverage set."""
+        import prismpy.translators.acea.translator as acea_mod
+
+        source = inspect.getsource(acea_mod.AceaTranslator.translate)
+        # Both comprehensions terminate with the intersection.
+        self.assertGreaterEqual(
+            source.count("} & cell_ids_30arcmin_set"), 2,
+            "ACEA tile-coverage comprehensions (gate + post-download) "
+            "MUST end with `& cell_ids_30arcmin_set` so foreign-region "
+            "folds are dropped from the coverage set (codex R14 cycle-3 "
+            "SHOULD-FIX).",
+        )
+
+    def test_acea_intersection_drops_out_of_region_fold(self):
+        """Behavioural pin — when a foreign 5-arcmin key folds to a
+        tile NOT in the region's expected set, the intersection drops
+        the spurious coverage entry and ``missing_tiles`` correctly
+        surfaces the still-uncovered targets."""
+        from prismpy.sources.climate import is_real_climate_cell_id
+        from prismpy.translators.acea.translator import AceaTranslator
+
+        inst = AceaTranslator.__new__(AceaTranslator)
+
+        class _Ts:
+            records = [object(), object()]
+
+        ts = _Ts()
+        # Foreign 5-arcmin id 0 folds to 30-arcmin tile 0 (outside
+        # the region's expected set {500}); intersection must drop it.
+        cell_ids_30arcmin_set = {500}
+        climate_data = {0: ts}
+
+        real_30arcmin_tiles = {
+            (k if k in cell_ids_30arcmin_set
+             else inst._cell_id_5arcmin_to_30arcmin_parent(k))
+            for k, ts_val in climate_data.items()
+            if is_real_climate_cell_id(k)
+            and hasattr(ts_val, 'records')
+            and len(ts_val.records) > 1
+        } & cell_ids_30arcmin_set
+        missing_tiles = cell_ids_30arcmin_set - real_30arcmin_tiles
+
+        self.assertEqual(
+            real_30arcmin_tiles, set(),
+            "Foreign-region tile that folds to a non-target tile MUST "
+            "be dropped by the intersection; pre-intersection set may "
+            "contain it but post-intersection set MUST NOT.",
+        )
+        self.assertEqual(
+            missing_tiles, {500},
+            "missing_tiles MUST surface the region's actually-uncovered "
+            "tile when the only `climate_data` entry is foreign + folds "
+            "outside the target set.",
+        )
+
+
+class TestPythiaWriterRequiresValidSeries(unittest.TestCase):
+    """Codex R14 cycle-3: the PYTHIA writer-input filter must also
+    require records validity. Without that check, a real cell key
+    with an empty or one-record series slips into
+    ``_generate_weather_files`` and either writes an empty ``.WTH``
+    or crashes the writer."""
+
+    def test_pythia_real_climate_data_filter_includes_records_check(self):
+        """Structural pin — the ``real_climate_data`` comprehension
+        ANDs in the same records-validity predicate the missing-
+        sites gate uses (``hasattr(ts, 'records') and len(ts.records)
+        > 1``)."""
+        import prismpy.translators.pythia.translator as pythia_mod
+
+        source = inspect.getsource(pythia_mod.PythiaTranslator.translate)
+        # Look for the real_climate_data comprehension body with both
+        # the canonical helper AND the records predicate.
+        self.assertIn("real_climate_data = {", source)
+        # Pull the slice containing the comprehension and confirm the
+        # records-validity predicate is present in the same block.
+        idx = source.index("real_climate_data = {")
+        # The next "}" closes the comprehension; everything up to that
+        # token is the predicate region.
+        comp_slice = source[idx:idx + source[idx:].index("}\n") + 2]
+        for token in ("is_real_climate_cell_id(k)", "hasattr(ts, 'records')", "len(ts.records) > 1"):
+            self.assertIn(
+                token, comp_slice,
+                f"PYTHIA `real_climate_data` comprehension MUST include "
+                f"`{token}` so the writer never sees an empty or "
+                "degenerate series (codex R14 cycle-3 SHOULD-FIX).",
+            )
+
+    def test_pythia_writer_filter_drops_empty_and_single_record_series(self):
+        """Behavioural pin — the filter expression evaluated against
+        a synthetic mix of (multi-record, single-record, empty,
+        no-records-attr) cases admits only the multi-record case."""
+        from prismpy.sources.climate import is_real_climate_cell_id
+
+        class _NoRecordsAttr:
+            pass
+
+        class _EmptyList:
+            records = []
+
+        class _SingleList:
+            records = [object()]
+
+        class _MultiList:
+            records = [object(), object()]
+
+        cases = {
+            1001: _MultiList(),       # GOOD: real cell + valid series
+            1002: _SingleList(),      # BAD: single record (degenerate)
+            1003: _EmptyList(),       # BAD: empty series
+            1004: _NoRecordsAttr(),   # BAD: no records attr at all
+        }
+        admitted = {
+            k: ts for k, ts in cases.items()
+            if is_real_climate_cell_id(k)
+            and hasattr(ts, 'records')
+            and len(ts.records) > 1
+        }
+        self.assertEqual(
+            set(admitted.keys()), {1001},
+            "PYTHIA writer filter MUST admit only the multi-record "
+            "case. Degenerate single-record / empty / missing-attr "
+            "series MUST be dropped before reaching "
+            "_generate_weather_files (codex R14 cycle-3 SHOULD-FIX).",
+        )
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

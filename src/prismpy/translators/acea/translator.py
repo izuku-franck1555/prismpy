@@ -446,6 +446,10 @@ class AceaTranslator(AceaTranslatorBase):
             # 5-arcmin keys to their parent tile; pass already-30-arcmin keys
             # through unchanged. The helper excludes the sentinel; record
             # validity (>1 records) excludes degenerate empty time-series.
+            # The final intersection bounds coverage to the region's expected
+            # tile set so a stray out-of-region tile in ``climate_data``
+            # (e.g., from upstream cache reuse) cannot fold by coincidence
+            # onto an in-region tile and falsely declare coverage complete.
             cell_ids_30arcmin_set = set(cell_ids_30arcmin)
             real_30arcmin_tiles = {
                 (k if k in cell_ids_30arcmin_set
@@ -454,7 +458,7 @@ class AceaTranslator(AceaTranslatorBase):
                 if is_real_climate_cell_id(k)
                 and hasattr(ts, 'records')
                 and len(ts.records) > 1
-            }
+            } & cell_ids_30arcmin_set
             missing_tiles = cell_ids_30arcmin_set - real_30arcmin_tiles
 
             if missing_tiles and data.grid and download_enabled:
@@ -512,7 +516,7 @@ class AceaTranslator(AceaTranslatorBase):
                     if is_real_climate_cell_id(k)
                     and hasattr(ts, 'records')
                     and len(ts.records) > 1
-                }
+                } & cell_ids_30arcmin_set
                 still_missing = cell_ids_30arcmin_set - post_download_30arcmin_tiles
                 if still_missing:
                     raise ClimateDownloadError(
