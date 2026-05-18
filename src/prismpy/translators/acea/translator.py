@@ -544,18 +544,22 @@ class AceaTranslator(AceaTranslatorBase):
                 )
                 output_files.extend(climate_files)
 
-                # F13 — surface per-cell climate onto the shared
-                # UnifiedData so the cell-summary writer and per-cell
-                # coverage validators observe the actual climate-loaded
-                # state. ``_download_climate_30arcmin`` already maps
-                # the 30-arcmin tile downloads back to 5-arcmin
-                # ``cell.cell_id`` keys (see the post-loop fanout at
-                # the bottom of that method), so ``climate_data`` is
-                # already 5-arcmin keyed by the time we get here. Pass
-                # it straight to the helper — re-fanning out via tile
-                # IDs would double-map and look up tile_ids in a
-                # 5-arcmin-keyed dict, returning None for every cell.
-                self._surface_per_cell_climate(data, climate_data)
+                # Surface per-cell climate onto the shared UnifiedData
+                # so the cell-summary writer and per-cell coverage
+                # validators observe the actual climate-loaded state.
+                # Canonicalize first so the surfaced dict is keyed by
+                # ``cell.cell_id`` regardless of whether the upstream
+                # download path emitted 5-arcmin or 30-arcmin keys, and
+                # so foreign keys (out-of-region or fold-collision)
+                # cannot reach the surfacing helper. The canonical
+                # emitter iterates ``data.grid.cells`` and never folds
+                # ``climate_data`` keys, which prevents a foreign tile
+                # whose parent-fold coincidentally lands on an in-region
+                # target from masquerading as real coverage.
+                canonical_climate = self._canonicalize_climate_by_grid_cells(
+                    climate_data, data.grid
+                )
+                self._surface_per_cell_climate(data, canonical_climate)
 
             # 2. Generate soil data (ACEA-compatible NetCDF)
             # ACEA requires soil data in NetCDF format (HWSD_soil_data_on_cropland_v2.3.nc)
@@ -827,6 +831,93 @@ class AceaTranslator(AceaTranslatorBase):
         row_30 = row_5 // 6
         col_30 = col_5 // 6
         return row_30 * self.GRID_COLS_30ARCMIN + col_30
+
+    def _canonicalize_climate_by_grid_cells(
+        self,
+        climate_data: Dict[Any, "ClimateTimeSeries"],
+        grid: Optional["SpatialGrid"],
+    ) -> Dict[int, "ClimateTimeSeries"]:
+        """Emit a per-grid-cell climate dict from ``climate_data`` using
+        ``grid.cells`` as the canonical source of truth.
+
+        The translator's input ``climate_data`` may carry several key
+        shapes that arrived from different upstream paths (5-arcmin grid
+        cells from per-tile fanout, raw 30-arcmin tile IDs handed in by
+        a caller, the placeholder sentinel from the retrieve stage, or
+        path-dict strings from SARRA-Py). Every consumer downstream of
+        the translator expects the dict keyed by ``cell.cell_id`` —
+        i.e., the grid's 5-arcmin cell IDs.
+
+        Strategy: iterate ``grid.cells`` rather than ``climate_data``.
+        For each cell, compute its parent 30-arcmin tile; admit the
+        cell into the canonical dict only when ``climate_data`` carries
+        a valid series under either the 5-arcmin cell key OR the
+        30-arcmin parent tile key. ``climate_data`` keys that match
+        neither of those two known shapes are skipped — including
+        foreign 30-arcmin tile IDs whose parent-fold lands by
+        coincidence on an in-region target. Cells without a real
+        series surface as missing-coverage downstream; the per-cell
+        validator's job is to report that honestly, not the canonical
+        emitter's.
+
+        Returns an empty dict when ``grid`` is None or has no cells —
+        callers fall through to the existing surfacing helper, which
+        is a no-op on an empty input.
+        """
+        # Late-import the canonical predicate; other call sites in this
+        # module use the same late-import pattern (no top-of-file
+        # import for ``is_real_climate_cell_id``).
+        from prismpy.sources.climate import is_real_climate_cell_id
+
+        canonical: Dict[int, "ClimateTimeSeries"] = {}
+        if grid is None or not grid.cells:
+            return canonical
+
+        # Build the canonical view from grid.cells. The cell→tile map +
+        # the inverse cell-id set are both derived FROM grid.cells, so
+        # they are the only key spaces this helper trusts as admissible
+        # in ``climate_data``. Foreign keys whose fold collides on a
+        # target tile (Scenario B) NEVER reach the canonical dict
+        # because they are not in either trusted space.
+        cell_id_to_tile = {
+            cell.cell_id: self._cell_id_5arcmin_to_30arcmin_parent(
+                cell.cell_id
+            )
+            for cell in grid.cells
+        }
+        grid_cell_ids = set(cell_id_to_tile.keys())
+        grid_tile_ids = set(cell_id_to_tile.values())
+
+        # tile_lookup admits only entries keyed by either a known grid
+        # cell id OR a known target tile id. The fold helper is NOT
+        # called on climate_data keys; coincidence-folding is avoided
+        # by construction.
+        tile_lookup: Dict[int, "ClimateTimeSeries"] = {}
+        for key, series in climate_data.items():
+            if not is_real_climate_cell_id(key):
+                continue
+            if not (
+                hasattr(series, "records")
+                and series.records
+                and len(series.records) > 1
+            ):
+                continue
+            if key in grid_tile_ids:
+                tile_lookup[key] = series
+            elif key in grid_cell_ids:
+                tile_lookup[cell_id_to_tile[key]] = series
+            # Else: foreign key (not a known tile, not a known cell);
+            # skip without folding so the Scenario B coincidence (a
+            # foreign tile whose fold-by-coincidence lands on an
+            # in-region target) cannot slip into the canonical dict.
+
+        for cell in grid.cells:
+            tile = cell_id_to_tile[cell.cell_id]
+            series = tile_lookup.get(tile)
+            if series is not None:
+                canonical[cell.cell_id] = series
+
+        return canonical
 
     def _compute_30arcmin_cell_ids(self, grid: Optional[SpatialGrid]) -> List[int]:
         """Compute UNIQUE 30-arcmin cell IDs from grid.

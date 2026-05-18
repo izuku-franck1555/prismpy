@@ -264,7 +264,13 @@ class PythiaTranslator(PythiaTranslatorBase):
                 and len(ts.records) > 1
             }
             if real_climate_data:
-                weather_files = self._generate_weather_files(real_climate_data)
+                # Pass ``data.grid`` so the writer's sequential IDs
+                # match the sites shapefile's ``ID`` column. Missing-
+                # climate cells emit a sentinel WTH preserving the
+                # numbering instead of renumbering surviving sites.
+                weather_files = self._generate_weather_files(
+                    real_climate_data, grid=data.grid
+                )
                 output_files.extend(weather_files)
                 # F13 — surface per-cell climate back onto the shared
                 # UnifiedData so the cell-summary writer, per-cell
@@ -536,6 +542,7 @@ class PythiaTranslator(PythiaTranslatorBase):
         climate_data: Dict[int, ClimateTimeSeries],
         *,
         climate_kind: "ClimateKind" = None,
+        grid: Optional[SpatialGrid] = None,
     ) -> List[Path]:
         """Generate DSSAT .WTH weather files.
 
@@ -563,6 +570,18 @@ class PythiaTranslator(PythiaTranslatorBase):
             climate_kind: Source provenance discriminator. Defaults to
                 ``ClimateKind.OBSERVED`` for backward-compat with all
                 existing callers.
+            grid: Optional SpatialGrid. When provided, .WTH sequential
+                IDs match ``sites.shp`` (``enumerate(grid.cells,
+                start=1)``) so runtime lookups via the sites
+                shapefile's ``ID`` column resolve to the correct
+                weather file. Cells without a valid climate series
+                emit a sentinel WTH with the header only, no data
+                rows — the Coverage validator surfaces those as
+                missing-coverage honestly instead of silently
+                renumbering the surviving sites. When ``grid`` is
+                None, the writer falls back to ``sorted(climate_data
+                .keys())`` ordering for back-compat with callers that
+                pre-date the parity requirement.
 
         Returns:
             List of generated .WTH file paths
@@ -592,13 +611,55 @@ class PythiaTranslator(PythiaTranslatorBase):
         # deferred to Phase 4.6 crop-modeling-specialist review.
         cockpit_sidecar = getattr(self, "cockpit_override_sidecar", None)
 
-        # Create a mapping of site_id to sequential number for unique file names
-        site_ids = sorted(climate_data.keys())
-        site_to_seq = {sid: i + 1 for i, sid in enumerate(site_ids)}
+        # Build the emission roster. When ``grid`` is provided, the
+        # sequential IDs come from ``enumerate(grid.cells, start=1)``
+        # — the same numbering ``_generate_sites_shapefile`` uses for
+        # the shapefile ``ID`` column. PYTHIA's runtime expectation
+        # (``lookup_wth::<prefix>::vector::<shapefile>::ID``) is that
+        # ``<ID>.WTH`` exists for every shapefile row; missing-climate
+        # cells therefore get a sentinel WTH that preserves the
+        # numbering and lets the Coverage validator surface the gap.
+        # When ``grid`` is None, the legacy ``sorted(climate_data
+        # .keys())`` ordering is preserved for back-compat with any
+        # caller that pre-dates the parity contract.
+        emission_roster: List[Tuple[int, int, Optional[ClimateTimeSeries]]] = []
+        if grid is not None and grid.cells:
+            for seq_num, cell in enumerate(grid.cells, start=1):
+                emission_roster.append(
+                    (seq_num, cell.cell_id, climate_data.get(cell.cell_id))
+                )
+        else:
+            site_ids = sorted(climate_data.keys())
+            for seq_num, site_id in enumerate(site_ids, start=1):
+                emission_roster.append(
+                    (seq_num, site_id, climate_data[site_id])
+                )
 
-        for site_id, ts in climate_data.items():
-            # Use sequential number for unique file naming (1.WTH, 2.WTH, etc.)
-            seq_num = site_to_seq[site_id]
+        for seq_num, site_id, ts in emission_roster:
+            wth_path = weather_dir / f"{seq_num}.WTH"
+
+            # Sentinel emit for cells without a valid series: header
+            # only, no data rows. The Coverage validator reads the
+            # empty data section and surfaces missing-coverage
+            # honestly. Filename slot is preserved so the sites.shp
+            # ID → WTH lookup keeps working for every other cell.
+            if ts is None or not (
+                hasattr(ts, "records")
+                and ts.records
+                and len(ts.records) > 1
+            ):
+                with open(wth_path, "w") as f:
+                    f.write(f"{self.WTH_HEADER}\n\n")
+                    f.write(
+                        "@ INSI       LAT      LONG    ELEV   TAV   "
+                        "AMP REFHT WNDHT\n"
+                    )
+                    f.write(
+                        "@  DATE  SRAD  TMAX  TMIN  RAIN  TDEW  RHUM  WIND\n"
+                    )
+                output_files.append(wth_path)
+                continue
+
             station_code = f"{seq_num}"  # Use just the number
 
             # Calculate TAV (annual average temp) and AMP (amplitude)

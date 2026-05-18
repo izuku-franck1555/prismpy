@@ -391,13 +391,20 @@ class TestPythiaWriterFiltersPlaceholder(unittest.TestCase):
             "shifts every real site's filename and PYTHIA fails to "
             "locate weather at runtime (codex post-rebase BLOCKING).",
         )
-        # The writer call uses the filtered name, NOT the raw climate_data
-        self.assertIn(
-            "_generate_weather_files(real_climate_data)", source,
+        # The writer call uses the filtered name, NOT the raw
+        # climate_data. The call may pass additional keyword arguments
+        # (e.g., ``grid=data.grid`` for the canonical sites-shapefile
+        # parity contract); accept either ``(real_climate_data)`` or
+        # ``(real_climate_data,`` as evidence the filtered name is the
+        # first positional argument.
+        self.assertTrue(
+            "_generate_weather_files(real_climate_data)" in source
+            or "_generate_weather_files(\n                    real_climate_data," in source
+            or "_generate_weather_files(real_climate_data," in source,
             "PYTHIA translate() MUST pass the filtered `real_climate_data` "
-            "(not raw `climate_data`) to _generate_weather_files. Codex "
-            "post-rebase BLOCKING: the unfiltered call shifts site "
-            "filenames.",
+            "(not raw `climate_data`) as the first positional arg of "
+            "_generate_weather_files. Codex post-rebase BLOCKING: the "
+            "unfiltered call shifts site filenames.",
         )
 
     def test_pythia_writer_filter_drops_sentinel(self):
@@ -626,6 +633,291 @@ class TestPythiaWriterRequiresValidSeries(unittest.TestCase):
             "series MUST be dropped before reaching "
             "_generate_weather_files (codex R14 cycle-3 SHOULD-FIX).",
         )
+
+
+class TestAceaCanonicalEmit(unittest.TestCase):
+    """Sketch D — ACEA's translator emits the per-cell climate dict by
+    iterating ``grid.cells`` rather than ``climate_data.keys``. This
+    moves the foreign-key filter from a per-site downstream guard to
+    the canonical-emit boundary (no fold called on climate_data keys
+    during the build, so a foreign tile whose parent-fold coincidentally
+    lands on an in-region target cannot reach the canonical dict)."""
+
+    def test_acea_canonicalize_helper_iterates_grid_cells(self):
+        """Structural pin — ``_canonicalize_climate_by_grid_cells``
+        exists on AceaTranslator AND iterates ``grid.cells`` (not
+        ``climate_data.keys()``) per AST inspection."""
+        import prismpy.translators.acea.translator as acea_mod
+
+        self.assertTrue(
+            hasattr(acea_mod.AceaTranslator, "_canonicalize_climate_by_grid_cells"),
+            "AceaTranslator MUST expose _canonicalize_climate_by_grid_cells "
+            "per Sketch D (codex R15 §6.3-redesign-trigger absorption).",
+        )
+        source = inspect.getsource(
+            acea_mod.AceaTranslator._canonicalize_climate_by_grid_cells
+        )
+        # The helper iterates grid.cells (canonical source) AND admits
+        # climate_data entries only via the known cell_ids / tile_ids
+        # spaces — never via fold-during-build.
+        self.assertIn(
+            "for cell in grid.cells", source,
+            "_canonicalize_climate_by_grid_cells MUST iterate "
+            "grid.cells to emit the canonical per-cell dict.",
+        )
+        self.assertIn(
+            "grid_cell_ids", source,
+            "_canonicalize_climate_by_grid_cells MUST track the known "
+            "grid cell-id space (admit climate_data keys that match a "
+            "real cell.cell_id).",
+        )
+        self.assertIn(
+            "grid_tile_ids", source,
+            "_canonicalize_climate_by_grid_cells MUST track the known "
+            "target tile-id space (admit climate_data keys that match "
+            "a real cell's parent tile).",
+        )
+
+    def test_acea_canonicalize_drops_foreign_fold_coincidence(self):
+        """Behavioural pin (Scenario B closure) — when ``climate_data``
+        contains a foreign 30-arcmin id whose parent-fold lands by
+        coincidence on an in-region target tile, the canonical helper
+        MUST NOT admit the foreign series into the canonical dict.
+        ``fold(600) == 100`` empirically demonstrates the coincidence
+        the cycle-3 intersection couldn't close on its own."""
+        from prismpy.translators.acea.translator import AceaTranslator
+
+        inst = AceaTranslator.__new__(AceaTranslator)
+
+        class _GridCell:
+            def __init__(self, cell_id):
+                self.cell_id = cell_id
+
+        class _Grid:
+            def __init__(self, cells):
+                self.cells = cells
+
+        class _Ts:
+            def __init__(self, label):
+                self.label = label
+                self.records = [object(), object()]
+
+        # Real grid cell 9241 has parent tile 100 (5-arcmin →
+        # 30-arcmin via the helper). Foreign 30-arcmin id 600 also
+        # folds to 100. Without the structural filter, a naive
+        # tile_lookup would key 100 to the foreign series.
+        target_cell_5arcmin = 9241
+        assert inst._cell_id_5arcmin_to_30arcmin_parent(
+            target_cell_5arcmin
+        ) == 100
+        assert inst._cell_id_5arcmin_to_30arcmin_parent(600) == 100
+
+        foreign_ts = _Ts("FOREIGN")
+        # climate_data has ONLY the foreign entry (no in-region tile
+        # 100 entry and no in-region cell 9241 entry). The canonical
+        # helper must produce an empty dict — the grid cell surfaces
+        # as missing-coverage downstream.
+        climate_data = {600: foreign_ts}
+        grid = _Grid([_GridCell(target_cell_5arcmin)])
+
+        canonical = inst._canonicalize_climate_by_grid_cells(climate_data, grid)
+
+        self.assertEqual(
+            canonical, {},
+            "_canonicalize_climate_by_grid_cells MUST drop foreign keys "
+            "whose parent-fold coincidentally lands on an in-region "
+            "target tile. fold(600)=100 collides with target tile 100; "
+            "without the structural filter the foreign series would "
+            "have been admitted (Scenario B residual). Empty canonical "
+            "dict here is the correct behaviour — the grid cell "
+            "surfaces as missing-coverage downstream.",
+        )
+
+    def test_acea_canonicalize_fans_tile_keyed_data_to_all_children(self):
+        """Behavioural pin (R15 P2 #1 fan-out) — when ``climate_data``
+        is 30-arcmin tile-keyed (a single tile entry covering multiple
+        5-arcmin children in the region), every child cell receives the
+        tile's series in the canonical dict."""
+        from prismpy.translators.acea.translator import AceaTranslator
+
+        inst = AceaTranslator.__new__(AceaTranslator)
+
+        class _GridCell:
+            def __init__(self, cell_id):
+                self.cell_id = cell_id
+
+        class _Grid:
+            def __init__(self, cells):
+                self.cells = cells
+
+        class _Ts:
+            def __init__(self, label):
+                self.label = label
+                self.records = [object(), object()]
+
+        # Pick a target tile + 3 of its 5-arcmin children, all in the
+        # unambiguously-5-arcmin range (cell_id > 259199 = 30-arcmin
+        # max) so the children cannot be misread as foreign 30-arcmin
+        # tiles. 5-arcmin grid: 2160 rows × 4320 cols; 30-arcmin grid:
+        # 360 rows × 720 cols; 6× fanout per axis. Target tile 7300 =
+        # row_30 10 + col_30 100. Children at row_5=60, col_5 in
+        # 600..602: 60*4320 + 600 = 259800.
+        children = [259800, 259801, 259802]  # row_5=60, cols 600/601/602
+        target_tile = 7300
+        for c in children:
+            assert inst._cell_id_5arcmin_to_30arcmin_parent(c) == target_tile, (
+                f"fixture math wrong: fold({c}) = "
+                f"{inst._cell_id_5arcmin_to_30arcmin_parent(c)}, "
+                f"expected {target_tile}"
+            )
+
+        tile_ts = _Ts(f"TILE_{target_tile}")
+        climate_data = {target_tile: tile_ts}
+        grid = _Grid([_GridCell(c) for c in children])
+
+        canonical = inst._canonicalize_climate_by_grid_cells(climate_data, grid)
+
+        self.assertEqual(
+            set(canonical.keys()), set(children),
+            "_canonicalize_climate_by_grid_cells MUST fan a single "
+            "tile-keyed climate entry out to every child grid cell "
+            "of that tile. Missing fan-out is codex R15 P2 #1 — "
+            "tile-keyed input with no per-child entries would surface "
+            "as zero-coverage even when the tile data is fully real.",
+        )
+        for cell_id in children:
+            self.assertIs(
+                canonical[cell_id], tile_ts,
+                f"Child cell {cell_id} MUST receive the tile-"
+                f"{target_tile} series.",
+            )
+
+
+class TestPythiaWeatherFilesParityWithSitesShapefile(unittest.TestCase):
+    """Sketch D Part 2 — PYTHIA's ``_generate_weather_files`` must
+    iterate ``grid.cells`` with the same ``enumerate(start=1)`` ordering
+    that ``_generate_sites_shapefile`` uses, so the ``.WTH`` filename
+    sequential IDs match the shapefile's ``ID`` column. Missing-climate
+    cells emit a sentinel WTH preserving the numbering — the Coverage
+    validator surfaces those gaps honestly instead of the writer
+    silently renumbering surviving sites."""
+
+    def test_pythia_writer_iterates_grid_cells_in_enumerate_order(self):
+        """Structural pin — the writer's emission loop is built from
+        ``enumerate(grid.cells, start=1)`` (matching the shapefile
+        producer at ``_generate_sites_shapefile``) and accepts a
+        ``grid`` keyword argument."""
+        import prismpy.translators.pythia.translator as pythia_mod
+
+        source = inspect.getsource(pythia_mod.PythiaTranslator._generate_weather_files)
+        # The writer signature now carries a ``grid`` keyword.
+        sig = inspect.signature(
+            pythia_mod.PythiaTranslator._generate_weather_files
+        )
+        self.assertIn(
+            "grid", sig.parameters,
+            "_generate_weather_files MUST accept a `grid` keyword "
+            "argument so callers can request sites-shapefile parity.",
+        )
+        # The writer body iterates ``enumerate(grid.cells, start=1)``
+        # under the grid-provided branch.
+        self.assertIn(
+            "enumerate(grid.cells, start=1)", source,
+            "_generate_weather_files MUST iterate "
+            "`enumerate(grid.cells, start=1)` to align WTH sequential "
+            "IDs with the shapefile's ID column (codex R15 P2 #2 "
+            "absorption).",
+        )
+
+    def test_pythia_writer_emits_sentinel_wth_for_missing_climate(self):
+        """Behavioural pin (R15 P2 #2 closure) — when the climate dict
+        is missing the entry for a grid cell that DOES appear in the
+        shapefile roster, the writer emits a sentinel WTH at the
+        corresponding seq-id so the filename ↔ ID mapping is preserved.
+
+        Set-up: 3-cell grid; ``climate_data`` carries valid series for
+        cells 1 and 3 (seq 1 and 3) but NOT cell 2 (seq 2). Expected:
+        ``1.WTH``, ``2.WTH``, ``3.WTH`` all exist; ``1.WTH`` and
+        ``3.WTH`` carry data rows; ``2.WTH`` is the header-only
+        sentinel."""
+        import tempfile
+        from datetime import date
+        from pathlib import Path
+        from prismpy.translators.pythia.translator import PythiaTranslator
+        from prismpy.models.climate import ClimateRecord, ClimateTimeSeries
+        from prismpy.models.spatial import SpatialGrid, GridCell, BoundingBox
+
+        records = [
+            ClimateRecord(
+                date=date(2020, 1, 1) + __import__("datetime").timedelta(days=i),
+                tmax=30.0, tmin=20.0, precip=0.0, srad=20.0,
+            )
+            for i in range(3)
+        ]
+        ts_with_data = ClimateTimeSeries(
+            location_id=1, lat=10.0, lon=10.0, source="test",
+            records=records, elevation=300.0,
+        )
+
+        cells = [
+            GridCell(cell_id=1001, lat=10.0, lon=10.0, row=0, col=0),
+            GridCell(cell_id=1002, lat=10.1, lon=10.1, row=0, col=1),
+            GridCell(cell_id=1003, lat=10.2, lon=10.2, row=0, col=2),
+        ]
+        grid = SpatialGrid(
+            bounds=BoundingBox(minx=10.0, miny=10.0, maxx=10.2, maxy=10.2),
+            resolution=0.1, cells=cells,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            inst = PythiaTranslator.__new__(PythiaTranslator)
+            inst.output_dir = Path(td)
+            (inst.output_dir / "weather").mkdir(parents=True, exist_ok=True)
+            # Minimal attributes the writer body reads via ``self.``.
+            inst.provenance = None
+            inst.cockpit_override_sidecar = None
+
+            # Climate carries series for cell 1001 and 1003 ONLY; cell
+            # 1002 (seq 2) is the gap that must surface as a sentinel.
+            climate_data = {1001: ts_with_data, 1003: ts_with_data}
+
+            files = inst._generate_weather_files(climate_data, grid=grid)
+
+            wth_dir = inst.output_dir / "weather"
+            for seq in (1, 2, 3):
+                self.assertTrue(
+                    (wth_dir / f"{seq}.WTH").exists(),
+                    f"{seq}.WTH MUST exist so the sites.shp ID → WTH "
+                    "lookup never points at a missing file.",
+                )
+
+            # Seq 2 is the sentinel — header-only, no data rows.
+            seq2_content = (wth_dir / "2.WTH").read_text()
+            data_rows = [
+                line for line in seq2_content.splitlines()
+                if line and not line.startswith("@")
+                and not line.startswith("$")
+            ]
+            self.assertEqual(
+                data_rows, [],
+                "2.WTH MUST be a header-only sentinel (no data rows) "
+                "when cell 1002 has no climate series. Coverage "
+                "validator surfaces the gap honestly downstream "
+                "(codex R15 P2 #2 absorption).",
+            )
+
+            # Seq 1 and seq 3 carry real data rows.
+            for seq, label in [(1, "1001"), (3, "1003")]:
+                content = (wth_dir / f"{seq}.WTH").read_text()
+                rows = [
+                    line for line in content.splitlines()
+                    if line and not line.startswith("@")
+                    and not line.startswith("$")
+                ]
+                self.assertGreater(
+                    len(rows), 0,
+                    f"{seq}.WTH for cell {label} MUST carry data rows.",
+                )
 
 
 if __name__ == "__main__":  # pragma: no cover
