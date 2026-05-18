@@ -439,18 +439,23 @@ class AceaTranslator(AceaTranslatorBase):
                 download_enabled = getattr(platform_config, 'download_climate', True)
                 download_delay = getattr(platform_config, 'climate_download_delay', 2.0)
 
-            # Compute REAL 30-arcmin tile coverage from current data.climate
-            # (which is 5-arcmin keyed post-download, sentinel-keyed when
-            # placeholder only). The helper excludes the sentinel; record
+            # Compute REAL 30-arcmin tile coverage from current data.climate.
+            # Keys may be either 5-arcmin (post-download default) or already
+            # 30-arcmin (when a caller hands in pre-aggregated tile coverage,
+            # which ``_create_id_mapping`` already supports downstream). Map
+            # 5-arcmin keys to their parent tile; pass already-30-arcmin keys
+            # through unchanged. The helper excludes the sentinel; record
             # validity (>1 records) excludes degenerate empty time-series.
+            cell_ids_30arcmin_set = set(cell_ids_30arcmin)
             real_30arcmin_tiles = {
-                self._cell_id_5arcmin_to_30arcmin_parent(k)
+                (k if k in cell_ids_30arcmin_set
+                 else self._cell_id_5arcmin_to_30arcmin_parent(k))
                 for k, ts in climate_data.items()
                 if is_real_climate_cell_id(k)
                 and hasattr(ts, 'records')
                 and len(ts.records) > 1
             }
-            missing_tiles = set(cell_ids_30arcmin) - real_30arcmin_tiles
+            missing_tiles = cell_ids_30arcmin_set - real_30arcmin_tiles
 
             if missing_tiles and data.grid and download_enabled:
                 # Download NASA POWER climate data for the missing 30-arcmin
@@ -501,13 +506,14 @@ class AceaTranslator(AceaTranslatorBase):
                 # status reflects the gap honestly (not a silent 'complete'
                 # with missing climate pickles in the package).
                 post_download_30arcmin_tiles = {
-                    self._cell_id_5arcmin_to_30arcmin_parent(k)
+                    (k if k in cell_ids_30arcmin_set
+                     else self._cell_id_5arcmin_to_30arcmin_parent(k))
                     for k, ts in climate_data.items()
                     if is_real_climate_cell_id(k)
                     and hasattr(ts, 'records')
                     and len(ts.records) > 1
                 }
-                still_missing = set(cell_ids_30arcmin) - post_download_30arcmin_tiles
+                still_missing = cell_ids_30arcmin_set - post_download_30arcmin_tiles
                 if still_missing:
                     raise ClimateDownloadError(
                         f"NASA POWER climate download incomplete: "

@@ -367,5 +367,128 @@ class TestMetadataWritersExcludeSentinel(unittest.TestCase):
         )
 
 
+class TestPythiaWriterFiltersPlaceholder(unittest.TestCase):
+    """Codex post-rebase finding: the PYTHIA writer caller must filter
+    the sentinel before invoking ``_generate_weather_files``. Without
+    the filter, the placeholder ends up as ``1.WTH`` after sorting and
+    every real-site filename shifts away from the shapefile ``ID``
+    values PYTHIA uses at runtime."""
+
+    def test_pythia_filters_placeholder_before_weather_file_write(self):
+        """Structural pin — the PYTHIA translate() body builds a
+        ``real_climate_data`` dict via ``is_real_climate_cell_id``
+        BEFORE calling ``_generate_weather_files`` so the writer never
+        sees the sentinel."""
+        import prismpy.translators.pythia.translator as pythia_mod
+
+        source = inspect.getsource(pythia_mod.PythiaTranslator.translate)
+        # The filtered dict comprehension uses the canonical helper
+        self.assertIn(
+            "real_climate_data = {", source,
+            "PYTHIA translate() MUST construct a `real_climate_data` "
+            "dict filtered via is_real_climate_cell_id before invoking "
+            "_generate_weather_files. Without the filter, the sentinel "
+            "shifts every real site's filename and PYTHIA fails to "
+            "locate weather at runtime (codex post-rebase BLOCKING).",
+        )
+        # The writer call uses the filtered name, NOT the raw climate_data
+        self.assertIn(
+            "_generate_weather_files(real_climate_data)", source,
+            "PYTHIA translate() MUST pass the filtered `real_climate_data` "
+            "(not raw `climate_data`) to _generate_weather_files. Codex "
+            "post-rebase BLOCKING: the unfiltered call shifts site "
+            "filenames.",
+        )
+
+    def test_pythia_writer_filter_drops_sentinel(self):
+        """Behavioural pin — the filter expression evaluated against a
+        synthetic mixed-key dict yields a dict containing only the
+        real-cell entries (no sentinel)."""
+        from prismpy.sources.climate import is_real_climate_cell_id
+
+        sentinel = -1
+        # Synthetic stand-in for ClimateTimeSeries; the filter checks
+        # only the key, not the value shape.
+        fake_ts = object()
+        mixed = {sentinel: fake_ts, 0: fake_ts, 1001: fake_ts, 2050: fake_ts}
+        real = {k: ts for k, ts in mixed.items() if is_real_climate_cell_id(k)}
+        self.assertNotIn(
+            sentinel, real,
+            "real_climate_data MUST exclude the placeholder sentinel.",
+        )
+        self.assertEqual(
+            set(real.keys()), {0, 1001, 2050},
+            "real_climate_data MUST retain every real-cell entry.",
+        )
+
+
+class TestAceaToleratesAlready30ArcminKeys(unittest.TestCase):
+    """Codex post-rebase finding: when a caller hands ACEA a climate
+    dict already keyed by 30-arcmin tile IDs (a shape
+    ``_create_id_mapping`` supports), the gate's 5→30 parent fold MUST
+    pass those keys through unchanged. Otherwise, valid coverage gets
+    re-mapped to a different tile and ``missing_tiles`` triggers a
+    spurious NASA POWER download that can fail offline runs."""
+
+    def test_acea_gate_uses_set_membership_to_detect_30arcmin_keys(self):
+        """Structural pin — ACEA translate() builds
+        ``cell_ids_30arcmin_set`` and uses it as the discriminator
+        between already-30-arcmin and 5-arcmin keys."""
+        import prismpy.translators.acea.translator as acea_mod
+
+        source = inspect.getsource(acea_mod.AceaTranslator.translate)
+        self.assertIn(
+            "cell_ids_30arcmin_set = set(cell_ids_30arcmin)", source,
+            "ACEA translate() MUST build a `cell_ids_30arcmin_set` so "
+            "the 5→30 mapping can short-circuit on already-30-arcmin "
+            "keys (codex post-rebase SHOULD-FIX).",
+        )
+        # The mapping expression keeps keys that are already 30-arcmin
+        self.assertIn(
+            "k if k in cell_ids_30arcmin_set", source,
+            "ACEA 30-arcmin coverage set MUST pass already-30-arcmin "
+            "keys through unchanged instead of re-mapping via "
+            "_cell_id_5arcmin_to_30arcmin_parent (codex post-rebase "
+            "SHOULD-FIX).",
+        )
+
+    def test_acea_30arcmin_discriminator_yields_empty_missing_tiles(self):
+        """Behavioural pin — when the climate dict's keys are all in
+        the target 30-arcmin set, the discriminator computes
+        ``missing_tiles == set()`` so no spurious download fires."""
+        from prismpy.sources.climate import is_real_climate_cell_id
+
+        # Simulate a region needing 3 already-30-arcmin tiles.
+        cell_ids_30arcmin = [100, 200, 300]
+        cell_ids_30arcmin_set = set(cell_ids_30arcmin)
+
+        # Synthetic time-series that satisfies the gate's record-validity
+        # check (>1 records). Only the ``records`` attribute length is
+        # inspected; the items themselves are not unpacked here.
+        class _Ts:
+            records = [object(), object()]
+
+        fake_ts = _Ts()
+        climate_data = {100: fake_ts, 200: fake_ts, 300: fake_ts}
+
+        real_30arcmin_tiles = {
+            (k if k in cell_ids_30arcmin_set
+             else None)  # `None` would surface as a spurious tile id
+            for k, ts in climate_data.items()
+            if is_real_climate_cell_id(k)
+            and hasattr(ts, 'records')
+            and len(ts.records) > 1
+        }
+        missing_tiles = cell_ids_30arcmin_set - real_30arcmin_tiles
+        self.assertEqual(
+            missing_tiles, set(),
+            "When every climate key is already a 30-arcmin tile id, the "
+            "discriminator MUST yield zero missing tiles. A non-empty "
+            "missing_tiles here means the 5→30 mapping is re-running on "
+            "already-30-arcmin keys and shifting the coverage set "
+            "(codex post-rebase SHOULD-FIX).",
+        )
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -247,8 +247,17 @@ class PythiaTranslator(PythiaTranslatorBase):
                 if downloaded:
                     climate_data = {**climate_data, **downloaded}
 
-            if climate_data:
-                weather_files = self._generate_weather_files(climate_data)
+            # Filter the placeholder sentinel before writing .WTH files so
+            # output filenames map 1:1 to shapefile ``ID`` values. If the
+            # ``-1`` placeholder reaches ``_generate_weather_files``, its
+            # sorted index becomes ``1.WTH`` and every real site shifts
+            # away from the shapefile IDs PYTHIA uses to locate weather.
+            real_climate_data = {
+                k: ts for k, ts in climate_data.items()
+                if is_real_climate_cell_id(k)
+            }
+            if real_climate_data:
+                weather_files = self._generate_weather_files(real_climate_data)
                 output_files.extend(weather_files)
                 # F13 — surface per-cell climate back onto the shared
                 # UnifiedData so the cell-summary writer, per-cell
