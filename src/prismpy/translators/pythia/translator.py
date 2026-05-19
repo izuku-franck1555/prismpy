@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 
+from prismpy.cells.admission import canonical_climate_for_grid
 from prismpy.config.schema import (
     Platform,
     PhenologyConfig,
@@ -203,28 +204,25 @@ class PythiaTranslator(PythiaTranslatorBase):
                 output_files.append(shape_file)
 
             # 2. Generate weather files (.WTH)
-            # AC-F-CP-13: align PYTHIA gate to canonical pattern — gate on
-            # REAL-cell coverage (sentinel excluded), set-difference to
-            # find missing sites, download only the missing subset, and
-            # merge with existing real climate so a partial pre-retrieve
-            # state is preserved (no double-fetch).
-            from prismpy.sources.climate import is_real_climate_cell_id
-
+            # Gate on canonical admission so the missing-sites set
+            # reflects which grid cells truly lack a valid series.
+            # Foreign keys whose records would otherwise count as
+            # coverage are dropped at the helper's admission boundary;
+            # the writer-input filter below shares the same helper so
+            # the gate's view and the writer's view cannot drift apart.
             logger.info("Step 2/8: Generating weather files...")
             climate_data = data.climate or {}
             all_site_keys = (
                 {c.cell_id for c in data.grid.cells} if data.grid else set()
             )
-            real_climate_keys = {
-                k for k, ts in climate_data.items()
-                if is_real_climate_cell_id(k)
-                and hasattr(ts, 'records') and len(ts.records) > 1
-            }
-            missing_sites = all_site_keys - real_climate_keys
+            gate_canonical = canonical_climate_for_grid(
+                climate_data, data.grid
+            )
+            missing_sites = all_site_keys - gate_canonical.per_cell.keys()
             if missing_sites and data.grid:
                 logger.info(
                     f"Climate coverage incomplete "
-                    f"({len(real_climate_keys)}/{len(all_site_keys)} sites) — "
+                    f"({len(gate_canonical.per_cell)}/{len(all_site_keys)} sites) — "
                     f"downloading from NASA POWER for {len(missing_sites)} missing sites..."
                 )
                 # Wire progress callback for substage reporting
@@ -247,22 +245,15 @@ class PythiaTranslator(PythiaTranslatorBase):
                 if downloaded:
                     climate_data = {**climate_data, **downloaded}
 
-            # Filter the placeholder sentinel before writing .WTH files so
-            # output filenames map 1:1 to shapefile ``ID`` values. If the
-            # ``-1`` placeholder reaches ``_generate_weather_files``, its
-            # sorted index becomes ``1.WTH`` and every real site shifts
-            # away from the shapefile IDs PYTHIA uses to locate weather.
-            # Also drop entries whose time-series is empty or one-record
-            # (the partial-download / harmonize-degenerate shape) so the
-            # writer never sees a series it cannot turn into a valid
-            # ``.WTH`` file. The validity check mirrors the missing-sites
-            # gate above so both gates apply the same admissibility rule.
-            real_climate_data = {
-                k: ts for k, ts in climate_data.items()
-                if is_real_climate_cell_id(k)
-                and hasattr(ts, 'records')
-                and len(ts.records) > 1
-            }
+            # Canonical admission at the producer boundary so the
+            # writer never sees the sentinel placeholder, foreign
+            # 30-arcmin keys, or degenerate empty / one-record series.
+            # The helper iterates ``data.grid.cells`` so weather file
+            # IDs map 1:1 to shapefile ``ID`` values and a partial
+            # pre-retrieve state survives intact through the merge.
+            real_climate_data = canonical_climate_for_grid(
+                climate_data, data.grid
+            ).per_cell
             if real_climate_data:
                 # Pass ``data.grid`` so the writer's sequential IDs
                 # match the sites shapefile's ``ID`` column. Missing-

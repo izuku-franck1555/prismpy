@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from prismpy.cells.admission import canonical_climate_for_grid
 from prismpy.config.schema import Platform
 from prismpy.data_sources.gadm import GADMDataSource
 from prismpy.models.climate import ClimateTimeSeries, ClimateRecord
@@ -204,19 +205,20 @@ class CraftTranslator(CraftTranslatorBase):
             # generate per-cell weather files (V2-20: self-contained
             # packages — no external CRAFT GUI download needed).
             #
-            # AC-F-CP-14: use the canonical ``is_real_climate_cell_id``
-            # helper instead of raw ``cid >= 0`` so the sentinel-discipline
-            # convention has a single source of truth.
+            # Route the climate dict through the canonical admission
+            # helper so admission discipline lives in one trusted code
+            # path. The helper drops sentinel + foreign + degenerate
+            # entries; the count compares the admitted view against
+            # n_cells to decide whether to fall back on NASA POWER.
             from prismpy.sources.climate import is_real_climate_cell_id
 
             if data.grid:
                 climate_data = data.climate
                 n_cells = len(data.grid.cells)
-                n_climate = sum(
-                    1 for cid, ts in (climate_data or {}).items()
-                    if is_real_climate_cell_id(cid)
-                    and hasattr(ts, 'records') and len(ts.records) > 1
+                gate_canonical = canonical_climate_for_grid(
+                    climate_data, data.grid
                 )
+                n_climate = len(gate_canonical.per_cell)
 
                 if n_climate < n_cells:
                     logger.info(
@@ -237,11 +239,9 @@ class CraftTranslator(CraftTranslatorBase):
                     )
 
                 if climate_data:
-                    real_climate = {
-                        cid: ts for cid, ts in climate_data.items()
-                        if is_real_climate_cell_id(cid)
-                        and hasattr(ts, 'records') and len(ts.records) > 1
-                    }
+                    real_climate = canonical_climate_for_grid(
+                        climate_data, data.grid
+                    ).per_cell
                     if real_climate:
                         weather_files = self._generate_weather_files(real_climate)
                         output_files.extend(weather_files)
