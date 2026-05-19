@@ -3160,6 +3160,20 @@ class CraftTranslator(CraftTranslatorBase):
             # a fake default. Computed once via the resolved-source
             # discriminator above.
             'gadm_level': manifest_gadm_level,
+
+            # Closed-world UC declaration: CRAFT packages serve UC1
+            # (yield_forecast), UC3 (sowing_optimization), UC4
+            # (drought_management), UC5 (soil_fertility), and UC6
+            # (livestock_feed) — the Sahelian-six crop coverage matches
+            # all five operationally-active UCs. Empty per-UC dicts
+            # signal "use UC defaults at dispatch time".
+            'use_case_config': {
+                'yield_forecast': {},
+                'sowing_optimization': {},
+                'drought_management': {},
+                'soil_fertility': {},
+                'livestock_feed': {},
+            },
         }
 
         # 1. Generate manifest

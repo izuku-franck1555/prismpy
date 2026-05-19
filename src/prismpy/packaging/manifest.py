@@ -92,6 +92,30 @@ PER_UC_GATES: Dict[str, FrozenSet[str]] = {
 ADVISORY_GATES: FrozenSet[str] = frozenset({
     "manifest_adapter_capability_sowing_rule_default_present",
     "n_years_gte_9_for_drought_freq_anomaly",
+    "scenario_packages_temporal_aligned",
+    "fertilizer_scenarios_resolvable",
+})
+
+
+_RESERVED_MANIFEST_KEYS: FrozenSet[str] = frozenset({
+    "package_version",
+    "generator",
+    "generator_version",
+    "platform",
+    "project_name",
+    "region",
+    "crop",
+    "crops",
+    "temporal",
+    "data_sources",
+    "use_case_config",
+    "summary",
+    "cells",
+    "cell_areas",
+    "files",
+    "uc_readiness",
+    "validation_status",
+    "scenario",
 })
 
 
@@ -407,9 +431,13 @@ def _eval_gate_at_least_one_scenario_package_present(
 def _eval_gate_scenario_packages_temporal_aligned(
     uc_config: Dict[str, Any], project_config: Dict[str, Any],
 ) -> bool:
-    if not _eval_gate_at_least_one_scenario_package_present(uc_config):
-        return False
-    return True
+    # Honest-signal: emitter does not open scenario-package manifests
+    # at packaging time to verify temporal alignment with the base
+    # package. The gate is classified as ADVISORY (see ADVISORY_GATES);
+    # failure surfaces an advisory_flag rather than gates_failed, and
+    # downstream consumers (prism-runner UC2 dispatch) perform the
+    # authoritative alignment check at execute time.
+    return False
 
 
 def _eval_gate_crop_supported_per_platform(
@@ -442,10 +470,13 @@ def _eval_gate_manifest_adapter_capability_sowing_rule_default_present(
 def _eval_gate_fertilizer_scenarios_resolvable(
     uc_config: Dict[str, Any],
 ) -> bool:
-    scenarios_value = uc_config.get("scenarios")
-    if scenarios_value:
-        return True
-    return True
+    # Honest-signal: the 5-priority resolver (preset / CSV / comma-list
+    # / package CSV / builtin fallback) is exercised at dispatch time,
+    # not at packaging time. The gate is classified as ADVISORY (see
+    # ADVISORY_GATES); failure surfaces an advisory_flag rather than
+    # gates_failed, and downstream consumers perform the authoritative
+    # resolver check.
+    return False
 
 
 def _dispatch_gate(
@@ -610,7 +641,11 @@ def canonical_uc_readiness_emitter(
                 ADVISORY_FLAG_UC3_SOWING_RULE_DEFAULT_ABSENT,
             )
 
-        if uc_name == "soil_fertility" and uc5_pythia_pk_triggered:
+        if (
+            uc_name == "soil_fertility"
+            and platform == "pythia"
+            and uc5_pythia_pk_triggered
+        ):
             advisory_flags.append(
                 ADVISORY_FLAG_UC5_PYTHIA_PK_SILENT_NO_OP,
             )
@@ -739,25 +774,63 @@ def _extract_cells_with_centroids(
     return [], {}
 
 
+def _resolve_resolution_deg(
+    project_config: Dict[str, Any], platform: str,
+) -> float:
+    """Normalize per-translator resolution conventions to ``resolution_deg``.
+
+    Each translator declares package resolution differently:
+    - ACEA: integer code at ``project_config['resolution']`` (``1`` =
+      5-arcmin, ``0`` = 30-arcmin)
+    - PYTHIA, SARRA-Py, CRAFT: string or float; convention varies
+
+    Callers that want full control can populate
+    ``project_config['resolution_deg']`` explicitly (always wins).
+    Without explicit override + without a platform-specific code, the
+    default is 5-arcmin (1/12 deg) — the dominant Sahel-band grid.
+    """
+    if "resolution_deg" in project_config:
+        return float(project_config["resolution_deg"])
+    if platform == "acea":
+        acea_code = project_config.get("resolution")
+        if acea_code == 0 or acea_code == "30arcmin":
+            return 30.0 / 60.0
+        if acea_code == 1 or acea_code == "5arcmin":
+            return 5.0 / 60.0
+    raw = project_config.get("resolution")
+    if isinstance(raw, (int, float)) and float(raw) > 0:
+        return float(raw)
+    if isinstance(raw, str):
+        if raw == "30arcmin":
+            return 30.0 / 60.0
+        if raw == "5arcmin":
+            return 5.0 / 60.0
+        try:
+            parsed = float(raw)
+            if parsed > 0:
+                return parsed
+        except ValueError:
+            pass
+    return 5.0 / 60.0
+
+
 def _build_spatial_ref_for_package(
     project_config: Dict[str, Any],
+    platform: str,
     centroid_lat_by_cell_id: Dict[int, float],
 ) -> SpatialRef:
     """Construct a :class:`SpatialRef` for the package.
 
-    Resolution is sourced from ``project_config['resolution_deg']`` when
-    present; otherwise defaults to 5-arcmin (1/12 deg) which is the
-    dominant Sahel-grid resolution across translators today. The
-    ``cell_centroid_latitude`` callable returns the per-cell centroid
-    when known (extracted from cell_summary.json or sites.shp);
-    otherwise returns a region-level fallback lat sourced from
-    ``project_config['region_centroid_lat']`` (or 0.0 — equator — as
-    last-resort default; callers concerned with accuracy should supply
-    per-cell lats via the cell_summary.json centroid keys).
+    Resolution is normalized across the four translator conventions
+    via :func:`_resolve_resolution_deg`. The ``cell_centroid_latitude``
+    callable returns the per-cell centroid when known (extracted from
+    cell_summary.json or sites.shp); otherwise returns a region-level
+    fallback lat sourced from ``project_config['region_centroid_lat']``
+    (or 0.0 — equator — as last-resort default; callers concerned with
+    accuracy should supply per-cell lats via the cell_summary.json
+    centroid keys).
     """
-    resolution_deg = float(
-        project_config.get("resolution_deg", 1.0 / 12.0),
-    )
+    resolution_deg = _resolve_resolution_deg(project_config, platform)
     fallback_lat = float(
         project_config.get("region_centroid_lat", 0.0),
     )
@@ -772,6 +845,42 @@ def _build_spatial_ref_for_package(
         cell_centroid_latitude=_lat_for_cell,
         deg2_to_km2=DEG2_TO_KM2_DEFAULT,
     )
+
+
+def _filter_additional_metadata(
+    additional_metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Sanitize ``additional_metadata`` before the manifest update merge.
+
+    Two protections:
+
+    1. Private (``_``-prefixed) keys are STRIPPED before the merge.
+       Callers use this prefix to pass private signals to the manifest
+       emitter (e.g., ``_acea_uc5_p_k_silent_no_op_triggered``) without
+       intending the keys to land in the published manifest. The strip
+       prevents private-signal leak into the on-disk artifact.
+    2. Reserved-key collisions RAISE. ``additional_metadata`` keys
+       that overlap with the canonical emit set
+       (``_RESERVED_MANIFEST_KEYS``) would silently overwrite the
+       authoritative emit; the raise forces the caller to rename their
+       extension key.
+    """
+    public: Dict[str, Any] = {}
+    collisions: List[str] = []
+    for k, v in additional_metadata.items():
+        if k.startswith("_"):
+            continue
+        if k in _RESERVED_MANIFEST_KEYS:
+            collisions.append(k)
+            continue
+        public[k] = v
+    if collisions:
+        raise ValueError(
+            "additional_metadata may not overwrite canonical manifest "
+            f"keys; reserved-key collisions: {sorted(collisions)}. "
+            "Rename the extension keys."
+        )
+    return public
 
 
 def create_manifest(
@@ -811,7 +920,7 @@ def create_manifest(
     crops_list = canonical_crops_emitter(project_config)
     cells_list, centroid_lat_by_cell_id = _extract_cells_with_centroids(package_dir)
     spatial_ref = _build_spatial_ref_for_package(
-        project_config, centroid_lat_by_cell_id,
+        project_config, platform, centroid_lat_by_cell_id,
     )
     cell_areas_list = [
         canonical_cell_area_km2(cid, spatial_ref) for cid in cells_list
@@ -891,7 +1000,8 @@ def create_manifest(
         manifest["uc_readiness"] = canonical_uc_readiness_emitter(
             merged_project_config, platform, manifest,
         )
-        manifest.update(additional_metadata)
+        public_extra = _filter_additional_metadata(additional_metadata)
+        manifest.update(public_extra)
     else:
         manifest["uc_readiness"] = canonical_uc_readiness_emitter(
             project_config, platform, manifest,

@@ -2381,11 +2381,28 @@ if __name__ == "__main__":
                 'crop_suitability': gaez_source,
                 'boundaries': boundary_label,
             },
+
+            # Closed-world UC declaration: ACEA-translated packages
+            # serve UC1 (yield_forecast), UC4 (drought_management), and
+            # UC5 (soil_fertility). UC3 (sowing_optimization) is a
+            # SARRA-Py/PYTHIA-leaning workflow and is not surfaced from
+            # ACEA emit; UC6 (livestock_feed) requires the residue
+            # aggregator path that ACEA does not currently feed. Empty
+            # per-UC dicts signal "use UC defaults at dispatch time".
+            'use_case_config': {
+                'yield_forecast': {},
+                'drought_management': {},
+                'soil_fertility': {},
+            },
         }
 
-        # 1. Generate manifest
+        # 1. Generate manifest. Defaults to ``False`` post-Phase-F-C
+        # B2 fix: the trigger must be explicitly set by
+        # ``_generate_acea_config`` (line :2915 hardcode site) before
+        # this method runs — without an explicit set, no advisory
+        # propagates (eliminates the eager false-positive class).
         manifest_extra: Dict[str, Any] = {}
-        if getattr(self, '_uc5_pythia_pk_silent_no_op_triggered', True):
+        if getattr(self, '_uc5_pythia_pk_silent_no_op_triggered', False):
             manifest_extra['_acea_uc5_p_k_silent_no_op_triggered'] = True
         try:
             manifest = create_manifest(

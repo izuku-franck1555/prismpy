@@ -3046,7 +3046,12 @@ class PythiaTranslator(PythiaTranslatorBase):
             resolved_boundary_source, manifest_gadm_level,
         )
 
-        # Build project config for manifest
+        # Build project config for manifest. ``use_case_config`` declares
+        # the UCs this package was built to serve — the manifest emitter
+        # uses this keyset for closed-world ``uc_readiness`` emit;
+        # downstream dispatch may pass UC-specific config overrides at
+        # run time but the emit-side declaration here gates which UCs
+        # the prismweb confirm-card surfaces.
         project_config = {
             "project_name": self.config.project.name,
             "region_name": data.region.name,
@@ -3063,7 +3068,13 @@ class PythiaTranslator(PythiaTranslatorBase):
                 "soil": "eGHR",
                 "crop_mask": "SPAM 2020",
                 "boundaries": boundary_label,
-            }
+            },
+            "use_case_config": {
+                "yield_forecast": {},
+                "sowing_optimization": {},
+                "drought_management": {},
+                "soil_fertility": {},
+            },
         }
 
         # Build the baseline scenario block. Every PYTHIA package

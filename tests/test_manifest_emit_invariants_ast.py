@@ -41,6 +41,14 @@ _MANIFEST_SRC_PATH = (
 )
 
 
+_TRANSLATOR_PLATFORMS = ("pythia", "sarra_py", "craft", "acea")
+_TRANSLATOR_SRC_PATHS = tuple(
+    Path(__file__).resolve().parent.parent
+    / "src" / "prismpy" / "translators" / platform / "translator.py"
+    for platform in _TRANSLATOR_PLATFORMS
+)
+
+
 def _load_manifest_ast() -> ast.Module:
     source = _MANIFEST_SRC_PATH.read_text(encoding="utf-8")
     return ast.parse(source, filename=str(_MANIFEST_SRC_PATH))
@@ -424,4 +432,112 @@ def test_t5_spatial_ref_has_three_documented_fields() -> None:
         assert required in field_names, (
             f"SpatialRef must declare '{required}' field per specialist "
             f"2026-05-19 spec; found fields: {sorted(field_names)}"
+        )
+
+
+# ── B1: translator call sites must populate use_case_config ─────────────────
+
+
+def _find_create_manifest_call(tree: ast.Module) -> ast.Call:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            target = node.func
+            if isinstance(target, ast.Name) and target.id == "create_manifest":
+                return node
+            if isinstance(target, ast.Attribute) and target.attr == "create_manifest":
+                return node
+    pytest.fail("no create_manifest() call found in translator source")
+
+
+def _project_config_for_call(call_node: ast.Call, tree: ast.Module) -> ast.AST:
+    """Resolve the project_config argument of ``create_manifest`` to its
+    dict-literal source. Accepts both positional and keyword
+    invocations (``project_config=...``); the name (when not inline) is
+    resolved by walking the module body for the most recent assignment.
+    """
+    arg: ast.AST | None = None
+    if len(call_node.args) >= 2:
+        arg = call_node.args[1]
+    if arg is None:
+        for kw in call_node.keywords:
+            if kw.arg in ("project_config", "package_config"):
+                arg = kw.value
+                break
+    if arg is None:
+        pytest.fail("could not locate project_config argument on create_manifest()")
+    if isinstance(arg, ast.Dict):
+        return arg
+    if isinstance(arg, ast.Name):
+        target_name = arg.id
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for assign_target in node.targets:
+                    if isinstance(assign_target, ast.Name) and assign_target.id == target_name:
+                        if isinstance(node.value, ast.Dict):
+                            return node.value
+    pytest.fail(
+        f"could not resolve create_manifest project_config arg to a "
+        f"dict literal (got {type(arg).__name__})"
+    )
+
+
+@pytest.mark.parametrize(
+    "translator_path", _TRANSLATOR_SRC_PATHS,
+    ids=lambda p: p.parent.name,
+)
+def test_b1_translator_populates_use_case_config(translator_path: Path) -> None:
+    """B1 closure: every translator's ``create_manifest`` call must
+    pass a ``project_config`` (a.k.a. ``package_config``) dict that
+    declares a non-empty ``use_case_config`` keyset.
+
+    Pre-Phase-F-C the 4 translators built their package_config without
+    ``use_case_config`` → ``canonical_use_case_config_serializer`` and
+    ``canonical_uc_readiness_emitter`` iterated empty source → PR3's
+    native-emission feature was non-functional in production
+    (codex Gate B v1 BLOCKING-1). This test prevents regression by
+    AST-asserting each translator's package_config dict literal
+    contains the ``use_case_config`` key with at least one UC entry.
+    """
+    src = translator_path.read_text(encoding="utf-8")
+    tree = ast.parse(src, filename=str(translator_path))
+    call = _find_create_manifest_call(tree)
+    pc_dict = _project_config_for_call(call, tree)
+
+    use_case_config_value = None
+    for key, value in zip(pc_dict.keys, pc_dict.values):
+        if isinstance(key, ast.Constant) and key.value == "use_case_config":
+            use_case_config_value = value
+            break
+
+    assert use_case_config_value is not None, (
+        f"{translator_path.parent.name} translator's package_config "
+        f"dict literal must declare 'use_case_config' key — without it, "
+        f"the manifest emitter sees an empty UC source and the "
+        f"closed-world emit produces empty uc_readiness."
+    )
+    assert isinstance(use_case_config_value, ast.Dict), (
+        f"{translator_path.parent.name} translator's 'use_case_config' "
+        f"value must be a dict literal (got "
+        f"{type(use_case_config_value).__name__})"
+    )
+    declared_ucs = [
+        k.value for k in use_case_config_value.keys
+        if isinstance(k, ast.Constant) and isinstance(k.value, str)
+    ]
+    assert len(declared_ucs) >= 1, (
+        f"{translator_path.parent.name} translator must declare at "
+        f"least one UC in 'use_case_config' (got empty dict)."
+    )
+    for uc_name in declared_ucs:
+        assert uc_name in {
+            "yield_forecast",
+            "climate_scenarios",
+            "sowing_optimization",
+            "drought_management",
+            "soil_fertility",
+            "livestock_feed",
+        }, (
+            f"{translator_path.parent.name} translator declares "
+            f"unknown UC name {uc_name!r} in use_case_config; expected "
+            f"one of the 6 KNOWN_USE_CASE_NAMES."
         )

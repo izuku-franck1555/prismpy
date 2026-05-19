@@ -1785,6 +1785,13 @@ class SarraPyTranslator(SarraPyTranslatorBase):
                 "crop_parameters": "SARRA-Py defaults",
             },
             "package_name": f"{data.region.name.lower()}_{self.config.crop.name.lower()}_sarra_py_package",
+            "use_case_config": {
+                "yield_forecast": {},
+                "sowing_optimization": {},
+                "drought_management": {},
+                "soil_fertility": {},
+                "livestock_feed": {},
+            },
         }
 
         # V2-20: Legacy System B provenance.json generation deleted.
