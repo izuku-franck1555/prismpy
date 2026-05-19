@@ -317,26 +317,111 @@ def test_t4_legacy_crop_singleton_key_still_emitted() -> None:
     )
 
 
-# ── T5: cells/cell_areas semantic source (STUB until specialist Gate A) ─────
+# ── T5: cells/cell_areas semantic source (FULL semantic check) ──────────────
 
 
-def test_t5_stub_cells_key_emitted_unconditionally() -> None:
-    """Stub: ``cells`` key is in the manifest dict literal per OQ-PR3-1
-    BL-3 resolution path (a). Full semantic source-method verification
-    upgrades after the post-specialist wire-in lands.
+_CELL_AREA_HELPER_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "src" / "prismpy" / "cells" / "canonical_cell_area_km2.py"
+)
+
+
+def test_t5_cells_and_cell_areas_keys_emitted_unconditionally() -> None:
+    """OQ-PR3-1 BL-3 resolution path (a): both ``cells`` and
+    ``cell_areas`` keys are emitted from ``create_manifest`` for ALL
+    platforms — no platform-conditional gate that would re-introduce
+    the prism-runner shim's manual-completion need.
     """
     tree = _load_manifest_ast()
     func = _find_function(tree, "create_manifest")
     keys = _dict_literal_keys(func) | _subscript_assignment_keys(func)
-    assert "cells" in keys
+    assert "cells" in keys, "manifest dict literal must emit 'cells'"
+    assert "cell_areas" in keys, "manifest dict literal must emit 'cell_areas'"
 
 
-def test_t5_stub_canonical_cell_area_km2_helper_exists() -> None:
-    """Stub: the ``canonical_cell_area_km2`` helper is scaffolded so the
-    integration is a one-line addition post-specialist Gate A approval.
-    The full T5 semantic assertion (the manifest emit calls into this
-    helper, NOT a uniform-placeholder constant per path γ) upgrades in
-    the follow-up revision.
+def test_t5_canonical_cell_area_km2_lives_in_canonical_module() -> None:
+    """Per the canonical-helper convention (§3.5) + specialist 2026-05-19
+    spec: the geodesic helper lives in
+    ``prismpy/src/prismpy/cells/canonical_cell_area_km2.py`` as its own
+    canonical-prefixed module — not buried inside
+    ``packaging/manifest.py`` (where the v0.3 scaffold initially lived
+    prior to specialist sign-off).
+    """
+    assert _CELL_AREA_HELPER_PATH.is_file(), (
+        f"canonical_cell_area_km2 helper module not found at expected "
+        f"path {_CELL_AREA_HELPER_PATH}; the canonical-helper convention "
+        f"(§3.5) requires a dedicated module."
+    )
+    helper_src = _CELL_AREA_HELPER_PATH.read_text(encoding="utf-8")
+    helper_tree = ast.parse(helper_src, filename=str(_CELL_AREA_HELPER_PATH))
+    func_names = {
+        node.name for node in ast.walk(helper_tree)
+        if isinstance(node, ast.FunctionDef)
+    }
+    assert "canonical_cell_area_km2" in func_names, (
+        "canonical_cell_area_km2 function must be defined in its "
+        "canonical module."
+    )
+
+
+def test_t5_create_manifest_calls_canonical_cell_area_km2_helper() -> None:
+    """Semantic source-method check per v0.4 codex SH-FIX-3 upgrade:
+    the ``cell_areas`` emission MUST be backed by a call to
+    ``canonical_cell_area_km2`` (path β: geodesic-computed). REJECTS
+    path γ where ``cell_areas`` would be a uniform-placeholder
+    constant detached from any per-cell geodesic source.
     """
     tree = _load_manifest_ast()
-    _find_function(tree, "canonical_cell_area_km2")
+    func = _find_function(tree, "create_manifest")
+    calls_helper = False
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call):
+            continue
+        target = node.func
+        if isinstance(target, ast.Name) and target.id == "canonical_cell_area_km2":
+            calls_helper = True
+            break
+        if isinstance(target, ast.Attribute) and target.attr == "canonical_cell_area_km2":
+            calls_helper = True
+            break
+    assert calls_helper, (
+        "create_manifest must invoke canonical_cell_area_km2 to "
+        "compute cell_areas[] per OQ-PR3-1 path β resolution. A "
+        "uniform-default cell_areas emission (path γ — e.g., "
+        "``[100.0] * len(cells)``) would satisfy key-presence but "
+        "defeat the scientific-source requirement per §464 (Dr. Kofi "
+        "paper-replication; Aminata thesis chapter)."
+    )
+
+
+def test_t5_spatial_ref_has_three_documented_fields() -> None:
+    """Specialist 2026-05-19 spec: ``SpatialRef`` is a frozen dataclass
+    with exactly three documented fields (``resolution_deg``,
+    ``cell_centroid_latitude`` callable, ``deg2_to_km2`` constant).
+    The AST guard asserts the dataclass exists + carries the three
+    field names so future refactors can't silently drop a field.
+    """
+    helper_src = _CELL_AREA_HELPER_PATH.read_text(encoding="utf-8")
+    helper_tree = ast.parse(helper_src, filename=str(_CELL_AREA_HELPER_PATH))
+    spatial_ref_class = None
+    for node in ast.walk(helper_tree):
+        if isinstance(node, ast.ClassDef) and node.name == "SpatialRef":
+            spatial_ref_class = node
+            break
+    assert spatial_ref_class is not None, (
+        "SpatialRef dataclass not found in canonical_cell_area_km2.py"
+    )
+    field_names = {
+        stmt.target.id
+        for stmt in spatial_ref_class.body
+        if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)
+    }
+    for required in (
+        "resolution_deg",
+        "cell_centroid_latitude",
+        "deg2_to_km2",
+    ):
+        assert required in field_names, (
+            f"SpatialRef must declare '{required}' field per specialist "
+            f"2026-05-19 spec; found fields: {sorted(field_names)}"
+        )

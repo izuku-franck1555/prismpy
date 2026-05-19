@@ -30,10 +30,15 @@ Determinism details:
 
 import hashlib
 import json
-import math
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple, Union
+
+from prismpy.cells.canonical_cell_area_km2 import (
+    DEG2_TO_KM2_DEFAULT,
+    SpatialRef,
+    canonical_cell_area_km2,
+)
 
 
 KNOWN_USE_CASE_NAMES: Tuple[str, ...] = (
@@ -180,7 +185,6 @@ _PLATFORM_SUPPORTED_CROPS: Dict[str, FrozenSet[str]] = {
 }
 
 
-_DEG2_KM_PER_DEG: float = 111.32
 
 
 def derive_boundary_label(
@@ -659,64 +663,51 @@ def canonical_uc_readiness_emitter(
     return out
 
 
-def canonical_cell_area_km2(
-    cell_id: int, spatial_ref: Dict[str, Any],
-) -> float:
-    """Geodesic per-cell area in km² from cell_id + spatial reference.
+def _extract_cells_with_centroids(
+    package_dir: Path,
+) -> Tuple[List[int], Dict[int, float]]:
+    """Extract cell IDs and per-cell centroid latitudes from a package.
 
-    Helper SCAFFOLD per OQ-PR3-1 path β resolution. Wire-in into
-    ``create_manifest`` is HELD pending crop-modeling-specialist Gate A
-    sign-off on the geodesic formula (contract §464 mandate). The
-    helper is intentionally NOT called from ``create_manifest`` at
-    this revision; the integration is a one-line addition once the
-    specialist approves.
-
-    Spherical approximation (matches the existing CRAFT translator
-    geodesic at ``translators/craft/translator.py:1394`` formula
-    factored out into a canonical helper per OQ-PR3-1 path β):
-
-        area_km2 = resolution_deg² × (KM_PER_DEG)² × cos(lat)
-
-    ``spatial_ref`` keys (callers MUST supply both):
-        ``resolution_deg``: cell grid resolution in degrees
-            (e.g. 5.0/60.0 for 5-arcmin).
-        ``lat``: cell-center latitude in degrees (longitude axis is
-            compressed by cos(lat) for geodesic accuracy).
-
-    Returns area in km² for the cell. cell_id is used by extended
-    spatial_ref resolvers (caller may pass a dict that derives lat
-    from cell_id) — this base implementation reads ``lat`` directly
-    from ``spatial_ref``.
-    """
-    resolution_deg = float(spatial_ref.get("resolution_deg", 5.0 / 60.0))
-    lat = float(spatial_ref.get("lat", 0.0))
-    cell_area_deg2 = resolution_deg ** 2
-    return cell_area_deg2 * (_DEG2_KM_PER_DEG ** 2) * math.cos(math.radians(lat))
-
-
-def _extract_cells_from_package(package_dir: Path) -> List[int]:
-    """Port the cell-extraction logic from the legacy completion shim.
-
-    Reads cell IDs from ``cell_summary.json`` (preferred when present)
-    or falls back to ``shapes/sites.shp`` via geopandas. Returns an
-    empty list when neither source is available — ``create_manifest``
-    callers then emit ``manifest.cells: []`` and downstream consumers
-    treat the package as cells-empty per UC Hook-0 semantics.
+    Preferred source is ``cell_summary.json``; falls back to
+    ``shapes/sites.shp`` via geopandas. Returns
+    ``(cells_list, centroid_lat_by_cell_id)`` — ``cells_list`` is the
+    ordered list of cell IDs (port of the legacy completion shim's
+    extraction logic); ``centroid_lat_by_cell_id`` carries the per-
+    cell centroid latitude in degrees when the source provides it
+    (cell_summary.json dict entries with ``lat``/``latitude``/
+    ``centroid_lat``/``centroid_latitude`` keys, or sites.shp geometry
+    centroids). Cells without an available per-cell lat are absent
+    from the dict; callers should fall back to a region-level default
+    in that case.
     """
     cs_path = package_dir / "cell_summary.json"
     if cs_path.exists():
         try:
             cs = json.loads(cs_path.read_text())
             cells_raw = cs.get("cells") or []
-            out: List[int] = []
+            cells: List[int] = []
+            lats: Dict[int, float] = {}
             for c in cells_raw:
                 if isinstance(c, dict):
                     cid = c.get("id") or c.get("cell_id")
-                    if cid is not None:
-                        out.append(int(cid))
+                    if cid is None:
+                        continue
+                    cid_int = int(cid)
+                    cells.append(cid_int)
+                    lat_value = (
+                        c.get("lat")
+                        or c.get("latitude")
+                        or c.get("centroid_lat")
+                        or c.get("centroid_latitude")
+                    )
+                    if lat_value is not None:
+                        try:
+                            lats[cid_int] = float(lat_value)
+                        except (TypeError, ValueError):
+                            pass
                 else:
-                    out.append(int(c))
-            return out
+                    cells.append(int(c))
+            return cells, lats
         except (json.JSONDecodeError, ValueError, TypeError):
             pass
 
@@ -725,13 +716,62 @@ def _extract_cells_from_package(package_dir: Path) -> List[int]:
         try:
             import geopandas as gpd
             gdf = gpd.read_file(shp)
+            id_col = None
             for candidate in ("ID", "id", "CellID", "cell_id"):
                 if candidate in gdf.columns:
-                    return [int(v) for v in gdf[candidate].tolist()]
+                    id_col = candidate
+                    break
+            if id_col is None:
+                return [], {}
+            cells = [int(v) for v in gdf[id_col].tolist()]
+            lats = {}
+            for cid_raw, geom in zip(gdf[id_col], gdf.geometry):
+                if geom is None or not hasattr(geom, "centroid"):
+                    continue
+                try:
+                    lats[int(cid_raw)] = float(geom.centroid.y)
+                except (TypeError, ValueError):
+                    continue
+            return cells, lats
         except Exception:
-            return []
+            return [], {}
 
-    return []
+    return [], {}
+
+
+def _build_spatial_ref_for_package(
+    project_config: Dict[str, Any],
+    centroid_lat_by_cell_id: Dict[int, float],
+) -> SpatialRef:
+    """Construct a :class:`SpatialRef` for the package.
+
+    Resolution is sourced from ``project_config['resolution_deg']`` when
+    present; otherwise defaults to 5-arcmin (1/12 deg) which is the
+    dominant Sahel-grid resolution across translators today. The
+    ``cell_centroid_latitude`` callable returns the per-cell centroid
+    when known (extracted from cell_summary.json or sites.shp);
+    otherwise returns a region-level fallback lat sourced from
+    ``project_config['region_centroid_lat']`` (or 0.0 — equator — as
+    last-resort default; callers concerned with accuracy should supply
+    per-cell lats via the cell_summary.json centroid keys).
+    """
+    resolution_deg = float(
+        project_config.get("resolution_deg", 1.0 / 12.0),
+    )
+    fallback_lat = float(
+        project_config.get("region_centroid_lat", 0.0),
+    )
+
+    def _lat_for_cell(cell_id: int) -> float:
+        if cell_id in centroid_lat_by_cell_id:
+            return centroid_lat_by_cell_id[cell_id]
+        return fallback_lat
+
+    return SpatialRef(
+        resolution_deg=resolution_deg,
+        cell_centroid_latitude=_lat_for_cell,
+        deg2_to_km2=DEG2_TO_KM2_DEFAULT,
+    )
 
 
 def create_manifest(
@@ -769,7 +809,13 @@ def create_manifest(
 
     use_case_config_emit = canonical_use_case_config_serializer(project_config)
     crops_list = canonical_crops_emitter(project_config)
-    cells_list = _extract_cells_from_package(package_dir)
+    cells_list, centroid_lat_by_cell_id = _extract_cells_with_centroids(package_dir)
+    spatial_ref = _build_spatial_ref_for_package(
+        project_config, centroid_lat_by_cell_id,
+    )
+    cell_areas_list = [
+        canonical_cell_area_km2(cid, spatial_ref) for cid in cells_list
+    ]
 
     manifest = {
         "package_version": "1.0",
@@ -823,6 +869,8 @@ def create_manifest(
         },
 
         "cells": cells_list,
+
+        "cell_areas": cell_areas_list,
 
         "files": files,
 
