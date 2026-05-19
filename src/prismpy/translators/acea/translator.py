@@ -30,6 +30,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from prismpy.cells.admission import (
+    canonical_climate_for_grid,
+    cell_id_5arcmin_to_30arcmin_parent,
+)
 from prismpy.config.schema import Platform
 from prismpy.models.climate import ClimateRecord, ClimateTimeSeries
 from prismpy.models.crop import CropParameters, CropCalendar
@@ -439,27 +443,16 @@ class AceaTranslator(AceaTranslatorBase):
                 download_enabled = getattr(platform_config, 'download_climate', True)
                 download_delay = getattr(platform_config, 'climate_download_delay', 2.0)
 
-            # Compute REAL 30-arcmin tile coverage from current data.climate.
-            # Keys may be either 5-arcmin (post-download default) or already
-            # 30-arcmin (when a caller hands in pre-aggregated tile coverage,
-            # which ``_create_id_mapping`` already supports downstream). Map
-            # 5-arcmin keys to their parent tile; pass already-30-arcmin keys
-            # through unchanged. The helper excludes the sentinel; record
-            # validity (>1 records) excludes degenerate empty time-series.
-            # The final intersection bounds coverage to the region's expected
-            # tile set so a stray out-of-region tile in ``climate_data``
-            # (e.g., from upstream cache reuse) cannot fold by coincidence
-            # onto an in-region tile and falsely declare coverage complete.
+            # Compute REAL 30-arcmin tile coverage via the canonical
+            # admission helper. The helper admits only keys that match
+            # ``data.grid.cells`` (5-arcmin direct admission) or those
+            # cells' parent tiles (30-arcmin broadcast admission);
+            # foreign keys whose parent-fold coincidentally lands on
+            # an in-region target tile are dropped at admission rather
+            # than rescued by an intersection downstream.
             cell_ids_30arcmin_set = set(cell_ids_30arcmin)
-            real_30arcmin_tiles = {
-                (k if k in cell_ids_30arcmin_set
-                 else self._cell_id_5arcmin_to_30arcmin_parent(k))
-                for k, ts in climate_data.items()
-                if is_real_climate_cell_id(k)
-                and hasattr(ts, 'records')
-                and len(ts.records) > 1
-            } & cell_ids_30arcmin_set
-            missing_tiles = cell_ids_30arcmin_set - real_30arcmin_tiles
+            canonical = canonical_climate_for_grid(climate_data, data.grid)
+            missing_tiles = cell_ids_30arcmin_set - canonical.covered_tile_ids
 
             if missing_tiles and data.grid and download_enabled:
                 # Download NASA POWER climate data for the missing 30-arcmin
@@ -470,7 +463,7 @@ class AceaTranslator(AceaTranslatorBase):
                 # retrieve-stage path-dict variants (matches CRAFT pattern).
                 logger.info(
                     f"Climate coverage incomplete "
-                    f"({len(real_30arcmin_tiles)}/{len(cell_ids_30arcmin)} tiles) — "
+                    f"({len(canonical.covered_tile_ids)}/{len(cell_ids_30arcmin)} tiles) — "
                     f"downloading from NASA POWER for {len(missing_tiles)} missing tiles..."
                 )
 
@@ -504,20 +497,18 @@ class AceaTranslator(AceaTranslatorBase):
                     climate_data = {**climate_data, **downloaded_climate}
                     logger.info(f"Climate data now has {len(climate_data)} locations")
 
-                # AC-F-CP-12 fail-loud per durable §28 + F-AG class
-                # precedent: re-compute coverage after merge. If tiles are
-                # still uncovered, raise the typed error so the pipeline
-                # status reflects the gap honestly (not a silent 'complete'
-                # with missing climate pickles in the package).
-                post_download_30arcmin_tiles = {
-                    (k if k in cell_ids_30arcmin_set
-                     else self._cell_id_5arcmin_to_30arcmin_parent(k))
-                    for k, ts in climate_data.items()
-                    if is_real_climate_cell_id(k)
-                    and hasattr(ts, 'records')
-                    and len(ts.records) > 1
-                } & cell_ids_30arcmin_set
-                still_missing = cell_ids_30arcmin_set - post_download_30arcmin_tiles
+                # Re-compute coverage after merge through the same
+                # canonical admission boundary so any tile still
+                # uncovered surfaces a typed error rather than a silent
+                # 'complete' with missing pickles in the package
+                # (durable §28 + F-AG honest-signal class).
+                post_download_canonical = canonical_climate_for_grid(
+                    climate_data, data.grid
+                )
+                still_missing = (
+                    cell_ids_30arcmin_set
+                    - post_download_canonical.covered_tile_ids
+                )
                 if still_missing:
                     raise ClimateDownloadError(
                         f"NASA POWER climate download incomplete: "
@@ -533,33 +524,28 @@ class AceaTranslator(AceaTranslatorBase):
                 # downstream Coverage validator fires correctly.
                 warnings.append(
                     f"Climate coverage incomplete "
-                    f"({len(real_30arcmin_tiles)}/{len(cell_ids_30arcmin)} tiles) "
+                    f"({len(canonical.covered_tile_ids)}/{len(cell_ids_30arcmin)} tiles) "
                     f"and download_climate=False; package will fail Coverage "
                     f"validator honestly."
                 )
 
             if climate_data:
-                climate_files = self._generate_climate_pickles(
-                    climate_data, cell_ids_30arcmin, climate_name
-                )
-                output_files.extend(climate_files)
-
-                # Surface per-cell climate onto the shared UnifiedData
-                # so the cell-summary writer and per-cell coverage
-                # validators observe the actual climate-loaded state.
-                # Canonicalize first so the surfaced dict is keyed by
-                # ``cell.cell_id`` regardless of whether the upstream
-                # download path emitted 5-arcmin or 30-arcmin keys, and
-                # so foreign keys (out-of-region or fold-collision)
-                # cannot reach the surfacing helper. The canonical
-                # emitter iterates ``data.grid.cells`` and never folds
-                # ``climate_data`` keys, which prevents a foreign tile
+                # Canonical admission at the producer boundary so the
+                # pickle writer + per-cell surface helper consume one
+                # trusted view. Iterating ``data.grid.cells`` rather
+                # than ``climate_data.keys()`` prevents a foreign tile
                 # whose parent-fold coincidentally lands on an in-region
-                # target from masquerading as real coverage.
-                canonical_climate = self._canonicalize_climate_by_grid_cells(
+                # target from masquerading as real coverage; per-cell
+                # distinct series under shared parents are preserved by
+                # the helper's two-pass admission.
+                canonical = canonical_climate_for_grid(
                     climate_data, data.grid
                 )
-                self._surface_per_cell_climate(data, canonical_climate)
+                climate_files = self._generate_climate_pickles(
+                    canonical.per_cell, cell_ids_30arcmin, climate_name
+                )
+                output_files.extend(climate_files)
+                self._surface_per_cell_climate(data, canonical.per_cell)
 
             # 2. Generate soil data (ACEA-compatible NetCDF)
             # ACEA requires soil data in NetCDF format (HWSD_soil_data_on_cropland_v2.3.nc)
@@ -812,141 +798,6 @@ class AceaTranslator(AceaTranslatorBase):
             data, cell_ids, climate_name, output_files
         )
 
-    def _cell_id_5arcmin_to_30arcmin_parent(self, cell_id_5: int) -> int:
-        """Map a 5-arcmin cell ID to its parent 30-arcmin tile ID.
-
-        5-arcmin grid: 4320 cols × 2160 rows. 30-arcmin grid: 720 cols ×
-        360 rows. The reduction factor is 6× per axis.
-
-        AC-F-CP-12 uses this mapping in the climate gate's set-difference
-        coverage check: ``data.climate`` is 5-arcmin keyed post-download
-        (see ``_download_climate_30arcmin``'s post-loop fanout that maps
-        30-arcmin tile downloads back to 5-arcmin ``cell.cell_id`` keys);
-        the gate computes ``real_30arcmin_tiles = {parent(k) for k in
-        real_keys}`` to honestly answer "which tiles are covered" before
-        deciding what to fetch.
-        """
-        row_5 = cell_id_5 // self.GRID_COLS_5ARCMIN
-        col_5 = cell_id_5 % self.GRID_COLS_5ARCMIN
-        row_30 = row_5 // 6
-        col_30 = col_5 // 6
-        return row_30 * self.GRID_COLS_30ARCMIN + col_30
-
-    def _canonicalize_climate_by_grid_cells(
-        self,
-        climate_data: Dict[Any, "ClimateTimeSeries"],
-        grid: Optional["SpatialGrid"],
-    ) -> Dict[int, "ClimateTimeSeries"]:
-        """Emit a per-grid-cell climate dict from ``climate_data`` using
-        ``grid.cells`` as the canonical source of truth.
-
-        The translator's input ``climate_data`` may carry several key
-        shapes that arrived from different upstream paths (5-arcmin grid
-        cells from per-tile fanout, raw 30-arcmin tile IDs handed in by
-        a caller, the placeholder sentinel from the retrieve stage, or
-        path-dict strings from SARRA-Py). Every consumer downstream of
-        the translator expects the dict keyed by ``cell.cell_id`` —
-        i.e., the grid's 5-arcmin cell IDs.
-
-        Strategy: iterate ``grid.cells`` rather than ``climate_data``.
-        For each cell, compute its parent 30-arcmin tile; admit the
-        cell into the canonical dict only when ``climate_data`` carries
-        a valid series under either the 5-arcmin cell key OR the
-        30-arcmin parent tile key. ``climate_data`` keys that match
-        neither of those two known shapes are skipped — including
-        foreign 30-arcmin tile IDs whose parent-fold lands by
-        coincidence on an in-region target. Cells without a real
-        series surface as missing-coverage downstream; the per-cell
-        validator's job is to report that honestly, not the canonical
-        emitter's.
-
-        Returns an empty dict when ``grid`` is None or has no cells —
-        callers fall through to the existing surfacing helper, which
-        is a no-op on an empty input.
-        """
-        # Late-import the canonical predicate; other call sites in this
-        # module use the same late-import pattern (no top-of-file
-        # import for ``is_real_climate_cell_id``).
-        from prismpy.sources.climate import is_real_climate_cell_id
-
-        canonical: Dict[int, "ClimateTimeSeries"] = {}
-        if grid is None or not grid.cells:
-            return canonical
-
-        # Build the canonical view from grid.cells. The cell→tile map +
-        # the inverse cell-id set are both derived FROM grid.cells, so
-        # they are the only key spaces this helper trusts as admissible
-        # in ``climate_data``. Foreign keys whose fold collides on a
-        # target tile (Scenario B) NEVER reach the canonical dict
-        # because they are not in either trusted space.
-        cell_id_to_tile = {
-            cell.cell_id: self._cell_id_5arcmin_to_30arcmin_parent(
-                cell.cell_id
-            )
-            for cell in grid.cells
-        }
-        grid_cell_ids = set(cell_id_to_tile.keys())
-        grid_tile_ids = set(cell_id_to_tile.values())
-
-        # Two-pass admission. Each pass is keyed by a different
-        # admission space derived from grid.cells. The two passes
-        # MUST stay separate: a 5-arcmin-keyed input carries
-        # per-cell series that would collapse if we folded it onto
-        # the parent tile and then fanned the parent back out to
-        # children (last-write-wins on the tile slot, all sibling
-        # cells receive the LAST iterated child's series — silent
-        # per-cell data corruption).
-        #
-        # Pass 1: direct per-cell hits. ``climate_data`` keyed by a
-        # known 5-arcmin grid cell id writes straight into
-        # ``canonical[key]``; distinct sibling cells therefore keep
-        # distinct series even when they share a parent tile.
-        #
-        # Pass 2: tile-keyed fan-out. ``climate_data`` keyed by a
-        # known 30-arcmin tile id is the producer's "broadcast this
-        # series to every 5-arcmin child of the tile" intent; we
-        # admit those into ``tile_lookup`` and fan them out in the
-        # second loop, skipping cells already populated by Pass 1
-        # so a directly-keyed input is never overwritten by a
-        # broadcast that shares its parent.
-        tile_lookup: Dict[int, "ClimateTimeSeries"] = {}
-        for key, series in climate_data.items():
-            if not is_real_climate_cell_id(key):
-                continue
-            if not (
-                hasattr(series, "records")
-                and series.records
-                and len(series.records) > 1
-            ):
-                continue
-            if key in grid_cell_ids:
-                # Direct per-cell admission. Writing straight to
-                # ``canonical`` preserves per-cell distinctness when
-                # multiple 5-arcmin children of the same parent
-                # tile carry different series.
-                canonical[key] = series
-            elif key in grid_tile_ids:
-                # Tile-keyed broadcast. Fan-out happens in the
-                # second loop below.
-                tile_lookup[key] = series
-            # Else: foreign key (not a known tile, not a known cell);
-            # skip without folding so the Scenario B coincidence (a
-            # foreign tile whose fold-by-coincidence lands on an
-            # in-region target) cannot slip into the canonical dict.
-
-        for cell in grid.cells:
-            if cell.cell_id in canonical:
-                # Pass 1 already populated this cell with its own
-                # series; do not overwrite with a tile-keyed
-                # broadcast that shares the parent tile.
-                continue
-            tile = cell_id_to_tile[cell.cell_id]
-            series = tile_lookup.get(tile)
-            if series is not None:
-                canonical[cell.cell_id] = series
-
-        return canonical
-
     def _compute_30arcmin_cell_ids(self, grid: Optional[SpatialGrid]) -> List[int]:
         """Compute UNIQUE 30-arcmin cell IDs from grid.
 
@@ -1080,22 +931,30 @@ class AceaTranslator(AceaTranslatorBase):
         output_files = []
         climate_dir = self.output_dir / "climate"
 
-        # Map 5-arcmin to 30-arcmin if needed
-        id_mapping = self._create_id_mapping(climate_data.keys(), cell_ids_30arcmin)
+        # Production callers route ``climate_data`` through
+        # ``canonical_climate_for_grid`` before this writer, so the
+        # input is already keyed by 5-arcmin ``cell.cell_id``. The
+        # 30-arcmin pickle id is the parent-fold of that key; we also
+        # accept already-30-arcmin keys (the input shape used by the
+        # writer's standalone unit tests) by passing them through when
+        # they match the target tile set.
+        target_set_30arcmin = set(cell_ids_30arcmin)
 
         from prismpy.sources.climate import is_real_climate_cell_id
 
         for loc_id, ts in climate_data.items():
-            # Skip placeholder cells (sentinel keys, non-int keys) per the
-            # canonical helper. Replaces the prior raw ``loc_id < 0`` check
-            # so the sentinel-discipline convention has a single source
-            # of truth (durable §24 + AC-F-CP-14).
+            # Defense-in-depth on canonical input: drop sentinel /
+            # non-int residue if a non-canonical caller (e.g., a unit
+            # test) hands one in.
             if not is_real_climate_cell_id(loc_id):
                 logger.debug(f"Skipping placeholder climate data (ID={loc_id})")
                 continue
 
-            # Get 30-arcmin cell ID
-            cell_id_30 = id_mapping.get(loc_id, loc_id)
+            cell_id_30 = (
+                loc_id
+                if loc_id in target_set_30arcmin
+                else cell_id_5arcmin_to_30arcmin_parent(loc_id)
+            )
 
             # Extract arrays
             tmax = np.array([r.tmax for r in ts.records], dtype=np.float32)
@@ -1193,61 +1052,6 @@ class AceaTranslator(AceaTranslatorBase):
         et0 = 0.0023 * Ra * (tmean + 17.8) * np.sqrt(tdelta)
 
         return max(0, et0)
-
-    def _create_id_mapping(
-        self,
-        source_ids: Any,
-        target_ids: List[int],
-    ) -> Dict[int, int]:
-        """Create mapping from source IDs to 30-arcmin IDs.
-
-        Maps 5-arcmin cell IDs to their parent 30-arcmin cell IDs based on
-        spatial relationship. Each 30-arcmin cell contains a 6x6 grid of
-        5-arcmin cells.
-
-        Args:
-            source_ids: Source location IDs (may be 5-arcmin cell IDs)
-            target_ids: Target 30-arcmin cell IDs
-
-        Returns:
-            Dictionary mapping source_id to 30-arcmin cell_id
-        """
-        mapping = {}
-        target_set = set(target_ids)
-
-        # Grid constants
-        COLS_5ARCMIN = 4320  # 360 degrees / (5/60) degrees
-        COLS_30ARCMIN = 720  # 360 degrees / 0.5 degrees
-
-        for src_id in source_ids:
-            if src_id < 0:
-                # Skip placeholder IDs
-                mapping[src_id] = src_id
-                continue
-
-            # Check if source ID is in 5-arcmin range (larger numbers)
-            if src_id >= 1000000:  # 5-arcmin IDs are typically in millions
-                # Convert 5-arcmin cell to 30-arcmin cell
-                row_5 = src_id // COLS_5ARCMIN
-                col_5 = src_id % COLS_5ARCMIN
-
-                # Each 30-arcmin cell contains 6x6 5-arcmin cells
-                row_30 = row_5 // 6
-                col_30 = col_5 // 6
-
-                cell_id_30 = row_30 * COLS_30ARCMIN + col_30
-            else:
-                # Assume already 30-arcmin or small ID
-                cell_id_30 = src_id
-
-            # Only map if target is in our list
-            if cell_id_30 in target_set:
-                mapping[src_id] = cell_id_30
-            else:
-                # Keep original if not in target set
-                mapping[src_id] = src_id
-
-        return mapping
 
     def _download_nasa_power_climate(
         self,
