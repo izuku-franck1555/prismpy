@@ -2360,12 +2360,17 @@ if __name__ == "__main__":
             'climate_name': climate_name,
             'gridcells': cell_ids_30arcmin,
 
-            # Config parameters
+            # Config parameters. ``gridcells`` above carries 30-arcmin
+            # cell IDs (the variable name ``cell_ids_30arcmin`` reflects
+            # the actual ACEA grid); the resolution code 0 + the
+            # explicit ``resolution_deg`` keep the manifest emitter's
+            # cell-area computation aligned with the real grid.
             'clock_start': f"{climate_start}/01/01",
             'clock_end': self.config.temporal.get_climate_end_date(
                 self.config.crop.calendar if self.config.crop else None
             ).strftime('%Y/%m/%d'),
-            'resolution': 1,  # 5arcmin
+            'resolution': 0,  # ACEA integer code: 0 = 30-arcmin
+            'resolution_deg': 30.0 / 60.0,
             'scenarios': [1],  # rainfed
 
             # Data sources
