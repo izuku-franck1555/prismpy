@@ -633,16 +633,18 @@ class TestSarraPyBarDDiscriminator(unittest.TestCase):
     def test_sarra_py_rejects_sentinel_and_non_int_documents_foreign_int_limitation(self):
         """Structural + behavioural pin.
 
-        Structural part: the source of ``_generate_climate_files``
-        contains the canonical predicate at the per-loc admission
-        gate (function-scoped walk; the predicate also appears at
-        ``translate()``'s metadata-counter site, so a file-level grep
-        cannot distinguish a reverted ``:741`` from the unchanged
-        ``:301`` callsite).
+        Structural part (mutation drill anchor): the source of
+        ``_generate_climate_files`` contains the canonical predicate
+        at the per-loc admission gate. Function-scoped walk because
+        the predicate also appears at ``translate()``'s metadata-
+        counter site, so a file-level grep cannot distinguish a
+        reverted ``:741`` from the unchanged ``:301`` callsite. A
+        revert of the production gate is caught here.
 
-        Behavioural part: against a synthetic ``climate_data`` whose
-        values ALL carry valid ``records`` (so ``hasattr`` cannot be
-        the rejector), the post-fix predicate admits:
+        Behavioural part (predicate-semantics documentation): against
+        a synthetic ``climate_data`` whose values ALL carry valid
+        ``records`` (so ``hasattr`` cannot be the rejector), the
+        canonical predicate admits:
 
         - the real grid cell (positive parity preserved),
         - the foreign non-grid non-negative int (DOCUMENTED LIMITATION
@@ -653,6 +655,19 @@ class TestSarraPyBarDDiscriminator(unittest.TestCase):
         - the sentinel ``-1``,
         - the path-dict string keys ``rainfall_dir`` /
           ``agera5_dir``.
+
+        Coverage boundary (intentional): the behavioural block
+        evaluates the predicate in test scope, not by invoking the
+        production ``_generate_climate_files`` directly. A production
+        revert at ``:741`` would NOT be caught by the behavioural
+        assertions because they exercise the canonical predicate
+        in-test; the structural assertion above is the mutation
+        anchor. Lifting the behavioural block to a full call-through
+        would require translator instantiation + file-system mocks
+        for the NetCDF / CSV writer chain, which adds substantial
+        fixture surface for a coverage class already locked by the
+        structural assertion. Documenting the boundary here keeps
+        the pin honest about what it does and does not protect.
         """
         from prismpy.sources.climate import is_real_climate_cell_id
 
