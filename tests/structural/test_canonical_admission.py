@@ -285,6 +285,12 @@ _META_PIN_ALLOWLIST = frozenset(
         ("translators/acea/translator.py", "translate"),
         ("translators/craft/translator.py", "translate"),
         ("translators/sarra_py/translator.py", "translate"),
+        # SARRA-Py's per-loc admission inside the climate-file writer.
+        # The substrate is path-dict-aware (string keys for path-dict
+        # variants, int keys for ClimateTimeSeries variants) so the
+        # canonical helper cannot route it; the local predicate at
+        # this callsite is the substrate-specific admission gate.
+        ("translators/sarra_py/translator.py", "_generate_climate_files"),
         # Scientific validator coverage check — read-only inspection.
         ("validators/scientific.py", "_check_coverage"),
         # Cockpit observed-values writer — read-only on
@@ -585,6 +591,158 @@ class TestPythiaProducerFilterRoutesThroughHelper(unittest.TestCase):
         )
         real_climate_data = canonical.per_cell
         self.assertEqual(set(real_climate_data.keys()), {9241})
+
+
+# ---------------------------------------------------------------------------
+# SARRA-Py Bar D discriminator (substrate-specific local tightening)
+# ---------------------------------------------------------------------------
+
+
+def _function_body_source(module_path: str, qualname: str) -> str:
+    """Return the source of a method body by enclosing-function scope.
+
+    Reads ``module_path`` (a dotted name like
+    ``prismpy.translators.sarra_py.translator``) and locates the
+    ``ClassName.method_name`` named by ``qualname``. Returning the
+    method source rather than the whole module text lets assertions
+    target the specific function body — the global
+    ``is_real_climate_cell_id`` name is referenced elsewhere in the
+    same file for metadata counting, and a file-level grep would
+    falsely pass when only the metadata-counter site survives.
+    """
+    import importlib
+
+    mod = importlib.import_module(module_path)
+    cls_name, method_name = qualname.split(".")
+    cls = getattr(mod, cls_name)
+    method = getattr(cls, method_name)
+    return inspect.getsource(method)
+
+
+class TestSarraPyBarDDiscriminator(unittest.TestCase):
+    """SARRA-Py's per-loc admission inside ``_generate_climate_files``
+    tightens from a Bar D (``hasattr`` only) check to the canonical
+    real-cell predicate plus the records-shape guard. The fix closes
+    the latent admission gap for the sentinel placeholder and
+    path-dict string keys; it does NOT close foreign non-grid
+    non-negative integer admission because the canonical predicate
+    has no grid context (SARRA-Py's substrate-shape — path-dict OR
+    ClimateTimeSeries dict — is outside the canonical helper's
+    domain by design)."""
+
+    def test_sarra_py_rejects_sentinel_and_non_int_documents_foreign_int_limitation(self):
+        """Structural + behavioural pin.
+
+        Structural part (mutation drill anchor): the source of
+        ``_generate_climate_files`` contains the canonical predicate
+        at the per-loc admission gate. Function-scoped walk because
+        the predicate also appears at ``translate()``'s metadata-
+        counter site, so a file-level grep cannot distinguish a
+        reverted ``:741`` from the unchanged ``:301`` callsite. A
+        revert of the production gate is caught here.
+
+        Behavioural part (predicate-semantics documentation): against
+        a synthetic ``climate_data`` whose values ALL carry valid
+        ``records`` (so ``hasattr`` cannot be the rejector), the
+        canonical predicate admits:
+
+        - the real grid cell (positive parity preserved),
+        - the foreign non-grid non-negative int (DOCUMENTED LIMITATION
+          per CMS DN-3; the canonical predicate has no grid context),
+
+        and rejects:
+
+        - the sentinel ``-1``,
+        - the path-dict string keys ``rainfall_dir`` /
+          ``agera5_dir``.
+
+        Coverage boundary (intentional): the behavioural block
+        evaluates the predicate in test scope, not by invoking the
+        production ``_generate_climate_files`` directly. A production
+        revert at ``:741`` would NOT be caught by the behavioural
+        assertions because they exercise the canonical predicate
+        in-test; the structural assertion above is the mutation
+        anchor. Lifting the behavioural block to a full call-through
+        would require translator instantiation + file-system mocks
+        for the NetCDF / CSV writer chain, which adds substantial
+        fixture surface for a coverage class already locked by the
+        structural assertion. Documenting the boundary here keeps
+        the pin honest about what it does and does not protect.
+        """
+        from prismpy.sources.climate import is_real_climate_cell_id
+
+        # Structural — function-scoped walk so a revert at the
+        # admission gate is caught even though the metadata-counter
+        # site in ``translate()`` keeps the predicate name live in
+        # the same module.
+        source = _function_body_source(
+            "prismpy.translators.sarra_py.translator",
+            "SarraPyTranslator._generate_climate_files",
+        )
+        self.assertIn(
+            "is_real_climate_cell_id(loc_id)",
+            source,
+            "_generate_climate_files MUST gate per-loc admission on "
+            "is_real_climate_cell_id(loc_id); reverting to a "
+            "hasattr-only check re-opens the sentinel + path-dict "
+            "string admission gap.",
+        )
+        self.assertIn(
+            "hasattr(ts, 'records')",
+            source,
+            "_generate_climate_files MUST keep the records-shape "
+            "guard alongside the canonical predicate; the predicate "
+            "is the key-shape gate and the records check is the "
+            "value-shape gate.",
+        )
+
+        # Behavioural — all values carry valid records so the
+        # predicate is the rejector. Real grid cell + foreign non-grid
+        # int both admit (foreign int admission is the documented
+        # limitation per CMS DN-3); sentinel + non-int strings drop.
+        class _MultiRec:
+            records = [object(), object()]
+
+        climate_data = {
+            -1: _MultiRec(),                # sentinel placeholder
+            100001: _MultiRec(),            # real grid cell
+            99999999: _MultiRec(),          # foreign non-grid int
+            "rainfall_dir": _MultiRec(),    # path-dict string
+            "agera5_dir": _MultiRec(),      # path-dict string
+        }
+        admitted = [
+            k for k, ts in climate_data.items()
+            if is_real_climate_cell_id(k) and hasattr(ts, "records")
+        ]
+        # POSITIVE assertions — sentinel + non-int strings dropped.
+        self.assertNotIn(-1, admitted)
+        self.assertNotIn("rainfall_dir", admitted)
+        self.assertNotIn("agera5_dir", admitted)
+        # POSITIVE assertion — real cell preserved.
+        self.assertIn(100001, admitted)
+        # DOCUMENTED LIMITATION — foreign non-grid non-negative int
+        # admits. The canonical predicate has no grid set; closing
+        # this surface would require canonical-helper migration which
+        # CMS DN-3 explicitly excludes for the SARRA-Py substrate.
+        self.assertIn(99999999, admitted)
+
+    def test_sarra_py_admits_real_cells_unchanged(self):
+        """Positive parity — a clean climate_data with two real grid
+        cells and valid multi-record series admits both cells; the
+        post-fix predicate adds no behaviour beyond closing the
+        sentinel / non-int gap on the same predicate every other
+        translator's gate already uses."""
+        from prismpy.sources.climate import is_real_climate_cell_id
+
+        class _MultiRec:
+            records = [object(), object()]
+
+        climate_data = {100001: _MultiRec(), 100002: _MultiRec()}
+        admitted = [
+            k for k, ts in climate_data.items()
+            if is_real_climate_cell_id(k) and hasattr(ts, "records")
+        ]
+        self.assertEqual(sorted(admitted), [100001, 100002])
 
 
 # ---------------------------------------------------------------------------

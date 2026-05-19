@@ -737,9 +737,16 @@ class SarraPyTranslator(SarraPyTranslatorBase):
             logger.warning("xarray not available, using CSV for climate data")
             use_netcdf = False
 
-        # Separate rainfall and temperature data
+        # Separate rainfall and temperature data. The canonical
+        # real-cell predicate keeps the sentinel placeholder and
+        # non-int path-dict keys (``rainfall_dir`` / ``agera5_dir``)
+        # from reaching the NetCDF / CSV writers; the records check
+        # is the value-shape guard that drops anything that isn't a
+        # ``ClimateTimeSeries``.
+        from prismpy.sources.climate import is_real_climate_cell_id
+
         for loc_id, ts in climate_data.items():
-            if not hasattr(ts, 'records'):  # Skip if not a ClimateTimeSeries
+            if not (is_real_climate_cell_id(loc_id) and hasattr(ts, 'records')):
                 continue
             if use_netcdf:
                 # Create NetCDF files
