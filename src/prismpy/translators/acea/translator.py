@@ -2360,12 +2360,17 @@ if __name__ == "__main__":
             'climate_name': climate_name,
             'gridcells': cell_ids_30arcmin,
 
-            # Config parameters
+            # Config parameters. ``gridcells`` above carries 30-arcmin
+            # cell IDs (the variable name ``cell_ids_30arcmin`` reflects
+            # the actual ACEA grid); the resolution code 0 + the
+            # explicit ``resolution_deg`` keep the manifest emitter's
+            # cell-area computation aligned with the real grid.
             'clock_start': f"{climate_start}/01/01",
             'clock_end': self.config.temporal.get_climate_end_date(
                 self.config.crop.calendar if self.config.crop else None
             ).strftime('%Y/%m/%d'),
-            'resolution': 1,  # 5arcmin
+            'resolution': 0,  # ACEA integer code: 0 = 30-arcmin
+            'resolution_deg': 30.0 / 60.0,
             'scenarios': [1],  # rainfed
 
             # Data sources
@@ -2381,11 +2386,36 @@ if __name__ == "__main__":
                 'crop_suitability': gaez_source,
                 'boundaries': boundary_label,
             },
+
+            # Closed-world UC declaration: ACEA-translated packages
+            # serve UC1 (yield_forecast), UC4 (drought_management), and
+            # UC5 (soil_fertility). UC3 (sowing_optimization) is a
+            # SARRA-Py/PYTHIA-leaning workflow and is not surfaced from
+            # ACEA emit; UC6 (livestock_feed) requires the residue
+            # aggregator path that ACEA does not currently feed. Empty
+            # per-UC dicts signal "use UC defaults at dispatch time".
+            'use_case_config': {
+                'yield_forecast': {},
+                'drought_management': {},
+                'soil_fertility': {},
+            },
         }
 
-        # 1. Generate manifest
+        # 1. Generate manifest. Defaults to ``False`` post-Phase-F-C
+        # B2 fix: the trigger must be explicitly set by
+        # ``_generate_acea_config`` (line :2915 hardcode site) before
+        # this method runs — without an explicit set, no advisory
+        # propagates (eliminates the eager false-positive class).
+        manifest_extra: Dict[str, Any] = {}
+        if getattr(self, '_uc5_pythia_pk_silent_no_op_triggered', False):
+            manifest_extra['_acea_uc5_p_k_silent_no_op_triggered'] = True
         try:
-            manifest = create_manifest(self.output_dir, package_config, platform='acea')
+            manifest = create_manifest(
+                self.output_dir,
+                package_config,
+                platform='acea',
+                additional_metadata=manifest_extra or None,
+            )
             manifest_path = save_manifest(manifest, self.output_dir / 'manifest.json')
             metadata_files.append(manifest_path)
             logger.info(f"Generated manifest: {manifest_path}")
@@ -2913,6 +2943,15 @@ if __name__ == "__main__":
         co2_name = "GlobalHistoricalCO2_NOAA_1980_2020"
         scenarios = [1]  # ACEA: 1=rainfed, 2=irrigated (integers!)
         soil_fertility = 0
+        # ACEA's default soil_fertility=0 leaves fertility stress
+        # unmodeled (DSSAT/AquaCrop default cultivar parameter sets do
+        # not activate the nutrient-stress block at this setting). The
+        # package therefore inherits the silent-no-op symptom on UC5
+        # PYTHIA dispatch; the package manifest emits the honest-signal
+        # advisory_flag in uc_readiness.soil_fertility downstream.
+        # Set True here; the override block below clears the flag when
+        # the platform config supplies an explicit non-zero value.
+        self._uc5_pythia_pk_silent_no_op_triggered = True
 
         # Irrigation and field management defaults
         irr_thresholds = [50] * 4
@@ -2941,6 +2980,7 @@ if __name__ == "__main__":
                 virtual_irrigation = platform_config.virtual_irrigation
             if hasattr(platform_config, 'soil_fertility') and platform_config.soil_fertility is not None:
                 soil_fertility = platform_config.soil_fertility
+                self._uc5_pythia_pk_silent_no_op_triggered = (soil_fertility == 0)
 
         # Auto-detect irrigation from management config if not explicitly set in platform config
         management = self.config.management if hasattr(self.config, 'management') else None

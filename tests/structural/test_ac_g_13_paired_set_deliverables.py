@@ -182,21 +182,30 @@ _PAIRED_SETS: Tuple[Tuple[str, str, str, Dict[str, Any], Dict[str, Any]], ...] =
 # diff is unambiguous.
 EXPECTED_MANIFEST_SHAS: Dict[str, Tuple[str, str]] = {
     # Mapping: set_id → (baseline_sha, projection_sha)
+    #
+    # SHAs re-baselined post the upstream UC-emission addition (5 new
+    # manifest fields: ``cells``, ``cell_areas``, ``crops`` widened,
+    # ``use_case_config``, ``uc_readiness``). Diff-scope verified: only
+    # the additive fields changed; all pre-PR3 fields (``platform``,
+    # ``project_name``, ``region``, ``crop`` singleton, ``temporal``,
+    # ``data_sources``, ``summary``, ``scenario``, ``files``,
+    # ``limitations``, ``validation_status``) unchanged in shape and
+    # value for each set.
     "set1_niamey_millet": (
-        "861714ecd9c0393cea41b4dc47b46fea1ab3a529f8de77013d6e430c486c3da9",  # baseline
-        "f4abaf56aca953ee9790f9c6dbdd1d780a7726007c02dd128b649dce628f4819",  # projection
+        "ca0a5057244b06282013ed3684759d575b6a330495afd6aa18d07672ddf80edd",  # baseline
+        "6b2acb6eac0ca12f5bd50c47ac6cc72b655ef22a5e7e68b0d93c33ff1641f79c",  # projection
     ),
     "set2_madarounfa_maize": (
-        "755e7d4962de9ebce1e77a11821290b0e6a97a9fa717ce147cad0f8d36d9f8dc",  # baseline
-        "d2c2713b410ee524881c01a6157016dd9e9fad63daf7e39aa458a79373d5dcb5",  # projection
+        "d449604060eb3bb1e2ec49667b4cb89979a68705b6b0efe3a2e4c2edf0b6f26e",  # baseline
+        "777070ab105bbfdc85317f3232f515d0a75f4f4fd8edd3708bac13433fc4e4c3",  # projection
     ),
     "set3_menoua_groundnut": (
-        "a8f58fde9df43689faf53374b8315fa50cf43d0c2418ba96577cab83f9553162",  # baseline
-        "d1b989df9837ad4d10c94f40e682c9b96c4b5f2cdeefa429814f318a5504632d",  # projection
+        "3b1237af41d512a661f86ff472a1789ccec9585f1cab0ab1909e7e125fa3417c",  # baseline
+        "4020895e2859e60b742e22816215a3a05439452a43b684e689f265c953d131b6",  # projection
     ),
     "set4_benoue_sorghum_ipsl": (
-        "a7096b2614530ef6e48983bf423ff2ce7c1667fa079f2470ca3ef3a008fb6941",  # baseline
-        "594dc277d9e4be162c0871d6c5f7e108a5b9703be58687780bb06f39ff1d4998",  # projection
+        "54b26677633c6165da7ff55efd70591f69a3d8d8a1888ca831f5c75ec095d556",  # baseline
+        "50caa11ae6d7026db10521771d6aa023576455227978afb8add3fa8a3c40d6c8",  # projection
     ),
 }
 
