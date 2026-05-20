@@ -61,7 +61,7 @@ signs off on; until then, those check_ids stay non-Override.
 
 from __future__ import annotations
 
-from typing import Final, NamedTuple, Optional
+from typing import Final, Mapping, NamedTuple, Optional
 
 
 class OverrideValueShape(NamedTuple):
@@ -202,6 +202,48 @@ OVERRIDE_VALUE_SHAPES: Final[dict[str, OverrideValueShape]] = {
 }
 
 
+# ── Canonical translation: consumer override vocab → producer vocab ──
+
+# Per-substrate canonical translation from the consumer override
+# registry's ``variable_key`` vocab to the producer observed-values
+# sidecar's emitted-key vocab. The producer writer at
+# ``prismpy/cockpit/observed_values_writer.py`` emits the right-hand-
+# side keys (e.g. ``ph_top30cm_mean``); the override registry above
+# names the same physical quantities with the left-hand-side
+# (e.g. ``soil_ph``). Consumer-side translation through
+# ``resolve_observed_key()`` lets the cockpit decisions service read
+# the originating producer-emitted value when rendering the Override
+# panel's CURRENT field, closing the producer-consumer vocabulary
+# drift on the 5 soil keys. Climate keys already match byte-for-byte
+# at the producer / consumer registries (4 keys identity-passthrough);
+# the structural pin at
+# ``tests/structural/test_soil_override_vocab_parity.py`` freezes
+# that invariant and asserts every soil entry has a mapping that
+# points to a real producer-emitted key.
+_SOIL_OVERRIDE_KEY_TO_OBSERVED_KEY: Final[Mapping[str, str]] = {
+    'soil_ph':                  'ph_top30cm_mean',
+    'soil_sand_pct':            'sand_rootzone_mean',
+    'soil_clay_pct':            'clay_rootzone_mean',
+    'soil_organic_carbon_pct':  'organic_carbon_top30cm_mean',
+    'soil_bulk_density_g_cm3':  'bulk_density_top30cm_mean',
+}
+
+
+def resolve_observed_key(override_key: str) -> str:
+    """Translate a consumer override-registry ``variable_key`` to the
+    producer observed-values sidecar's emitted-key vocab.
+
+    Soil keys translate via :data:`_SOIL_OVERRIDE_KEY_TO_OBSERVED_KEY`;
+    every other key (currently the 4 climate keys, which already match
+    producer-emitted keys byte-for-byte) passes through unchanged.
+    Future per-substrate additions extend the mapping; the structural
+    pin at ``tests/structural/test_soil_override_vocab_parity.py``
+    asserts the mapping stays complete + climate-symmetric so a
+    future drift on either side fails fast.
+    """
+    return _SOIL_OVERRIDE_KEY_TO_OBSERVED_KEY.get(override_key, override_key)
+
+
 def get_override_value_shape(check_id: str) -> Optional[OverrideValueShape]:
     """Return the value shape for ``check_id`` or ``None`` if Override
     is not defined for that check.
@@ -221,4 +263,5 @@ __all__ = [
     "OVERRIDE_VALUE_SHAPES",
     "OverrideValueShape",
     "get_override_value_shape",
+    "resolve_observed_key",
 ]

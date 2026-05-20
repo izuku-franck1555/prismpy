@@ -164,13 +164,17 @@ def test_get_override_value_shape_round_trips_for_known_check_id() -> None:
 
 
 def test_module_exports_canonical_symbols() -> None:
-    """The 3 canonical exports: registry dict + NamedTuple + helper.
-    Internal constants (none currently) stay private."""
+    """The 4 canonical exports: registry dict + NamedTuple + per-
+    check_id getter + producer-vocab translator. Internal constants
+    (e.g. ``_SOIL_OVERRIDE_KEY_TO_OBSERVED_KEY``) stay private and
+    are NOT in this list — consumers route through
+    ``resolve_observed_key`` to keep the canonical hop honoured."""
     from prismpy.standards import override_value_shapes
     assert sorted(override_value_shapes.__all__) == [
         "OVERRIDE_VALUE_SHAPES",
         "OverrideValueShape",
         "get_override_value_shape",
+        "resolve_observed_key",
     ]
 
 
