@@ -3106,6 +3106,24 @@ class PythiaTranslator(PythiaTranslatorBase):
                     "Skipping baseline scenario block emission: %s", exc,
                 )
 
+        # PYTHIA always sets the soil-fertility P+K silent-no-op trigger
+        # for PYTHIA packages. ``use_case_config`` above unconditionally
+        # includes ``soil_fertility`` (the downstream emit gate at
+        # ``packaging/manifest.py:644-650`` filters per UC name, so the
+        # joint advisory_flag lands only on the soil_fertility entry —
+        # never on yield_forecast / sowing_optimization / drought_
+        # management). Mirrors the ACEA pattern at
+        # ``acea/translator.py:2408-2417`` (ACEA platform manifests
+        # carry the trigger too, but the same per-platform gate filters
+        # ACEA out so only PYTHIA packages emit the flag).
+        # Trigger semantic per parent contract v1.1.7 section 2.7.6.1:
+        # "PYTHIA UC5 silently no-ops P+K" — structurally true because
+        # PYTHIA templates hardcode PHOSP=N + POTAS=N (DSSAT @N OPTIONS
+        # row), so per-element fertility stress is unmodeled by design.
+        additional_metadata = {
+            "_acea_uc5_p_k_silent_no_op_triggered": True,
+        }
+
         # Create manifest with the (optional) scenario block plumbed
         # through so the on-disk JSON carries it at top level.
         manifest = create_manifest(
@@ -3113,6 +3131,7 @@ class PythiaTranslator(PythiaTranslatorBase):
             project_config=project_config,
             platform="pythia",
             scenario=scenario_block,
+            additional_metadata=additional_metadata,
         )
 
         # Save
