@@ -4,11 +4,15 @@ The ACEA translator declares the UC4 preserve_raw capability via
 ``additional_metadata`` blind-merge to ``create_manifest``. The
 declaration must reach the persisted on-disk manifest as a top-level
 ``adapter_version`` plus a nested ``adapter_capability.preserve_raw_
-supported`` list with the 5 daily artifacts. Two guards:
+supported`` list with the 13-artifact union: 5 base daily artifacts
+(shared with PYTHIA / SARRA-Py), 2 annual artifacts (engine-consistency
+with PYTHIA's 7-key map), and 6 green/blue/conditional-rainfall
+water-partition scalars sourced from AquaCrop ``et_color`` / ``s_color``
+arrays. Two guards:
 
 - **A7-syntactic**: AST-walks ``translators/acea/translator.py`` and
   asserts that the ``manifest_extra`` build site assigns the EXACT
-  5-key ``preserve_raw_supported`` list AND ``adapter_version =
+  13-key ``preserve_raw_supported`` list AND ``adapter_version =
   '1.0'`` AND the assignment is gated on ``drought_management`` in
   ``use_case_config``. Catches drift to a wrong artifact list or a
   missing version.
@@ -74,29 +78,59 @@ def _str_constants(node: ast.AST) -> set[str]:
 
 
 def _find_uc4_capability_if(tree: ast.Module) -> ast.If:
-    """Locate the translator's ``if 'drought_management' in ...`` gate
-    whose body assigns ``manifest_extra['adapter_capability']``.
+    """Locate the translator's ``if 'drought_management' (not) in
+    use_case_config`` gate inside ``_build_uc4_capability_extra``.
 
-    The check uses the body content (not just the test expression) to
-    avoid matching any unrelated `'drought_management' in ...` site.
-    """
-    for if_node in ast.walk(tree):
-        if not isinstance(if_node, ast.If):
+    Post the cycle-closure refactor the gate now lives inside the
+    helper method as an early-return on the no-UC4 branch; the
+    positive branch falls through to a ``return {dict-literal}`` that
+    carries ``adapter_version`` and ``adapter_capability``. This
+    finder returns the gate If so the existing operator / dict
+    assertions still apply (the gate uses ``NotIn`` for the early-
+    return — codified by the operator check below)."""
+    for func in ast.walk(tree):
+        if not isinstance(func, ast.FunctionDef):
             continue
-        if "drought_management" not in _str_constants(if_node.test):
+        if func.name != "_build_uc4_capability_extra":
             continue
-        body_constants: set[str] = set()
-        for child in if_node.body:
-            body_constants |= _str_constants(child)
-        if (
-            "adapter_capability" in body_constants
-            and "adapter_version" in body_constants
-            and "preserve_raw_supported" in body_constants
-        ):
+        for if_node in ast.walk(func):
+            if not isinstance(if_node, ast.If):
+                continue
+            if "drought_management" not in _str_constants(if_node.test):
+                continue
             return if_node
     pytest.fail(
-        "ACEA translator must contain an `if 'drought_management' in ...:` "
-        "gate whose body assigns adapter_capability + adapter_version"
+        "ACEA translator must contain a ``_build_uc4_capability_extra`` "
+        "helper with a ``drought_management`` gate."
+    )
+
+
+def _find_uc4_positive_return_dict(tree: ast.Module) -> ast.Dict:
+    """Locate the positive-branch ``return {dict-literal}`` inside
+    ``_build_uc4_capability_extra`` — the dict that carries
+    ``adapter_version`` + ``adapter_capability`` + ``preserve_raw_
+    supported``."""
+    for func in ast.walk(tree):
+        if not isinstance(func, ast.FunctionDef):
+            continue
+        if func.name != "_build_uc4_capability_extra":
+            continue
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Return):
+                continue
+            val = node.value
+            if not isinstance(val, ast.Dict):
+                continue
+            keys = {
+                k.value for k in val.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)
+            }
+            if "adapter_version" in keys and "adapter_capability" in keys:
+                return val
+    pytest.fail(
+        "ACEA ``_build_uc4_capability_extra`` must return a dict literal "
+        "with adapter_version + adapter_capability on the UC4-positive "
+        "branch."
     )
 
 
@@ -127,17 +161,22 @@ def _extract_subscript_assignments(
     return out
 
 
-def test_a7_syntactic_exact_5_daily_list_with_top_level_adapter_version() -> None:
-    """SH-1 codex fold — tighten the syntactic check so the
-    counterfactuals are actually verifiable:
+def test_a7_syntactic_exact_13_artifact_union_with_top_level_adapter_version() -> None:
+    """Cycle-closure fold of the original 5-daily check — now binds to
+    the 13-artifact union (5 base daily + 2 annual + 6 green/blue
+    scalars) declared by the ACEA translator's
+    ``_build_uc4_capability_extra`` helper post the cycle-closure
+    refactor.
 
-    - The ``preserve_raw_supported`` list is the EXACT 5-key daily set
-      (adding ``annual_total_biomass`` fails this).
-    - ``adapter_version`` is assigned at the TOP LEVEL of
-      ``manifest_extra`` (nesting it under ``adapter_capability`` fails
-      this).
-    - The gate uses the ``In`` operator (inverting to ``NotIn`` fails
-      this).
+    Invariants:
+
+    - The ``preserve_raw_supported`` list is the EXACT 13-key union
+      (dropping any tier — base daily, annual, or green/blue — fails).
+    - ``adapter_version`` is a TOP-LEVEL key of the returned dict
+      (nesting it under ``adapter_capability`` fails).
+    - The gate's early-return uses the ``NotIn`` operator (so the
+      positive branch — UC4 in use_case_config — carries the
+      capability surface).
     """
     tree = ast.parse(
         _ACEA_TRANSLATOR.read_text(encoding="utf-8"),
@@ -145,57 +184,49 @@ def test_a7_syntactic_exact_5_daily_list_with_top_level_adapter_version() -> Non
     )
     if_node = _find_uc4_capability_if(tree)
 
-    # (1) Gate uses In, not NotIn.
-    found_in_op = False
+    # (1) Gate uses NotIn (early-return on no-UC4 branch).
+    found_not_in = False
     for cmp in ast.walk(if_node.test):
         if isinstance(cmp, ast.Compare):
             for op in cmp.ops:
-                if isinstance(op, ast.In):
-                    found_in_op = True
                 if isinstance(op, ast.NotIn):
-                    pytest.fail(
-                        "UC4 capability gate must use the In operator on "
-                        "'drought_management'; found NotIn (inverted)."
-                    )
-    assert found_in_op, (
-        "UC4 capability gate must use the In operator on "
-        "'drought_management' (not equality / NotIn / Lt etc.)."
+                    found_not_in = True
+    assert found_not_in, (
+        "UC4 capability gate inside ``_build_uc4_capability_extra`` "
+        "must use the NotIn operator on 'drought_management' to "
+        "early-return an empty dict on the no-UC4 branch."
     )
 
-    # (2) Subscript assignments on `manifest_extra` carry
-    # ``adapter_version`` at the top level (not nested under
-    # ``adapter_capability``).
-    assigns = _extract_subscript_assignments(if_node, "manifest_extra")
-    assert "adapter_version" in assigns, (
-        "manifest_extra must carry adapter_version at the top level (not "
-        "nested under adapter_capability)."
+    # (2) Positive-branch return-dict carries adapter_version + cap.
+    return_dict = _find_uc4_positive_return_dict(tree)
+    cap_node = None
+    av_node = None
+    for k, v in zip(return_dict.keys, return_dict.values):
+        if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+            continue
+        if k.value == "adapter_version":
+            av_node = v
+        elif k.value == "adapter_capability":
+            cap_node = v
+    assert av_node is not None and isinstance(av_node, ast.Constant), (
+        "Helper's returned dict must carry adapter_version at the TOP "
+        "LEVEL (not nested under adapter_capability)."
     )
-    av_node = assigns["adapter_version"]
-    assert (
-        isinstance(av_node, ast.Constant) and av_node.value == "1.0"
-    ), (
-        f"manifest_extra['adapter_version'] must be the literal '1.0'; "
-        f"got {ast.dump(av_node)!r}"
+    assert av_node.value == "1.0", (
+        f"adapter_version must be the literal '1.0'; got {av_node.value!r}"
     )
-    assert "adapter_capability" in assigns, (
-        "manifest_extra must carry adapter_capability at the top level."
-    )
-    cap_node = assigns["adapter_capability"]
-    assert isinstance(cap_node, ast.Dict), (
-        "manifest_extra['adapter_capability'] must be a dict literal."
-    )
-    # The adapter_capability dict must NOT carry adapter_version
-    # (nested-version counterfactual fails this).
+    assert isinstance(cap_node, ast.Dict)
     cap_keys = {
         k.value for k in cap_node.keys
         if isinstance(k, ast.Constant) and isinstance(k.value, str)
     }
     assert "adapter_version" not in cap_keys, (
         "adapter_version must NOT be nested under adapter_capability; "
-        "it must live at the top level of manifest_extra."
+        "it must live at the TOP LEVEL of the returned dict."
     )
 
-    # (3) The preserve_raw_supported value is an EXACT 5-key List.
+    # (3) The preserve_raw_supported value is an EXACT 13-key List
+    # (5 base daily + 2 annual + 6 green/blue scalars).
     preserve_raw_node = None
     for k, v in zip(cap_node.keys, cap_node.values):
         if (
@@ -214,9 +245,10 @@ def test_a7_syntactic_exact_5_daily_list_with_top_level_adapter_version() -> Non
         if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
     }
     assert declared == _EXPECTED_DAILY, (
-        f"preserve_raw_supported must be EXACTLY the 5 daily artifacts; "
-        f"got {sorted(declared)}. Adding an annual artifact (e.g., "
-        f"'annual_total_biomass') or any other key fails this guard."
+        f"preserve_raw_supported must be EXACTLY the 13-artifact union "
+        f"(5 base daily + 2 annual + 6 green/blue scalars); got "
+        f"{sorted(declared)}. Dropping a tier (e.g., omitting the 6 "
+        f"green/blue scalars) or adding an unrelated key fails this guard."
     )
 
 
@@ -314,7 +346,47 @@ def test_a7_runtime_invokes_translator_and_captures_adapter_capability() -> None
     declared = set(cap.get("preserve_raw_supported") or [])
     assert declared == _EXPECTED_DAILY, (
         f"translator-emitted preserve_raw_supported must be EXACTLY the "
-        f"5 daily artifacts; got {sorted(declared)}"
+        f"13-artifact union (5 base daily + 2 annual + 6 green/blue); "
+        f"got {sorted(declared)}"
+    )
+
+
+def test_a7_acea_helper_emits_empty_extra_when_uc4_absent() -> None:
+    """Translator-helper-level counterfactual (Gate-B fold of eval-2
+    NICE-N2 + the same axis codex flagged for the CRAFT side): drive
+    the actual ``AceaTranslator._build_uc4_capability_extra`` directly
+    with a synthetic ``package_config`` whose ``use_case_config`` does
+    NOT include ``drought_management`` and assert it returns an empty
+    dict.
+
+    Catches a regression that would unconditionally emit the modern
+    capability surface — the manifest-write boundary test below would
+    still pass because it bypasses the translator. Mirrors the UC4-
+    POSITIVE runtime probe but exercises the no-UC4 branch.
+
+    The accompanying positive-branch assertion (UC4 present →
+    13-artifact union) anchors the symmetric expectation in one place.
+    """
+    from prismpy.translators.acea.translator import AceaTranslator
+
+    translator = AceaTranslator.__new__(AceaTranslator)
+    no_uc4 = {"use_case_config": {"yield_forecast": {}, "soil_fertility": {}}}
+    assert translator._build_uc4_capability_extra(no_uc4) == {}, (
+        "ACEA helper must return empty dict when drought_management "
+        "is absent from use_case_config — capability surface is "
+        "UC4-gated."
+    )
+
+    with_uc4 = {"use_case_config": {
+        "yield_forecast": {}, "drought_management": {}, "soil_fertility": {},
+    }}
+    out = translator._build_uc4_capability_extra(with_uc4)
+    assert out.get("adapter_version") == "1.0"
+    cap = out.get("adapter_capability") or {}
+    assert set(cap.get("preserve_raw_supported") or []) == _EXPECTED_DAILY, (
+        "ACEA helper must emit the 13-artifact union when UC4 is "
+        "present; mismatch indicates the gate-on-UC4 path drifted "
+        "from the documented surface."
     )
 
 

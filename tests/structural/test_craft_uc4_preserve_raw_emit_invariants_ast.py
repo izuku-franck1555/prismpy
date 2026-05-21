@@ -56,30 +56,52 @@ def _str_constants(node: ast.AST) -> set[str]:
 
 
 def _find_uc4_capability_if(tree: ast.Module) -> ast.If:
-    """Locate the CRAFT translator's ``if 'drought_management' in ...:``
-    gate whose body assigns ``manifest_extra['adapter_capability']``.
-
-    Mirrors the ACEA AST guard: bind to the body content (not just the
-    test expression) so unrelated ``'drought_management' in ...`` sites
-    elsewhere in the file don't shadow the producer-emit gate.
-    """
-    for if_node in ast.walk(tree):
-        if not isinstance(if_node, ast.If):
+    """Locate the CRAFT translator's ``drought_management`` gate inside
+    ``_build_uc4_capability_extra``. Post the cycle-closure refactor
+    the gate lives inside the helper as a NotIn early-return on the
+    no-UC4 branch; the positive branch returns a dict literal carrying
+    ``adapter_version`` + ``adapter_capability``."""
+    for func in ast.walk(tree):
+        if not isinstance(func, ast.FunctionDef):
             continue
-        if "drought_management" not in _str_constants(if_node.test):
+        if func.name != "_build_uc4_capability_extra":
             continue
-        body_constants: set[str] = set()
-        for child in if_node.body:
-            body_constants |= _str_constants(child)
-        if (
-            "adapter_capability" in body_constants
-            and "adapter_version" in body_constants
-            and "preserve_raw_supported" in body_constants
-        ):
+        for if_node in ast.walk(func):
+            if not isinstance(if_node, ast.If):
+                continue
+            if "drought_management" not in _str_constants(if_node.test):
+                continue
             return if_node
     pytest.fail(
-        "CRAFT translator must contain an `if 'drought_management' in ...:` "
-        "gate whose body assigns adapter_capability + adapter_version"
+        "CRAFT translator must contain a ``_build_uc4_capability_extra`` "
+        "helper with a ``drought_management`` gate."
+    )
+
+
+def _find_uc4_positive_return_dict(tree: ast.Module) -> ast.Dict:
+    """Locate the positive-branch ``return {dict-literal}`` inside the
+    CRAFT helper. Mirrors the ACEA-side finder."""
+    for func in ast.walk(tree):
+        if not isinstance(func, ast.FunctionDef):
+            continue
+        if func.name != "_build_uc4_capability_extra":
+            continue
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Return):
+                continue
+            val = node.value
+            if not isinstance(val, ast.Dict):
+                continue
+            keys = {
+                k.value for k in val.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)
+            }
+            if "adapter_version" in keys and "adapter_capability" in keys:
+                return val
+    pytest.fail(
+        "CRAFT ``_build_uc4_capability_extra`` must return a dict "
+        "literal with adapter_version + adapter_capability on the "
+        "UC4-positive branch."
     )
 
 
@@ -105,13 +127,14 @@ def _extract_subscript_assignments(
     return out
 
 
-def test_craft_uc4_capability_gate_carries_5_daily_and_top_level_version(
+def test_craft_uc4_capability_helper_returns_5_daily_with_top_level_version(
 ) -> None:
-    """Syntactic check: the CRAFT translator's UC4 gate uses the ``In``
-    operator on ``'drought_management'`` and assigns
-    ``manifest_extra['adapter_version'] = '1.0'`` at the top level
-    alongside ``manifest_extra['adapter_capability']`` (a dict that
-    carries the 5-base-daily list, no nested adapter_version).
+    """Syntactic check on the CRAFT translator's helper-method return:
+    ``_build_uc4_capability_extra`` early-returns ``{}`` on the no-UC4
+    branch via the ``NotIn`` operator and returns a dict literal with
+    top-level ``adapter_version='1.0'`` + nested
+    ``adapter_capability.preserve_raw_supported`` (5 base daily
+    artifacts) on the positive branch.
     """
     tree = ast.parse(
         _CRAFT_TRANSLATOR.read_text(encoding="utf-8"),
@@ -119,34 +142,33 @@ def test_craft_uc4_capability_gate_carries_5_daily_and_top_level_version(
     )
     if_node = _find_uc4_capability_if(tree)
 
-    # Gate uses ``In`` (not ``NotIn``)
-    found_in = False
+    # Gate's early-return uses ``NotIn`` (mirrors ACEA cycle-closure
+    # helper pattern).
+    found_not_in = False
     for cmp in ast.walk(if_node.test):
         if isinstance(cmp, ast.Compare):
             for op in cmp.ops:
-                if isinstance(op, ast.In):
-                    found_in = True
                 if isinstance(op, ast.NotIn):
-                    pytest.fail(
-                        "CRAFT UC4 capability gate must use the In operator "
-                        "on 'drought_management'; found NotIn (inverted)."
-                    )
-    assert found_in
+                    found_not_in = True
+    assert found_not_in, (
+        "CRAFT helper must use NotIn on the no-UC4 early-return."
+    )
 
-    assigns = _extract_subscript_assignments(if_node, "manifest_extra")
-    assert "adapter_version" in assigns, (
-        "manifest_extra must carry adapter_version at the top level "
-        "(not nested under adapter_capability)."
+    return_dict = _find_uc4_positive_return_dict(tree)
+    av_node = None
+    cap_node = None
+    for k, v in zip(return_dict.keys, return_dict.values):
+        if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+            continue
+        if k.value == "adapter_version":
+            av_node = v
+        elif k.value == "adapter_capability":
+            cap_node = v
+    assert av_node is not None and isinstance(av_node, ast.Constant)
+    assert av_node.value == "1.0", (
+        f"CRAFT adapter_version must be the literal '1.0'; got "
+        f"{av_node.value!r}"
     )
-    av_node = assigns["adapter_version"]
-    assert (
-        isinstance(av_node, ast.Constant) and av_node.value == "1.0"
-    ), (
-        f"manifest_extra['adapter_version'] must be the literal '1.0'; "
-        f"got {ast.dump(av_node)!r}"
-    )
-    assert "adapter_capability" in assigns
-    cap_node = assigns["adapter_capability"]
     assert isinstance(cap_node, ast.Dict)
     cap_keys = {
         k.value for k in cap_node.keys
@@ -154,7 +176,7 @@ def test_craft_uc4_capability_gate_carries_5_daily_and_top_level_version(
     }
     assert "adapter_version" not in cap_keys, (
         "CRAFT adapter_version must NOT be nested under "
-        "adapter_capability; it must live at the top level."
+        "adapter_capability; it must live at the TOP LEVEL."
     )
 
     preserve_raw_node = None
@@ -270,10 +292,50 @@ def test_craft_translator_runtime_emits_adapter_capability_on_uc4() -> None:
     )
 
 
-def test_craft_translator_omits_capability_when_uc4_absent() -> None:
-    """When the package does NOT configure drought_management, the
-    CRAFT translator must NOT carry adapter_capability —
-    only the soil-fertility joint flag (kept verbatim)."""
+def test_craft_helper_emits_empty_extra_when_uc4_absent() -> None:
+    """Translator-helper-level counterfactual (Gate-B fold of codex
+    SH-1 + eval-2 NICE-N2): drive
+    ``CraftTranslator._build_uc4_capability_extra`` directly with a
+    synthetic ``package_config`` whose ``use_case_config`` does NOT
+    include ``drought_management`` and assert it returns an empty
+    dict. Mirrors the symmetric ACEA helper test.
+
+    Catches a regression that would unconditionally emit the modern
+    capability surface — the manifest-write boundary check below
+    would still pass because it bypasses the translator.
+    """
+    from prismpy.translators.craft.translator import CraftTranslator
+
+    translator = CraftTranslator.__new__(CraftTranslator)
+    no_uc4 = {"use_case_config": {"yield_forecast": {}, "soil_fertility": {}}}
+    assert translator._build_uc4_capability_extra(no_uc4) == {}, (
+        "CRAFT helper must return empty dict when drought_management "
+        "is absent from use_case_config — capability surface is "
+        "UC4-gated."
+    )
+
+    with_uc4 = {"use_case_config": {
+        "yield_forecast": {}, "drought_management": {}, "soil_fertility": {},
+    }}
+    out = translator._build_uc4_capability_extra(with_uc4)
+    assert out.get("adapter_version") == "1.0"
+    cap = out.get("adapter_capability") or {}
+    assert set(cap.get("preserve_raw_supported") or []) == _EXPECTED_BASE_DAILY, (
+        "CRAFT helper must emit the 5-base-daily set when UC4 is "
+        "present; mismatch indicates the gate-on-UC4 path drifted."
+    )
+
+
+def test_craft_manifest_write_boundary_omits_capability_when_uc4_absent(
+) -> None:
+    """Boundary-level pin (preserved from the original fold draft):
+    when the manifest writer itself is called with
+    ``additional_metadata=None`` (the path the translator hits when
+    UC4 is absent post the new gate), the persisted manifest dict
+    contains neither ``adapter_version`` nor ``adapter_capability``.
+    This is sanity-checking the writer + the translator-invocation
+    test above together pin the no-UC4 invariant on both sides of the
+    boundary (translator emit ↔ writer persistence)."""
     from prismpy.packaging.manifest import create_manifest
     import json
 

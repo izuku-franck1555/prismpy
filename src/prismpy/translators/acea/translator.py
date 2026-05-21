@@ -2226,6 +2226,49 @@ if __name__ == "__main__":
         logger.info(f"Generated install script: {script_path}")
         return script_path
 
+    def _build_uc4_capability_extra(
+        self, package_config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Return the ``manifest_extra`` slice that declares the UC4
+        preserve_raw capability when (and only when)
+        ``drought_management`` is in ``package_config.use_case_config``.
+
+        Empty dict otherwise — keeps the gate testable on the no-UC4
+        branch independent of the package-config build site (which
+        hardcodes the three default UCs above).
+
+        Capability surface for the ACEA UC4 path:
+
+        - 5 base daily artifacts (shared with PYTHIA / SARRA-Py)
+        - 2 annual artifacts (engine-consistency with PYTHIA's
+          PRESERVE_RAW_PYTHIA_KEY_MAP)
+        - 6 green/blue/conditional-rainfall water-partition scalars
+          sourced from AquaCrop ``et_color`` and ``s_color`` arrays
+          (per-component, not a consolidated metadata column).
+        """
+        if 'drought_management' not in package_config.get('use_case_config', {}):
+            return {}
+        return {
+            'adapter_version': '1.0',
+            'adapter_capability': {
+                'preserve_raw_supported': [
+                    'daily_eto_etc',
+                    'daily_ftsw',
+                    'daily_lai_or_phenology',
+                    'daily_precipitation',
+                    'daily_root_zone_moisture',
+                    'annual_total_biomass',
+                    'annual_grain_yield',
+                    'daily_et_green',
+                    'daily_et_blue',
+                    'daily_et_cr',
+                    'daily_storage_green',
+                    'daily_storage_blue',
+                    'daily_storage_cr',
+                ],
+            },
+        }
+
     def _generate_package_metadata(
         self,
         data: UnifiedData,
@@ -2418,35 +2461,9 @@ if __name__ == "__main__":
         manifest_extra: Dict[str, Any] = {}
         if getattr(self, '_uc5_pythia_pk_silent_no_op_triggered', False):
             manifest_extra['_acea_uc5_p_k_silent_no_op_triggered'] = True
-        if 'drought_management' in package_config.get('use_case_config', {}):
-            manifest_extra['adapter_version'] = '1.0'
-            manifest_extra['adapter_capability'] = {
-                'preserve_raw_supported': [
-                    # 5 base daily artifacts (shared with PYTHIA / SARRA-Py)
-                    'daily_eto_etc',
-                    'daily_ftsw',
-                    'daily_lai_or_phenology',
-                    'daily_precipitation',
-                    'daily_root_zone_moisture',
-                    # 2 annual artifacts (engine-consistency with PYTHIA
-                    # PRESERVE_RAW_PYTHIA_KEY_MAP) — yield from AquaCrop
-                    # annual general column + biomass derivation.
-                    'annual_total_biomass',
-                    'annual_grain_yield',
-                    # 6 green/blue/conditional-rainfall water-partition
-                    # scalars sourced from AquaCrop ``et_color`` +
-                    # ``s_color`` arrays. Per-component scalars (not a
-                    # consolidated component-metadata column) so each
-                    # artifact gets its own ``(cell_id, year, doy, value)``
-                    # parquet matching the engine-consistent shape.
-                    'daily_et_green',
-                    'daily_et_blue',
-                    'daily_et_cr',
-                    'daily_storage_green',
-                    'daily_storage_blue',
-                    'daily_storage_cr',
-                ],
-            }
+        manifest_extra.update(
+            self._build_uc4_capability_extra(package_config)
+        )
         try:
             manifest = create_manifest(
                 self.output_dir,
