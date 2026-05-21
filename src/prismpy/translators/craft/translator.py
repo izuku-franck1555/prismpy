@@ -2940,6 +2940,42 @@ class CraftTranslator(CraftTranslatorBase):
         logger.info(f"Generated CRAFT organic fertilizer data: {organic_path} ({len(filtered_cells)} rows)")
         return organic_path
 
+    def _build_uc4_capability_extra(
+        self, package_config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Return the ``manifest_extra`` slice that declares the UC4
+        preserve_raw capability for CRAFT packages when (and only when)
+        ``drought_management`` is in ``package_config.use_case_config``.
+
+        Empty dict otherwise — keeps the gate testable on the no-UC4
+        branch independent of the package-config build site (which
+        currently hardcodes the default UCs above).
+
+        Capability surface for the CRAFT UC4 path:
+
+        - 5 base daily artifacts (shared with PYTHIA via DSSAT execution
+          path; CRAFT-vs-PYTHIA distinguisher in the downstream parquet
+          is ``source_platform`` metadata, NOT a new source-method name
+          per V3_1_SOURCE_METHODS reuse rule). CRAFT does not emit
+          AquaCrop ``et_color`` / ``s_color`` arrays + PYTHIA already
+          covers Summary CWAM/HWAM annuals, so annual + green/blue
+          surfaces stay out of CRAFT scope at this cycle.
+        """
+        if 'drought_management' not in package_config.get('use_case_config', {}):
+            return {}
+        return {
+            'adapter_version': '1.0',
+            'adapter_capability': {
+                'preserve_raw_supported': [
+                    'daily_eto_etc',
+                    'daily_ftsw',
+                    'daily_lai_or_phenology',
+                    'daily_precipitation',
+                    'daily_root_zone_moisture',
+                ],
+            },
+        }
+
     def _generate_package_metadata(
         self,
         data: UnifiedData,
@@ -3193,6 +3229,9 @@ class CraftTranslator(CraftTranslatorBase):
         manifest_extra: Dict[str, Any] = {
             '_acea_uc5_p_k_silent_no_op_triggered': True,
         }
+        manifest_extra.update(
+            self._build_uc4_capability_extra(package_config)
+        )
         try:
             manifest = create_manifest(
                 self.output_dir, package_config, platform='craft',
