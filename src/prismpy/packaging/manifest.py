@@ -641,9 +641,20 @@ def canonical_uc_readiness_emitter(
                 ADVISORY_FLAG_UC3_SOWING_RULE_DEFAULT_ABSENT,
             )
 
+        # F-BP-5 cycle R1: CRAFT routes via the DSSAT engine (same as
+        # PYTHIA per ``adapters/craft.py`` ``run_dssat_site`` reuse) and
+        # carries the identical ``@N OPTIONS PHOSP=N POTAS=N`` hard-code
+        # in the CRAFT-emitted .SNX template. The disclosure gate widens
+        # from ``"pythia"``-only to the DSSAT-engine producer set
+        # ``{"pythia", "craft"}``. The joint-flag literal name and the
+        # downstream per-element flag names keep their ``pythia`` prefix
+        # per Lesson #24 canonical-source-or-pin (stable identifiers);
+        # the ``pythia`` prefix is a historical platform-origin label
+        # inherited from the cycle-4 first-shipping platform. Engine-axis
+        # rename (``*_on_pythia`` → ``*_on_dssat``) is the v3.2 cleanup.
         if (
             uc_name == "soil_fertility"
-            and platform == "pythia"
+            and platform in {"pythia", "craft"}
             and uc5_pythia_pk_triggered
         ):
             advisory_flags.append(
