@@ -3193,6 +3193,31 @@ class CraftTranslator(CraftTranslatorBase):
         manifest_extra: Dict[str, Any] = {
             '_acea_uc5_p_k_silent_no_op_triggered': True,
         }
+        # F-BP-5 cycle 2 R2 sub-PR 4 cycle closure: CRAFT preserve_raw
+        # foundation. CRAFT shares the DSSAT execution path with PYTHIA
+        # (CRAFT-emitted .SNX templates feed the same Ritchie water
+        # balance + PlantGro/Summary outputs); the preserve_raw surface
+        # mirrors the PYTHIA 5-daily set. CRAFT-distinguisher in the
+        # downstream parquet is ``source_platform="craft"`` (not a new
+        # source_method name) per the V3_1_SOURCE_METHODS reuse rule —
+        # CRAFT's ``ftsw_taw_derived_proxy`` carries the same engine
+        # semantics as PYTHIA's. Annual + green/blue artifacts stay out
+        # of scope here because CRAFT does not emit the AquaCrop-side
+        # ``et_color`` / ``s_color`` arrays + the PYTHIA-side Summary
+        # CWAM/HWAM annual columns are already covered by the PYTHIA
+        # preserve_raw surface; cross-engine intercomparison uses CRAFT
+        # daily only at this cycle.
+        if 'drought_management' in package_config.get('use_case_config', {}):
+            manifest_extra['adapter_version'] = '1.0'
+            manifest_extra['adapter_capability'] = {
+                'preserve_raw_supported': [
+                    'daily_eto_etc',
+                    'daily_ftsw',
+                    'daily_lai_or_phenology',
+                    'daily_precipitation',
+                    'daily_root_zone_moisture',
+                ],
+            }
         try:
             manifest = create_manifest(
                 self.output_dir, package_config, platform='craft',

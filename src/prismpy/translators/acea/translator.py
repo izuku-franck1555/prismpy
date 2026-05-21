@@ -2422,11 +2422,29 @@ if __name__ == "__main__":
             manifest_extra['adapter_version'] = '1.0'
             manifest_extra['adapter_capability'] = {
                 'preserve_raw_supported': [
+                    # 5 base daily artifacts (shared with PYTHIA / SARRA-Py)
                     'daily_eto_etc',
                     'daily_ftsw',
                     'daily_lai_or_phenology',
                     'daily_precipitation',
                     'daily_root_zone_moisture',
+                    # 2 annual artifacts (engine-consistency with PYTHIA
+                    # PRESERVE_RAW_PYTHIA_KEY_MAP) — yield from AquaCrop
+                    # annual general column + biomass derivation.
+                    'annual_total_biomass',
+                    'annual_grain_yield',
+                    # 6 green/blue/conditional-rainfall water-partition
+                    # scalars sourced from AquaCrop ``et_color`` +
+                    # ``s_color`` arrays. Per-component scalars (not a
+                    # consolidated component-metadata column) so each
+                    # artifact gets its own ``(cell_id, year, doy, value)``
+                    # parquet matching the engine-consistent shape.
+                    'daily_et_green',
+                    'daily_et_blue',
+                    'daily_et_cr',
+                    'daily_storage_green',
+                    'daily_storage_blue',
+                    'daily_storage_cr',
                 ],
             }
         try:

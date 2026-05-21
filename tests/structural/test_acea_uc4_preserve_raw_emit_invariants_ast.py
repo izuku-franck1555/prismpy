@@ -38,13 +38,31 @@ _ACEA_TRANSLATOR = (
 )
 
 
-_EXPECTED_DAILY = {
+# F-BP-5 cycle closure: ACEA preserve_raw widens 5 → 13 artifacts.
+# Base 5 daily artifacts + 2 annual (engine-consistency with PYTHIA) +
+# 6 green/blue water-partition scalars (AquaCrop ``et_color`` /
+# ``s_color`` arrays). Each subset stays addressable by name so a
+# regression that drops one tier surfaces a specific failure.
+_EXPECTED_BASE_DAILY = {
     "daily_eto_etc",
     "daily_ftsw",
     "daily_lai_or_phenology",
     "daily_precipitation",
     "daily_root_zone_moisture",
 }
+_EXPECTED_ANNUAL = {
+    "annual_total_biomass",
+    "annual_grain_yield",
+}
+_EXPECTED_GREEN_BLUE = {
+    "daily_et_green",
+    "daily_et_blue",
+    "daily_et_cr",
+    "daily_storage_green",
+    "daily_storage_blue",
+    "daily_storage_cr",
+}
+_EXPECTED_DAILY = _EXPECTED_BASE_DAILY | _EXPECTED_ANNUAL | _EXPECTED_GREEN_BLUE
 
 
 def _str_constants(node: ast.AST) -> set[str]:
