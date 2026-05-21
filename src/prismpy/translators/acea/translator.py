@@ -2401,14 +2401,34 @@ if __name__ == "__main__":
             },
         }
 
-        # 1. Generate manifest. Defaults to ``False`` post-Phase-F-C
-        # B2 fix: the trigger must be explicitly set by
-        # ``_generate_acea_config`` (line :2915 hardcode site) before
-        # this method runs — without an explicit set, no advisory
-        # propagates (eliminates the eager false-positive class).
+        # 1. Generate manifest. The UC5 P+K silent-no-op trigger is set
+        # explicitly by ``_generate_acea_config`` (line :2915 hardcode
+        # site) before this method runs — without an explicit set, no
+        # advisory propagates (eliminates the eager false-positive
+        # class). The UC4 ACEA preserve_raw capability is declared
+        # unconditionally for every ACEA package that includes UC4 in
+        # its use_case_config: AquaCrop natively emits the 5 daily
+        # artifacts via SaveRawResults, and the prism-runner consumer
+        # uses this declaration to route the daily extraction. Mirrors
+        # the PYTHIA UC5 trigger pattern at
+        # ``translators/pythia/translator.py:3119+``; the additional_
+        # metadata blind-merge at ``packaging/manifest.py:1008-1014``
+        # surfaces ``adapter_version`` + ``adapter_capability`` to the
+        # persisted manifest.json (non-``_``-prefixed keys are public).
         manifest_extra: Dict[str, Any] = {}
         if getattr(self, '_uc5_pythia_pk_silent_no_op_triggered', False):
             manifest_extra['_acea_uc5_p_k_silent_no_op_triggered'] = True
+        if 'drought_management' in package_config.get('use_case_config', {}):
+            manifest_extra['adapter_version'] = '1.0'
+            manifest_extra['adapter_capability'] = {
+                'preserve_raw_supported': [
+                    'daily_eto_etc',
+                    'daily_ftsw',
+                    'daily_lai_or_phenology',
+                    'daily_precipitation',
+                    'daily_root_zone_moisture',
+                ],
+            }
         try:
             manifest = create_manifest(
                 self.output_dir,
