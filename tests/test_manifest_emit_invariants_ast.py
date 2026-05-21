@@ -249,9 +249,15 @@ def test_t3_uc1_shortfall_threshold_template_present() -> None:
 
 
 def test_t3_uc5_pythia_pk_advisory_conditional_on_acea_trigger() -> None:
-    """The UC5 PYTHIA P+K advisory append must be conditional on the
-    ACEA-translator-set trigger flag (closed-world: SARRA-Py / CRAFT /
-    DSSAT translator paths do NOT set the flag → advisory absent).
+    """The UC5 P+K advisory append must be conditional on the
+    ``_acea_uc5_p_k_silent_no_op_triggered`` flag (the engine-axis SSOT
+    trigger key reused across ACEA + PYTHIA + CRAFT producer paths per
+    F-BP-5 cycle R1). Closed-world: SARRA-Py / ACEA-platform paths do
+    NOT emit the flag — SARRA-Py never sets the trigger (native P+K
+    modeling); ACEA-platform manifests carry the trigger but the
+    downstream emit gate's platform filter (``platform in {"pythia",
+    "craft"}``) excludes them. PYTHIA + CRAFT both set the trigger AND
+    pass the platform filter → advisory present.
     """
     tree = _load_manifest_ast()
     func = _find_function(tree, "canonical_uc_readiness_emitter")

@@ -3176,9 +3176,28 @@ class CraftTranslator(CraftTranslatorBase):
             },
         }
 
-        # 1. Generate manifest
+        # 1. Generate manifest. CRAFT routes through DSSAT (same engine
+        # as PYTHIA per ``adapters/craft.py`` ``run_dssat_site`` reuse;
+        # F-BP-5 cycle R1 specialist analysis). The CRAFT-emitted .SNX
+        # templates ship with PHOSP=N + POTAS=N hard-coded in the
+        # ``@N OPTIONS`` row (empirically verified across all 6 source
+        # templates), so the soil-fertility P+K silent-no-op disclosure
+        # applies unconditionally to every CRAFT package. Trigger key
+        # reused from the ACEA-as-PYTHIA-target original site per Lesson
+        # #24 canonical-source-or-pin; same single SSOT trigger for all
+        # DSSAT-engine producer paths (ACEA, PYTHIA direct, CRAFT). The
+        # downstream prismpy emit gate at ``packaging/manifest.py:644-
+        # 651`` filters per UC name + per-platform so the joint flag
+        # lands only on ``soil_fertility`` for ``platform in {"pythia",
+        # "craft"}``.
+        manifest_extra: Dict[str, Any] = {
+            '_acea_uc5_p_k_silent_no_op_triggered': True,
+        }
         try:
-            manifest = create_manifest(self.output_dir, package_config, platform='craft')
+            manifest = create_manifest(
+                self.output_dir, package_config, platform='craft',
+                additional_metadata=manifest_extra,
+            )
             manifest_path = save_manifest(manifest, self.output_dir / 'manifest.json')
             metadata_files.append(manifest_path)
             logger.info(f"Generated manifest: {manifest_path}")

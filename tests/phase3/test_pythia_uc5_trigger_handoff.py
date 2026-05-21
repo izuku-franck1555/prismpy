@@ -324,10 +324,12 @@ def test_acea_platform_does_not_emit_joint_flag_even_with_trigger(
     """ACEA-target packages (``platform='acea'``) carry the trigger in
     ``additional_metadata`` (from the ACEA translator's own pattern at
     ``acea/translator.py:2408-2417``) but never emit the joint flag —
-    the manifest.py emit gate at ``:644-650`` requires
-    ``platform == 'pythia'`` so ACEA-platform packages are filtered
-    out. Verifies the cycle-4 prismpy fix does NOT collaterally flip
-    ACEA into emitting the PYTHIA-only disclosure.
+    the manifest.py emit gate at ``:644-651`` requires
+    ``platform in {"pythia", "craft"}`` (the DSSAT-engine producer set
+    per F-BP-5 cycle R1) so ACEA-platform packages are filtered out.
+    The platform-filter restrictiveness is independent of trigger
+    presence: ACEA-platform with the trigger set still does NOT emit;
+    only PYTHIA + CRAFT platforms emit when the trigger is present.
     """
     cfg = _pythia_project_config()
     m = create_manifest(
