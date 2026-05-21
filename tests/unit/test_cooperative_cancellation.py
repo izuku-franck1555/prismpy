@@ -430,9 +430,12 @@ class TestCarveOutRegression:
         # ``PLACEHOLDER_CLIMATE_SENTINEL_ID`` constant import and added
         # a 5-line ``_real_n_locations`` helper at the
         # ``_load_climate_data`` provenance emit (~11 lines cumulative
-        # shift forward in ``executor.py``). Same provenance try block,
-        # new line number per durable §27 producer-consumer parity.
-        ("src/prismpy/pipeline/executor.py", 2799),
+        # shift forward in ``executor.py``). Then 2799 → 2814 after the
+        # iSDA nodata gate added ~15 lines inside
+        # ``_retrieve_isda_api_for_grid`` (nodata sentinel guard before
+        # `× scale` per durable §30). Same provenance try block, new
+        # line number per durable §27 producer-consumer parity.
+        ("src/prismpy/pipeline/executor.py", 2814),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed
