@@ -1822,17 +1822,32 @@ class TranslationPipeline:
                     )
 
                 with rasterio.open(url) as src:
+                    # iSDA uint8 nodata sentinel (commonly 255) × scale
+                    # leaks physically-impossible substrate (e.g.
+                    # pH = 25.5). Gate at the producer boundary so
+                    # downstream None routes the cell through the HWSD
+                    # fallback cascade per durable §30 canonical-emit.
+                    nodata = src.nodata
+                    scale = prop_info["scale"]
                     for i, cell in enumerate(cells):
                         x, y = cell_coords_3857[i]
                         row, col = src.index(x, y)
                         # Read bands 1 (0-20cm mean) and 2 (20-50cm mean)
                         window = rasterio.windows.Window(col, row, 1, 1)
-                        b1 = float(src.read(1, window=window)[0][0])
-                        b2 = float(src.read(2, window=window)[0][0])
-
-                        scale = prop_info["scale"]
-                        cell_data[cell.cell_id][f"{prop_name}_0-20"] = b1 * scale
-                        cell_data[cell.cell_id][f"{prop_name}_20-50"] = b2 * scale
+                        b1_raw = src.read(1, window=window)[0][0]
+                        b2_raw = src.read(2, window=window)[0][0]
+                        b1 = (
+                            None
+                            if (nodata is not None and b1_raw == nodata)
+                            else float(b1_raw) * scale
+                        )
+                        b2 = (
+                            None
+                            if (nodata is not None and b2_raw == nodata)
+                            else float(b2_raw) * scale
+                        )
+                        cell_data[cell.cell_id][f"{prop_name}_0-20"] = b1
+                        cell_data[cell.cell_id][f"{prop_name}_20-50"] = b2
 
             # Build SoilProfile objects
             profiles = {}
