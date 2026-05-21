@@ -42,6 +42,8 @@ permissions:
 
 on:
   push:
+    branches:
+      - main
     paths:
       # Substrate scope:
       - 'src/prismpy/bounds/**'
@@ -90,7 +92,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           # Per codex Gate-A HIGH on commit 10: the PR-code
           # path must NOT carry the GITHUB_TOKEN beyond the
@@ -101,7 +103,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
