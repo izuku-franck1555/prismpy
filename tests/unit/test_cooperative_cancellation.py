@@ -441,10 +441,11 @@ class TestCarveOutRegression:
         # line number per durable §27 producer-consumer parity. Then
         # 2814 → 2820 after a new `_bridge_helper_on_attempt` import (+1)
         # + the TAMSAT retry-attempt bridge build in `_execute_retrieve`
-        # (~+5). Then 2820 → 2835 after the producer-boundary
+        # (~+5). Then 2820 → 2833 after the producer-boundary
         # classification block + structured ``error_events`` population
-        # at the per-platform broad-except site (~+15).
-        ("src/prismpy/pipeline/executor.py", 2835),
+        # at the per-platform broad-except site (~+13, with the
+        # grid-total derive refactored off a try block).
+        ("src/prismpy/pipeline/executor.py", 2833),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed

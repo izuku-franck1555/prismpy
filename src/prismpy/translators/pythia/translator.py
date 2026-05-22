@@ -356,18 +356,11 @@ class PythiaTranslator(PythiaTranslatorBase):
             traceback.print_exc()
             errors.append(str(e))
             from prismpy.errors import classify_to_event_dict
-            ctx = {}
-            try:
-                cells = getattr(data.grid, "cells", None)
-                if cells is not None:
-                    ctx["grid_total"] = len(cells)
-            except Exception:  # pragma: no cover - defensive
-                pass
             return self.create_result(
                 success=False,
                 output_files=output_files,
                 errors=errors,
-                error_events=[classify_to_event_dict(e, ctx)],
+                error_events=[classify_to_event_dict(e)],
             )
 
         # Record provenance

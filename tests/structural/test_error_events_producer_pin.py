@@ -41,12 +41,12 @@ _EXECUTOR = _PRISMPY_ROOT / "src" / "prismpy" / "pipeline" / "executor.py"
 # stay in production (they still fail loudly).
 F_AG_GATE_SITES: Tuple[Tuple[str, int, str], ...] = (
     ("src/prismpy/translators/acea/translator.py", 514, "ClimateDownloadError"),
-    ("src/prismpy/translators/pythia/translator.py", 977, "ValueError"),
-    ("src/prismpy/translators/pythia/translator.py", 1770, "ValueError"),
-    ("src/prismpy/translators/pythia/translator.py", 2518, "BuildEghrSubstrateError"),
-    ("src/prismpy/translators/sarra_py/translator.py", 718, "ValueError"),
-    ("src/prismpy/translators/sarra_py/translator.py", 1557, "ValueError"),
-    ("src/prismpy/translators/craft/translator.py", 1572, "ValueError"),
+    ("src/prismpy/translators/pythia/translator.py", 970, "ValueError"),
+    ("src/prismpy/translators/pythia/translator.py", 1763, "ValueError"),
+    ("src/prismpy/translators/pythia/translator.py", 2511, "BuildEghrSubstrateError"),
+    ("src/prismpy/translators/sarra_py/translator.py", 711, "ValueError"),
+    ("src/prismpy/translators/sarra_py/translator.py", 1550, "ValueError"),
+    ("src/prismpy/translators/craft/translator.py", 1565, "ValueError"),
     ("src/prismpy/translators/_shared/eghr_substrate.py", 461, "ValueError"),
     ("src/prismpy/translators/_shared/eghr_substrate.py", 466, "ValueError"),
 )
@@ -228,6 +228,24 @@ def test_each_translator_classifies_in_its_outer_catch() -> None:
     assert not violations, (
         "translator-catch classification gap (would reintroduce the "
         "Bester mask):\n  " + "\n  ".join(violations)
+    )
+
+
+def test_acea_raise_carries_total_in_cell_unit() -> None:
+    """ACEA's typed raise MUST pass ``total=len(cell_ids_30arcmin)`` so
+    the downstream ``partial_progress`` is in the SAME unit as
+    ``missing_tiles`` (30-arcmin cell count, NOT pixel-grid size). Without
+    this, the consumer would report "47,996 of 48,000 cells" instead of
+    the honest "96 of 100 cells" — quiet honest-signal violation."""
+    acea = _PRISMPY_ROOT / "src/prismpy/translators/acea/translator.py"
+    text = acea.read_text(encoding="utf-8")
+    m = re.search(
+        r"raise ClimateDownloadError\(.*?total\s*=\s*len\(\s*cell_ids_30arcmin",
+        text, re.DOTALL,
+    )
+    assert m, (
+        "ACEA raise MUST carry total=len(cell_ids_30arcmin) so "
+        "partial_progress reports counts in the cell unit, not pixels"
     )
 
 

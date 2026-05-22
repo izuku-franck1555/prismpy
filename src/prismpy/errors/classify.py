@@ -30,9 +30,16 @@ def classify_to_event_dict(
         # error to settle on one attribute name.
         missing = getattr(exc, "missing_assets", None)
 
+    # Denominator MUST be in the same unit as ``missing_tiles`` — e.g. count
+    # of 30-arcmin cell IDs for ACEA, NOT the full pixel-grid size. Read it
+    # off the exception first (set by the raise site that knows the unit);
+    # fall back to ``context['grid_total']`` only when no caller provided
+    # the typed value.
     partial_progress: Optional[Dict[str, int]] = None
-    if missing is not None and context:
-        total = context.get("grid_total")
+    if missing is not None:
+        total = getattr(exc, "total", None)
+        if total is None and context:
+            total = context.get("grid_total")
         if isinstance(total, int) and total > 0:
             failed = len(missing)
             partial_progress = {

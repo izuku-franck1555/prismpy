@@ -32,9 +32,14 @@ class ClimateDownloadError(Exception):
         *,
         missing_tiles: Optional[List[int]] = None,
         source: Optional[str] = None,
+        total: Optional[int] = None,
     ) -> None:
         self.missing_tiles: List[int] = list(missing_tiles or [])
         self.source = source
+        # ``total`` is in the SAME unit as ``len(missing_tiles)`` (e.g.
+        # 30-arcmin cell count, not pixel-grid size) so a partial-progress
+        # derivation downstream reports honest counts in matching units.
+        self.total = total
         prefix = f"[{source}] " if source else ""
         suffix = (
             f" ({len(self.missing_tiles)} unfetched IDs: "

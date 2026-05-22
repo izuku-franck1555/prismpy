@@ -2812,14 +2812,12 @@ class TranslationPipeline:
                     self.logger.error(f"Translation error for {platform.value}: {e}")
                     from prismpy.translators.base import TranslationResult
                     from prismpy.errors import classify_to_event_dict
-                    # Best-effort grid_total so partial_progress is derived
-                    # when the typed exception carried a missing_tiles list.
-                    ctx = {"platform": platform.value}
-                    grid = getattr(unified_data, "grid", None)
-                    cells = getattr(grid, "cells", None) if grid is not None else None
-                    if cells is not None and hasattr(cells, "__len__"):
-                        ctx["grid_total"] = len(cells)
-                    error_event = classify_to_event_dict(e, ctx)
+                    # The typed exception carries ``total`` in the correct
+                    # unit (e.g. ACEA's 30-arcmin cell count) when it knows
+                    # one — passing a pixel-grid count here would be a
+                    # unit mismatch ("47,996 of 48,000" instead of "96 of
+                    # 100"), so the catch supplies no denominator.
+                    error_event = classify_to_event_dict(e)
                     results[platform.value] = TranslationResult(
                         success=False,
                         platform=platform,

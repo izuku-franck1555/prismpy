@@ -13,7 +13,15 @@ when the exception did not carry the corresponding attribute.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, NotRequired, Optional, TypedDict
+import sys
+from typing import Any, Dict, List, Optional, TypedDict
+
+# Required / NotRequired moved into typing at 3.11; fall back to
+# typing_extensions on 3.10 (prismpy supports >=3.10,<3.13).
+if sys.version_info >= (3, 11):
+    from typing import NotRequired
+else:  # pragma: no cover - 3.10 path
+    from typing_extensions import NotRequired
 
 
 class ErrorEventDict(TypedDict):

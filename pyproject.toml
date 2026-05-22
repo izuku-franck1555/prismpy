@@ -108,6 +108,9 @@ dependencies = [
     # scenario-package code path the way agera5/cdsapi did before
     # being promoted.
     "isimip-client>=2.0,<3.0",
+    # NotRequired moved into typing at 3.11; the errors package needs
+    # typing_extensions on 3.10 (prismpy supports >=3.10,<3.13).
+    "typing_extensions ; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
