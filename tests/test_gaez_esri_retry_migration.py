@@ -1,20 +1,18 @@
-"""Ship 1' EXPANDED AC-S1E-2 — GAEZ esri_client canonical-helper migration.
+"""GAEZ esri_client canonical-helper migration — behaviour tests.
 
-Behaviour tests for ``EsriImageServiceClient.fetch_image`` after the bespoke
-retry loop was replaced by ``retry_with_exponential_backoff``:
+Tests for ``EsriImageServiceClient.fetch_image`` after the bespoke retry
+loop was replaced by ``retry_with_exponential_backoff``:
 
-* **In-band Esri error (S1v2-C4, highest-value)**: HTTP 200 + a JSON
-  ``{"error": {...}}`` envelope MUST raise ``EsriFetchError`` and be RETRIED
-  by the helper — never returned as if it were valid raster bytes.
-* **Success short-circuit**: 200 + image content returns on the first call.
-* **Exhaust parity**: persistent failure raises ``EsriFetchError`` after
-  exactly ``max_attempts`` calls (the F-AG fail-loud exhaust type).
-* **Cancel-during-retry**: a cancel observed mid-storm raises
-  ``PipelineCancelled`` at the next attempt boundary, well before the budget.
-* **Producer-side retry substage (PRI-6)**: a wired ``progress_callback``
-  receives ``retry_info={'kind': 'retry', ...}`` during the storm.
-* **ThreadPool cancel**: a worker cancel propagates out of
-  ``download_cultivar`` (carve-out before EsriFetchError accumulation).
+* In-band Esri error: HTTP 200 + a JSON ``{"error": {...}}`` envelope MUST
+  raise ``EsriFetchError`` and be retried — never returned as raster bytes.
+* Success short-circuit: 200 + image content returns on the first call.
+* Exhaust parity: persistent failure raises ``EsriFetchError`` after exactly
+  ``max_attempts`` calls.
+* Cancel-during-retry: a cancel mid-storm raises ``PipelineCancelled`` at the
+  next attempt boundary, well before the budget.
+* Retry substage: a wired ``progress_callback`` receives
+  ``retry_info={'kind': 'retry', ...}`` during the storm.
+* ThreadPool cancel: a worker cancel propagates out of ``download_cultivar``.
 """
 from __future__ import annotations
 
@@ -92,8 +90,8 @@ def test_success_first_attempt_returns_bytes(monkeypatch, no_sleep):
 
 
 def test_in_band_json_error_raises_and_retries(monkeypatch, no_sleep):
-    """S1v2-C4: 200 + JSON-error body MUST raise (not return the body) and
-    the helper MUST retry it to exhaustion."""
+    """200 + JSON-error body MUST raise (not return the body) and the helper
+    MUST retry it to exhaustion."""
     calls = []
 
     def fake_get(url, **kw):
@@ -153,8 +151,8 @@ def test_cancel_during_retry_aborts_before_budget(monkeypatch, no_sleep):
 
 
 def test_progress_callback_emits_retry_substage(monkeypatch, no_sleep):
-    """PRI-6: a wired progress_callback receives the structured retry_info
-    during the storm (translate stage, kind='retry')."""
+    """A wired progress_callback receives the structured retry_info during
+    the storm (translate stage, kind='retry')."""
     def fake_get(url, **kw):
         return _Resp(503, "text/html", text="down")
 
@@ -174,8 +172,8 @@ def test_progress_callback_emits_retry_substage(monkeypatch, no_sleep):
 
 
 def test_download_cultivar_early_cancel_propagates():
-    """5-level cancel-wire entry: cancel observed before fan-out raises
-    PipelineCancelled (never rewritten as a GAEZ fetch error)."""
+    """Cancel observed before fan-out raises PipelineCancelled (never
+    rewritten as a GAEZ fetch error)."""
     from prismpy.sources.gaez.downloader import GAEZDownloader
 
     dl = GAEZDownloader(max_workers=1)

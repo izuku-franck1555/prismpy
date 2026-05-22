@@ -1,10 +1,10 @@
-"""Ship 1' EXPANDED AC-S1E-3 — TAMSAT canonical-helper migration.
+"""TAMSAT canonical-helper migration — behaviour tests.
 
-Behaviour tests for the ``_download_nc`` HTTP path after the bespoke single
-5xx retry was replaced by ``retry_with_exponential_backoff``. Driven through
-the public ``_download_tamsat`` (``_download_nc`` is a closure). All scenarios
-return a non-200 status so NO ``.nc`` file is written and Phase 2 stays a
-no-op (rasterio is imported but the conversion loop iterates an empty dir).
+Tests for the ``_download_nc`` HTTP path after the bespoke single 5xx retry
+was replaced by ``retry_with_exponential_backoff``. Driven through
+``_download_tamsat`` (``_download_nc`` is a closure). All scenarios return a
+non-200 status so no ``.nc`` file is written and Phase 2 stays a no-op
+(rasterio is imported but the conversion loop iterates an empty dir).
 
 Preserved invariants under test:
 * 404 → ``"skipped"`` fast-path is NON-retryable (exactly one HTTP call).
@@ -132,8 +132,8 @@ def test_cancel_during_retry_aborts(tmp_path, monkeypatch, no_sleep):
 
 
 def test_retry_observer_emits_substage(tmp_path, monkeypatch, no_sleep):
-    """PRI-6: a wired retry_observer (the bridge closure) receives the
-    structured retry payload during a TAMSAT 5xx storm."""
+    """A wired retry_observer (the bridge closure) receives the structured
+    retry payload during a TAMSAT 5xx storm."""
     def fake_get(url, **kw):
         return _Resp(503, text="down")
 

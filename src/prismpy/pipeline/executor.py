@@ -1106,9 +1106,7 @@ class TranslationPipeline:
                             self._progress_callback.on_substage_progress(
                                 'retrieve', 'Downloading TAMSAT rainfall',
                                 current, total, label)
-                    # Producer-side retry-attempt progress (PRI-6): built
-                    # from the WebProgressCallback object so a TAMSAT 5xx
-                    # retry storm emits a 'retrying N/M' substage.
+                    # Retry-attempt progress emitter for the TAMSAT download.
                     tamsat_on_attempt = _bridge_helper_on_attempt(
                         self._progress_callback, 'retrieve', 'TAMSAT'
                     )

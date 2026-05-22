@@ -51,10 +51,8 @@ _LOWER = 815
 # Sprint history:
 #   Sprint C / D: 815-2300 (legacy bands; retired at Sprint E.3)
 #   Sprint E.3 Phase 1 close: 2600 (this canonical pin)
-#   Ship 1' EXPANDED retry migration: n_collected ≈ 2658 after the new
-#     GAEZ/TAMSAT migration + cancel-AST + single-emitter pin suites (plus
-#     accumulated inter-sprint growth that had already breached 2600).
-#     ceil((2658 + 200) / 50) * 50 = ceil(57.16) * 50 = 58 * 50 = 2900.
+#   Retry-migration test suites: n_collected ≈ 2658 →
+#     ceil((2658 + 200) / 50) * 50 = 2900.
 _UPPER = 2900
 
 

@@ -34,7 +34,7 @@ from prismpy.sources.common.retry import (
 _PRISMPY_ROOT = Path(__file__).resolve().parents[2]
 _NASA_POWER = _PRISMPY_ROOT / "src" / "prismpy" / "sources" / "climate" / "nasa_power.py"
 _RETRY = _PRISMPY_ROOT / "src" / "prismpy" / "sources" / "common" / "retry.py"
-# Ship 1' EXPANDED: GAEZ esri_client + TAMSAT also route through the helper.
+# GAEZ esri_client + TAMSAT also route through the helper.
 _ESRI = _PRISMPY_ROOT / "src" / "prismpy" / "sources" / "gaez" / "esri_client.py"
 _TAMSAT = _PRISMPY_ROOT / "src" / "prismpy" / "sources" / "climate" / "tamsat.py"
 
@@ -235,24 +235,22 @@ def test_anti_mutation_swap_chunked_encoding_error_breaks_pin() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Ship 1' EXPANDED — GAEZ esri_client + TAMSAT migration + PRI-6 on_attempt.
+# GAEZ esri_client + TAMSAT migration + on_attempt threading.
 # ---------------------------------------------------------------------------
 
 
 def test_helper_exposes_on_attempt_keyword() -> None:
-    """PRI-6: the canonical helper MUST expose an ``on_attempt`` keyword so
-    producer-side adapters can emit a retry-attempt substage. Removing it
-    breaks the retry-attempt threading substrate."""
+    """The helper MUST expose an ``on_attempt`` keyword so adapters can emit
+    a retry-attempt substage."""
     sig = inspect.signature(retry_with_exponential_backoff)
     assert "on_attempt" in sig.parameters, (
-        "retry_with_exponential_backoff MUST expose `on_attempt` "
-        "(PRI-6 producer-side retry-attempt threading)"
+        "retry_with_exponential_backoff MUST expose `on_attempt`"
     )
 
 
 def test_gaez_esri_routes_through_canonical_helper() -> None:
-    """AC-S1E-2: GAEZ ``fetch_image`` (the PRODUCTION retry surface) MUST
-    route through the canonical helper, and the legacy bespoke
+    """GAEZ ``fetch_image`` (the production retry surface) MUST route through
+    the canonical helper, and the bespoke
     ``while attempt <= self.retries`` loop MUST be gone."""
     assert _file_invokes_helper(_ESRI), (
         "esri_client.py MUST invoke retry_with_exponential_backoff "
@@ -263,35 +261,34 @@ def test_gaez_esri_routes_through_canonical_helper() -> None:
     legacy = re.compile(r"while\s+attempt\s*<=\s*self\.retries")
     assert not legacy.search(text), (
         "esri_client.py still carries the bespoke "
-        "`while attempt <= self.retries` retry loop; AC-S1E-2 migrates "
+        "`while attempt <= self.retries` retry loop; the migration moves "
         "fetch_image to retry_with_exponential_backoff."
     )
 
 
 def test_gaez_fetch_image_has_cancel_and_progress_params() -> None:
-    """AC-S1E-2 + AC-S1E-1: the innermost GAEZ retry surface MUST accept
-    ``cancel_check`` (5-level cancel-wire terminus) AND ``progress_callback``
-    (producer-side retry-attempt emit)."""
+    """The innermost GAEZ retry surface MUST accept ``cancel_check`` (the
+    cancel-wire terminus) AND ``progress_callback`` (retry-attempt emit)."""
     from prismpy.sources.gaez.esri_client import EsriImageServiceClient
 
     params = inspect.signature(EsriImageServiceClient.fetch_image).parameters
     assert "cancel_check" in params, "fetch_image MUST accept cancel_check"
     assert "progress_callback" in params, (
-        "fetch_image MUST accept progress_callback (PRI-6 retry-attempt emit)"
+        "fetch_image MUST accept progress_callback"
     )
 
 
 def test_tamsat_routes_through_canonical_helper() -> None:
-    """AC-S1E-3: TAMSAT ``_download_nc`` MUST route the 5xx fallback through
-    the canonical helper instead of the bespoke double ``requests.get``."""
+    """TAMSAT ``_download_nc`` MUST route the 5xx fallback through the
+    canonical helper instead of the bespoke double ``requests.get``."""
     assert _file_invokes_helper(_TAMSAT), (
-        "tamsat.py MUST invoke retry_with_exponential_backoff (AC-S1E-3)"
+        "tamsat.py MUST invoke retry_with_exponential_backoff"
     )
 
 
 # ---------------------------------------------------------------------------
-# Codex round-1 absorption: backoff-multiplier parity + legacy-callback
-# additive fallback for the retry-substage bridge.
+# backoff-multiplier schedule parity + legacy-callback additive fallback
+# for the retry-substage bridge.
 # ---------------------------------------------------------------------------
 
 
@@ -341,8 +338,8 @@ class _ModernRetryInfoCallback:
 
 
 def test_bridge_falls_back_to_legacy_5arg_callback() -> None:
-    """Codex P2: a retry storm against a legacy 5-arg callback MUST NOT
-    raise TypeError — the bridge degrades to the 5-arg call shape."""
+    """A retry storm against a legacy 5-arg callback MUST NOT raise
+    TypeError — the bridge degrades to the 5-arg call shape."""
     cb = _LegacyFiveArgCallback()
     on_attempt = _bridge_helper_on_attempt(cb, "translate", "GAEZ")
     assert on_attempt is not None

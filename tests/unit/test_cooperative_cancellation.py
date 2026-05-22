@@ -374,8 +374,8 @@ class TestCarveOutRegression:
         # PipelineStage class definition. Then 510 → 519 after F-R
         # added GeometryRequiredError class at module top (~9 lines).
         # Then 519 → 520 after Sprint E.0 added WarningCategory import.
-        # Then 520 → 521 after Ship 1' EXPANDED added the
-        # `_bridge_helper_on_attempt` import (+1 line at module top).
+        # Then 520 → 521 after a new `_bridge_helper_on_attempt` import
+        # (+1 line at module top).
         ("src/prismpy/pipeline/executor.py", 521),
         # Provenance-flush inside the translator-dispatch except handler
         # in _execute_translate: writes decision records, cancel-inert.
@@ -437,9 +437,9 @@ class TestCarveOutRegression:
         # ``_retrieve_isda_api_for_grid`` (nodata sentinel guard before
         # `× scale` per durable §30). Same provenance try block, new
         # line number per durable §27 producer-consumer parity. Then
-        # 2814 → 2822 after Ship 1' EXPANDED added the
-        # `_bridge_helper_on_attempt` import (+1) + the TAMSAT
-        # retry-attempt bridge build in `_execute_retrieve` (~+7).
+        # 2814 → 2822 after a new `_bridge_helper_on_attempt` import (+1)
+        # + the TAMSAT retry-attempt bridge build in `_execute_retrieve`
+        # (~+7).
         ("src/prismpy/pipeline/executor.py", 2822),
     }
 

@@ -994,22 +994,11 @@ class AgERA5Source(DataSource):
             # interrupt — orphan threads consume CDS quota across
             # cancellations. User-facing expectation documented in AC L.4.
             #
-            # Ship 1' AC-S1E-4 — HONEST-DEFER (no behaviour change): AgERA5
-            # is deliberately NOT migrated to the canonical
-            # ``retry_with_exponential_backoff`` helper. ``cdsapi`` already
-            # runs its OWN poll/retry loop internally (defaults
-            # ``retry_max=500`` polls, ``sleep_max=120`` s between polls),
-            # so wrapping it would DOUBLE-retry an already-resilient call
-            # (codex S1-S1 + warning-auditor confirmed legitimate). The
-            # helper is also requests-based and cdsapi is not. Consequences,
-            # stated plainly:
-            #   * No producer-side retry-attempt substage (PRI-6) here — the
-            #     cdsapi internals expose no per-attempt hook to bridge.
-            #   * Cancel responsiveness stays year-boundary only (above).
-            # Future work to close the gap would require either a direct CDS
-            # HTTP client (so the canonical helper + cancel-wire apply) or
-            # patching a cdsapi progress/retry callback — both out of Ship 1'
-            # scope and tracked as honest deferred debt, not silent absence.
+            # Deliberately NOT wrapped in the canonical retry helper: cdsapi
+            # already runs its own poll/retry loop (retry_max=500,
+            # sleep_max=120 s) and is not requests-based, so wrapping would
+            # double-retry. Consequence: no per-attempt retry progress here
+            # (cdsapi exposes no hook) and cancel stays year-boundary only.
             try:
                 download_AgERA5_year(
                     query_year=year,

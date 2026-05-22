@@ -83,31 +83,17 @@ class EsriImageServiceClient:
     ) -> bytes:
         """Fetch a single raster as TIFF bytes.
 
-        Raises ``EsriFetchError`` on every failure mode. The single fail-loud
-        surface keeps the caller free of dual-shape success/error handling
-        (the previous ``(success, msg)`` tuple was the source of the F-AG
-        silent-skip class).
+        Raises ``EsriFetchError`` on every failure mode (the single
+        fail-loud surface keeps callers free of dual-shape success/error
+        handling). Retries via the canonical helper. Two non-obvious notes:
 
-        Retry policy is the canonical ``retry_with_exponential_backoff``
-        helper (durable #24 canonical-source-or-pin) instead of the former
-        bespoke loop. Two semantic notes:
-
-        * **Cancellation** is cooperative: ``cancel_check`` is polled at the
-          top of every attempt and again before each backoff sleep, so a
-          user cancel aborts at the next attempt boundary. ``requests.get``
-          blocks for up to ``self.timeout`` and cannot be interrupted
-          mid-flight, so worst-case cancel latency is one ``timeout`` window
-          (same model as NASA POWER's per-attempt cancel — honest note I7).
-        * **In-band Esri errors** (HTTP 200 + a JSON ``{"error": {...}}``
-          envelope) are RAISED as ``EsriFetchError`` rather than recorded in
-          a ``last_err`` accumulator, so the canonical helper retries them
-          and an exhausted in-band error fails loudly — never returning the
-          error body as if it were valid raster bytes (the silent-corruption
-          class guarded by S1v2-C4).
-
-        Jitter shifts from the bespoke MULTIPLICATIVE ``random.uniform(0.8,
-        1.2)`` to the helper's additive ±``jitter_ratio``; the effective
-        per-raster backoff budget is preserved at the same small magnitude.
+        * Cancellation is cooperative: ``cancel_check`` is polled at the top
+          of every attempt and before each backoff sleep. ``requests.get``
+          blocks up to ``self.timeout`` and cannot be interrupted mid-flight,
+          so worst-case cancel latency is one ``timeout`` window.
+        * In-band Esri errors (HTTP 200 + a JSON ``{"error": {...}}``
+          envelope) are RAISED, not returned — returning the error body as
+          raster bytes would be silent corruption.
         """
         try:
             import requests
@@ -135,9 +121,7 @@ class EsriImageServiceClient:
         attempt_counter = {"i": 0}
 
         def _attempt() -> bytes:
-            # Per-attempt cancel check — fires at the top of every attempt,
-            # including after a backoff sleep, so a cancel during the sleep
-            # window aborts before the next blocking request.
+            # Top-of-attempt cancel check (also covers the post-sleep path).
             raise_if_cancelled(
                 cancel_check, f"esri.fetch.attempt={attempt_counter['i']}"
             )
@@ -165,10 +149,8 @@ class EsriImageServiceClient:
                 return resp.content
 
             if status == 200 and "application/json" in content_type:
-                # In-band Esri error envelope (the documented edge per codex
-                # M2): RAISE so the canonical helper retries it. Never return
-                # the error body as image bytes (S1v2-C4 silent-corruption
-                # guard).
+                # In-band error envelope: raise so the helper retries it;
+                # returning the error body as image bytes is silent corruption.
                 try:
                     body = resp.json()
                 except ValueError as e:
@@ -190,8 +172,7 @@ class EsriImageServiceClient:
                     0, f"ESRI_ERROR: {parsed.code} {parsed.message}"
                 )
 
-            # HTTP 4xx / 5xx — preserve the actual status code per builder
-            # DELTA-CA-1 + codex M3 honest-signal floor.
+            # HTTP 4xx / 5xx — preserve the actual status code.
             try:
                 body_snippet = resp.text[:200] if resp.text else ""
             except Exception:
@@ -199,8 +180,7 @@ class EsriImageServiceClient:
             raise EsriFetchError(status, f"HTTP {status}: {body_snippet}")
 
         def _on_retry(attempt_index, exc, sleep_s):
-            # Pre-sleep cancel check — a cancel observed before the backoff
-            # wait short-circuits the sleep entirely (mirrors NASA POWER).
+            # Pre-sleep cancel check so a cancel aborts during the backoff.
             raise_if_cancelled(
                 cancel_check, f"esri.before_retry={attempt_index}"
             )
@@ -209,20 +189,12 @@ class EsriImageServiceClient:
             progress_callback, "translate", "GAEZ"
         )
 
-        # Honour caller-supplied retry config; max_attempts = initial + the
-        # configured retry count — EXACT parity with the former bespoke
-        # attempt-counted loop (retries=3 → 4 attempts; retries=0 → 1
-        # attempt, no retry). Floor of 1 guards the helper's
-        # ``max_attempts >= 1`` contract.
+        # initial attempt + configured retries (retries=0 → 1 attempt).
         max_attempts = max(1, int(self.retries) + 1)
 
-        # Reproduce the bespoke schedule exactly: base wait 1.0 s grown by
-        # the configured ``self.backoff`` factor each attempt (so callers
-        # passing a custom backoff — incl. 0.0 for near-immediate retries —
-        # keep their behaviour). Jitter shifts from the bespoke MULTIPLICATIVE
-        # ``random.uniform(*self.jitter_range)`` to the helper's additive
-        # ±20 % (contract-sanctioned semantic shift; ``jitter_range`` is now a
-        # legacy constructor arg that no longer alters the schedule).
+        # base 1.0 s grown by self.backoff each attempt so a caller's custom
+        # backoff is honoured; jitter is the helper's additive form
+        # (jitter_range is no longer used).
         try:
             return retry_with_exponential_backoff(
                 _attempt,

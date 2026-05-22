@@ -1,28 +1,24 @@
-"""Ship 1' EXPANDED §6.1 — cancel-during-retry + single-emitter pins.
+"""Cancel-during-retry + single-emitter structural pins.
 
-Two structural invariants over the prismpy source tree:
+Two invariants over the prismpy source tree:
 
-1. **PRI-3 cancel-during-retry** (``test_every_retry_call_site_is_cancel_wired``):
-   every call to the canonical ``retry_with_exponential_backoff`` in
-   ``src/prismpy/**`` MUST pass an ``on_retry=`` callback whose body reaches
-   ``raise_if_cancelled`` — so a user cancel observed during a backoff sleep
-   raises promptly instead of waiting out the full retry budget.
+1. cancel-during-retry (``test_every_retry_call_site_is_cancel_wired``):
+   every call to ``retry_with_exponential_backoff`` in ``src/prismpy/**``
+   MUST pass an ``on_retry=`` callback whose body reaches
+   ``raise_if_cancelled`` — so a cancel during a backoff sleep raises
+   promptly instead of waiting out the full retry budget.
 
-2. **S1v2-C1 single-emitter** (``test_no_inline_retry_substage_dict``): the
-   structured retry-substage payload (``{'kind': 'retry', ...}``) MUST be
-   built in exactly ONE place — ``_bridge_helper_on_attempt`` in
-   ``sources/common/retry.py`` — and never inline-constructed by an adapter
-   (durable #30 canonical-emit-at-producer-boundary polymorphism guard).
+2. single-emitter (``test_no_inline_retry_substage_dict``): the
+   ``{'kind': 'retry', ...}`` payload MUST be built in exactly one place —
+   ``_bridge_helper_on_attempt`` — and never inline-constructed by an adapter.
 
-RESOLVER SCOPE (codex S1-S2 honesty): the cancel-wire walk resolves the
-``on_retry`` argument ONE LEVEL by NAME — it must be a ``Name`` referring to
-a ``def`` in the same module whose (recursive) body calls
-``raise_if_cancelled`` by its canonical name. Lambdas, callback factories,
-attribute callbacks, aliased ``raise_if_cancelled`` imports, and variable
-indirection are deliberately NOT resolved and will FAIL the pin — the pin
-intentionally forces the canonical local-``_on_retry``-def pattern that NASA
-POWER / GAEZ / TAMSAT all use. Arity is validated against the real 3-arg
-helper contract ``(attempt, exc, sleep_s)``.
+Resolver scope: the cancel-wire walk resolves the ``on_retry`` argument one
+level by NAME — it must be a ``Name`` referring to a ``def`` in the same
+module whose (recursive) body calls ``raise_if_cancelled``. Lambdas, callback
+factories, attribute callbacks, aliased imports, and variable indirection are
+NOT resolved and will FAIL the pin — forcing the local-``_on_retry``-def
+pattern. Arity is validated against the 3-arg ``(attempt, exc, sleep_s)``
+contract.
 """
 from __future__ import annotations
 
@@ -82,7 +78,7 @@ def _retry_call_sites(tree: ast.AST) -> List[ast.Call]:
 
 
 def test_every_retry_call_site_is_cancel_wired() -> None:
-    """PRI-3: each helper call site passes ``on_retry=`` whose def reaches
+    """Each helper call site passes ``on_retry=`` whose def reaches
     ``raise_if_cancelled`` with the canonical 3-arg arity."""
     checked = 0
     failures: List[str] = []
@@ -157,9 +153,9 @@ def _dicts_with_retry_kind(tree: ast.AST) -> List[int]:
 
 
 def test_no_inline_retry_substage_dict() -> None:
-    """S1v2-C1 / durable #30: no adapter inline-builds a
-    ``{'kind': 'retry', ...}`` substage dict; the ONLY producer is
-    ``_bridge_helper_on_attempt`` in ``sources/common/retry.py``."""
+    """No adapter inline-builds a ``{'kind': 'retry', ...}`` substage dict;
+    the only producer is ``_bridge_helper_on_attempt`` in
+    ``sources/common/retry.py``."""
     offenders: List[Tuple[str, int]] = []
     for path in _iter_py_files():
         if path.resolve() == _RETRY.resolve():
@@ -168,8 +164,7 @@ def test_no_inline_retry_substage_dict() -> None:
         for lineno in _dicts_with_retry_kind(tree):
             offenders.append((str(path.relative_to(_PRISMPY_ROOT)), lineno))
     assert not offenders, (
-        "inline retry-substage dict(s) outside _bridge_helper_on_attempt "
-        "(durable #30 single-emitter violated):\n"
+        "inline retry-substage dict(s) outside _bridge_helper_on_attempt:\n"
         + "\n".join(f"  {f}:{ln}" for f, ln in offenders)
     )
 

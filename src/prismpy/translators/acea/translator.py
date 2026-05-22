@@ -1095,7 +1095,7 @@ class AceaTranslator(AceaTranslatorBase):
         )
         source = NASAPowerSource(config)
 
-        # Producer-side retry-attempt progress (PRI-6), built once.
+        # Retry-attempt progress emitter, built once for the cell loop.
         nasa_on_attempt = _bridge_helper_on_attempt(
             getattr(self, 'progress_callback', None), 'translate', 'NASA POWER'
         )
@@ -1194,9 +1194,7 @@ class AceaTranslator(AceaTranslatorBase):
         )
         source = NASAPowerSource(config)
 
-        # Producer-side retry-attempt progress (PRI-6): built once from the
-        # WebProgressCallback object so a NASA POWER retry storm emits a
-        # 'retrying N/M' substage. None when no object is wired (CLI / tests).
+        # Retry-attempt progress emitter, built once for the cell loop.
         nasa_on_attempt = _bridge_helper_on_attempt(
             getattr(self, 'progress_callback', None), 'translate', 'NASA POWER'
         )
@@ -1956,10 +1954,6 @@ class AceaTranslator(AceaTranslatorBase):
                     output_dir=output_dir,
                     water_supplies=['irr', 'rf'],
                     input_levels=['High', 'Low'],
-                    # Ship 1' 5-level cancel-wire entry point + producer-side
-                    # retry-attempt progress (PRI-6). The translator holds the
-                    # WebProgressCallback object (set by the executor); thread
-                    # it so fetch_image's retry storm emits a substage.
                     cancel_check=getattr(self, 'cancel_check', None),
                     progress_callback=getattr(self, 'progress_callback', None),
                 )

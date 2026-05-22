@@ -363,11 +363,8 @@ class GAEZDownloader:
 
         Raises ``EsriFetchError`` (or ``UnknownCombination``) on failure;
         the caller catches and accumulates into ``GAEZFetchSummary``.
-
         ``cancel_check`` + ``progress_callback`` thread through to
-        ``fetch_image`` (the innermost retry surface) for cooperative
-        cancellation + producer-side retry-attempt progress (Ship 1' 5-level
-        cancel-wire / PRI-6).
+        ``fetch_image`` (the innermost retry surface).
         """
         if cache_path.exists() and not overwrite:
             logger.debug(f"GAEZ cache hit: {cache_path}")
@@ -406,7 +403,7 @@ class GAEZDownloader:
         ``cancel_check`` is observed before fan-out, per single-threaded
         raster, and (via ``fetch_image``) inside each worker; on cancel the
         ThreadPoolExecutor is shut down with ``cancel_futures=True`` so
-        queued rasters never touch the FAO service (TAMSAT precedent).
+        queued rasters never touch the FAO service.
         """
         if input_levels is None:
             input_levels = ['High', 'Low']
@@ -480,11 +477,8 @@ class GAEZDownloader:
                         key, path = fut.result()
                         downloaded[key] = path
                     except PipelineCancelled:
-                        # A worker observed cancel mid-retry. Stop queued
-                        # rasters immediately so they never touch FAO, then
-                        # propagate the cancel (carve-out before the
-                        # EsriFetchError accumulation so cancel is never
-                        # rewritten as a fetch error).
+                        # Caught before EsriFetchError so a cancel is never
+                        # rewritten as a fetch error; stop queued rasters.
                         pool.shutdown(wait=False, cancel_futures=True)
                         raise
                     except UnknownCombination as e:
@@ -519,8 +513,7 @@ class GAEZDownloader:
 
         Re-raises ``GAEZDownloadError`` on any cultivar's failure so the
         ACEA translator can surface ``PipelineRun.status='error'``.
-        ``cancel_check`` + ``progress_callback`` thread down to
-        ``download_cultivar`` (Ship 1' 5-level cancel-wire).
+        ``cancel_check`` + ``progress_callback`` thread to ``download_cultivar``.
         """
         all_downloaded: Dict[str, Path] = {}
         cultivars = self.get_cultivars_for_crop(crop_name)
@@ -550,10 +543,8 @@ class GAEZDownloader:
         """Download GAEZ data and copy to output directory.
 
         Raises ``GAEZDownloadError`` if any underlying ``download_cultivar``
-        fails (per F-AG-class fail-loud contract). ``cancel_check`` +
-        ``progress_callback`` are the top of the Ship 1' 5-level cancel-wire
-        (ACEA passes ``self.cancel_check`` here); they thread down to
-        ``fetch_image``.
+        fails. ``cancel_check`` + ``progress_callback`` thread from here down
+        to ``fetch_image``.
         """
         if water_supplies is None:
             water_supplies = ['irr', 'rf']

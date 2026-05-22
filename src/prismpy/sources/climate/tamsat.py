@@ -439,10 +439,9 @@ class TAMSATSource(DataSource):
                             except OSError:
                                 pass
 
-                    # PRI-6 retry-attempt observer (the bridge closure) is
-                    # threaded via instance state, NOT a _download_tamsat
-                    # kwarg, so existing _download_tamsat test doubles (which
-                    # don't declare the param) keep working unchanged.
+                    # Pass the retry-attempt observer via instance state, not
+                    # a _download_tamsat kwarg, so existing test doubles that
+                    # omit the param keep working.
                     self._retry_observer = kwargs.get('retry_observer')
                     self._download_tamsat(
                         bounds=bounds_sarra_py,
@@ -748,13 +747,12 @@ class TAMSATSource(DataSource):
             region_name: Region name for file naming
             progress_callback: Optional callback(current, total, detail)
             max_workers: Number of parallel download threads (default 4)
-            retry_observer: Optional PRI-6 on_attempt closure; when not
-                passed explicitly (the production path via ``retrieve``),
-                falls back to the instance attribute set by ``retrieve``.
+            retry_observer: Optional retry-attempt progress closure. When
+                not passed explicitly (the path via ``retrieve``), falls
+                back to the instance attribute ``retrieve`` set.
         """
-        # PRI-6: prefer an explicit param (direct-call / unit tests); else
-        # use the instance attribute threaded by ``retrieve`` (keeps
-        # _download_tamsat test doubles that omit the param working).
+        # Explicit param wins (direct-call / tests); else use the attribute
+        # set by retrieve.
         if retry_observer is None:
             retry_observer = getattr(self, '_retry_observer', None)
 
@@ -860,14 +858,11 @@ class TAMSATSource(DataSource):
                 day=target_date.day,
             )
 
-            # Ship 1' AC-S1E-3: route the bespoke single 5xx retry through the
-            # canonical helper (durable #24). max_attempts=3 = initial + 2
-            # retries (preserves the bespoke 2-attempt fallback + adds one
-            # resilience retry per Phase 0c §16.A). The 404 → "skipped"
-            # fast-path stays NON-retryable; the (30, 60) timeout + FileLock
-            # guard + return-string contract are unchanged. The inner
-            # callable RAISES on 5xx / transient errors so the helper
-            # retries; 4xx-non-404 stays terminal.
+            # Route the 5xx fallback through the canonical helper
+            # (max_attempts=3). 404 → "skipped" stays non-retryable; the
+            # (30, 60) timeout, FileLock, and return-string contract are
+            # unchanged. The inner callable raises on 5xx / transient errors
+            # so the helper retries them; 4xx-non-404 stays terminal.
             def _attempt():
                 raise_if_cancelled(
                     cancel_check, f"tamsat._download_nc.attempt.{target_date}"
@@ -884,8 +879,7 @@ class TAMSATSource(DataSource):
                 return resp
 
             def _on_retry(attempt_index, exc, sleep_s):
-                # Pre-sleep cancel check so a cancel during the backoff
-                # window short-circuits the wait (mirrors NASA POWER).
+                # Pre-sleep cancel check so a cancel aborts during the backoff.
                 raise_if_cancelled(
                     cancel_check,
                     f"tamsat._download_nc.before_retry.{target_date}",

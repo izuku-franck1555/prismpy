@@ -303,8 +303,6 @@ class NASAPowerSource(DataSource):
                     end_date=year_end,
                     parameters=params_to_fetch,
                     cancel_check=cancel_check,
-                    # Producer-side retry-attempt progress (PRI-6); built
-                    # by the caller from the WebProgressCallback object.
                     on_attempt=kwargs.get('on_attempt'),
                 )
                 year_ts = self._convert_to_climate_timeseries(
