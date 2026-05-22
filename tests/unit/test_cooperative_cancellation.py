@@ -437,10 +437,10 @@ class TestCarveOutRegression:
         # ``_retrieve_isda_api_for_grid`` (nodata sentinel guard before
         # `× scale` per durable §30). Same provenance try block, new
         # line number per durable §27 producer-consumer parity. Then
-        # 2814 → 2822 after a new `_bridge_helper_on_attempt` import (+1)
+        # 2814 → 2820 after a new `_bridge_helper_on_attempt` import (+1)
         # + the TAMSAT retry-attempt bridge build in `_execute_retrieve`
-        # (~+7).
-        ("src/prismpy/pipeline/executor.py", 2822),
+        # (~+5).
+        ("src/prismpy/pipeline/executor.py", 2820),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed
