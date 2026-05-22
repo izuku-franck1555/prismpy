@@ -521,47 +521,56 @@ class NASAPowerSource(DataSource):
             f"from {start_date} to {end_date}"
         )
 
-        last_error = None
-        for attempt in range(self.config.retry_count):
-            # V2-22b L: retry-loop cancel check — AC L.2. Catches cancel
-            # fired during an earlier attempt's 120-s timeout wait.
-            raise_if_cancelled(
-                cancel_check, f"nasa_power.fetch.attempt={attempt}",
+        from prismpy.sources.common.retry import (
+            retry_with_exponential_backoff,
+        )
+
+        def _attempt() -> Dict[str, Dict[str, float]]:
+            response = requests.get(
+                self.config.base_url,
+                params=params,
+                timeout=self.config.timeout,
             )
-            try:
-                response = requests.get(
-                    self.config.base_url,
-                    params=params,
-                    timeout=self.config.timeout,
-                )
-                response.raise_for_status()
-                data = response.json()
+            response.raise_for_status()
+            data = response.json()
+            if "properties" not in data or "parameter" not in data["properties"]:
+                raise ValueError("Invalid response format from NASA POWER")
+            return data["properties"]["parameter"]
 
-                # Validate response structure
-                if "properties" not in data or "parameter" not in data["properties"]:
-                    raise ValueError("Invalid response format from NASA POWER")
+        def _on_retry(attempt_index, exc, sleep_s):
+            self.logger.warning(
+                "Attempt %d failed: %s; sleeping %.2fs before retry",
+                attempt_index + 1, exc, sleep_s,
+            )
+            # V2-22b L: retry-loop + pre-retry-delay cancel checks —
+            # AC L.2. Catches cancel fired during an earlier attempt's
+            # timeout wait OR during the backoff sleep window.
+            raise_if_cancelled(
+                cancel_check,
+                f"nasa_power.before_retry_delay={attempt_index}",
+            )
 
-                return data["properties"]["parameter"]
-
-            except requests.exceptions.Timeout:
-                last_error = f"Timeout after {self.config.timeout}s"
-                self.logger.warning(f"Attempt {attempt + 1} timeout, retrying...")
-            except requests.exceptions.RequestException as e:
-                last_error = str(e)
-                self.logger.warning(f"Attempt {attempt + 1} failed: {e}, retrying...")
-            except ValueError as e:
-                last_error = str(e)
-                self.logger.warning(f"Attempt {attempt + 1} invalid response: {e}")
-
-            if attempt < self.config.retry_count - 1:
-                # V2-22b L: pre-retry-delay sleep check — cancel during
-                # the backoff wait is observed on the next iteration.
-                raise_if_cancelled(
-                    cancel_check, f"nasa_power.before_retry_delay={attempt}",
-                )
-                time.sleep(self.config.retry_delay)
-
-        raise Exception(f"API request failed after {self.config.retry_count} attempts: {last_error}")
+        # V2-22b L: pre-flight cancel check before the first attempt.
+        raise_if_cancelled(cancel_check, "nasa_power.fetch.attempt=0")
+        try:
+            return retry_with_exponential_backoff(
+                _attempt,
+                max_attempts=6,
+                base_delay_s=5.0,
+                jitter_ratio=0.2,
+                exception_classes=(
+                    requests.exceptions.Timeout,
+                    requests.exceptions.ConnectionError,
+                    requests.exceptions.HTTPError,
+                    requests.exceptions.ChunkedEncodingError,
+                    ValueError,
+                ),
+                on_retry=_on_retry,
+            )
+        except (requests.exceptions.RequestException, ValueError) as exc:
+            raise Exception(
+                f"API request failed after retries: {exc}"
+            ) from exc
 
     def _convert_to_climate_timeseries(
         self,
