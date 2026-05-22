@@ -26,7 +26,10 @@ from pathlib import Path
 import pytest
 import requests
 
-from prismpy.sources.common.retry import retry_with_exponential_backoff
+from prismpy.sources.common.retry import (
+    _bridge_helper_on_attempt,
+    retry_with_exponential_backoff,
+)
 
 _PRISMPY_ROOT = Path(__file__).resolve().parents[2]
 _NASA_POWER = _PRISMPY_ROOT / "src" / "prismpy" / "sources" / "climate" / "nasa_power.py"
@@ -284,3 +287,78 @@ def test_tamsat_routes_through_canonical_helper() -> None:
     assert _file_invokes_helper(_TAMSAT), (
         "tamsat.py MUST invoke retry_with_exponential_backoff (AC-S1E-3)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Codex round-1 absorption: backoff-multiplier parity + legacy-callback
+# additive fallback for the retry-substage bridge.
+# ---------------------------------------------------------------------------
+
+
+def test_helper_honors_backoff_multiplier() -> None:
+    """The ``backoff_multiplier`` knob MUST drive the schedule so adapters
+    (e.g. GAEZ ``self.backoff``) reproduce their own backoff rather than a
+    forced doubling. With base=1.0 and multiplier=3.0 the sleeps are
+    1, 3, 9 (jitter disabled)."""
+    sleeps = []
+    calls = {"n": 0}
+
+    def boom():
+        calls["n"] += 1
+        raise requests.exceptions.Timeout("t")
+
+    with pytest.raises(requests.exceptions.Timeout):
+        retry_with_exponential_backoff(
+            boom,
+            max_attempts=4,
+            base_delay_s=1.0,
+            jitter_ratio=0.0,
+            backoff_multiplier=3.0,
+            exception_classes=(requests.exceptions.Timeout,),
+            sleep_fn=sleeps.append,
+        )
+    assert sleeps == [1.0, 3.0, 9.0], f"expected 1,3,9 schedule; got {sleeps}"
+
+
+class _LegacyFiveArgCallback:
+    """Implements ONLY the documented 5-arg on_substage_progress protocol —
+    no ``retry_info`` keyword (the pre-β consumer shape)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def on_substage_progress(self, stage, task, current, total, detail=""):
+        self.calls.append((stage, task, current, total, detail))
+
+
+class _ModernRetryInfoCallback:
+    def __init__(self):
+        self.calls = []
+
+    def on_substage_progress(self, stage, task, current, total, detail="",
+                             retry_info=None):
+        self.calls.append((stage, task, current, total, detail, retry_info))
+
+
+def test_bridge_falls_back_to_legacy_5arg_callback() -> None:
+    """Codex P2: a retry storm against a legacy 5-arg callback MUST NOT
+    raise TypeError — the bridge degrades to the 5-arg call shape."""
+    cb = _LegacyFiveArgCallback()
+    on_attempt = _bridge_helper_on_attempt(cb, "translate", "GAEZ")
+    assert on_attempt is not None
+    on_attempt(2, 6, 10.0)  # must not raise
+    assert cb.calls == [("translate", "Retrying GAEZ", 2, 6,
+                         "next attempt in 10s")]
+
+
+def test_bridge_passes_retry_info_to_modern_callback() -> None:
+    """A retry_info-aware consumer receives the structured payload."""
+    cb = _ModernRetryInfoCallback()
+    on_attempt = _bridge_helper_on_attempt(cb, "retrieve", "TAMSAT")
+    on_attempt(1, 3, 5.0)
+    assert len(cb.calls) == 1
+    ri = cb.calls[0][5]
+    assert ri == {
+        "kind": "retry", "attempt": 1, "max_attempts": 3,
+        "next_retry_delay_s": 5.0, "provider": "TAMSAT",
+    }

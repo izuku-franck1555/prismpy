@@ -13,6 +13,7 @@ Default schedule (max_attempts=6, base_delay_s=5.0):
 """
 from __future__ import annotations
 
+import inspect
 import logging
 import random
 import time
@@ -29,6 +30,7 @@ def retry_with_exponential_backoff(
     max_attempts: int = 6,
     base_delay_s: float = 5.0,
     jitter_ratio: float = 0.2,
+    backoff_multiplier: float = 2.0,
     exception_classes: Tuple[Type[BaseException], ...] = (
         requests.exceptions.HTTPError,
         requests.exceptions.ConnectionError,
@@ -50,6 +52,11 @@ def retry_with_exponential_backoff(
             sleeps double (5 → 10 → 20 → 40 → 80 s).
         jitter_ratio: ±fraction of the sleep magnitude applied
             uniformly to spread herd retries.
+        backoff_multiplier: per-attempt growth factor of the sleep
+            schedule (default 2.0 → doubling). Adapters with a different
+            historical backoff (e.g. GAEZ's configurable ``self.backoff``)
+            pass their own factor so the canonical helper reproduces their
+            schedule exactly instead of forcing a fixed doubling.
         exception_classes: tuple of exception types treated as
             transient. ``requests.RequestException`` is deliberately
             NOT a default because it would catch programmer errors
@@ -86,7 +93,7 @@ def retry_with_exponential_backoff(
             last_exc = exc
             if attempt >= max_attempts - 1:
                 break
-            sleep_s = base_delay_s * (2 ** attempt)
+            sleep_s = base_delay_s * (backoff_multiplier ** attempt)
             if jitter_ratio:
                 spread = sleep_s * jitter_ratio
                 sleep_s += random.uniform(-spread, spread)
@@ -125,8 +132,13 @@ def _bridge_helper_on_attempt(
     The returned closure converts the helper's PRIMITIVE
     ``(attempt, max_attempts, sleep_s)`` callback into a structured
     ``retry_info`` payload and emits it through the consumer's existing
-    ``on_substage_progress`` seam (the ``retry_info`` channel is added
-    consumer-side in prismweb β; the two repos ship atomically).
+    ``on_substage_progress`` seam. Consumers that already accept the
+    ``retry_info`` keyword (prismweb β) receive the structured payload;
+    consumers implementing only the legacy 5-arg
+    ``on_substage_progress(stage, task, current, total, detail)`` protocol
+    receive the same call WITHOUT ``retry_info`` — so a retry storm never
+    degrades a transient failure into a hard ``TypeError`` for an older
+    consumer (additive-fallback guarantee).
 
     Args:
         progress_callback: object exposing ``on_substage_progress``
@@ -148,21 +160,41 @@ def _bridge_helper_on_attempt(
     ):
         return None
 
-    def _on_attempt(attempt: int, max_attempts: int, sleep_s: float) -> None:
-        retry_info = {
-            "kind": "retry",
-            "attempt": attempt,
-            "max_attempts": max_attempts,
-            "next_retry_delay_s": round(float(sleep_s), 1),
-            "provider": provider,
-        }
-        progress_callback.on_substage_progress(
-            stage,
-            f"Retrying {provider}",
-            attempt,
-            max_attempts,
-            f"next attempt in {sleep_s:.0f}s",
-            retry_info=retry_info,
+    emit = progress_callback.on_substage_progress
+
+    # Detect whether the consumer's on_substage_progress accepts the
+    # `retry_info` keyword (prismweb β) or only the legacy 5-arg protocol.
+    # A consumer with **kwargs also counts as accepting it. Resolved ONCE
+    # at bridge construction so the per-attempt path stays cheap.
+    try:
+        params = inspect.signature(emit).parameters
+        accepts_retry_info = "retry_info" in params or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
         )
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        accepts_retry_info = False
+
+    def _on_attempt(attempt: int, max_attempts: int, sleep_s: float) -> None:
+        task = f"Retrying {provider}"
+        detail = f"next attempt in {sleep_s:.0f}s"
+        if accepts_retry_info:
+            emit(
+                stage,
+                task,
+                attempt,
+                max_attempts,
+                detail,
+                retry_info={
+                    "kind": "retry",
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                    "next_retry_delay_s": round(float(sleep_s), 1),
+                    "provider": provider,
+                },
+            )
+        else:
+            # Legacy 5-arg consumer: emit progress without retry_info so a
+            # retry storm never raises TypeError on an older callback.
+            emit(stage, task, attempt, max_attempts, detail)
 
     return _on_attempt

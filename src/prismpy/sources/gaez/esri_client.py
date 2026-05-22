@@ -216,12 +216,20 @@ class EsriImageServiceClient:
         # ``max_attempts >= 1`` contract.
         max_attempts = max(1, int(self.retries) + 1)
 
+        # Reproduce the bespoke schedule exactly: base wait 1.0 s grown by
+        # the configured ``self.backoff`` factor each attempt (so callers
+        # passing a custom backoff — incl. 0.0 for near-immediate retries —
+        # keep their behaviour). Jitter shifts from the bespoke MULTIPLICATIVE
+        # ``random.uniform(*self.jitter_range)`` to the helper's additive
+        # ±20 % (contract-sanctioned semantic shift; ``jitter_range`` is now a
+        # legacy constructor arg that no longer alters the schedule).
         try:
             return retry_with_exponential_backoff(
                 _attempt,
                 max_attempts=max_attempts,
                 base_delay_s=1.0,
                 jitter_ratio=0.2,
+                backoff_multiplier=float(self.backoff),
                 exception_classes=(EsriFetchError,),
                 on_retry=_on_retry,
                 on_attempt=on_attempt,
