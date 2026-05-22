@@ -993,6 +993,12 @@ class AgERA5Source(DataSource):
             # to CDS queue + 6-variable sequential fetch. Do not try to
             # interrupt — orphan threads consume CDS quota across
             # cancellations. User-facing expectation documented in AC L.4.
+            #
+            # Deliberately NOT wrapped in the canonical retry helper: cdsapi
+            # already runs its own poll/retry loop (retry_max=500,
+            # sleep_max=120 s) and is not requests-based, so wrapping would
+            # double-retry. Consequence: no per-attempt retry progress here
+            # (cdsapi exposes no hook) and cancel stays year-boundary only.
             try:
                 download_AgERA5_year(
                     query_year=year,

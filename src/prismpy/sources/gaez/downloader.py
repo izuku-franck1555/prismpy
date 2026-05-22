@@ -48,8 +48,9 @@ import shutil
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from prismpy.sources.climate._cancel import PipelineCancelled, raise_if_cancelled
 from prismpy.sources.gaez.errors import (
     EsriFetchError,
     GAEZDownloadError,
@@ -355,11 +356,15 @@ class GAEZDownloader:
         acea_var: str,
         cache_path: Path,
         overwrite: bool,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        progress_callback: Any = None,
     ) -> Tuple[str, Path]:
         """Fetch a single raster, write atomically, return the cache path.
 
         Raises ``EsriFetchError`` (or ``UnknownCombination``) on failure;
         the caller catches and accumulates into ``GAEZFetchSummary``.
+        ``cancel_check`` + ``progress_callback`` thread through to
+        ``fetch_image`` (the innermost retry surface).
         """
         if cache_path.exists() and not overwrite:
             logger.debug(f"GAEZ cache hit: {cache_path}")
@@ -367,7 +372,11 @@ class GAEZDownloader:
 
         query = resolve_esri_query(cultivar, water_supply, input_level, acea_var)
         start = time.monotonic()
-        payload = self.client.fetch_image(query)
+        payload = self.client.fetch_image(
+            query,
+            cancel_check=cancel_check,
+            progress_callback=progress_callback,
+        )
         elapsed_ms = (time.monotonic() - start) * 1000
 
         self._atomic_write(cache_path, payload)
@@ -383,14 +392,23 @@ class GAEZDownloader:
         water_supply: str = 'irr',
         input_levels: Optional[List[str]] = None,
         overwrite: bool = False,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        progress_callback: Any = None,
     ) -> Dict[str, Path]:
         """Download every GAEZ variable for one cultivar.
 
         Raises ``GAEZDownloadError`` if any raster fails — the F-AG-class
         status propagation contract requires fail-loud on partial failure.
+
+        ``cancel_check`` is observed before fan-out, per single-threaded
+        raster, and (via ``fetch_image``) inside each worker; on cancel the
+        ThreadPoolExecutor is shut down with ``cancel_futures=True`` so
+        queued rasters never touch the FAO service.
         """
         if input_levels is None:
             input_levels = ['High', 'Low']
+
+        raise_if_cancelled(cancel_check, f"gaez.download_cultivar.start={cultivar}")
 
         crop_code = GAEZ_CROP_CODES.get(cultivar)
         if not crop_code:
@@ -419,9 +437,16 @@ class GAEZDownloader:
         # Single-threaded path when max_workers <= 1 (eases drill / debugging).
         if self.max_workers <= 1:
             for input_level, acea_var, ws, cache_path in tasks:
+                # Per-raster cancel check covers the cache-hit sweep too,
+                # where fetch_image (and its per-attempt check) never runs.
+                raise_if_cancelled(
+                    cancel_check, f"gaez.download_cultivar.loop={cultivar}"
+                )
                 try:
                     key, path = self._fetch_one(
-                        cultivar, ws, input_level, acea_var, cache_path, overwrite
+                        cultivar, ws, input_level, acea_var, cache_path, overwrite,
+                        cancel_check=cancel_check,
+                        progress_callback=progress_callback,
                     )
                     downloaded[key] = path
                 except UnknownCombination as e:
@@ -442,6 +467,8 @@ class GAEZDownloader:
                         acea_var,
                         cache_path,
                         overwrite,
+                        cancel_check=cancel_check,
+                        progress_callback=progress_callback,
                     ): (input_level, acea_var)
                     for input_level, acea_var, ws, cache_path in tasks
                 }
@@ -449,6 +476,11 @@ class GAEZDownloader:
                     try:
                         key, path = fut.result()
                         downloaded[key] = path
+                    except PipelineCancelled:
+                        # Caught before EsriFetchError so a cancel is never
+                        # rewritten as a fetch error; stop queued rasters.
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        raise
                     except UnknownCombination as e:
                         errors.append(EsriFetchError(0, f"UNKNOWN_COMBINATION: {e}"))
                     except EsriFetchError as e:
@@ -474,20 +506,26 @@ class GAEZDownloader:
         crop_name: str,
         water_supply: str = 'irr',
         input_levels: Optional[List[str]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        progress_callback: Any = None,
     ) -> Dict[str, Path]:
         """Download GAEZ data for every cultivar of a crop.
 
         Re-raises ``GAEZDownloadError`` on any cultivar's failure so the
         ACEA translator can surface ``PipelineRun.status='error'``.
+        ``cancel_check`` + ``progress_callback`` thread to ``download_cultivar``.
         """
         all_downloaded: Dict[str, Path] = {}
         cultivars = self.get_cultivars_for_crop(crop_name)
 
         for cultivar in cultivars:
+            raise_if_cancelled(cancel_check, f"gaez.download_for_crop={crop_name}")
             downloaded = self.download_cultivar(
                 cultivar,
                 water_supply=water_supply,
                 input_levels=input_levels,
+                cancel_check=cancel_check,
+                progress_callback=progress_callback,
             )
             all_downloaded.update(downloaded)
 
@@ -499,11 +537,14 @@ class GAEZDownloader:
         output_dir: Path,
         water_supplies: Optional[List[str]] = None,
         input_levels: Optional[List[str]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        progress_callback: Any = None,
     ) -> List[Path]:
         """Download GAEZ data and copy to output directory.
 
         Raises ``GAEZDownloadError`` if any underlying ``download_cultivar``
-        fails (per F-AG-class fail-loud contract).
+        fails. ``cancel_check`` + ``progress_callback`` thread from here down
+        to ``fetch_image``.
         """
         if water_supplies is None:
             water_supplies = ['irr', 'rf']
@@ -517,6 +558,8 @@ class GAEZDownloader:
                 crop_name,
                 water_supply=ws,
                 input_levels=input_levels,
+                cancel_check=cancel_check,
+                progress_callback=progress_callback,
             )
 
             for key, src_path in downloaded.items():

@@ -51,7 +51,9 @@ _LOWER = 815
 # Sprint history:
 #   Sprint C / D: 815-2300 (legacy bands; retired at Sprint E.3)
 #   Sprint E.3 Phase 1 close: 2600 (this canonical pin)
-_UPPER = 2600
+#   Retry-migration test suites: n_collected ≈ 2658 →
+#     ceil((2658 + 200) / 50) * 50 = 2900.
+_UPPER = 2900
 
 
 class TestTrajectoryCap(TestCase):

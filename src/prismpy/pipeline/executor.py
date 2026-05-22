@@ -59,6 +59,7 @@ class PipelineStage(str, Enum):
 
 
 from prismpy.sources.climate._cancel import PipelineCancelled, raise_if_cancelled
+from prismpy.sources.common.retry import _bridge_helper_on_attempt
 # V2-22c-PRE.4 — RemediationBlocked is the structured exception for
 # Veto #4 server enforcement. Imported at module level so the narrow
 # `except RemediationBlocked` catch in `execute()` (evaluator §12.5
@@ -1105,6 +1106,10 @@ class TranslationPipeline:
                             self._progress_callback.on_substage_progress(
                                 'retrieve', 'Downloading TAMSAT rainfall',
                                 current, total, label)
+                    # Retry-attempt progress emitter for the TAMSAT download.
+                    tamsat_on_attempt = _bridge_helper_on_attempt(
+                        self._progress_callback, 'retrieve', 'TAMSAT'
+                    )
                     tamsat_result = tamsat.retrieve(
                         region=region, start_date=start_date,
                         end_date=end_date, download=True,
@@ -1113,6 +1118,7 @@ class TranslationPipeline:
                         # Phase 2 observe user cancel.
                         cancel_check=getattr(self, '_cancel_check', None),
                         run_id=_extract_run_id(self._progress_callback),
+                        retry_observer=tamsat_on_attempt,
                     )
                     if tamsat_result.success and tamsat_result.data:
                         climate_data["rainfall_dir"] = tamsat_result.data.data_dir
