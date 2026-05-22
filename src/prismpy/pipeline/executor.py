@@ -2815,12 +2815,10 @@ class TranslationPipeline:
                     # Best-effort grid_total so partial_progress is derived
                     # when the typed exception carried a missing_tiles list.
                     ctx = {"platform": platform.value}
-                    try:
-                        cells = getattr(unified_data.grid, "cells", None)
-                        if cells is not None:
-                            ctx["grid_total"] = len(cells)
-                    except Exception:  # pragma: no cover - defensive
-                        pass
+                    grid = getattr(unified_data, "grid", None)
+                    cells = getattr(grid, "cells", None) if grid is not None else None
+                    if cells is not None and hasattr(cells, "__len__"):
+                        ctx["grid_total"] = len(cells)
                     error_event = classify_to_event_dict(e, ctx)
                     results[platform.value] = TranslationResult(
                         success=False,

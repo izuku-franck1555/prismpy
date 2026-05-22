@@ -41,12 +41,12 @@ _EXECUTOR = _PRISMPY_ROOT / "src" / "prismpy" / "pipeline" / "executor.py"
 # stay in production (they still fail loudly).
 F_AG_GATE_SITES: Tuple[Tuple[str, int, str], ...] = (
     ("src/prismpy/translators/acea/translator.py", 514, "ClimateDownloadError"),
-    ("src/prismpy/translators/pythia/translator.py", 968, "ValueError"),
-    ("src/prismpy/translators/pythia/translator.py", 1761, "ValueError"),
-    ("src/prismpy/translators/pythia/translator.py", 2509, "BuildEghrSubstrateError"),
-    ("src/prismpy/translators/sarra_py/translator.py", 709, "ValueError"),
-    ("src/prismpy/translators/sarra_py/translator.py", 1548, "ValueError"),
-    ("src/prismpy/translators/craft/translator.py", 1563, "ValueError"),
+    ("src/prismpy/translators/pythia/translator.py", 977, "ValueError"),
+    ("src/prismpy/translators/pythia/translator.py", 1770, "ValueError"),
+    ("src/prismpy/translators/pythia/translator.py", 2518, "BuildEghrSubstrateError"),
+    ("src/prismpy/translators/sarra_py/translator.py", 718, "ValueError"),
+    ("src/prismpy/translators/sarra_py/translator.py", 1557, "ValueError"),
+    ("src/prismpy/translators/craft/translator.py", 1572, "ValueError"),
     ("src/prismpy/translators/_shared/eghr_substrate.py", 461, "ValueError"),
     ("src/prismpy/translators/_shared/eghr_substrate.py", 466, "ValueError"),
 )
@@ -175,6 +175,59 @@ def test_f_ag_gate_sites_raise_as_expected() -> None:
     assert not violations, (
         "F_AG_GATE_SITES drift — update the allowlist after auditing the "
         "raise sites:\n  " + "\n  ".join(violations)
+    )
+
+
+_TRANSLATOR_PATHS = (
+    "src/prismpy/translators/acea/translator.py",
+    "src/prismpy/translators/pythia/translator.py",
+    "src/prismpy/translators/sarra_py/translator.py",
+    "src/prismpy/translators/craft/translator.py",
+)
+
+
+def test_each_translator_classifies_in_its_outer_catch() -> None:
+    """Each translator's outer ``except Exception`` in ``translate`` MUST
+    call ``classify_to_event_dict`` AND pass ``error_events=`` to its
+    ``create_result`` return — otherwise the typed exception is flattened
+    to ``str(e)`` before the executor-level catch ever sees it, recreating
+    the Bester mask the producer-boundary classification is meant to close.
+    """
+    violations: List[str] = []
+    for rel in _TRANSLATOR_PATHS:
+        path = _PRISMPY_ROOT / rel
+        text = path.read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        translate = next(
+            (n for n in ast.walk(tree)
+             if isinstance(n, ast.FunctionDef) and n.name == "translate"),
+            None,
+        )
+        if translate is None:
+            violations.append(f"{rel}: no `translate` function found")
+            continue
+        # The classify call MUST appear inside translate; AND at least one
+        # create_result(...) call in translate MUST carry error_events=.
+        classifies = False
+        passes_events = False
+        for sub in ast.walk(translate):
+            if isinstance(sub, ast.Call):
+                f = sub.func
+                if (isinstance(f, ast.Name) and f.id == "classify_to_event_dict") \
+                        or (isinstance(f, ast.Attribute) and f.attr == "classify_to_event_dict"):
+                    classifies = True
+                if isinstance(f, ast.Attribute) and f.attr == "create_result":
+                    if any(kw.arg == "error_events" for kw in sub.keywords):
+                        passes_events = True
+        if not classifies:
+            violations.append(f"{rel}: translate() does not call classify_to_event_dict")
+        if not passes_events:
+            violations.append(
+                f"{rel}: translate() create_result(...) does not carry error_events="
+            )
+    assert not violations, (
+        "translator-catch classification gap (would reintroduce the "
+        "Bester mask):\n  " + "\n  ".join(violations)
     )
 
 

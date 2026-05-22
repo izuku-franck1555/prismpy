@@ -13,27 +13,21 @@ when the exception did not carry the corresponding attribute.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List, NotRequired, Optional, TypedDict
 
 
-class ErrorEventDict(TypedDict, total=False):
+class ErrorEventDict(TypedDict):
     """Structural error-event payload.
 
-    Required (populated by ``classify_to_event_dict``):
-    - ``error_class``: ``type(exc).__name__`` — the consumer dispatch key.
-    - ``message``: ``str(exc)`` — full formatted message.
-
-    Optional (present iff the exception carries the corresponding attr):
-    - ``source``: provider key (e.g. ``'nasa_power'``, ``'tamsat'``).
-    - ``missing_tiles``: list of missing tile / cell / asset ids.
-    - ``partial_progress``: derived ``{succeeded, failed, total}`` when a
-      ``missing_tiles`` count + grid-total context are available.
-    - ``recoverable``: whether the failure is treated as transient.
+    ``error_class`` and ``message`` are REQUIRED so the consumer can
+    dispatch on class without ``KeyError``. The remaining keys are
+    optional (``NotRequired``) — present iff the exception carried the
+    corresponding attribute (or context supplied enough to derive it).
     """
 
     error_class: str
     message: str
-    source: Optional[str]
-    missing_tiles: Optional[List[Any]]
-    partial_progress: Optional[Dict[str, int]]
-    recoverable: Optional[bool]
+    source: NotRequired[Optional[str]]
+    missing_tiles: NotRequired[Optional[List[Any]]]
+    partial_progress: NotRequired[Optional[Dict[str, int]]]
+    recoverable: NotRequired[Optional[bool]]
