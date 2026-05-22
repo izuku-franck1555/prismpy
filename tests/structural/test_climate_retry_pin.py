@@ -84,35 +84,44 @@ def test_nasa_power_routes_through_canonical_helper() -> None:
 
 
 def test_nasa_power_call_site_uses_required_budget_floor() -> None:
+    """The call site MUST guarantee a minimum exponential budget
+    regardless of caller-supplied config. The floor lives in a
+    ``max(N, self.config.retry_count)`` (and matching base-delay)
+    expression that promotes config values above the contract
+    minimum but never below it."""
     text = _NASA_POWER.read_text(encoding="utf-8")
-    call_match = re.search(
-        r"retry_with_exponential_backoff\((.*?)\)",
-        text, re.DOTALL,
+    floor_attempts = re.search(
+        r"max_attempts\s*=\s*max\(\s*(\d+)\s*,",
+        text,
     )
-    assert call_match, (
-        "nasa_power.py MUST invoke retry_with_exponential_backoff"
+    floor_delay = re.search(
+        r"base_delay_s\s*=\s*max\(\s*([\d.]+)\s*,",
+        text,
     )
-    body = call_match.group(1)
-    max_attempts_match = re.search(r"max_attempts\s*=\s*(\d+)", body)
-    base_delay_match = re.search(r"base_delay_s\s*=\s*([\d.]+)", body)
-    assert max_attempts_match, "call MUST pass max_attempts=N"
-    assert base_delay_match, "call MUST pass base_delay_s=N"
-    max_attempts = int(max_attempts_match.group(1))
-    base_delay = float(base_delay_match.group(1))
-    assert max_attempts >= 5, (
-        f"NASA POWER retry MUST allow ≥5 total attempts (per "
-        f"deployment-engineer R1); got max_attempts={max_attempts}"
+    assert floor_attempts, (
+        "nasa_power.py MUST pin a `max_attempts = max(N, ...)` "
+        "floor so caller config can raise but not lower the "
+        "contract minimum (deployment-engineer R1)."
     )
-    assert base_delay >= 5.0, (
-        f"NASA POWER base delay MUST be ≥5 s; got {base_delay}s"
+    assert floor_delay, (
+        "nasa_power.py MUST pin a `base_delay_s = max(N.0, ...)` "
+        "floor so caller config can raise but not lower the "
+        "contract minimum."
     )
-    # Cumulative budget: sum of base * 2^i for i in 0..(N-2).
-    n_sleeps = max_attempts - 1
-    budget = sum(base_delay * (2 ** i) for i in range(n_sleeps))
+    floor_n = int(floor_attempts.group(1))
+    floor_d = float(floor_delay.group(1))
+    assert floor_n >= 5, (
+        f"NASA POWER max_attempts floor MUST be ≥5; got {floor_n}"
+    )
+    assert floor_d >= 5.0, (
+        f"NASA POWER base_delay floor MUST be ≥5.0 s; got {floor_d}"
+    )
+    n_sleeps = floor_n - 1
+    budget = sum(floor_d * (2 ** i) for i in range(n_sleeps))
     assert budget >= 120, (
         f"Cumulative retry budget MUST be ≥120 s to absorb a "
         f"transient external-API blip; got {budget:.1f}s "
-        f"({n_sleeps} sleeps from base={base_delay}s)"
+        f"({n_sleeps} sleeps from base={floor_d}s)"
     )
 
 

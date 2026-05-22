@@ -525,7 +525,22 @@ class NASAPowerSource(DataSource):
             retry_with_exponential_backoff,
         )
 
+        # F-AG-NASA-RETRY minimum floors per deployment-engineer R1 —
+        # transient external-API blips need a ≥120 s cumulative budget
+        # to absorb. Config-supplied values raise the ceiling but
+        # never lower below the contract floor.
+        attempt_counter = {"i": 0}
+
         def _attempt() -> Dict[str, Dict[str, float]]:
+            # V2-22b L: per-attempt cancel check — fires at the top of
+            # every iteration, including after a backoff sleep completes
+            # so a cancel during the sleep window aborts before the
+            # next potentially 120-s NASA request.
+            raise_if_cancelled(
+                cancel_check,
+                f"nasa_power.fetch.attempt={attempt_counter['i']}",
+            )
+            attempt_counter["i"] += 1
             response = requests.get(
                 self.config.base_url,
                 params=params,
@@ -542,21 +557,23 @@ class NASAPowerSource(DataSource):
                 "Attempt %d failed: %s; sleeping %.2fs before retry",
                 attempt_index + 1, exc, sleep_s,
             )
-            # V2-22b L: retry-loop + pre-retry-delay cancel checks —
-            # AC L.2. Catches cancel fired during an earlier attempt's
-            # timeout wait OR during the backoff sleep window.
+            # V2-22b L: pre-sleep cancel check — cancel fired before
+            # the backoff wait short-circuits the sleep entirely.
             raise_if_cancelled(
                 cancel_check,
                 f"nasa_power.before_retry_delay={attempt_index}",
             )
 
-        # V2-22b L: pre-flight cancel check before the first attempt.
-        raise_if_cancelled(cancel_check, "nasa_power.fetch.attempt=0")
+        # Honor caller-supplied retry config but never below the
+        # contract floor (max_attempts >= 6, base_delay >= 5.0 s).
+        max_attempts = max(6, int(self.config.retry_count))
+        base_delay_s = max(5.0, float(self.config.retry_delay))
+
         try:
             return retry_with_exponential_backoff(
                 _attempt,
-                max_attempts=6,
-                base_delay_s=5.0,
+                max_attempts=max_attempts,
+                base_delay_s=base_delay_s,
                 jitter_ratio=0.2,
                 exception_classes=(
                     requests.exceptions.Timeout,
