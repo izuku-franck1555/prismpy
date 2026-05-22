@@ -1,9 +1,10 @@
-"""Canonical retry helper for external-provider adapter calls.
+"""Canonical retry helper for requests-based adapter calls.
 
-Centralises exponential-backoff + jitter retry semantics so every
-adapter (NASA POWER, future TAMSAT / AgERA5 / iSDA migrations)
-inherits the same policy. Per durable §24 canonical-source-or-pin:
-a single helper avoids per-adapter drift when the policy bumps.
+Centralises exponential-backoff + jitter retry semantics for any
+``requests``-backed adapter call so the policy lives in one place
+per durable §24 canonical-source-or-pin. The current consumer is
+the NASA POWER adapter; non-``requests`` adapters (cdsapi, custom
+TCP, etc.) need their own retry wrapper and are not in scope.
 
 Default schedule (max_attempts=6, base_delay_s=5.0):
     initial call + sleeps of 5, 10, 20, 40, 80 s ≈ 155 s budget

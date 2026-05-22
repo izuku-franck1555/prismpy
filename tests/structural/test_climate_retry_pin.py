@@ -24,6 +24,7 @@ import re
 from pathlib import Path
 
 import pytest
+import requests
 
 from prismpy.sources.common.retry import retry_with_exponential_backoff
 
@@ -39,6 +40,14 @@ def _function_body_source(text: str, name: str) -> str:
                 and node.name == name:
             return ast.unparse(node)
     raise AssertionError(f"function {name!r} not found")
+
+
+_EXPECTED_EXCEPTION_CLASSES = {
+    requests.exceptions.HTTPError,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+}
 
 
 def test_helper_exposes_canonical_signature() -> None:
@@ -64,12 +73,43 @@ def test_helper_exposes_canonical_signature() -> None:
         )
 
 
+def test_helper_exception_classes_default_is_canonical_set() -> None:
+    """The default `exception_classes` tuple MUST contain exactly the
+    4 transient-class types the contract names. Mutation that swaps
+    one (e.g. ChunkedEncodingError → SomeOtherError) → pin FAILS."""
+    sig = inspect.signature(retry_with_exponential_backoff)
+    exc_default = sig.parameters["exception_classes"].default
+    assert set(exc_default) == _EXPECTED_EXCEPTION_CLASSES, (
+        f"retry_with_exponential_backoff default `exception_classes` "
+        f"= {set(exc_default)}; MUST be {_EXPECTED_EXCEPTION_CLASSES} "
+        f"(cycle-2 contract: HTTPError + ConnectionError + Timeout "
+        f"+ ChunkedEncodingError; RequestException base over-catches "
+        f"programmer bugs)."
+    )
+
+
 def test_nasa_power_routes_through_canonical_helper() -> None:
+    """AST-walk asserts a real Call node invokes the canonical helper
+    by name. Defeats substring / comment / docstring false-positives
+    that a substring check would accept."""
     text = _NASA_POWER.read_text(encoding="utf-8")
-    assert "from prismpy.sources.common.retry import" in text \
-        or "from prismpy.sources.common import retry" in text \
-        or "retry_with_exponential_backoff" in text, (
-        "nasa_power.py MUST import + call retry_with_exponential_backoff"
+    tree = ast.parse(text)
+    has_call = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) \
+                    and func.id == "retry_with_exponential_backoff":
+                has_call = True
+                break
+            if isinstance(func, ast.Attribute) \
+                    and func.attr == "retry_with_exponential_backoff":
+                has_call = True
+                break
+    assert has_call, (
+        "nasa_power.py MUST contain a real Call node invoking "
+        "`retry_with_exponential_backoff` (AST-walked). Substring "
+        "matches in comments / docstrings don't satisfy the pin."
     )
     # The legacy inline iteration pattern MUST be gone.
     legacy_pattern = re.compile(
@@ -90,23 +130,31 @@ def test_nasa_power_call_site_uses_required_budget_floor() -> None:
     expression that promotes config values above the contract
     minimum but never below it."""
     text = _NASA_POWER.read_text(encoding="utf-8")
+    # Require the second operand to be a config-derived expression
+    # (self.config.retry_count / retry_delay), NOT a constant. A
+    # mutation `max(6, 6)` would silently neutralise the floor by
+    # making config irrelevant; this assertion catches that.
     floor_attempts = re.search(
-        r"max_attempts\s*=\s*max\(\s*(\d+)\s*,",
+        r"max_attempts\s*=\s*max\(\s*(\d+)\s*,\s*"
+        r"int\(\s*self\.config\.retry_count\s*\)\s*\)",
         text,
     )
     floor_delay = re.search(
-        r"base_delay_s\s*=\s*max\(\s*([\d.]+)\s*,",
+        r"base_delay_s\s*=\s*max\(\s*([\d.]+)\s*,\s*"
+        r"float\(\s*self\.config\.retry_delay\s*\)\s*\)",
         text,
     )
     assert floor_attempts, (
-        "nasa_power.py MUST pin a `max_attempts = max(N, ...)` "
-        "floor so caller config can raise but not lower the "
-        "contract minimum (deployment-engineer R1)."
+        "nasa_power.py MUST pin "
+        "`max_attempts = max(N, int(self.config.retry_count))` so "
+        "the contract floor protects against config that lowers "
+        "below the minimum while still honouring config overrides "
+        "above it (deployment-engineer R1 + codex Gate B fix-up)."
     )
     assert floor_delay, (
-        "nasa_power.py MUST pin a `base_delay_s = max(N.0, ...)` "
-        "floor so caller config can raise but not lower the "
-        "contract minimum."
+        "nasa_power.py MUST pin "
+        "`base_delay_s = max(N.0, float(self.config.retry_delay))` "
+        "with the config-derived second operand (not a constant)."
     )
     floor_n = int(floor_attempts.group(1))
     floor_d = float(floor_delay.group(1))
@@ -145,4 +193,21 @@ def test_anti_mutation_revert_to_linear_breaks_pin() -> None:
     assert "retry_with_exponential_backoff" not in mutated, (
         "anti-mutation drill: removing the helper call MUST be "
         "detectable by the same substring Pin 2 checks"
+    )
+
+
+def test_anti_mutation_swap_chunked_encoding_error_breaks_pin() -> None:
+    """Drill: synthetic exception_classes tuple that swaps one of
+    the 4 transient types (ChunkedEncodingError → str) MUST fail
+    the canonical-set check."""
+    mutated = {
+        requests.exceptions.HTTPError,
+        requests.exceptions.ConnectionError,
+        requests.exceptions.Timeout,
+        str,  # swapped from ChunkedEncodingError
+    }
+    assert mutated != _EXPECTED_EXCEPTION_CLASSES, (
+        "anti-mutation drill: swapping a transient class out of "
+        "the default tuple MUST diverge from the canonical set "
+        "Pin 2b inspects"
     )
