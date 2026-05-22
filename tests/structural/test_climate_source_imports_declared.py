@@ -64,8 +64,8 @@ _PYPROJECT = _REPO_ROOT / "pyproject.toml"
 _STDLIB_PACKAGES = frozenset({
     "__future__", "abc", "argparse", "ast", "calendar", "collections",
     "concurrent", "contextlib", "copy", "csv", "dataclasses", "datetime",
-    "decimal", "enum", "functools", "glob", "gzip", "hashlib", "io",
-    "itertools", "json", "locale", "logging", "math",
+    "decimal", "enum", "functools", "glob", "gzip", "hashlib",
+    "inspect", "io", "itertools", "json", "locale", "logging", "math",
     "multiprocessing", "numbers", "os", "pathlib", "pickle", "platform",
     "queue", "random", "re", "shutil", "signal", "socket", "sqlite3",
     "ssl", "stat", "string", "struct", "subprocess", "sys", "tempfile",
