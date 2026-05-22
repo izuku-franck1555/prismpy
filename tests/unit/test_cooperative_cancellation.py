@@ -375,8 +375,10 @@ class TestCarveOutRegression:
         # added GeometryRequiredError class at module top (~9 lines).
         # Then 519 → 520 after Sprint E.0 added WarningCategory import.
         # Then 520 → 521 after a new `_bridge_helper_on_attempt` import
-        # (+1 line at module top).
-        ("src/prismpy/pipeline/executor.py", 521),
+        # (+1 line at module top). Then 521 → 526 after a new
+        # ``error_events`` field + 4-line docstring added to
+        # ``StageResult``.
+        ("src/prismpy/pipeline/executor.py", 526),
         # Provenance-flush inside the translator-dispatch except handler
         # in _execute_translate: writes decision records, cancel-inert.
         # Line shifted from 2338 → 2346 (PRE.3.3 thread-through)
@@ -439,8 +441,11 @@ class TestCarveOutRegression:
         # line number per durable §27 producer-consumer parity. Then
         # 2814 → 2820 after a new `_bridge_helper_on_attempt` import (+1)
         # + the TAMSAT retry-attempt bridge build in `_execute_retrieve`
-        # (~+5).
-        ("src/prismpy/pipeline/executor.py", 2820),
+        # (~+5). Then 2820 → 2833 after the producer-boundary
+        # classification block + structured ``error_events`` population
+        # at the per-platform broad-except site (~+13, with the
+        # grid-total derive refactored off a try block).
+        ("src/prismpy/pipeline/executor.py", 2833),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed

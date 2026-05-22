@@ -6,7 +6,7 @@ ensuring consistent behavior across SARRA-Py, CRAFT, PYTHIA, and ACEA.
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 import logging
@@ -60,6 +60,10 @@ class TranslationResult:
         errors: List of errors encountered
         warnings: List of warnings generated
         metadata: Additional result metadata
+        error_events: Structured error payloads built by the producer at
+            catch sites so consumers can dispatch on error class instead
+            of pattern-matching ``errors`` strings. Additive — every
+            existing reader of ``errors`` keeps working unchanged.
     """
     success: bool
     platform: Platform
@@ -68,6 +72,7 @@ class TranslationResult:
     errors: List[str]
     warnings: List[str]
     metadata: Dict[str, Any]
+    error_events: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class BaseTranslator(ABC):
@@ -208,6 +213,7 @@ class BaseTranslator(ABC):
         errors: Optional[List[str]] = None,
         warnings: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        error_events: Optional[List[Dict[str, Any]]] = None,
     ) -> TranslationResult:
         """Create a translation result object.
 
@@ -217,6 +223,9 @@ class BaseTranslator(ABC):
             errors: List of errors
             warnings: List of warnings
             metadata: Additional metadata
+            error_events: Structured error payloads (see TranslationResult).
+                Optional; defaults to an empty list so existing callers
+                stay backward-compatible.
 
         Returns:
             TranslationResult object
@@ -229,6 +238,7 @@ class BaseTranslator(ABC):
             errors=errors or [],
             warnings=warnings or [],
             metadata=metadata or {},
+            error_events=error_events or [],
         )
 
     def generate_package(

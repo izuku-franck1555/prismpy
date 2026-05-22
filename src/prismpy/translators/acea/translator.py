@@ -518,6 +518,7 @@ class AceaTranslator(AceaTranslatorBase):
                         f"honest-signal per F-AG class.",
                         missing_tiles=sorted(still_missing),
                         source='nasa_power',
+                        total=len(cell_ids_30arcmin),
                     )
 
             elif missing_tiles:
@@ -699,10 +700,12 @@ class AceaTranslator(AceaTranslatorBase):
         except Exception as e:
             logger.error(f"ACEA translation failed: {e}")
             errors.append(str(e))
+            from prismpy.errors import classify_to_event_dict
             return self.create_result(
                 success=False,
                 output_files=output_files,
                 errors=errors,
+                error_events=[classify_to_event_dict(e)],
             )
 
         # Record provenance

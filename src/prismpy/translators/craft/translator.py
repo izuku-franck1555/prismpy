@@ -328,10 +328,12 @@ class CraftTranslator(CraftTranslatorBase):
         except Exception as e:
             logger.error(f"CRAFT translation failed: {e}")
             errors.append(str(e))
+            from prismpy.errors import classify_to_event_dict
             return self.create_result(
                 success=False,
                 output_files=output_files,
                 errors=errors,
+                error_events=[classify_to_event_dict(e)],
             )
 
         # Record provenance
