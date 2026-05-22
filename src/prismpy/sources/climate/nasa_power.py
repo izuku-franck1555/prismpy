@@ -303,6 +303,9 @@ class NASAPowerSource(DataSource):
                     end_date=year_end,
                     parameters=params_to_fetch,
                     cancel_check=cancel_check,
+                    # Producer-side retry-attempt progress (PRI-6); built
+                    # by the caller from the WebProgressCallback object.
+                    on_attempt=kwargs.get('on_attempt'),
                 )
                 year_ts = self._convert_to_climate_timeseries(
                     nasa_data=nasa_data,
@@ -485,6 +488,7 @@ class NASAPowerSource(DataSource):
         end_date: date,
         parameters: List[str],
         cancel_check: Optional[Callable[[], bool]] = None,
+        on_attempt: Optional[Callable[[int, int, float], None]] = None,
     ) -> Dict[str, Dict[str, float]]:
         """Fetch data from NASA POWER API.
 
@@ -583,6 +587,7 @@ class NASAPowerSource(DataSource):
                     ValueError,
                 ),
                 on_retry=_on_retry,
+                on_attempt=on_attempt,
             )
         except (requests.exceptions.RequestException, ValueError) as exc:
             raise Exception(

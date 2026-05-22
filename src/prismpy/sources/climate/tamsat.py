@@ -60,6 +60,7 @@ from prismpy.sources._cache_base import (
 )
 from prismpy.sources.base import DataSource, RetrievalResult
 from prismpy.sources.climate._cancel import PipelineCancelled, raise_if_cancelled
+from prismpy.sources.common.retry import retry_with_exponential_backoff
 
 
 logger = logging.getLogger(__name__)
@@ -438,6 +439,11 @@ class TAMSATSource(DataSource):
                             except OSError:
                                 pass
 
+                    # PRI-6 retry-attempt observer (the bridge closure) is
+                    # threaded via instance state, NOT a _download_tamsat
+                    # kwarg, so existing _download_tamsat test doubles (which
+                    # don't declare the param) keep working unchanged.
+                    self._retry_observer = kwargs.get('retry_observer')
                     self._download_tamsat(
                         bounds=bounds_sarra_py,
                         start_date=start_date,
@@ -709,6 +715,7 @@ class TAMSATSource(DataSource):
         progress_callback=None,
         max_workers: int = 4,
         cancel_check=None,
+        retry_observer=None,
     ) -> None:
         """Download TAMSAT daily rainfall and crop to region bounds.
 
@@ -741,7 +748,16 @@ class TAMSATSource(DataSource):
             region_name: Region name for file naming
             progress_callback: Optional callback(current, total, detail)
             max_workers: Number of parallel download threads (default 4)
+            retry_observer: Optional PRI-6 on_attempt closure; when not
+                passed explicitly (the production path via ``retrieve``),
+                falls back to the instance attribute set by ``retrieve``.
         """
+        # PRI-6: prefer an explicit param (direct-call / unit tests); else
+        # use the instance attribute threaded by ``retrieve`` (keeps
+        # _download_tamsat test doubles that omit the param working).
+        if retry_observer is None:
+            retry_observer = getattr(self, '_retry_observer', None)
+
         import requests
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -844,29 +860,72 @@ class TAMSATSource(DataSource):
                 day=target_date.day,
             )
 
-            try:
+            # Ship 1' AC-S1E-3: route the bespoke single 5xx retry through the
+            # canonical helper (durable #24). max_attempts=3 = initial + 2
+            # retries (preserves the bespoke 2-attempt fallback + adds one
+            # resilience retry per Phase 0c §16.A). The 404 → "skipped"
+            # fast-path stays NON-retryable; the (30, 60) timeout + FileLock
+            # guard + return-string contract are unchanged. The inner
+            # callable RAISES on 5xx / transient errors so the helper
+            # retries; 4xx-non-404 stays terminal.
+            def _attempt():
+                raise_if_cancelled(
+                    cancel_check, f"tamsat._download_nc.attempt.{target_date}"
+                )
                 resp = requests.get(url, timeout=(30, 60))
-
-                if resp.status_code == 404:
-                    return "skipped"
-
                 if resp.status_code >= 500:
                     self.logger.warning(
                         f"TAMSAT server {resp.status_code} for "
                         f"{target_date}, retrying..."
                     )
-                    resp = requests.get(url, timeout=(30, 60))
-                    if resp.status_code != 200:
-                        return f"HTTP {resp.status_code}"
+                    raise requests.exceptions.HTTPError(
+                        f"TAMSAT server {resp.status_code}", response=resp
+                    )
+                return resp
 
-                resp.raise_for_status()
-                nc_path.write_bytes(resp.content)
-                return "ok"
+            def _on_retry(attempt_index, exc, sleep_s):
+                # Pre-sleep cancel check so a cancel during the backoff
+                # window short-circuits the wait (mirrors NASA POWER).
+                raise_if_cancelled(
+                    cancel_check,
+                    f"tamsat._download_nc.before_retry.{target_date}",
+                )
 
+            try:
+                resp = retry_with_exponential_backoff(
+                    _attempt,
+                    max_attempts=3,
+                    base_delay_s=5.0,
+                    jitter_ratio=0.2,
+                    exception_classes=(
+                        requests.exceptions.Timeout,
+                        requests.exceptions.ConnectionError,
+                        requests.exceptions.HTTPError,
+                        requests.exceptions.ChunkedEncodingError,
+                    ),
+                    on_retry=_on_retry,
+                    on_attempt=retry_observer,
+                )
+            except requests.exceptions.HTTPError as e:
+                # 5xx exhausted — preserve the bespoke "HTTP {code}" surface.
+                status = getattr(e.response, "status_code", None)
+                return f"HTTP {status}" if status else f"download error: {e}"
             except requests.exceptions.Timeout:
                 return "timeout"
             except requests.exceptions.RequestException as e:
                 return f"download error: {e}"
+
+            # Terminal (non-retryable) status inspection after the helper.
+            if resp.status_code == 404:
+                return "skipped"
+            if resp.status_code != 200:
+                # 4xx-non-404: terminal, mirror the bespoke "download error".
+                try:
+                    resp.raise_for_status()
+                except requests.exceptions.RequestException as e:
+                    return f"download error: {e}"
+            nc_path.write_bytes(resp.content)
+            return "ok"
 
         # Codex self-check MEDIUM — track HTTP fetches and .nc-cache
         # hits SEPARATELY so Phase 1 progress + completion messages

@@ -27,10 +27,13 @@ retries when many concurrent workers hit a transient Esri outage at once.
 from __future__ import annotations
 
 import logging
-import random
-import time
-from typing import Optional
+from typing import Any, Callable, Optional
 
+from prismpy.sources.climate._cancel import raise_if_cancelled
+from prismpy.sources.common.retry import (
+    _bridge_helper_on_attempt,
+    retry_with_exponential_backoff,
+)
 from prismpy.sources.gaez.errors import EsriFetchError
 from prismpy.sources.gaez.esri_schemas import (
     EsriErrorResponse,
@@ -75,6 +78,8 @@ class EsriImageServiceClient:
         query: EsriQuerySpec,
         bbox: str = "-180,-90,180,90",
         size: str = "4320,2160",
+        cancel_check: Optional[Callable[[], bool]] = None,
+        progress_callback: Any = None,
     ) -> bytes:
         """Fetch a single raster as TIFF bytes.
 
@@ -82,6 +87,27 @@ class EsriImageServiceClient:
         surface keeps the caller free of dual-shape success/error handling
         (the previous ``(success, msg)`` tuple was the source of the F-AG
         silent-skip class).
+
+        Retry policy is the canonical ``retry_with_exponential_backoff``
+        helper (durable #24 canonical-source-or-pin) instead of the former
+        bespoke loop. Two semantic notes:
+
+        * **Cancellation** is cooperative: ``cancel_check`` is polled at the
+          top of every attempt and again before each backoff sleep, so a
+          user cancel aborts at the next attempt boundary. ``requests.get``
+          blocks for up to ``self.timeout`` and cannot be interrupted
+          mid-flight, so worst-case cancel latency is one ``timeout`` window
+          (same model as NASA POWER's per-attempt cancel — honest note I7).
+        * **In-band Esri errors** (HTTP 200 + a JSON ``{"error": {...}}``
+          envelope) are RAISED as ``EsriFetchError`` rather than recorded in
+          a ``last_err`` accumulator, so the canonical helper retries them
+          and an exhausted in-band error fails loudly — never returning the
+          error body as if it were valid raster bytes (the silent-corruption
+          class guarded by S1v2-C4).
+
+        Jitter shifts from the bespoke MULTIPLICATIVE ``random.uniform(0.8,
+        1.2)`` to the helper's additive ±``jitter_ratio``; the effective
+        per-raster backoff budget is preserved at the same small magnitude.
         """
         try:
             import requests
@@ -106,11 +132,17 @@ class EsriImageServiceClient:
         # urllib default; mirrors the curl probe path that succeeded.
         headers = {"User-Agent": "prismpy/gaez-esri (+https://prismpy.local)"}
 
-        attempt = 0
-        wait = 1.0
-        last_err: Optional[EsriFetchError] = None
+        attempt_counter = {"i": 0}
 
-        while attempt <= self.retries:
+        def _attempt() -> bytes:
+            # Per-attempt cancel check — fires at the top of every attempt,
+            # including after a backoff sleep, so a cancel during the sleep
+            # window aborts before the next blocking request.
+            raise_if_cancelled(
+                cancel_check, f"esri.fetch.attempt={attempt_counter['i']}"
+            )
+            attempt_counter["i"] += 1
+
             try:
                 resp = requests.get(
                     url,
@@ -119,77 +151,84 @@ class EsriImageServiceClient:
                     timeout=self.timeout,
                 )
             except requests.exceptions.Timeout as e:
-                last_err = EsriFetchError(0, f"TIMEOUT: {e}")
+                raise EsriFetchError(0, f"TIMEOUT: {e}") from e
             except requests.exceptions.ConnectionError as e:
-                last_err = EsriFetchError(0, f"CONNECTION_ERROR: {e}")
+                raise EsriFetchError(0, f"CONNECTION_ERROR: {e}") from e
             except requests.exceptions.RequestException as e:
-                last_err = EsriFetchError(0, f"REQUEST_ERROR: {e}")
-            else:
-                # No transport-level exception. Inspect the response.
-                status = resp.status_code
-                content_type = (resp.headers.get("Content-Type") or "").lower()
+                raise EsriFetchError(0, f"REQUEST_ERROR: {e}") from e
 
-                if status == 200 and content_type.startswith("image/"):
-                    return resp.content
+            # No transport-level exception. Inspect the response.
+            status = resp.status_code
+            content_type = (resp.headers.get("Content-Type") or "").lower()
 
-                if status == 200 and "application/json" in content_type:
-                    # In-band Esri error envelope (the documented edge per
-                    # codex M2). Parse via the ``extra='ignore'`` schema.
-                    try:
-                        body = resp.json()
-                    except ValueError as e:
-                        last_err = EsriFetchError(
-                            0, f"ESRI_ERROR: non-JSON body: {e}"
-                        )
-                    else:
-                        # Esri wraps the envelope in ``{"error": {...}}``.
-                        err = body.get("error") if isinstance(body, dict) else None
-                        if isinstance(err, dict):
-                            try:
-                                parsed = EsriErrorResponse.model_validate(err)
-                                last_err = EsriFetchError(
-                                    0,
-                                    f"ESRI_ERROR: {parsed.code} {parsed.message}",
-                                )
-                            except Exception as e:  # pragma: no cover
-                                last_err = EsriFetchError(
-                                    0, f"ESRI_ERROR: parse failure: {e}"
-                                )
-                        else:
-                            last_err = EsriFetchError(
-                                0, f"ESRI_ERROR: unrecognized JSON shape: {body!r}"
-                            )
-                else:
-                    # HTTP 4xx / 5xx — preserve the actual status code per
-                    # builder DELTA-CA-1 + codex M3 honest-signal floor.
-                    try:
-                        body_snippet = resp.text[:200] if resp.text else ""
-                    except Exception:
-                        body_snippet = ""
-                    last_err = EsriFetchError(
-                        status, f"HTTP {status}: {body_snippet}"
+            if status == 200 and content_type.startswith("image/"):
+                return resp.content
+
+            if status == 200 and "application/json" in content_type:
+                # In-band Esri error envelope (the documented edge per codex
+                # M2): RAISE so the canonical helper retries it. Never return
+                # the error body as image bytes (S1v2-C4 silent-corruption
+                # guard).
+                try:
+                    body = resp.json()
+                except ValueError as e:
+                    raise EsriFetchError(
+                        0, f"ESRI_ERROR: non-JSON body: {e}"
+                    ) from e
+                err = body.get("error") if isinstance(body, dict) else None
+                if not isinstance(err, dict):
+                    raise EsriFetchError(
+                        0, f"ESRI_ERROR: unrecognized JSON shape: {body!r}"
                     )
-
-            attempt += 1
-            if attempt > self.retries:
-                if last_err is None:  # pragma: no cover - defensive
-                    last_err = EsriFetchError(0, "max retries exceeded; no error captured")
-                logger.error(
-                    f"Esri fetch failed for query={query.to_where()!r}: "
-                    f"{last_err.message} (after {self.retries} retries)"
+                try:
+                    parsed = EsriErrorResponse.model_validate(err)
+                except Exception as e:  # pragma: no cover - schema drift
+                    raise EsriFetchError(
+                        0, f"ESRI_ERROR: parse failure: {e}"
+                    ) from e
+                raise EsriFetchError(
+                    0, f"ESRI_ERROR: {parsed.code} {parsed.message}"
                 )
-                raise last_err
 
-            # Exponential backoff with jitter per WA CA-3 R13 mitigation.
-            jitter = random.uniform(*self.jitter_range)
-            sleep_for = wait * jitter
-            logger.warning(
-                f"Retry {attempt}/{self.retries} for Esri fetch "
-                f"({last_err.message if last_err else 'unknown'}); "
-                f"sleeping {sleep_for:.2f}s"
+            # HTTP 4xx / 5xx — preserve the actual status code per builder
+            # DELTA-CA-1 + codex M3 honest-signal floor.
+            try:
+                body_snippet = resp.text[:200] if resp.text else ""
+            except Exception:
+                body_snippet = ""
+            raise EsriFetchError(status, f"HTTP {status}: {body_snippet}")
+
+        def _on_retry(attempt_index, exc, sleep_s):
+            # Pre-sleep cancel check — a cancel observed before the backoff
+            # wait short-circuits the sleep entirely (mirrors NASA POWER).
+            raise_if_cancelled(
+                cancel_check, f"esri.before_retry={attempt_index}"
             )
-            time.sleep(sleep_for)
-            wait *= self.backoff
 
-        # Defensive: while-loop guarantees we either return or raise above.
-        raise EsriFetchError(0, "exhausted retry loop without resolution")
+        on_attempt = _bridge_helper_on_attempt(
+            progress_callback, "translate", "GAEZ"
+        )
+
+        # Honour caller-supplied retry config; max_attempts = initial + the
+        # configured retry count — EXACT parity with the former bespoke
+        # attempt-counted loop (retries=3 → 4 attempts; retries=0 → 1
+        # attempt, no retry). Floor of 1 guards the helper's
+        # ``max_attempts >= 1`` contract.
+        max_attempts = max(1, int(self.retries) + 1)
+
+        try:
+            return retry_with_exponential_backoff(
+                _attempt,
+                max_attempts=max_attempts,
+                base_delay_s=1.0,
+                jitter_ratio=0.2,
+                exception_classes=(EsriFetchError,),
+                on_retry=_on_retry,
+                on_attempt=on_attempt,
+            )
+        except EsriFetchError as exc:
+            logger.error(
+                f"Esri fetch failed for query={query.to_where()!r}: "
+                f"{exc.message} (after {max_attempts - 1} retries)"
+            )
+            raise

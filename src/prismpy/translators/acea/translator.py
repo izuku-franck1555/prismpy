@@ -42,6 +42,7 @@ from prismpy.models.soil import SoilProfile
 from prismpy.models.spatial import SpatialGrid, GridCell
 from prismpy.provenance.tracker import DecisionType, ProvenanceTracker
 from prismpy.sources.climate._cancel import PipelineCancelled, raise_if_cancelled
+from prismpy.sources.common.retry import _bridge_helper_on_attempt
 # Sprint E.3 AC-E3-9 — cockpit override dispatch helper. The
 # climate / soil / management per-cell write sites in this
 # translator route raw values through ``apply_override`` before
@@ -1094,6 +1095,11 @@ class AceaTranslator(AceaTranslatorBase):
         )
         source = NASAPowerSource(config)
 
+        # Producer-side retry-attempt progress (PRI-6), built once.
+        nasa_on_attempt = _bridge_helper_on_attempt(
+            getattr(self, 'progress_callback', None), 'translate', 'NASA POWER'
+        )
+
         climate_data = {}
         total_cells = len(grid.cells)
 
@@ -1115,6 +1121,7 @@ class AceaTranslator(AceaTranslatorBase):
                     start_date=start_date,
                     end_date=end_date,
                     cancel_check=getattr(self, 'cancel_check', None),
+                    on_attempt=nasa_on_attempt,
                 )
 
                 if result.success and result.data:
@@ -1187,6 +1194,13 @@ class AceaTranslator(AceaTranslatorBase):
         )
         source = NASAPowerSource(config)
 
+        # Producer-side retry-attempt progress (PRI-6): built once from the
+        # WebProgressCallback object so a NASA POWER retry storm emits a
+        # 'retrying N/M' substage. None when no object is wired (CLI / tests).
+        nasa_on_attempt = _bridge_helper_on_attempt(
+            getattr(self, 'progress_callback', None), 'translate', 'NASA POWER'
+        )
+
         # Download per unique 30-arcmin cell
         climate_30 = {}
         for i, (cell_id, (lat, lon)) in enumerate(centers_30.items()):
@@ -1203,6 +1217,7 @@ class AceaTranslator(AceaTranslatorBase):
                 result = source.retrieve(
                     lat=lat, lon=lon, start_date=start_date, end_date=end_date,
                     cancel_check=getattr(self, 'cancel_check', None),
+                    on_attempt=nasa_on_attempt,
                 )
                 if result.success and result.data:
                     climate_30[cell_id] = result.data
@@ -1941,6 +1956,12 @@ class AceaTranslator(AceaTranslatorBase):
                     output_dir=output_dir,
                     water_supplies=['irr', 'rf'],
                     input_levels=['High', 'Low'],
+                    # Ship 1' 5-level cancel-wire entry point + producer-side
+                    # retry-attempt progress (PRI-6). The translator holds the
+                    # WebProgressCallback object (set by the executor); thread
+                    # it so fetch_image's retry storm emits a substage.
+                    cancel_check=getattr(self, 'cancel_check', None),
+                    progress_callback=getattr(self, 'progress_callback', None),
                 )
                 logger.info(f"Downloaded and copied {len(output_files)} GAEZ files")
             except (ImportError, ModuleNotFoundError):

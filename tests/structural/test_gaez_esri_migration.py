@@ -691,7 +691,10 @@ class TestGaezDownloadErrorPropagation(unittest.TestCase):
         # First call succeeds; second raises; third succeeds.
         call_count = {"n": 0}
 
-        def fake_fetch(query, bbox="-180,-90,180,90", size="4320,2160"):
+        def fake_fetch(query, bbox="-180,-90,180,90", size="4320,2160",
+                       **kwargs):
+            # Ship 1' added cancel_check / progress_callback kwargs to the
+            # real fetch_image; the mock must accept them.
             call_count["n"] += 1
             if call_count["n"] == 2:
                 raise EsriFetchError(403, "HTTP 403")

@@ -31,6 +31,24 @@ from prismpy.sources.common.retry import retry_with_exponential_backoff
 _PRISMPY_ROOT = Path(__file__).resolve().parents[2]
 _NASA_POWER = _PRISMPY_ROOT / "src" / "prismpy" / "sources" / "climate" / "nasa_power.py"
 _RETRY = _PRISMPY_ROOT / "src" / "prismpy" / "sources" / "common" / "retry.py"
+# Ship 1' EXPANDED: GAEZ esri_client + TAMSAT also route through the helper.
+_ESRI = _PRISMPY_ROOT / "src" / "prismpy" / "sources" / "gaez" / "esri_client.py"
+_TAMSAT = _PRISMPY_ROOT / "src" / "prismpy" / "sources" / "climate" / "tamsat.py"
+
+
+def _file_invokes_helper(path: Path) -> bool:
+    """AST-walk ``path`` for a real Call node invoking the canonical helper
+    (by name or attribute). Defeats substring / comment / docstring
+    false-positives."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id == "retry_with_exponential_backoff":
+                return True
+            if isinstance(func, ast.Attribute) and func.attr == "retry_with_exponential_backoff":
+                return True
+    return False
 
 
 def _function_body_source(text: str, name: str) -> str:
@@ -210,4 +228,59 @@ def test_anti_mutation_swap_chunked_encoding_error_breaks_pin() -> None:
         "anti-mutation drill: swapping a transient class out of "
         "the default tuple MUST diverge from the canonical set "
         "Pin 2b inspects"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Ship 1' EXPANDED — GAEZ esri_client + TAMSAT migration + PRI-6 on_attempt.
+# ---------------------------------------------------------------------------
+
+
+def test_helper_exposes_on_attempt_keyword() -> None:
+    """PRI-6: the canonical helper MUST expose an ``on_attempt`` keyword so
+    producer-side adapters can emit a retry-attempt substage. Removing it
+    breaks the retry-attempt threading substrate."""
+    sig = inspect.signature(retry_with_exponential_backoff)
+    assert "on_attempt" in sig.parameters, (
+        "retry_with_exponential_backoff MUST expose `on_attempt` "
+        "(PRI-6 producer-side retry-attempt threading)"
+    )
+
+
+def test_gaez_esri_routes_through_canonical_helper() -> None:
+    """AC-S1E-2: GAEZ ``fetch_image`` (the PRODUCTION retry surface) MUST
+    route through the canonical helper, and the legacy bespoke
+    ``while attempt <= self.retries`` loop MUST be gone."""
+    assert _file_invokes_helper(_ESRI), (
+        "esri_client.py MUST invoke retry_with_exponential_backoff "
+        "(AST-walked) — the bespoke while-loop is migrated to the "
+        "canonical helper."
+    )
+    text = _ESRI.read_text(encoding="utf-8")
+    legacy = re.compile(r"while\s+attempt\s*<=\s*self\.retries")
+    assert not legacy.search(text), (
+        "esri_client.py still carries the bespoke "
+        "`while attempt <= self.retries` retry loop; AC-S1E-2 migrates "
+        "fetch_image to retry_with_exponential_backoff."
+    )
+
+
+def test_gaez_fetch_image_has_cancel_and_progress_params() -> None:
+    """AC-S1E-2 + AC-S1E-1: the innermost GAEZ retry surface MUST accept
+    ``cancel_check`` (5-level cancel-wire terminus) AND ``progress_callback``
+    (producer-side retry-attempt emit)."""
+    from prismpy.sources.gaez.esri_client import EsriImageServiceClient
+
+    params = inspect.signature(EsriImageServiceClient.fetch_image).parameters
+    assert "cancel_check" in params, "fetch_image MUST accept cancel_check"
+    assert "progress_callback" in params, (
+        "fetch_image MUST accept progress_callback (PRI-6 retry-attempt emit)"
+    )
+
+
+def test_tamsat_routes_through_canonical_helper() -> None:
+    """AC-S1E-3: TAMSAT ``_download_nc`` MUST route the 5xx fallback through
+    the canonical helper instead of the bespoke double ``requests.get``."""
+    assert _file_invokes_helper(_TAMSAT), (
+        "tamsat.py MUST invoke retry_with_exponential_backoff (AC-S1E-3)"
     )
