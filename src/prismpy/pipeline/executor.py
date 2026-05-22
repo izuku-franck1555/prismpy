@@ -176,6 +176,10 @@ class StageResult:
         errors: List of errors encountered
         warnings: List of warnings generated
         duration_seconds: Execution time
+        error_events: Structured error payloads aggregated from the
+            stage's catch sites (and from per-platform TranslationResults
+            for TRANSLATE), so consumers can dispatch on error class
+            instead of pattern-matching ``errors`` strings. Additive.
     """
     stage: PipelineStage
     success: bool
@@ -183,6 +187,7 @@ class StageResult:
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     duration_seconds: float = 0.0
+    error_events: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -2806,6 +2811,17 @@ class TranslationPipeline:
                 except Exception as e:
                     self.logger.error(f"Translation error for {platform.value}: {e}")
                     from prismpy.translators.base import TranslationResult
+                    from prismpy.errors import classify_to_event_dict
+                    # Best-effort grid_total so partial_progress is derived
+                    # when the typed exception carried a missing_tiles list.
+                    ctx = {"platform": platform.value}
+                    try:
+                        cells = getattr(unified_data.grid, "cells", None)
+                        if cells is not None:
+                            ctx["grid_total"] = len(cells)
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+                    error_event = classify_to_event_dict(e, ctx)
                     results[platform.value] = TranslationResult(
                         success=False,
                         platform=platform,
@@ -2814,6 +2830,7 @@ class TranslationPipeline:
                         errors=[str(e)],
                         warnings=[],
                         metadata={},
+                        error_events=[error_event],
                     )
                     # V2-19: still flush pending decisions on failure
                     if self.provenance.enabled:
@@ -4303,6 +4320,10 @@ class TranslationPipeline:
                             w for r in translation_results.values() for w in r.warnings
                         ],
                         duration_seconds=translate_duration,
+                        error_events=[
+                            ev for r in translation_results.values()
+                            for ev in r.error_events
+                        ],
                     )
                     stage_results["translate"] = result
                     _notify_complete("translate", result)
