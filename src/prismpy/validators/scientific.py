@@ -72,9 +72,70 @@ SOIL_RANGES = {
     "clay": (0.0, 100.0, "%"),
     "silt": (0.0, 100.0, "%"),
     "organic_carbon": (0.0, 30.0, "%"),
-    "ph": (2.5, 10.5, ""),
+    "ph": (3.5, 9.5, ""),
     "bulk_density": (0.5, 1.9, "g/cm³"),  # Tightened per specialist — catches unit errors
 }
+
+# Physical/defect tier for the value-range checks. CLIMATE_RANGES and
+# SOIL_RANGES above are the PLAUSIBILITY tier — a value outside them is
+# atypical-but-real (a warning the researcher can acknowledge with
+# evidence). The bands below are the PHYSICAL tier: a value outside them
+# is physically or chemically impossible — a data defect (e.g. a nodata
+# sentinel that leaked through scaling, pH 25.5). A physical violation is
+# marked ``defect=True`` and is non-acknowledgeable downstream. Every
+# plausibility band is a subset of its physical band, so "outside
+# plausibility" still counts every defect; the defect tier is the
+# stricter subset. Variables whose only meaningful bound is physical
+# (the soil texture fractions, relative humidity) carry the same band in
+# both tiers, which collapses the warning tier to empty.
+PHYSICAL_CLIMATE_RANGES = {
+    "tmax": (-70.0, 65.0),
+    "tmin": (-90.0, 50.0),
+    "precip": (0.0, 2000.0),
+    "srad": (0.0, 45.0),
+    "wind": (0.0, 110.0),
+    "rh": (0.0, 100.0),
+}
+
+PHYSICAL_SOIL_RANGES = {
+    "sand": (0.0, 100.0),
+    "clay": (0.0, 100.0),
+    "silt": (0.0, 100.0),
+    "organic_carbon": (0.0, 60.0),
+    "ph": (0.0, 14.0),
+    "bulk_density": (0.1, 2.65),
+}
+
+# Texture fractions sum to ~100% in a clean profile. The plausibility
+# band is the tight ±5% window; the physical band is the wide window
+# outside which no combination of real fractions plus independent-model
+# prediction noise can land — a sum below 50 or above 150 signals a
+# corrupt or nodata fraction (sand=255 → sum≈315), the primary leak
+# tripwire alongside pH > 14.
+TEXTURE_SUM_PLAUSIBILITY = (95.0, 105.0)
+TEXTURE_SUM_PHYSICAL = (50.0, 150.0)
+
+
+def _value_tier(value, physical, plausibility):
+    """Classify a value against a two-tier bound.
+
+    ``physical`` is a ``(min, max)`` band; a value outside it is a
+    DEFECT (physically impossible). ``plausibility`` is a ``(min, max)``
+    band or ``None``; a value inside the physical band but outside the
+    plausibility band is a WARNING (atypical-but-real). Otherwise the
+    value passes. Pass ``plausibility=None`` (or the physical band
+    itself) for single-tier variables to get only ``"pass"`` /
+    ``"defect"``.
+    """
+    pmin, pmax = physical
+    if value < pmin or value > pmax:
+        return "defect"
+    if plausibility is not None:
+        lo, hi = plausibility
+        if value < lo or value > hi:
+            return "warning"
+    return "pass"
+
 
 # Platform-specific required soil properties
 PLATFORM_SOIL_REQUIREMENTS = {
@@ -1257,10 +1318,11 @@ def _check_value_ranges(
                     if not vals:
                         continue
                     vmin, vmax, unit = CLIMATE_RANGES[var]
+                    physical = PHYSICAL_CLIMATE_RANGES[var]
                     if var not in climate_stats:
                         climate_stats[var] = {
                             "min": min(vals), "max": max(vals),
-                            "out_of_range": 0, "total": 0,
+                            "out_of_range": 0, "defect_count": 0, "total": 0,
                             "affected_cells": set(),
                         }
                     stats = climate_stats[var]
@@ -1268,8 +1330,11 @@ def _check_value_ranges(
                     stats["max"] = max(stats["max"], max(vals))
                     stats["total"] += len(vals)
                     for v in vals:
-                        if v < vmin or v > vmax:
+                        tier = _value_tier(v, physical, (vmin, vmax))
+                        if tier != "pass":
                             stats["out_of_range"] += 1
+                            if tier == "defect":
+                                stats["defect_count"] += 1
                             stats["affected_cells"].add(cell_id)
                             # AC-E2-25 sub-criterion 4 — per-cell
                             # violation entry. SARRA's stratified-
@@ -1296,6 +1361,7 @@ def _check_value_ranges(
                                 "value": float(v),
                                 "unit": unit,
                                 "bounds": [vmin, vmax],
+                                "defect": tier == "defect",
                             })
         # else: empty climate_stats → no per-variable climate checks
         # emitted; the delegated info record above is the only output.
@@ -1310,18 +1376,22 @@ def _check_value_ranges(
                     val = getattr(record, var, None)
                     if val is None:
                         continue
+                    physical = PHYSICAL_CLIMATE_RANGES[var]
                     if var not in climate_stats:
                         climate_stats[var] = {
                             "min": val, "max": val,
-                            "out_of_range": 0, "total": 0,
+                            "out_of_range": 0, "defect_count": 0, "total": 0,
                             "affected_cells": set(),
                         }
                     stats = climate_stats[var]
                     stats["min"] = min(stats["min"], val)
                     stats["max"] = max(stats["max"], val)
                     stats["total"] += 1
-                    if val < vmin or val > vmax:
+                    tier = _value_tier(val, physical, (vmin, vmax))
+                    if tier != "pass":
                         stats["out_of_range"] += 1
+                        if tier == "defect":
+                            stats["defect_count"] += 1
                         stats["affected_cells"].add(cell_id)
                         # AC-E2-25 sub-criterion 4 — per-cell
                         # violation entry on the in-memory path.
@@ -1345,6 +1415,7 @@ def _check_value_ranges(
                             "value": float(val),
                             "unit": unit,
                             "bounds": [vmin, vmax],
+                            "defect": tier == "defect",
                         })
 
     for var, (vmin, vmax, unit) in CLIMATE_RANGES.items():
@@ -1352,6 +1423,7 @@ def _check_value_ranges(
         if not stats:
             continue
         n_oor = stats["out_of_range"]
+        n_defect = stats.get("defect_count", 0)
         result = "warning" if n_oor > 0 else "pass"
         checks.append({
             "check": f"value_range_{var}",
@@ -1372,6 +1444,14 @@ def _check_value_ranges(
                 "observed_max": round(stats["max"], 2),
                 "out_of_range_count": n_oor,
                 "total_values": stats["total"],
+                # Physical-tier marker: ``defect`` is True when any value
+                # fell outside the physical band (impossible value, a data
+                # defect — non-acknowledgeable downstream). The check
+                # ``result`` stays in the existing vocab; defect rides as
+                # an additive marker so the consumer can refuse the
+                # acknowledge action without a new result enum.
+                "defect": n_defect > 0,
+                "defect_count": n_defect,
                 # V2-22c-PRE.1.3 — un-truncated for cockpit drill-down.
                 "affected_cells": list(stats["affected_cells"]),
                 # AC-E2-25 sub-criterion 4 + Codex HIGH A2 —
@@ -1409,6 +1489,7 @@ def _check_value_ranges(
         return checks
     soil_stats = {}
     texture_violations = 0
+    texture_defects = 0
     texture_total = 0
     # V2-22c-PRE.1.4 / 1.5 — track per-(cell_id, layer_idx) violations
     # alongside the existing aggregate counters so the validator emits a
@@ -1433,17 +1514,21 @@ def _check_value_ranges(
                 val = getattr(layer, var, None)
                 if val is None:
                     continue
+                physical = PHYSICAL_SOIL_RANGES[var]
                 if var not in soil_stats:
                     soil_stats[var] = {
                         "min": val, "max": val,
-                        "out_of_range": 0, "total": 0,
+                        "out_of_range": 0, "defect_count": 0, "total": 0,
                     }
                 stats = soil_stats[var]
                 stats["min"] = min(stats["min"], val)
                 stats["max"] = max(stats["max"], val)
                 stats["total"] += 1
-                if val < vmin or val > vmax:
+                tier = _value_tier(val, physical, (vmin, vmax))
+                if tier != "pass":
                     stats["out_of_range"] += 1
+                    if tier == "defect":
+                        stats["defect_count"] += 1
                     soil_violations_by_var.setdefault(var, []).append(
                         (cell_id, layer_idx),
                     )
@@ -1463,6 +1548,7 @@ def _check_value_ranges(
                         "value": float(val),
                         "unit": unit,
                         "bounds": [vmin, vmax],
+                        "defect": tier == "defect",
                     })
 
             # Texture fraction check (sand + clay + silt ≈ 100)
@@ -1472,8 +1558,13 @@ def _check_value_ranges(
             if sand is not None and clay is not None and silt is not None:
                 texture_total += 1
                 texture_sum = sand + clay + silt
-                if texture_sum < 95 or texture_sum > 105:
+                texture_tier = _value_tier(
+                    texture_sum, TEXTURE_SUM_PHYSICAL, TEXTURE_SUM_PLAUSIBILITY,
+                )
+                if texture_tier != "pass":
                     texture_violations += 1
+                    if texture_tier == "defect":
+                        texture_defects += 1
                     texture_violation_cells.append((cell_id, layer_idx))
                     soil_violation_details.append({
                         "cell_id": cell_id,
@@ -1486,6 +1577,7 @@ def _check_value_ranges(
                         "value": float(texture_sum),
                         "unit": "%",
                         "bounds": [95, 105],
+                        "defect": texture_tier == "defect",
                     })
 
     for var, (vmin, vmax, unit) in SOIL_RANGES.items():
@@ -1493,6 +1585,7 @@ def _check_value_ranges(
         if not stats:
             continue
         n_oor = stats["out_of_range"]
+        n_defect = stats.get("defect_count", 0)
         result = "warning" if n_oor > 0 else "pass"
         checks.append({
             "check": f"value_range_soil_{var}",
@@ -1513,6 +1606,11 @@ def _check_value_ranges(
                 "observed_max": round(stats["max"], 3),
                 "out_of_range_count": n_oor,
                 "total_values": stats["total"],
+                # Physical-tier marker (see the climate rollup above):
+                # ``defect`` flags an impossible value — non-acknowledgeable
+                # downstream — while the check ``result`` stays warning/pass.
+                "defect": n_defect > 0,
+                "defect_count": n_defect,
                 # V2-22c-PRE.1.5 — per-(cell_id, layer_idx) tuples for
                 # each layer that violated this variable's range.
                 # Sorted by (cell_id, layer_idx) ASC for deterministic
@@ -1617,6 +1715,19 @@ def _check_value_ranges(
                 "expected_range": [95, 105],
                 "violations": texture_violations,
                 "total_layers": texture_total,
+                # Physical-tier marker: a texture sum below 50 or above
+                # 150 cannot arise from real fractions plus prediction
+                # noise — it signals a corrupt/nodata fraction (the leak
+                # tripwire). ``defect`` flags that any layer hit the
+                # physical band; ``n_defect_layers`` counts them. The
+                # check ``result`` stays warning/pass; defect rides as an
+                # additive marker so the cell is non-acknowledgeable.
+                # ``defect_count`` mirrors the uniform key the other
+                # value-range checks emit; ``n_defect_layers`` keeps the
+                # per-layer naming family alongside ``n_flagged_layers``.
+                "defect": texture_defects > 0,
+                "defect_count": texture_defects,
+                "n_defect_layers": texture_defects,
                 # F16 per-cell vs per-layer breakdown — chip text
                 # binds to ``n_flagged_cells`` (cell-count surface);
                 # drawer detail binds to ``n_flagged_layers`` /
@@ -1860,9 +1971,14 @@ def compute_coverage_diff(expected_grid_cells, cells_with_data) -> List[Any]:
 # Axis-based remediation kind for SYNTHESIZED absent-cell findings. Absent
 # soil has an HWSD fallback path; absent climate is gap-filled by spatial
 # interpolation. Keyed on the coverage check id.
+# Axis-based remediation kind for absent (no-data) cells. Soil-absent is a
+# genuine gap the cockpit can fill (HWSD fallback). Climate-absent is a
+# fetch failure — NASA POWER / AgERA5 cover land completely, so a missing
+# climate cell means the download failed, not that the value is unknowable;
+# it routes to RETRY, never to interpolation (climate-IDW is a moral hazard).
 _ABSENT_REMEDIATION_KIND = {
     "coverage_soil_cells": "hwsd_fallback",
-    "coverage_climate_cells": "interpolate",
+    "coverage_climate_cells": "retry",
 }
 
 
@@ -1923,6 +2039,10 @@ def _build_remediable_findings(checks, unified_data) -> List[Dict[str, Any]]:
         cause = details.get("cause")
 
         if is_coverage_check(check_id) and affected:
+            kind = _ABSENT_REMEDIATION_KIND.get(check_id, "hwsd_fallback")
+            # "retry" is a banner fetch-retry, NOT a cockpit action — so a
+            # climate-absent finding is surfaced but not cockpit-remediable.
+            # Soil-absent ("hwsd_fallback") IS a cockpit action.
             findings.append({
                 "category": check.get("category"),
                 "check": check_id,
@@ -1930,10 +2050,8 @@ def _build_remediable_findings(checks, unified_data) -> List[Dict[str, Any]]:
                 "result": check.get("result"),
                 "cell_ids": affected,
                 "cause": cause or "absent",
-                "remediable": True,
-                "remediation_kind": _ABSENT_REMEDIATION_KIND.get(
-                    check_id, "interpolate",
-                ),
+                "remediable": kind != "retry",
+                "remediation_kind": kind,
                 "detail": check.get("summary", ""),
             })
             continue

@@ -519,6 +519,10 @@ class AceaTranslator(AceaTranslatorBase):
                         missing_tiles=sorted(still_missing),
                         source='nasa_power',
                         total=len(cell_ids_30arcmin),
+                        # NASA POWER covers all land; tiles still uncovered
+                        # after the retry path exhausted = transient (the
+                        # retries ran out), not a permanent rejection.
+                        recoverable=True,
                     )
 
             elif missing_tiles:

@@ -33,6 +33,7 @@ class ClimateDownloadError(Exception):
         missing_tiles: Optional[List[int]] = None,
         source: Optional[str] = None,
         total: Optional[int] = None,
+        recoverable: Optional[bool] = None,
     ) -> None:
         self.missing_tiles: List[int] = list(missing_tiles or [])
         self.source = source
@@ -40,6 +41,15 @@ class ClimateDownloadError(Exception):
         # 30-arcmin cell count, not pixel-grid size) so a partial-progress
         # derivation downstream reports honest counts in matching units.
         self.total = total
+        # ``recoverable`` rides the Ship-3 ``error_event`` (classify reads
+        # ``getattr(exc, 'recoverable', None)``) so the consumer can degrade
+        # transient-vs-terminal. True = transient (timeout / 429 / 5xx /
+        # network — retry-eligible); False = terminal (4xx-non-429 /
+        # coordinate-rejected / out-of-domain — not worth retrying); None =
+        # unknown. A land-covering provider still uncovered AFTER the retry
+        # path is transient by default (the failure exhausted retries, it
+        # was not a permanent rejection).
+        self.recoverable = recoverable
         prefix = f"[{source}] " if source else ""
         suffix = (
             f" ({len(self.missing_tiles)} unfetched IDs: "

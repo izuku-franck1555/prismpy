@@ -344,8 +344,10 @@ class TestFailedChecksEmptyByDefault:
 
 class TestFailedChecksStructuredShape:
     """V2-22c-PRE.1.2 evaluator §12.2 — every entry has the exact
-    3-key shape `{check_id, result, category}`. No extras, no
-    missing, no bare check_id strings."""
+    4-key shape `{check_id, result, category, defect}`. No extras, no
+    missing, no bare check_id strings. The ``defect`` flag is the
+    two-tier physical-bound marker: True when the cell carries an
+    impossible value (non-acknowledgeable), False otherwise."""
 
     def test_per_cell_check_pivots_into_failed_checks(self):
         pipeline = _make_pipeline()
@@ -366,7 +368,7 @@ class TestFailedChecksStructuredShape:
         assert len(out["cells"][0]["failed_checks"]) == 1
         assert out["cells"][1]["failed_checks"] == []
 
-    def test_failed_check_entry_has_exactly_three_keys(self):
+    def test_failed_check_entry_has_exactly_four_keys(self):
         pipeline = _make_pipeline()
         unified = _make_full_unified(n_cells=1)
         report = _validation_report({
@@ -377,12 +379,15 @@ class TestFailedChecksStructuredShape:
         })
         out = pipeline._build_cell_summary(unified, report)
         entry = out["cells"][0]["failed_checks"][0]
-        assert set(entry.keys()) == {"check_id", "result", "category"}, (
-            f"entry must have exactly 3 keys; got {set(entry.keys())!r}"
+        assert set(entry.keys()) == {"check_id", "result", "category", "defect"}, (
+            f"entry must have exactly 4 keys; got {set(entry.keys())!r}"
         )
         assert entry["check_id"] == "temporal_completeness"
         assert entry["result"] == "warning"
         assert entry["category"] == "temporal"
+        # No violation_details carry defect=True on this check, so the
+        # per-cell defect marker defaults to False.
+        assert entry["defect"] is False
 
     def test_result_only_fail_or_warning(self):
         """Evaluator §12.2 — `result ∈ {"fail", "warning"}` literal.
