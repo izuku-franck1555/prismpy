@@ -106,6 +106,7 @@ def run_scientific_validation(
     config,
     enabled_platforms: Optional[List[str]] = None,
     sarra_climate_per_cell: Optional[Dict[int, Dict[str, list]]] = None,
+    sarra_climate_readable: bool = False,
 ) -> Dict[str, Any]:
     """Run all 6 Tier 1 scientific validation checks.
 
@@ -166,7 +167,11 @@ def run_scientific_validation(
     # these emit per-cell `affected_cells` lists that PRE.1.2's
     # failed_checks pivot reads. Cockpit's Layer 1 fill rule + Layer
     # 3 dimension toggle (Coverage) depend on these.
-    checks.append(_check_coverage_climate_cells(unified_data))
+    checks.append(_check_coverage_climate_cells(
+        unified_data,
+        sarra_climate_per_cell=sarra_climate_per_cell,
+        sarra_climate_readable=sarra_climate_readable,
+    ))
     checks.append(_check_coverage_soil_cells(unified_data))
 
     # Check 7: Region-specific bounds (V2-20)
@@ -218,6 +223,10 @@ def run_scientific_validation(
         "categories_total": len(categories),
         "categories": categories,
         "summary_statistics": summary_stats,
+        # Canonical remediable-findings substrate (Coverage-Honesty Phase A).
+        # Always a list; absent cells are synthesized so they reach the
+        # cockpit chip instead of being orphaned by the cell-summary pivot.
+        "remediable_findings": _build_remediable_findings(checks, unified_data),
         # Flat list preserved for backward compat + flat-list operations
         "checks": checks,
         "n_checks": len(checks),
@@ -793,6 +802,7 @@ UNAVAILABLE_CAUSES: tuple[str, ...] = (
     "soil_cascade_exhausted",
     "no_climate_and_soil_fetch",
     "no_translated_output",
+    "coverage_unverifiable",
 )
 _UNAVAILABLE_CAUSE_LABELS: Dict[str, str] = {
     "no_climate_fetch": "climate data was not fetched",
@@ -800,6 +810,7 @@ _UNAVAILABLE_CAUSE_LABELS: Dict[str, str] = {
     "soil_cascade_exhausted": "soil cascade exhausted (iSDA → HWSD all empty)",
     "no_climate_and_soil_fetch": "neither climate nor soil data was fetched",
     "no_translated_output": "platform translation produced no output for this cell",
+    "coverage_unverifiable": "per-cell coverage could not be verified",
 }
 
 
@@ -1830,10 +1841,138 @@ def _check_coverage(unified_data, config) -> Dict[str, Any]:
 
 
 # =============================================================================
+# Coverage-diff + remediable-findings substrate (Coverage-Honesty Phase A)
+# =============================================================================
+
+
+def compute_coverage_diff(expected_grid_cells, cells_with_data) -> List[Any]:
+    """Return the sorted cell_ids that are expected but have no data.
+
+    The single source for "which cells are missing" across soil and ALL
+    climate platforms, so per-platform coverage logic can't drift apart.
+    ``cells_with_data`` is the set of cell_ids that carry usable data;
+    everything in the grid but not in that set is missing. Sorted for
+    deterministic JSON diffs.
+    """
+    return sorted(set(expected_grid_cells) - set(cells_with_data))
+
+
+# Axis-based remediation kind for SYNTHESIZED absent-cell findings. Absent
+# soil has an HWSD fallback path; absent climate is gap-filled by spatial
+# interpolation. Keyed on the coverage check id.
+_ABSENT_REMEDIATION_KIND = {
+    "coverage_soil_cells": "hwsd_fallback",
+    "coverage_climate_cells": "interpolate",
+}
+
+
+def _bucket_is_remediable(bucket) -> bool:
+    """V2 remediable predicate: only INTERPOLATABLE auto-remediates.
+
+    ``MANUAL_OVERRIDE_WITH_EVIDENCE`` is V3-only, so the V2 remediable set
+    is exactly ``{INTERPOLATABLE}``. An unmapped/unknown bucket (``None``)
+    is NOT remediable but is still surfaced by the caller.
+    """
+    from prismpy.warnings.categories import WarningBucket
+
+    return bucket == WarningBucket.INTERPOLATABLE
+
+
+def _resolve_warning_bucket(warning_category):
+    """Map a canonical ``WarningCategory`` value to its bucket, or ``None``.
+
+    Reuses the canonical ``WARNING_BUCKET_MAP`` (no reinvented mapping).
+    Returns ``None`` for an absent or unrecognized category so the caller
+    surfaces it as a non-remediable finding rather than dropping it.
+    """
+    if warning_category is None:
+        return None
+    from prismpy.warnings.categories import WarningCategory, bucket_for
+
+    try:
+        return bucket_for(WarningCategory(warning_category))
+    except (ValueError, KeyError):
+        return None
+
+
+def _build_remediable_findings(checks, unified_data) -> List[Dict[str, Any]]:
+    """Build the canonical ``remediable_findings`` substrate from the checks.
+
+    Two derivation paths (the absent path is why this exists):
+
+    * Path B — cells reported by a coverage check are absent (no data), so
+      they have no per-cell ``RoutingDecision`` to read; they are SYNTHESIZED
+      as remediable with an axis-based ``remediation_kind``. Without this the
+      ``_build_cell_summary`` pivot orphans them and they never reach the chip.
+    * Path A — any other failing check is data-bearing. Its bucket is resolved
+      from the canonical category map when the check carries one; remediable
+      iff that bucket is INTERPOLATABLE. A check with no resolvable bucket is
+      surfaced as non-remediable, never silently dropped.
+
+    Always returns a list (empty when nothing failed).
+    """
+    from prismpy.cockpit.check_id_enumeration import is_coverage_check
+
+    findings: List[Dict[str, Any]] = []
+    for check in checks:
+        if check.get("result") not in ("fail", "warning", "unavailable"):
+            continue
+        details = check.get("details") or {}
+        affected = list(details.get("affected_cells") or [])
+        check_id = check.get("check", "")
+        cause = details.get("cause")
+
+        if is_coverage_check(check_id) and affected:
+            findings.append({
+                "category": check.get("category"),
+                "check": check_id,
+                "scope": check.get("scope"),
+                "result": check.get("result"),
+                "cell_ids": affected,
+                "cause": cause or "absent",
+                "remediable": True,
+                "remediation_kind": _ABSENT_REMEDIATION_KIND.get(
+                    check_id, "interpolate",
+                ),
+                "detail": check.get("summary", ""),
+            })
+            continue
+
+        # Path A — data-bearing. Remediability is bucket-driven: a finding is
+        # remediable iff its check carries a ``warning_category`` that maps to
+        # INTERPOLATABLE. In V2 NO validator check emits a ``warning_category``
+        # and the only INTERPOLATABLE category (SHORT_GAP_INTERPOLATABLE) has
+        # no producer yet, so every data-bearing finding is INTENTIONALLY
+        # surfaced as remediable=False. This is the honest V2 state — not a
+        # bug to "fix" by fabricating remediable=True. When a future producer
+        # emits an INTERPOLATABLE category the resolver lights up automatically
+        # (forward-compat, no code change here).
+        bucket = _resolve_warning_bucket(details.get("warning_category"))
+        remediable = _bucket_is_remediable(bucket)
+        findings.append({
+            "category": check.get("category"),
+            "check": check_id,
+            "scope": check.get("scope"),
+            "result": check.get("result"),
+            "cell_ids": affected,
+            "cause": cause or (
+                "coverage_unverifiable"
+                if check.get("result") == "unavailable" else None
+            ),
+            "remediable": remediable,
+            "remediation_kind": "interpolate" if remediable else None,
+            "detail": check.get("summary", ""),
+        })
+    return findings
+
+
+# =============================================================================
 # Check 6b: Per-cell coverage (V2-22c-PRE.1.9 / D36)
 # =============================================================================
 
-def _check_coverage_climate_cells(unified_data) -> Dict[str, Any]:
+def _check_coverage_climate_cells(
+    unified_data, sarra_climate_per_cell=None, sarra_climate_readable=False,
+) -> Dict[str, Any]:
     """V2-22c-PRE.1.9 (D36) — per-cell climate coverage check.
 
     Cells where the unified climate data has no entry, OR has an
@@ -1841,12 +1980,13 @@ def _check_coverage_climate_cells(unified_data) -> Dict[str, Any]:
     ``scope='per_cell'`` so PRE.1.2's failed_checks pivot picks it
     up under the ``coverage_per_cell`` category.
 
-    SARRA-Py file-based climate path: emits ``info`` with a
-    delegation note rather than ``fail``. Per-cell coverage for
-    SARRA-Py is V2-22d backlog (#11) — PRE.2.4 ships per-cell
-    climate sampling but the coverage synthesis defers. The
-    ``info`` result lets the cockpit Coverage chip render
-    "delegated" instead of red.
+    SARRA-Py file-based climate is verified against the per-cell
+    sample in ``sarra_climate_per_cell`` (threaded in from the
+    executor). When that sample is available the check does a real
+    coverage diff; when it is absent — the sampler could not read
+    any GeoTIFFs — coverage cannot be verified and the check emits
+    an explicit ``unavailable`` / ``coverage_unverifiable`` record
+    rather than a silent ``info`` pass that would hide real gaps.
     """
     grid = (
         unified_data.grid
@@ -1951,39 +2091,112 @@ def _check_coverage_climate_cells(unified_data) -> Dict[str, Any]:
             },
         }
     if _is_file_based_climate(climate):
+        # SARRA-Py climate is file-based, so per-cell coverage is verified
+        # against the GeoTIFF sample threaded in from the executor. The empty
+        # cases are NOT equivalent: ``sample_sarra_py_per_cell`` returns ``{}``
+        # both when it cannot read any rasters (rasterio missing / no tifs)
+        # AND when the rasters ARE readable but no cell falls on covered data
+        # (region outside the extent / all-nodata). ``sarra_climate_readable``
+        # (computed by the executor from the same output dir) separates them:
+        # an unreadable sample is genuinely UNVERIFIABLE, while a readable-but-
+        # empty sample is a MEASURED all-cells-missing result that must surface
+        # as a gap — never a silent info pass (#166) and never a false
+        # unverifiable claim that hides a measured gap.
+        grid_ids = {c.cell_id for c in grid.cells}
+        n_total = len(grid_ids)
+        if sarra_climate_per_cell:
+            cells_with_data = {
+                cid for cid, var_bucket in sarra_climate_per_cell.items()
+                if var_bucket and any(vals for vals in var_bucket.values())
+            }
+            affected_cells = compute_coverage_diff(grid_ids, cells_with_data)
+            n_missing = len(affected_cells)
+            result = "fail" if n_missing > 0 else "pass"
+            return {
+                "check": "coverage_climate_cells",
+                "scope": "per_cell",
+                "result": result,
+                "summary": (
+                    f"{n_total - n_missing}/{n_total} cells covered by climate data"
+                    + (f" — {n_missing} cells missing" if n_missing else "")
+                ),
+                "manuscript_claim": "Section 2.5: per-cell coverage check",
+                "details": {
+                    "n_total": n_total,
+                    "n_missing": n_missing,
+                    "affected_cells": affected_cells,
+                    "violation_details": [
+                        {
+                            "cell_id": cid, "layer_idx": None,
+                            "variable": "climate",
+                            "date": None, "value": None,
+                            "unit": None, "bounds": None,
+                        }
+                        for cid in affected_cells
+                    ],
+                },
+            }
+        if sarra_climate_readable:
+            # Rasters read fine but the sample is empty → no cell falls on
+            # covered data (region outside the GeoTIFF extent or all-nodata).
+            # A MEASURED gap: every cell is missing.
+            all_cell_ids = sorted(grid_ids)
+            return {
+                "check": "coverage_climate_cells",
+                "scope": "per_cell",
+                "result": "fail",
+                "summary": (
+                    f"0/{n_total} cells covered by climate data "
+                    f"(no cell falls on covered SARRA-Py raster data)"
+                ),
+                "manuscript_claim": "Section 2.5: per-cell coverage check",
+                "details": {
+                    "n_total": n_total,
+                    "n_missing": n_total,
+                    "affected_cells": all_cell_ids,
+                    "cause": "absent",
+                    "violation_details": [
+                        {
+                            "cell_id": cid, "layer_idx": None,
+                            "variable": "climate",
+                            "date": None, "value": None,
+                            "unit": None, "bounds": None,
+                        }
+                        for cid in all_cell_ids
+                    ],
+                },
+            }
+        # Rasters unreadable (rasterio missing / no tifs / no sample threaded)
+        # → coverage genuinely cannot be verified.
         return {
             "check": "coverage_climate_cells",
             "scope": "per_cell",
-            "result": "info",
+            "result": "unavailable",
             "summary": (
-                "File-based climate (SARRA-Py) — per-cell coverage "
-                "delegated to PRE.2 sampling (V2-22d backlog)"
+                "Per-cell climate coverage could not be verified "
+                "(SARRA-Py climate rasters unreadable)"
             ),
             "manuscript_claim": "Section 2.5: per-cell coverage check",
             "details": {
-                "delegated_to": "PRE.2 sampling",
+                "cause": "coverage_unverifiable",
                 "affected_cells": [],
                 "n_missing": 0,
-                "n_total": grid.n_cells,
+                "n_total": n_total,
             },
         }
 
     grid_ids = {c.cell_id for c in grid.cells}
-    missing = set()
     if isinstance(climate, dict):
-        for cid in grid_ids:
-            ts = climate.get(cid)
-            if ts is None:
-                missing.add(cid)
-                continue
-            records = getattr(ts, 'records', None)
-            if records is None or len(records) == 0:
-                missing.add(cid)
+        cells_with_data = {
+            cid for cid in grid_ids
+            if climate.get(cid) is not None
+            and getattr(climate.get(cid), 'records', None)
+        }
     else:
-        # Non-dict climate that isn't file-based: treat as missing.
-        missing = set(grid_ids)
+        # Non-dict climate that isn't file-based: nothing has data.
+        cells_with_data = set()
 
-    affected_cells = sorted(missing)
+    affected_cells = compute_coverage_diff(grid_ids, cells_with_data)
     n_missing = len(affected_cells)
     n_total = len(grid_ids)
     result = "fail" if n_missing > 0 else "pass"
@@ -2100,20 +2313,16 @@ def _check_coverage_soil_cells(unified_data) -> Dict[str, Any]:
         }
 
     grid_ids = {c.cell_id for c in grid.cells}
-    missing = set()
     if isinstance(soil, dict):
-        for cid in grid_ids:
-            profile = soil.get(cid)
-            if profile is None:
-                missing.add(cid)
-                continue
-            layers = getattr(profile, 'layers', None)
-            if layers is None or len(layers) == 0:
-                missing.add(cid)
+        cells_with_data = {
+            cid for cid in grid_ids
+            if soil.get(cid) is not None
+            and getattr(soil.get(cid), 'layers', None)
+        }
     else:
-        missing = set(grid_ids)
+        cells_with_data = set()
 
-    affected_cells = sorted(missing)
+    affected_cells = compute_coverage_diff(grid_ids, cells_with_data)
     n_missing = len(affected_cells)
     n_total = len(grid_ids)
     result = "fail" if n_missing > 0 else "pass"

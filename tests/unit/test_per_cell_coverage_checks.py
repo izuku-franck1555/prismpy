@@ -142,24 +142,41 @@ class TestCoverageClimateCells:
         assert d["layer_idx"] is None
 
 
-class TestCoverageClimateCellsFileBasedDelegation:
-    """V2-22c-PRE.1.9 — file-based (SARRA-Py) climate delegates to
-    PRE.2 sampling. Check emits `info` (NOT fail) with a clear
-    delegation note. SARRA-Py per-cell coverage synthesis is V2-22d
-    backlog (#11)."""
+class TestCoverageClimateCellsFileBased:
+    """Coverage-Honesty Phase A (#166) — file-based (SARRA-Py) climate
+    no longer emits a silent ``info`` delegation stub. With a per-cell
+    sample it does a real coverage diff; without one it reports
+    ``unavailable``/``coverage_unverifiable`` so the gap is never hidden."""
 
-    def test_file_based_climate_emits_info_with_delegation_note(self):
-        """File-based climate is detected via `_is_file_based_climate`
-        which checks for path-dict shape."""
-        climate = {
-            "rainfall_dir": "/tmp/rainfall",
-            "agera5_dir": "/tmp/agera5",
-        }
-        unified = _make_unified(climate=climate)
-        check = _check_coverage_climate_cells(unified)
-        assert check["result"] == "info"
-        assert "delegated" in check["summary"].lower() or \
-               "sarra" in check["summary"].lower()
+    _CLIMATE = {"rainfall_dir": "/tmp/rainfall", "agera5_dir": "/tmp/agera5"}
+
+    def test_unsampled_file_based_climate_is_unavailable_not_info(self):
+        """No sample → explicit unverifiable signal, never a silent info
+        pass (the #166 regression)."""
+        unified = _make_unified(climate=self._CLIMATE)
+        check = _check_coverage_climate_cells(unified, sarra_climate_per_cell=None)
+        assert check["result"] == "unavailable"
+        assert check["details"]["cause"] == "coverage_unverifiable"
+        assert check["details"]["affected_cells"] == []
+
+    def test_sampled_file_based_climate_does_real_diff(self):
+        """A per-cell sample → real coverage diff; cells absent from the
+        sample (or with empty values) are reported missing."""
+        unified = _make_unified(grid_n=3, climate=self._CLIMATE)
+        sample = {0: {"rain": [1.0]}, 1: {"rain": []}}  # cell 1 empty, cell 2 absent
+        check = _check_coverage_climate_cells(
+            unified, sarra_climate_per_cell=sample,
+        )
+        assert check["result"] == "fail"
+        assert check["details"]["affected_cells"] == [1, 2]
+
+    def test_fully_sampled_file_based_climate_passes(self):
+        unified = _make_unified(grid_n=2, climate=self._CLIMATE)
+        sample = {0: {"rain": [1.0]}, 1: {"rain": [2.0]}}
+        check = _check_coverage_climate_cells(
+            unified, sarra_climate_per_cell=sample,
+        )
+        assert check["result"] == "pass"
         assert check["details"]["affected_cells"] == []
 
 

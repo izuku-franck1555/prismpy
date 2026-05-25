@@ -699,6 +699,35 @@ def sample_sarra_py_per_cell(
     return per_cell
 
 
+def sarra_py_climate_rasters_readable(platform_dir: Path) -> bool:
+    """Return True iff at least one SARRA-Py climate GeoTIFF can be opened.
+
+    The per-cell coverage check needs to tell two ``{}`` sample outcomes
+    apart: ``sample_sarra_py_per_cell`` returns an empty dict both when it
+    cannot read any rasters (rasterio missing, or no GeoTIFFs on disk) AND
+    when the rasters read fine but no cell falls on covered data (region
+    outside the extent / all-nodata). This probe is True only in the second
+    case, so the coverage check can report a MEASURED all-cells-missing gap
+    instead of an unverifiable result. It opens at most one raster.
+    """
+    try:
+        import rasterio
+    except ImportError:
+        return False
+    climate_base = platform_dir / "data" / "climate"
+    for subdir_name in SARRA_PY_VAR_MAPPING:
+        var_dir = climate_base / subdir_name
+        if not var_dir.is_dir():
+            continue
+        for tif_path in sorted(var_dir.glob("*.tif")):
+            try:
+                with rasterio.open(tif_path):
+                    return True
+            except Exception:
+                continue
+    return False
+
+
 def _validate_sarra_py_geotiffs(
     platform_dir: Path,
 ) -> List[Dict[str, Any]]:

@@ -3148,6 +3148,7 @@ class TranslationPipeline:
         # Stash on ``unified_data.metadata`` so the packaging stage
         # can read it without re-sampling.
         sarra_climate_per_cell: Optional[Dict[int, Dict[str, list]]] = None
+        sarra_climate_readable: bool = False
         if unified_data:
             try:
                 enabled_platforms = [
@@ -3182,9 +3183,16 @@ class TranslationPipeline:
                     if sarra_dir.is_dir():
                         from prismpy.validators.post_translate import (
                             sample_sarra_py_per_cell,
+                            sarra_py_climate_rasters_readable,
                         )
                         sarra_climate_per_cell = sample_sarra_py_per_cell(
                             sarra_dir, unified_data.grid.cells,
+                        )
+                        # Distinguish "rasters unreadable" from "readable but
+                        # no cell covered" so the coverage check reports a
+                        # measured all-missing gap vs an unverifiable result.
+                        sarra_climate_readable = (
+                            sarra_py_climate_rasters_readable(sarra_dir)
                         )
                         if sarra_climate_per_cell:
                             # Stash on metadata so the packaging
@@ -3208,6 +3216,7 @@ class TranslationPipeline:
                 scientific_report = run_scientific_validation(
                     unified_data, self.config, enabled_platforms,
                     sarra_climate_per_cell=sarra_climate_per_cell,
+                    sarra_climate_readable=sarra_climate_readable,
                 )
                 validation_summary["scientific"] = scientific_report
             except Exception as e:
