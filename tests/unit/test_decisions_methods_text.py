@@ -99,7 +99,33 @@ def _skip_record(cell_id: str, check_id: str, rationale: str) -> dict:
     }
 
 
-def test_empty_snapshot_renders_all_four_sections() -> None:
+def _interpolation_record(cell_id: str, check_id: str) -> dict:
+    return {
+        "decision_id": "55555555-5555-5555-5555-555555555555",
+        "cell_id": cell_id,
+        "action": "apply_interpolation",
+        "check_id": check_id,
+        "timestamp": "2026-05-10T16:00:00+00:00",
+        "user_identity": "test_user",
+        "method_or_rationale": "IDW from 4 nearest soil neighbours",
+        "sequence_number": 5,
+        "interpolation_record": {
+            "interpolation_method": "idw",
+            "source_cells": [101, 102, 103, 104],
+            "uncertainty_ci_lower": 12.0,
+            "uncertainty_ci_upper": 18.0,
+            "method_doi": "10.1145/800186.810616",
+            "applied_at_decision_id": "55555555-5555-5555-5555-555555555555",
+            "affected_zone_code": "BSh",
+            "caveat_codes": ["sahel-precip-convective"],
+            "radius_km": 15.0,
+            "k": 4,
+            "weight_power": 2.0,
+        },
+    }
+
+
+def test_empty_snapshot_renders_all_five_sections() -> None:
     text = render_cockpit_decisions_text(
         cockpit_decisions_at_launch={},
         derived_run_id="run-uuid-123",
@@ -110,7 +136,8 @@ def test_empty_snapshot_renders_all_four_sections() -> None:
     assert "## Documented Overrides (Cat D — documentary basis)" in text
     assert "## Acknowledged Warnings (Bucket 2 informational)" in text
     assert "## Skipped Cells (excluded from analysis)" in text
-    assert text.count("(no entries)") == 4
+    assert "## Interpolated Cells (synthetic values — estimated, not observed)" in text
+    assert text.count("(no entries)") == 5
 
 
 def test_value_replacement_override_renders_value_pairs_and_apply_suffix() -> None:
@@ -195,6 +222,43 @@ def test_skip_decision_renders_with_excluded_marker() -> None:
     assert "Cell EXCLUDED from canonical files" in text
 
 
+def test_interpolation_decision_renders_full_provenance() -> None:
+    """An apply_interpolation decision surfaces the full provenance a
+    reader needs to tell estimated from observed: synthetic
+    declaration, IDW method + parameters, contributing neighbours,
+    95% uncertainty interval, the canonical domain caveat phrase, and
+    the decision id."""
+    snapshot = {
+        "4500000": {
+            "coverage_soil_cells": _interpolation_record(
+                "4500000", "coverage_soil_cells",
+            ),
+        },
+    }
+    text = render_cockpit_decisions_text(
+        cockpit_decisions_at_launch=snapshot,
+    )
+    assert "## Interpolated Cells (synthetic values — estimated, not observed)" in text
+    assert "Cell 4500000 (coverage_soil_cells)" in text
+    # Self-declared synthetic (the honesty floor — never written-as-observed).
+    assert "SYNTHETIC" in text
+    assert "not a direct observation" in text
+    # Method + parameters from the canonical record fields.
+    assert "IDW(k=4, R=15.0 km, w=1/d^2.0)" in text
+    assert "Shepard 1968" in text
+    assert "10.1145/800186.810616" in text
+    # Contributing neighbours: count + the source cell ids.
+    assert "Contributing neighbours: 4 cell(s)" in text
+    assert "101" in text and "104" in text
+    # Uncertainty interval.
+    assert "95% CI [12.0, 18.0]" in text
+    # Machine flag + decision provenance.
+    assert "INTERPOLATION-PRESENT" in text
+    assert "Decision: 55555555-5555-5555-5555-555555555555" in text
+    # Canonical caveat phrase surfaced verbatim (no paraphrase drift).
+    assert "Sahel-zone precipitation interpolation" in text
+
+
 def test_mixed_decision_types_partition_into_correct_sections() -> None:
     """Each decision type lands under its expected section — no
     cross-contamination of the partition."""
@@ -217,22 +281,29 @@ def test_mixed_decision_types_partition_into_correct_sections() -> None:
                 "400", "outside_crop_envelope", "skip rationale for cell 400",
             ),
         },
+        "500": {
+            "coverage_soil_cells": _interpolation_record(
+                "500", "coverage_soil_cells",
+            ),
+        },
     }
     text = render_cockpit_decisions_text(
         cockpit_decisions_at_launch=snapshot,
     )
-    # All four sections populated.
+    # All five sections populated.
     assert text.count("(no entries)") == 0
     assert "Cell 100" in text
     assert "Cell 200" in text
     assert "Cell 300" in text
     assert "Cell 400" in text
-    # Section header ordering: Value → Documented → Ack → Skip.
+    assert "Cell 500" in text
+    # Section header ordering: Value → Documented → Ack → Skip → Interpolated.
     pos_val = text.index("## Value-Replacement Overrides")
     pos_doc = text.index("## Documented Overrides")
     pos_ack = text.index("## Acknowledged Warnings")
     pos_skip = text.index("## Skipped Cells")
-    assert pos_val < pos_doc < pos_ack < pos_skip
+    pos_interp = text.index("## Interpolated Cells")
+    assert pos_val < pos_doc < pos_ack < pos_skip < pos_interp
 
 
 def test_none_snapshot_renders_empty_stub_without_crashing() -> None:
@@ -243,4 +314,4 @@ def test_none_snapshot_renders_empty_stub_without_crashing() -> None:
         cockpit_decisions_at_launch=None,
     )
     assert "# Cockpit Decisions — User Audit Trail" in text
-    assert text.count("(no entries)") == 4
+    assert text.count("(no entries)") == 5

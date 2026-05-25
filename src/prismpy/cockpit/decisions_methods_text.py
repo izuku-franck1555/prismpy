@@ -33,6 +33,8 @@ from __future__ import annotations
 import logging
 from typing import Any, List, Mapping, Optional
 
+from prismpy.standards.caveat_codes import METHODS_TEXT_CAVEAT_PHRASES
+
 logger = logging.getLogger(__name__)
 
 
@@ -41,6 +43,9 @@ _TEXT_SUBHEADER_OVERRIDES_DOC = "## Documented Overrides (Cat D — documentary 
 _TEXT_SUBHEADER_OVERRIDES_VAL = "## Value-Replacement Overrides (Cat A / B / C)"
 _TEXT_SUBHEADER_ACKNOWLEDGES = "## Acknowledged Warnings (Bucket 2 informational)"
 _TEXT_SUBHEADER_SKIPS = "## Skipped Cells (excluded from analysis)"
+_TEXT_SUBHEADER_INTERPOLATIONS = (
+    "## Interpolated Cells (synthetic values — estimated, not observed)"
+)
 _TEXT_EMPTY_BLOCK = "(no entries)"
 
 
@@ -75,9 +80,9 @@ def render_cockpit_decisions_text(
     Returns:
         Multi-line plain-text string. The first line is the
         ``_TEXT_BANNER`` header; subsequent sections list per-decision
-        rows under the four sub-headers (value-replacement overrides /
+        rows under the five sub-headers (value-replacement overrides /
         Cat D documentary overrides / acknowledged warnings / skipped
-        cells). Sections with zero entries emit
+        cells / interpolated cells). Sections with zero entries emit
         ``_TEXT_EMPTY_BLOCK`` so the persona sees the section's
         presence (an empty section signals "we considered this
         category and the persona made no decisions"; a missing
@@ -97,11 +102,12 @@ def render_cockpit_decisions_text(
         lines.append(f"Derived run id: {derived_run_id}")
     lines.append("")
 
-    # Walk the snapshot and partition decisions into four buckets.
+    # Walk the snapshot and partition decisions into five buckets.
     value_replacement_rows: List[str] = []
     cat_d_documentary_rows: List[str] = []
     acknowledge_rows: List[str] = []
     skip_rows: List[str] = []
+    interpolation_rows: List[str] = []
 
     if isinstance(cockpit_decisions_at_launch, dict):
         for cell_id in sorted(cockpit_decisions_at_launch):
@@ -131,8 +137,11 @@ def render_cockpit_decisions_text(
                         cell_id, check_id, record_dict,
                     )
                     skip_rows.append(row)
-                # ``apply_interpolation`` rows fall to a future fixup;
-                # not surfaced in v1 methods text per fixup +15 scope.
+                elif action == "apply_interpolation":
+                    row = _format_interpolation_row(
+                        cell_id, check_id, record_dict,
+                    )
+                    interpolation_rows.append(row)
 
     lines.append(_TEXT_SUBHEADER_OVERRIDES_VAL)
     if value_replacement_rows:
@@ -158,6 +167,13 @@ def render_cockpit_decisions_text(
     lines.append(_TEXT_SUBHEADER_SKIPS)
     if skip_rows:
         lines.extend(skip_rows)
+    else:
+        lines.append(_TEXT_EMPTY_BLOCK)
+    lines.append("")
+
+    lines.append(_TEXT_SUBHEADER_INTERPOLATIONS)
+    if interpolation_rows:
+        lines.extend(interpolation_rows)
     else:
         lines.append(_TEXT_EMPTY_BLOCK)
     lines.append("")
@@ -274,6 +290,92 @@ def _format_skip_row(
         f"  Decision: {decision_id} @ {timestamp}\n"
         f"  (Cell EXCLUDED from canonical files; skip removes from analysis)"
     )
+
+
+def _format_interpolation_row(
+    cell_id: str,
+    check_id: str,
+    record_dict: Mapping[str, Any],
+) -> str:
+    """Render a single ``apply_interpolation`` decision row.
+
+    An interpolated value is a model estimate, not an observation, so
+    the row self-declares the value as synthetic and carries the full
+    provenance a downstream reader needs to tell estimated from
+    observed: the method and its parameters, the contributing
+    neighbour cells, the 95% uncertainty interval, any domain caveats,
+    and the decision id. The cell is INCLUDED in the canonical files
+    with the synthetic value written in place — so this provenance is
+    the honesty floor that keeps a synthetic value from masquerading
+    as a direct retrieval. Missing fields degrade to ``"(unspecified)"``
+    / ``"(not recorded)"`` rather than crashing the package emission.
+    """
+    decision_id = record_dict.get("decision_id", "(unspecified)")
+    timestamp = record_dict.get("timestamp", "(unspecified)")
+    rationale = record_dict.get("method_or_rationale") or ""
+    record = record_dict.get("interpolation_record") or {}
+    if not isinstance(record, dict):
+        record = {}
+
+    # Normalise both an absent key AND an explicit ``None`` to the
+    # placeholder (an explicit-None malformed record must not render as
+    # ``k=None``). Use an is-None test rather than ``or`` so a legitimate
+    # zero would survive — though the schema forbids k=0 / radius=0.
+    def _spec(value: Any) -> Any:
+        return "(unspecified)" if value is None else value
+
+    k = _spec(record.get("k"))
+    radius_km = _spec(record.get("radius_km"))
+    weight_power = _spec(record.get("weight_power"))
+    method_doi = record.get("method_doi") or "(unspecified)"
+
+    source_cells = record.get("source_cells")
+    if not isinstance(source_cells, list):
+        source_cells = []
+    n_neighbors = len(source_cells)
+    neighbor_ids = (
+        ", ".join(str(c) for c in source_cells)
+        if source_cells
+        else "(none recorded)"
+    )
+
+    ci_lower = record.get("uncertainty_ci_lower")
+    ci_upper = record.get("uncertainty_ci_upper")
+    if ci_lower is not None and ci_upper is not None:
+        ci_label = f"95% CI [{ci_lower}, {ci_upper}]"
+    else:
+        ci_label = "(uncertainty not recorded)"
+
+    caveat_codes = record.get("caveat_codes")
+    if not isinstance(caveat_codes, list):
+        caveat_codes = []
+
+    row = (
+        f"- Cell {cell_id} ({check_id}): interpolated value — SYNTHETIC, "
+        f"estimated from neighbouring cells, not a direct observation\n"
+        f"  Method: IDW(k={k}, R={radius_km} km, w=1/d^{weight_power}); "
+        f"Shepard 1968 (DOI {method_doi})\n"
+        f"  Contributing neighbours: {n_neighbors} cell(s) "
+        f"[{neighbor_ids}]; search radius {radius_km} km\n"
+        f"  Uncertainty: {ci_label}\n"
+        f"  Decision: {decision_id} @ {timestamp}\n"
+        f"  (Synthetic value written to canonical per-cell files; "
+        f"INTERPOLATION-PRESENT — distinguish from observed data)"
+    )
+    # Surface any domain caveats verbatim from the canonical phrase
+    # registry so the audit trail carries the same peer-reviewed
+    # wording as the manifest methods text (single source of truth —
+    # no paraphrase drift). Codes absent from the registry render bare
+    # so a newly added caveat is never silently dropped.
+    for code in caveat_codes:
+        phrase = METHODS_TEXT_CAVEAT_PHRASES.get(code)
+        if phrase:
+            row += f"\n  Caveat ({code}): {phrase}"
+        else:
+            row += f"\n  Caveat: {code}"
+    if rationale.strip():
+        row += f"\n  Rationale: {rationale}"
+    return row
 
 
 __all__ = [

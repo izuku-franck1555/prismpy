@@ -4104,6 +4104,18 @@ class TranslationPipeline:
                 affected_ids = self._affected_cell_ids(
                     details.get("affected_cells"),
                 )
+                # Per-cell physical-defect set. A value-range check carries
+                # a ``defect`` flag on each violation_details entry that
+                # fell outside the physical (not just plausibility) band —
+                # an impossible value. DEFECT is a per-CELL classification:
+                # ANY one field's physical violation condemns the whole
+                # cell as non-acknowledgeable, so the acknowledge path can
+                # refuse it by reading the per-cell flag stamped below.
+                defect_cell_ids = {
+                    vd.get("cell_id")
+                    for vd in (details.get("violation_details") or [])
+                    if isinstance(vd, dict) and vd.get("defect")
+                }
                 # G7 §2 — classify the entry by axis (climate / soil
                 # / None) so the per-cell loop can drop entries that
                 # would land on a cell whose corresponding axis is
@@ -4144,7 +4156,9 @@ class TranslationPipeline:
                             )
                         ):
                             continue
-                    cell["failed_checks"].append(dict(entry_template))
+                    entry = dict(entry_template)
+                    entry["defect"] = cell_id in defect_cell_ids
+                    cell["failed_checks"].append(entry)
 
                 # PRE.1.8 flatten — per-violation detail rows.
                 # AC-E2-25 sub-criterion 4 + Codex Gate A HIGH A2 —
@@ -4172,6 +4186,11 @@ class TranslationPipeline:
                         "value": vd.get("value"),
                         "unit": vd.get("unit"),
                         "bounds": vd.get("bounds"),
+                        # Physical-tier marker carried through to the
+                        # drawer row so the consumer can render the
+                        # impossible value distinctly and refuse the
+                        # acknowledge action.
+                        "defect": bool(vd.get("defect")),
                     })
 
         # Stable ordering for both the per-cell `failed_checks` arrays
