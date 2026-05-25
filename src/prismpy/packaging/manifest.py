@@ -52,11 +52,20 @@ KNOWN_USE_CASE_NAMES: Tuple[str, ...] = (
 
 
 PER_UC_GATES: Dict[str, FrozenSet[str]] = {
+    # UC1 — UC-GEN-S1-UC1-CONTRACT §3.1 MUST-1/MUST-5 gate-reclassification.
+    # Removed the dispatch-only "forecast_or_analog_mode_resolved" (it reads a
+    # runtime target_year/forecast_date that does not exist at packaging —
+    # canary Finding 3; now a prism-runner pre-run preflight). Raised the
+    # temporal floor n_years_gte_3 -> n_years_gte_4 (BL-1: the analog planner
+    # self-excludes the in-range target, so >=4 package years guarantee >=3
+    # analogs). Added the >=30-year forecast-adequacy ADVISORY (WMO normal).
+    # Hard set = {n_years_gte_4, manifest_cells_populated, manifest_crops_
+    # populated}; n_years_gte_30_for_forecast_adequacy is advisory.
     "yield_forecast": frozenset({
-        "n_years_gte_3",
+        "n_years_gte_4",
         "manifest_cells_populated",
         "manifest_crops_populated",
-        "forecast_or_analog_mode_resolved",
+        "n_years_gte_30_for_forecast_adequacy",
     }),
     "climate_scenarios": frozenset({
         "base_package_temporal_complete",
@@ -94,6 +103,11 @@ ADVISORY_GATES: FrozenSet[str] = frozenset({
     "n_years_gte_9_for_drought_freq_anomaly",
     "scenario_packages_temporal_aligned",
     "fertilizer_scenarios_resolvable",
+    # UC-GEN-S1-UC1-CONTRACT §5 MUST-5 — UC1 forecast-adequacy disclosure
+    # (>=30 WMO normal). Failure emits a templated advisory_flag carrying the
+    # actual N (SF-1), NOT a dispatch block: >=4 lets the analog method run;
+    # >=30 makes it trustworthy.
+    "n_years_gte_30_for_forecast_adequacy",
 })
 
 
@@ -183,6 +197,14 @@ ADVISORY_FLAG_UC5_PYTHIA_PK_SILENT_NO_OP = (
 )
 ADVISORY_FLAG_UC1_SHORTFALL_THRESHOLD_TEMPLATE = (
     "shortfall_threshold:viz_layer_default_{value}_kgha_{crop}_{region}"
+)
+# UC-GEN-S1-UC1-CONTRACT §5 MUST-5 / SF-1 — UC1 forecast-adequacy advisory.
+# Carries the ACTUAL span N (a 4-yr and a 28-yr package must be
+# distinguishable; the default "{gate}_failed:advisory_fallback" loses N). N is
+# a span UPPER bound on adequacy (SF-2: per-cell season completeness may reduce
+# the realized member count). WMO climatological normal = 30 years.
+ADVISORY_FLAG_UC1_FORECAST_ADEQUACY_TEMPLATE = (
+    "forecast_adequacy:n_years_{n}_lt_30_wide_sampling_uncertainty"
 )
 ADVISORY_FLAG_UC4_SEVERITY_TIER = "severity_tier:viz_layer_thresholds_v1"
 ADVISORY_FLAG_UC5_ROI_PRICES = "roi_prices:viz_layer_regional_defaults"
@@ -362,6 +384,17 @@ def _eval_gate_n_years_gte_3(project_config: Dict[str, Any]) -> bool:
     return (int(end) - int(start) + 1) >= 3
 
 
+def _eval_gate_n_years_gte_4(project_config: Dict[str, Any]) -> bool:
+    # UC-GEN-S1-UC1-CONTRACT §3.1 MUST-1 / BL-1 — UC1 analog floor. The
+    # in-range target self-excludes from the analog set, so >=4 package years
+    # guarantee >=3 analog members. Same shape as _eval_gate_n_years_gte_3.
+    start = project_config.get("start_year")
+    end = project_config.get("end_year")
+    if start is None or end is None:
+        return False
+    return (int(end) - int(start) + 1) >= 4
+
+
 def _eval_gate_n_years_gte_5(project_config: Dict[str, Any]) -> bool:
     start = project_config.get("start_year")
     end = project_config.get("end_year")
@@ -402,14 +435,28 @@ def _eval_gate_manifest_cell_areas_populated(
     return bool(cell_areas)
 
 
-def _eval_gate_forecast_or_analog_mode_resolved(
-    uc_config: Dict[str, Any],
+def _eval_gate_n_years_gte_30_for_forecast_adequacy(
+    project_config: Dict[str, Any],
 ) -> bool:
-    if uc_config.get("forecast_date") is not None:
-        return True
-    if uc_config.get("target_year") is not None:
-        return True
-    return False
+    # UC-GEN-S1-UC1-CONTRACT §5 MUST-5 — UC1 forecast-adequacy ADVISORY (WMO
+    # climatological normal = 30 years). Same year-span shape as the other
+    # _eval_gate_n_years_gte_* evaluators. Failure surfaces a templated
+    # advisory_flag (SF-1), not a hard gates_failed.
+    start = project_config.get("start_year")
+    end = project_config.get("end_year")
+    if start is None or end is None:
+        return False
+    return (int(end) - int(start) + 1) >= 30
+
+
+# UC-GEN-S1-UC1-CONTRACT §3.1 MUST-1b (OQ-2) — the gen-time evaluator
+# `_eval_gate_forecast_or_analog_mode_resolved` was REMOVED. It read a runtime
+# uc_config (target_year/forecast_date) choice that does not exist at
+# packaging, so it could never pass at gen (canary Finding 3). The check is
+# reclassified to the prism-runner dispatch pre-run preflight (PR1). Intentional
+# cross-codebase asymmetry: prismpy (producer) removes the evaluator entirely;
+# prism-runner (consumer) keeps its ManifestGate enum member to back the
+# dispatch preflight. No back-compat reader remains in the gen path.
 
 
 def _eval_gate_base_package_temporal_complete(
@@ -488,18 +535,22 @@ def _dispatch_gate(
 ) -> bool:
     if gate_name == "n_years_gte_3":
         return _eval_gate_n_years_gte_3(project_config)
+    if gate_name == "n_years_gte_4":
+        return _eval_gate_n_years_gte_4(project_config)
     if gate_name == "n_years_gte_5":
         return _eval_gate_n_years_gte_5(project_config)
     if gate_name == "n_years_gte_9_for_drought_freq_anomaly":
         return _eval_gate_n_years_gte_9_for_drought_freq_anomaly(project_config)
+    if gate_name == "n_years_gte_30_for_forecast_adequacy":
+        return _eval_gate_n_years_gte_30_for_forecast_adequacy(project_config)
     if gate_name == "manifest_cells_populated":
         return _eval_gate_manifest_cells_populated(manifest_so_far)
     if gate_name == "manifest_crops_populated":
         return _eval_gate_manifest_crops_populated(manifest_so_far)
     if gate_name == "manifest_cell_areas_populated":
         return _eval_gate_manifest_cell_areas_populated(manifest_so_far)
-    if gate_name == "forecast_or_analog_mode_resolved":
-        return _eval_gate_forecast_or_analog_mode_resolved(uc_config)
+    # MUST-1b (OQ-2): "forecast_or_analog_mode_resolved" branch REMOVED — the
+    # gate is reclassified to the prism-runner dispatch preflight (PR1).
     if gate_name == "base_package_temporal_complete":
         return _eval_gate_base_package_temporal_complete(project_config)
     if gate_name == "at_least_one_scenario_package_present":
@@ -626,9 +677,28 @@ def canonical_uc_readiness_emitter(
                 gates_passed.append(gate_name)
                 continue
             if gate_name in ADVISORY_GATES:
-                advisory_flags.append(
-                    f"{gate_name}_failed:advisory_fallback"
-                )
+                if gate_name == "n_years_gte_30_for_forecast_adequacy":
+                    # SF-1: emit a TEMPLATED flag carrying the actual span N
+                    # (NOT the generic "{gate}_failed:advisory_fallback", which
+                    # loses N — a 4-yr and a 28-yr package would be
+                    # indistinguishable). N is a span upper-bound on adequacy
+                    # (SF-2). UC-GEN-S1-UC1-CONTRACT §5 MUST-5.
+                    start = project_config.get("start_year")
+                    end = project_config.get("end_year")
+                    n_years = (
+                        int(end) - int(start) + 1
+                        if start is not None and end is not None
+                        else 0
+                    )
+                    advisory_flags.append(
+                        ADVISORY_FLAG_UC1_FORECAST_ADEQUACY_TEMPLATE.format(
+                            n=n_years
+                        )
+                    )
+                else:
+                    advisory_flags.append(
+                        f"{gate_name}_failed:advisory_fallback"
+                    )
             else:
                 gates_failed.append({
                     "gate_id": gate_name,
