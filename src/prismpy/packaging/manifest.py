@@ -354,7 +354,13 @@ def collect_files_with_checksums(
     directory = Path(directory)
     files_info = []
 
-    exclude_patterns = exclude_patterns or [".DS_Store", "*.pyc", "__pycache__"]
+    # ``manifest.json`` is self-referential — a manifest cannot checksum
+    # itself. It is excluded so files[] never carries a stale self-hash (the
+    # build-last re-emit overwrites manifest.json after this scan, which would
+    # otherwise record the pre-overwrite hash and fail validate_manifest).
+    exclude_patterns = exclude_patterns or [
+        ".DS_Store", "*.pyc", "__pycache__", "manifest.json",
+    ]
 
     if patterns:
         all_files = []

@@ -3695,10 +3695,14 @@ class TranslationPipeline:
                         f"({len(_manifest.get('cells', []))} cells)"
                     )
                 except Exception as _me:
-                    warnings.append(
+                    # FATAL: a failed late re-emit would leave the early
+                    # (cells:[]) manifest in place; record as an ERROR so the
+                    # PACKAGE stage fails rather than shipping a broken manifest
+                    # in a "successful" package.
+                    errors.append(
                         f"{_plat_name}: build-last manifest failed: {_me}"
                     )
-                    self.logger.warning(
+                    self.logger.error(
                         f"build-last manifest failed for {_plat_name}: {_me}"
                     )
 
