@@ -92,14 +92,17 @@ class TestAbsentSoilSynthesis(unittest.TestCase):
         self.assertEqual(f["remediation_kind"], "hwsd_fallback")
         self.assertEqual(f["cause"], "absent")
 
-    def test_absent_climate_cell_synthesizes_interpolate(self):
+    def test_absent_climate_cell_routes_to_retry_not_cockpit(self):
+        # D2 — climate-absent is a fetch failure (NASA POWER/AgERA5 cover
+        # land), so it routes to RETRY and is NOT cockpit-remediable; never
+        # interpolated (moral hazard).
         grid = _grid([1, 2])
         climate = {1: _series([object()])}  # cell 2 absent
         check = _check_coverage_climate_cells(_ud(grid=grid, climate=climate))
         findings = _build_remediable_findings([check], None)
         self.assertEqual(findings[0]["cell_ids"], [2])
-        self.assertTrue(findings[0]["remediable"])
-        self.assertEqual(findings[0]["remediation_kind"], "interpolate")
+        self.assertFalse(findings[0]["remediable"])
+        self.assertEqual(findings[0]["remediation_kind"], "retry")
 
 
 # ── C.1(b) — SARRA-Py per-cell climate: real diff, never silent info ────
@@ -149,9 +152,11 @@ class TestSarraPyCoverage(unittest.TestCase):
         self.assertEqual(check["result"], "fail")
         self.assertEqual(check["details"]["affected_cells"], [1, 2, 3])
         self.assertEqual(check["details"]["n_missing"], 3)
-        # And these measured-absent cells reach Path B as remediable.
+        # These measured-absent climate cells reach Path B as a finding, but
+        # climate-absent routes to RETRY (not cockpit-remediable, D2).
         findings = _build_remediable_findings([check], None)
-        assert findings and findings[0]["remediable"] is True
+        assert findings and findings[0]["remediable"] is False
+        self.assertEqual(findings[0]["remediation_kind"], "retry")
         self.assertEqual(findings[0]["cell_ids"], [1, 2, 3])
 
     def test_partial_sample_yields_real_diff(self):

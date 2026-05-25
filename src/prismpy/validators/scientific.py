@@ -1860,9 +1860,14 @@ def compute_coverage_diff(expected_grid_cells, cells_with_data) -> List[Any]:
 # Axis-based remediation kind for SYNTHESIZED absent-cell findings. Absent
 # soil has an HWSD fallback path; absent climate is gap-filled by spatial
 # interpolation. Keyed on the coverage check id.
+# Axis-based remediation kind for absent (no-data) cells. Soil-absent is a
+# genuine gap the cockpit can fill (HWSD fallback). Climate-absent is a
+# fetch failure — NASA POWER / AgERA5 cover land completely, so a missing
+# climate cell means the download failed, not that the value is unknowable;
+# it routes to RETRY, never to interpolation (climate-IDW is a moral hazard).
 _ABSENT_REMEDIATION_KIND = {
     "coverage_soil_cells": "hwsd_fallback",
-    "coverage_climate_cells": "interpolate",
+    "coverage_climate_cells": "retry",
 }
 
 
@@ -1923,6 +1928,10 @@ def _build_remediable_findings(checks, unified_data) -> List[Dict[str, Any]]:
         cause = details.get("cause")
 
         if is_coverage_check(check_id) and affected:
+            kind = _ABSENT_REMEDIATION_KIND.get(check_id, "hwsd_fallback")
+            # "retry" is a banner fetch-retry, NOT a cockpit action — so a
+            # climate-absent finding is surfaced but not cockpit-remediable.
+            # Soil-absent ("hwsd_fallback") IS a cockpit action.
             findings.append({
                 "category": check.get("category"),
                 "check": check_id,
@@ -1930,10 +1939,8 @@ def _build_remediable_findings(checks, unified_data) -> List[Dict[str, Any]]:
                 "result": check.get("result"),
                 "cell_ids": affected,
                 "cause": cause or "absent",
-                "remediable": True,
-                "remediation_kind": _ABSENT_REMEDIATION_KIND.get(
-                    check_id, "interpolate",
-                ),
+                "remediable": kind != "retry",
+                "remediation_kind": kind,
                 "detail": check.get("summary", ""),
             })
             continue
