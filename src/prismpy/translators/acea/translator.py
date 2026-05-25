@@ -2495,6 +2495,15 @@ if __name__ == "__main__":
         except Exception as e:
             logger.warning(f"Failed to generate manifest: {e}")
 
+        # Build-manifest-LAST fix: stash the args so the executor RE-EMITS the
+        # manifest AFTER its post-generate distribution block writes
+        # cell_summary.json. The build above runs before cell_summary exists,
+        # so its cells/cell_areas land empty; the executor rebuild (reading
+        # _deferred_manifest) inventories the FINISHED package.
+        self._deferred_manifest = (
+            self.output_dir, package_config, 'acea', manifest_extra or None,
+        )
+
         # 2. Generate README
         try:
             readme_path = generate_readme(
