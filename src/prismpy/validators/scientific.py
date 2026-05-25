@@ -106,6 +106,7 @@ def run_scientific_validation(
     config,
     enabled_platforms: Optional[List[str]] = None,
     sarra_climate_per_cell: Optional[Dict[int, Dict[str, list]]] = None,
+    sarra_climate_readable: bool = False,
 ) -> Dict[str, Any]:
     """Run all 6 Tier 1 scientific validation checks.
 
@@ -167,7 +168,9 @@ def run_scientific_validation(
     # failed_checks pivot reads. Cockpit's Layer 1 fill rule + Layer
     # 3 dimension toggle (Coverage) depend on these.
     checks.append(_check_coverage_climate_cells(
-        unified_data, sarra_climate_per_cell=sarra_climate_per_cell,
+        unified_data,
+        sarra_climate_per_cell=sarra_climate_per_cell,
+        sarra_climate_readable=sarra_climate_readable,
     ))
     checks.append(_check_coverage_soil_cells(unified_data))
 
@@ -799,6 +802,7 @@ UNAVAILABLE_CAUSES: tuple[str, ...] = (
     "soil_cascade_exhausted",
     "no_climate_and_soil_fetch",
     "no_translated_output",
+    "coverage_unverifiable",
 )
 _UNAVAILABLE_CAUSE_LABELS: Dict[str, str] = {
     "no_climate_fetch": "climate data was not fetched",
@@ -806,6 +810,7 @@ _UNAVAILABLE_CAUSE_LABELS: Dict[str, str] = {
     "soil_cascade_exhausted": "soil cascade exhausted (iSDA → HWSD all empty)",
     "no_climate_and_soil_fetch": "neither climate nor soil data was fetched",
     "no_translated_output": "platform translation produced no output for this cell",
+    "coverage_unverifiable": "per-cell coverage could not be verified",
 }
 
 
@@ -1933,6 +1938,15 @@ def _build_remediable_findings(checks, unified_data) -> List[Dict[str, Any]]:
             })
             continue
 
+        # Path A — data-bearing. Remediability is bucket-driven: a finding is
+        # remediable iff its check carries a ``warning_category`` that maps to
+        # INTERPOLATABLE. In V2 NO validator check emits a ``warning_category``
+        # and the only INTERPOLATABLE category (SHORT_GAP_INTERPOLATABLE) has
+        # no producer yet, so every data-bearing finding is INTENTIONALLY
+        # surfaced as remediable=False. This is the honest V2 state — not a
+        # bug to "fix" by fabricating remediable=True. When a future producer
+        # emits an INTERPOLATABLE category the resolver lights up automatically
+        # (forward-compat, no code change here).
         bucket = _resolve_warning_bucket(details.get("warning_category"))
         remediable = _bucket_is_remediable(bucket)
         findings.append({
@@ -1957,7 +1971,7 @@ def _build_remediable_findings(checks, unified_data) -> List[Dict[str, Any]]:
 # =============================================================================
 
 def _check_coverage_climate_cells(
-    unified_data, sarra_climate_per_cell=None,
+    unified_data, sarra_climate_per_cell=None, sarra_climate_readable=False,
 ) -> Dict[str, Any]:
     """V2-22c-PRE.1.9 (D36) — per-cell climate coverage check.
 
@@ -2077,63 +2091,97 @@ def _check_coverage_climate_cells(
             },
         }
     if _is_file_based_climate(climate):
-        # SARRA-Py climate is file-based, so per-cell coverage needs the
-        # GeoTIFF sample (``sample_sarra_py_per_cell``, threaded in from the
-        # executor). Both ``None`` (no sample threaded) and ``{}`` mean there
-        # is no usable sample: the sampler returns ``{}`` ONLY when it cannot
-        # read any GeoTIFFs (rasterio missing / no files), i.e. coverage is
-        # genuinely UNVERIFIABLE — not "every cell confirmed absent". So both
-        # emit an explicit unverifiable signal rather than a silent info pass
-        # (which would hide gaps, #166) OR a false all-missing claim (which
-        # would over-report a gap we never measured — honest-signal floor).
+        # SARRA-Py climate is file-based, so per-cell coverage is verified
+        # against the GeoTIFF sample threaded in from the executor. The empty
+        # cases are NOT equivalent: ``sample_sarra_py_per_cell`` returns ``{}``
+        # both when it cannot read any rasters (rasterio missing / no tifs)
+        # AND when the rasters ARE readable but no cell falls on covered data
+        # (region outside the extent / all-nodata). ``sarra_climate_readable``
+        # (computed by the executor from the same output dir) separates them:
+        # an unreadable sample is genuinely UNVERIFIABLE, while a readable-but-
+        # empty sample is a MEASURED all-cells-missing result that must surface
+        # as a gap — never a silent info pass (#166) and never a false
+        # unverifiable claim that hides a measured gap.
         grid_ids = {c.cell_id for c in grid.cells}
         n_total = len(grid_ids)
-        if not sarra_climate_per_cell:
+        if sarra_climate_per_cell:
+            cells_with_data = {
+                cid for cid, var_bucket in sarra_climate_per_cell.items()
+                if var_bucket and any(vals for vals in var_bucket.values())
+            }
+            affected_cells = compute_coverage_diff(grid_ids, cells_with_data)
+            n_missing = len(affected_cells)
+            result = "fail" if n_missing > 0 else "pass"
             return {
                 "check": "coverage_climate_cells",
                 "scope": "per_cell",
-                "result": "unavailable",
+                "result": result,
                 "summary": (
-                    "Per-cell climate coverage could not be verified "
-                    "(file-based climate not sampled)"
+                    f"{n_total - n_missing}/{n_total} cells covered by climate data"
+                    + (f" — {n_missing} cells missing" if n_missing else "")
                 ),
                 "manuscript_claim": "Section 2.5: per-cell coverage check",
                 "details": {
-                    "cause": "coverage_unverifiable",
-                    "affected_cells": [],
-                    "n_missing": 0,
                     "n_total": n_total,
+                    "n_missing": n_missing,
+                    "affected_cells": affected_cells,
+                    "violation_details": [
+                        {
+                            "cell_id": cid, "layer_idx": None,
+                            "variable": "climate",
+                            "date": None, "value": None,
+                            "unit": None, "bounds": None,
+                        }
+                        for cid in affected_cells
+                    ],
                 },
             }
-        cells_with_data = {
-            cid for cid, var_bucket in sarra_climate_per_cell.items()
-            if var_bucket and any(vals for vals in var_bucket.values())
-        }
-        affected_cells = compute_coverage_diff(grid_ids, cells_with_data)
-        n_missing = len(affected_cells)
-        result = "fail" if n_missing > 0 else "pass"
+        if sarra_climate_readable:
+            # Rasters read fine but the sample is empty → no cell falls on
+            # covered data (region outside the GeoTIFF extent or all-nodata).
+            # A MEASURED gap: every cell is missing.
+            all_cell_ids = sorted(grid_ids)
+            return {
+                "check": "coverage_climate_cells",
+                "scope": "per_cell",
+                "result": "fail",
+                "summary": (
+                    f"0/{n_total} cells covered by climate data "
+                    f"(no cell falls on covered SARRA-Py raster data)"
+                ),
+                "manuscript_claim": "Section 2.5: per-cell coverage check",
+                "details": {
+                    "n_total": n_total,
+                    "n_missing": n_total,
+                    "affected_cells": all_cell_ids,
+                    "cause": "absent",
+                    "violation_details": [
+                        {
+                            "cell_id": cid, "layer_idx": None,
+                            "variable": "climate",
+                            "date": None, "value": None,
+                            "unit": None, "bounds": None,
+                        }
+                        for cid in all_cell_ids
+                    ],
+                },
+            }
+        # Rasters unreadable (rasterio missing / no tifs / no sample threaded)
+        # → coverage genuinely cannot be verified.
         return {
             "check": "coverage_climate_cells",
             "scope": "per_cell",
-            "result": result,
+            "result": "unavailable",
             "summary": (
-                f"{n_total - n_missing}/{n_total} cells covered by climate data"
-                + (f" — {n_missing} cells missing" if n_missing else "")
+                "Per-cell climate coverage could not be verified "
+                "(SARRA-Py climate rasters unreadable)"
             ),
             "manuscript_claim": "Section 2.5: per-cell coverage check",
             "details": {
+                "cause": "coverage_unverifiable",
+                "affected_cells": [],
+                "n_missing": 0,
                 "n_total": n_total,
-                "n_missing": n_missing,
-                "affected_cells": affected_cells,
-                "violation_details": [
-                    {
-                        "cell_id": cid, "layer_idx": None,
-                        "variable": "climate",
-                        "date": None, "value": None,
-                        "unit": None, "bounds": None,
-                    }
-                    for cid in affected_cells
-                ],
             },
         }
 

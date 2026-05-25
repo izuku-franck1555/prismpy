@@ -21,6 +21,7 @@ from prismpy.validators.scientific import (
     _resolve_warning_bucket,
     compute_coverage_diff,
 )
+from prismpy.validators.post_translate import sarra_py_climate_rasters_readable
 from prismpy.warnings.categories import WarningBucket
 
 
@@ -112,26 +113,46 @@ class TestSarraPyCoverage(unittest.TestCase):
             climate={"rainfall_dir": "/tmp/r", "agera5_dir": "/tmp/a"},
         )
 
-    def test_unsamplable_emits_unavailable_not_info(self):
+    def test_unreadable_no_sample_is_unverifiable_not_info(self):
+        """No sample + rasters not readable → unverifiable, never a silent
+        info pass (the #166 regression)."""
         grid = _grid([1, 2, 3])
         check = _check_coverage_climate_cells(
-            self._file_based_ud(grid), sarra_climate_per_cell=None,
+            self._file_based_ud(grid),
+            sarra_climate_per_cell=None, sarra_climate_readable=False,
         )
         self.assertEqual(check["result"], "unavailable")
         self.assertEqual(check["details"]["cause"], "coverage_unverifiable")
-        self.assertNotEqual(check["result"], "info")  # the #166 regression
+        self.assertNotEqual(check["result"], "info")
 
-    def test_empty_sample_is_unverifiable_not_all_missing(self):
-        """An empty ``{}`` sample means the sampler could not read any
-        GeoTIFFs (unverifiable) — NOT that every cell is confirmed absent.
-        It must emit ``unavailable``, never a false all-cells-missing fail."""
+    def test_unreadable_empty_sample_is_unverifiable(self):
+        """Empty ``{}`` sample with UNREADABLE rasters → unverifiable: the
+        sampler couldn't read any GeoTIFF, so coverage is unknown."""
         grid = _grid([1, 2, 3])
         check = _check_coverage_climate_cells(
-            self._file_based_ud(grid), sarra_climate_per_cell={},
+            self._file_based_ud(grid),
+            sarra_climate_per_cell={}, sarra_climate_readable=False,
         )
         self.assertEqual(check["result"], "unavailable")
         self.assertEqual(check["details"]["cause"], "coverage_unverifiable")
         self.assertEqual(check["details"]["affected_cells"], [])
+
+    def test_readable_empty_sample_is_measured_all_missing(self):
+        """Empty ``{}`` sample with READABLE rasters → a MEASURED gap: the
+        rasters opened fine but no cell fell on covered data, so every cell
+        is missing (fail), NOT unverifiable. (codex F-1 / team-lead arb.)"""
+        grid = _grid([1, 2, 3])
+        check = _check_coverage_climate_cells(
+            self._file_based_ud(grid),
+            sarra_climate_per_cell={}, sarra_climate_readable=True,
+        )
+        self.assertEqual(check["result"], "fail")
+        self.assertEqual(check["details"]["affected_cells"], [1, 2, 3])
+        self.assertEqual(check["details"]["n_missing"], 3)
+        # And these measured-absent cells reach Path B as remediable.
+        findings = _build_remediable_findings([check], None)
+        assert findings and findings[0]["remediable"] is True
+        self.assertEqual(findings[0]["cell_ids"], [1, 2, 3])
 
     def test_partial_sample_yields_real_diff(self):
         grid = _grid([1, 2, 3])
@@ -154,6 +175,14 @@ class TestSarraPyCoverage(unittest.TestCase):
         )
         self.assertEqual(check["result"], "pass")
         self.assertEqual(check["details"]["affected_cells"], [])
+
+    def test_readability_probe_false_when_no_climate_dir(self):
+        """The readability probe returns False when there is no climate
+        raster tree to open (so the coverage check reports unverifiable)."""
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            assert sarra_py_climate_rasters_readable(Path(d)) is False
 
 
 # ── C.1(c)/(d) + C.3 — substrate shape, empty-list, unknown-bucket ─────
