@@ -2056,17 +2056,34 @@ def _build_remediable_findings(checks, unified_data) -> List[Dict[str, Any]]:
             })
             continue
 
-        # Path A — data-bearing. Remediability is bucket-driven: a finding is
-        # remediable iff its check carries a ``warning_category`` that maps to
-        # INTERPOLATABLE. In V2 NO validator check emits a ``warning_category``
-        # and the only INTERPOLATABLE category (SHORT_GAP_INTERPOLATABLE) has
-        # no producer yet, so every data-bearing finding is INTENTIONALLY
-        # surfaced as remediable=False. This is the honest V2 state — not a
-        # bug to "fix" by fabricating remediable=True. When a future producer
-        # emits an INTERPOLATABLE category the resolver lights up automatically
-        # (forward-compat, no code change here).
+        # Path A — data-bearing. Three remediability paths:
+        #   * INTERPOLATABLE bucket → heavy "interpolate" path (the value
+        #     is replaced by a model estimate). Forward-compat — no V2
+        #     validator emits a ``warning_category`` yet, but the resolver
+        #     lights up automatically when one does.
+        #   * data-bearing warning (``result == 'warning'`` AND non-empty
+        #     ``affected_cells``) → light "acknowledge" path. The user
+        #     reviewed the atypical-but-real value and confirmed it
+        #     stands (a documented decision, not a value replacement).
+        #     Without this, a warning cell stays "outstanding" forever
+        #     and a derived run never reaches refined-ready GREEN even
+        #     after the user has cleared every flag in the cockpit.
+        #   * anything else (unavailable / fail / warning-with-no-cells)
+        #     → not remediable. ``unavailable`` carries no value to ack;
+        #     ``fail`` defers to its substrate's own path (the defect
+        #     tier handles physical defects via the per-cell marker);
+        #     a warning with no affected_cells has nothing to act on.
         bucket = _resolve_warning_bucket(details.get("warning_category"))
-        remediable = _bucket_is_remediable(bucket)
+        is_interpolatable = _bucket_is_remediable(bucket)
+        if is_interpolatable:
+            remediable = True
+            remediation_kind = "interpolate"
+        elif check.get("result") == "warning" and affected:
+            remediable = True
+            remediation_kind = "acknowledge"
+        else:
+            remediable = False
+            remediation_kind = None
         findings.append({
             "category": check.get("category"),
             "check": check_id,
@@ -2078,7 +2095,7 @@ def _build_remediable_findings(checks, unified_data) -> List[Dict[str, Any]]:
                 if check.get("result") == "unavailable" else None
             ),
             "remediable": remediable,
-            "remediation_kind": "interpolate" if remediable else None,
+            "remediation_kind": remediation_kind,
             "detail": check.get("summary", ""),
         })
     return findings
