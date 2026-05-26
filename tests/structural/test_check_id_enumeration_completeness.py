@@ -207,3 +207,68 @@ def test_fstring_prefixes_match_canonical_families(
         f"Producer f-string check-id prefixes outside the "
         f"canonical VALUE_RANGE_PREFIX_FAMILIES set: {offenders}"
     )
+
+
+# ── AC-α-7 axis-unavailable synthetic prefix family ──────────────────
+
+
+def test_axis_unavailable_synthetic_prefix_accepts_climate_and_soil() -> None:
+    """The consumer-side cockpit records "Acknowledge as known gap"
+    decisions on data-unavailable cells via a synthetic check_id of
+    shape ``__axis_unavailable__:<axis>``. There's no real producer
+    check to acknowledge against — the cell has no value to flag —
+    so the validator's prefix-family allowlist accepts the synthetic
+    token without forcing the consumer to fabricate a fake check.
+    """
+    assert matches_known_prefix("__axis_unavailable__:climate")
+    assert matches_known_prefix("__axis_unavailable__:soil")
+    assert matches_known_prefix("__axis_unavailable__:climate_and_soil")
+
+
+def test_axis_unavailable_synthetic_prefix_round_trips_decision_record() -> None:
+    """End-to-end: a ``CellDecisionRecord`` carrying the synthetic
+    token constructs cleanly through the canonical-membership
+    validator. Prior to this prefix-family extension the pydantic
+    model raised ``ValueError`` because the token matched no
+    enumerated producer check_id.
+    """
+    from datetime import datetime, timezone
+    from uuid import uuid4
+
+    from prismpy.models.decision_log import CellDecisionRecord
+
+    record = CellDecisionRecord(
+        decision_id=uuid4(),
+        cell_id="42",
+        action="acknowledge",
+        check_id="__axis_unavailable__:climate",
+        timestamp=datetime.now(tz=timezone.utc),
+        user_identity="builder",
+        method_or_rationale="ack",
+        sequence_number=1,
+    )
+    assert record.check_id == "__axis_unavailable__:climate"
+
+
+def test_unknown_synthetic_prefix_still_rejected() -> None:
+    """Belt-and-suspenders — only the documented
+    ``__axis_unavailable__`` family relaxes the validator; an
+    arbitrary leading-underscore token still fails.
+    """
+    assert not matches_known_prefix("__foo__:bar")
+    assert not matches_known_prefix("__not_a_known_prefix__:anything")
+
+
+def test_real_check_ids_still_validated_unchanged() -> None:
+    """The prefix-family extension is additive — every concrete
+    producer-side check_id that was accepted before still is.
+    """
+    for sample in (
+        "value_range_soil_ph",
+        "value_range_climate_tmax",
+        "post_translate_climate_tmin_continuity",
+        "soil_completeness_layer_ph",
+    ):
+        assert matches_known_prefix(sample), (
+            f"prefix-family regression on {sample!r}"
+        )

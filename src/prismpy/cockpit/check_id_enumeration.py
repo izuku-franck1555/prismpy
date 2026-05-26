@@ -170,6 +170,24 @@ VALUE_RANGE_PREFIX_FAMILIES: Final[tuple[str, ...]] = (
 )
 
 
+# ``AXIS_UNAVAILABLE_PREFIX_FAMILIES`` — synthetic check_id prefix
+# the consumer (prismweb cockpit) uses to record an "Acknowledge
+# as known gap" decision against a cell whose ``data_availability
+# == 'unavailable'`` (i.e., the producer reports no data for one
+# or both axes, so there's no real check to acknowledge against).
+# The token shape is ``__axis_unavailable__:<axis>`` where
+# ``<axis>`` is one of the producer's ``unavailable_reason``
+# vocabulary (``climate``, ``soil``, ``climate_and_soil``); the
+# leading double-underscore signals "synthetic, not a real check
+# the validators emit". Keeping this in a separate tuple from the
+# value-range families lets a future audit grep just for the
+# synthetic family without false-positives on real value-range
+# checks.
+AXIS_UNAVAILABLE_PREFIX_FAMILIES: Final[tuple[str, ...]] = (
+    "__axis_unavailable__",
+)
+
+
 # ── Public helper ───────────────────────────────────────────────────
 
 
@@ -195,10 +213,17 @@ def matches_known_prefix(check_id: str) -> bool:
     consumer registry too. The static enumeration enforces the
     strict floor; the prefix relaxation closes the union under
     legitimate future additions.
+
+    Also accepts the ``__axis_unavailable__`` synthetic family
+    the consumer uses to record per-cell "Acknowledge as known
+    gap" decisions on cells with no real check to ack against.
     """
     return any(
         check_id.startswith(prefix)
-        for prefix in VALUE_RANGE_PREFIX_FAMILIES
+        for prefix in (
+            *VALUE_RANGE_PREFIX_FAMILIES,
+            *AXIS_UNAVAILABLE_PREFIX_FAMILIES,
+        )
     )
 
 
@@ -237,6 +262,7 @@ def is_coverage_check(check_id: str) -> bool:
 
 
 __all__ = [
+    "AXIS_UNAVAILABLE_PREFIX_FAMILIES",
     "COVERAGE_CHECK_IDS",
     "POST_TRANSLATE_CHECK_IDS",
     "VALIDATOR_CHECK_IDS",
