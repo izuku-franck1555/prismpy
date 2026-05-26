@@ -286,6 +286,42 @@ def convert_AgERA5_netcdf_to_geotiff(area, selected_area, variables, query=dt.to
                     bT = bT.rio.set_spatial_dims(x_dim='lon', y_dim='lat')
                     bT.rio.write_crs("epsg:4326", inplace=True)
 
+                    # post-vendor 2026-05-25 deviation: small study areas
+                    # (sub-~0.2 deg) subset to a SINGLE AgERA5 grid pixel in a
+                    # dimension. rioxarray cannot infer the affine from a
+                    # 1-pixel axis, so it silently falls back to an identity
+                    # transform — origin (0,0), bounds (0, N, M, 0) — which
+                    # places the raster at null-island. The downstream SARRA-Py
+                    # reprojection onto the (correctly georeferenced) TAMSAT
+                    # grid then has zero overlap and yields ALL-NaN
+                    # temperature/radiation/ET0, so the crop never sows and the
+                    # forecast returns 0 kg/ha for every cell/year. Set the
+                    # geotransform explicitly from the lon/lat coordinate values
+                    # plus the AgERA5 native 0.1 deg resolution (fallback for a
+                    # single-pixel axis) so even a 1-pixel subset georeferences
+                    # correctly. Multi-pixel grids keep rioxarray's native
+                    # inference path untouched (no behaviour change).
+                    _lons = np.asarray(bT["lon"].values, dtype=float)
+                    _lats = np.asarray(bT["lat"].values, dtype=float)
+                    if _lons.size < 2 or _lats.size < 2:
+                        _xres = (
+                            float(abs(_lons[1] - _lons[0]))
+                            if _lons.size > 1
+                            else 0.1
+                        )
+                        _yres = (
+                            float(abs(_lats[1] - _lats[0]))
+                            if _lats.size > 1
+                            else 0.1
+                        )
+                        _transform = rasterio.transform.from_origin(
+                            float(_lons.min()) - _xres / 2.0,
+                            float(_lats.max()) + _yres / 2.0,
+                            _xres,
+                            _yres,
+                        )
+                        bT.rio.write_transform(_transform, inplace=True)
+
                     filename = variable[0]+"_"+variable[1]+"_"+pd.to_datetime(nc_file_content.time.values[0]).strftime('%Y')+"_"+pd.to_datetime(nc_file_content.time.values[0]).strftime('%m')+"_"+pd.to_datetime(nc_file_content.time.values[0]).strftime('%d')+".tif"
                     bT.rio.to_raster(os.path.join(conversion_path, filename))
 
