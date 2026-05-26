@@ -3659,6 +3659,53 @@ class TranslationPipeline:
                         f"  {platform_name}: package files distributed"
                     )
 
+            # Build-manifest-LAST (universal cells:0 ordering fix): the
+            # distribution block above has now written cell_summary.json +
+            # provenance + validation_report into each platform dir, so emit
+            # the DEFERRED manifests here — create_manifest inventories the
+            # FINISHED package (cells / cell_areas / spatial_ref /
+            # uc_readiness / files[] all complete). Translators that defer set
+            # ``_deferred_manifest``; pythia builds its manifest early via the
+            # sites.shp cells fallback and is intentionally left untouched.
+            from prismpy.packaging.manifest import (
+                create_manifest as _create_manifest,
+                save_manifest as _save_manifest,
+            )
+            for _plat_name, _result in translation_results.items():
+                if not _result.success:
+                    continue
+                _translator = self._translators.get(Platform(_plat_name))
+                _deferred = (
+                    getattr(_translator, "_deferred_manifest", None)
+                    if _translator else None
+                )
+                if not _deferred:
+                    continue
+                _out_dir, _pkg_config, _plat_str, _extra = _deferred
+                try:
+                    _manifest = _create_manifest(
+                        _out_dir, _pkg_config, platform=_plat_str,
+                        additional_metadata=_extra,
+                    )
+                    _mpath = _save_manifest(_manifest, _out_dir / "manifest.json")
+                    if _mpath not in _result.output_files:
+                        _result.output_files.append(_mpath)
+                    self.logger.info(
+                        f"  {_plat_name}: manifest.json built-last "
+                        f"({len(_manifest.get('cells', []))} cells)"
+                    )
+                except Exception as _me:
+                    # FATAL: a failed late re-emit would leave the early
+                    # (cells:[]) manifest in place; record as an ERROR so the
+                    # PACKAGE stage fails rather than shipping a broken manifest
+                    # in a "successful" package.
+                    errors.append(
+                        f"{_plat_name}: build-last manifest failed: {_me}"
+                    )
+                    self.logger.error(
+                        f"build-last manifest failed for {_plat_name}: {_me}"
+                    )
+
             report = self.provenance.get_report()
             report_path = canonical_rich.parent / f"{self.provenance.session_id}_report.txt"
             with open(report_path, "w") as f:

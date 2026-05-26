@@ -3245,6 +3245,12 @@ class CraftTranslator(CraftTranslatorBase):
         except Exception as e:
             logger.warning(f"Failed to generate manifest: {e}")
 
+        # Build-manifest-LAST fix: stash args so the executor RE-EMITS the
+        # manifest AFTER cell_summary.json is written (see acea translator).
+        self._deferred_manifest = (
+            self.output_dir, package_config, 'craft', manifest_extra,
+        )
+
         # 2. Generate README
         try:
             readme_path = generate_readme(

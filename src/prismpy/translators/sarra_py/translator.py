@@ -1813,6 +1813,14 @@ class SarraPyTranslator(SarraPyTranslatorBase):
         package_files.append(manifest_path)
         logger.info(f"Generated manifest.json: {manifest_path}")
 
+        # Build-manifest-LAST fix: stash args so the executor RE-EMITS the
+        # manifest AFTER cell_summary.json is written (the build above lands
+        # cells:[] — cell_summary is written in the executor's post-generate
+        # distribution loop). Executor reads _deferred_manifest.
+        self._deferred_manifest = (
+            self.output_dir, project_config, "sarra_py", None,
+        )
+
         return package_files
 
     def _generate_validation_report(self, data: UnifiedData) -> Path:
