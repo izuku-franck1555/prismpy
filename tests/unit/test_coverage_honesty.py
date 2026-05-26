@@ -215,13 +215,48 @@ class TestRemediableFindingsShape(unittest.TestCase):
         f = _build_remediable_findings([check], None)[0]
         self.assertEqual(set(f.keys()), self._KEYS)
 
-    def test_unknown_bucket_data_bearing_surfaced_not_dropped(self):
-        # A data-bearing failing check with no resolvable WarningCategory
-        # is surfaced as non-remediable, never silently dropped (CR-7).
+    def test_data_bearing_warning_surfaces_as_acknowledge(self):
+        # A data-bearing warning (result='warning' with affected cells)
+        # is surfaced as remediable via the light "acknowledge" path —
+        # the user reviews the atypical-but-real value and confirms it
+        # stands. Without this, a warning cell would stay outstanding
+        # forever and a derived run could never reach refined-ready
+        # GREEN even after the user cleared every flag in the cockpit.
+        # An unresolvable WarningCategory does NOT block the ack path
+        # (it only blocks the heavy "interpolate" path); the finding is
+        # still surfaced (CR-7).
         check = {
             "check": "value_range_tmax", "scope": "per_cell",
             "result": "warning", "category": "ranges",
             "summary": "out of range", "details": {"affected_cells": [4]},
+        }
+        findings = _build_remediable_findings([check], None)
+        self.assertEqual(len(findings), 1)
+        self.assertTrue(findings[0]["remediable"])
+        self.assertEqual(findings[0]["remediation_kind"], "acknowledge")
+
+    def test_warning_with_empty_affected_stays_non_remediable(self):
+        # A warning whose affected_cells list is empty has nothing for
+        # the cockpit to act on — surfaced but non-remediable.
+        check = {
+            "check": "value_range_tmax", "scope": "per_cell",
+            "result": "warning", "category": "ranges",
+            "summary": "out of range (no cells listed)",
+            "details": {"affected_cells": []},
+        }
+        findings = _build_remediable_findings([check], None)
+        self.assertEqual(len(findings), 1)
+        self.assertFalse(findings[0]["remediable"])
+        self.assertIsNone(findings[0]["remediation_kind"])
+
+    def test_fail_result_stays_non_remediable(self):
+        # A data-bearing ``fail`` defers to its substrate's own
+        # remediation path (the defect tier handles physical defects via
+        # the per-cell marker); it does NOT take the ack clearing path.
+        check = {
+            "check": "value_range_tmax", "scope": "per_cell",
+            "result": "fail", "category": "ranges",
+            "summary": "hard fail", "details": {"affected_cells": [4]},
         }
         findings = _build_remediable_findings([check], None)
         self.assertEqual(len(findings), 1)
@@ -319,6 +354,87 @@ def test_report_carries_remediable_findings_list(sample_project_config):
     ]
     assert absent, "absent soil cell must reach remediable_findings"
     assert absent[0]["remediable"]
+
+
+class TestAcknowledgePathParity(unittest.TestCase):
+    """AC-alpha-6 producer parity pin — the data-bearing-warning ack
+    clearing path. Without it a warning cell would stay outstanding
+    forever and a derived run could never reach refined-ready GREEN."""
+
+    def _warning(self, *, affected, warning_category=None):
+        check = {
+            "check": "value_range_soil_ph", "scope": "per_layer",
+            "result": "warning", "category": "ranges",
+            "summary": "ph atypical",
+            "details": {"affected_cells": affected},
+        }
+        if warning_category is not None:
+            check["details"]["warning_category"] = warning_category
+        return check
+
+    def test_data_bearing_warning_non_interpolatable_is_acknowledge(self):
+        f = _build_remediable_findings(
+            [self._warning(affected=[(3, 0)])], None,
+        )[0]
+        self.assertTrue(f["remediable"])
+        self.assertEqual(f["remediation_kind"], "acknowledge")
+
+    def test_interpolatable_warning_stays_interpolate(self):
+        # SHORT_GAP_INTERPOLATABLE → INTERPOLATABLE bucket → "interpolate"
+        # (the heavy path is preserved; ack does NOT displace it).
+        f = _build_remediable_findings(
+            [self._warning(
+                affected=[(3, 0)],
+                warning_category="short_gap_interpolatable",
+            )], None,
+        )[0]
+        self.assertTrue(f["remediable"])
+        self.assertEqual(f["remediation_kind"], "interpolate")
+
+    def test_warning_with_empty_affected_is_not_remediable(self):
+        f = _build_remediable_findings(
+            [self._warning(affected=[])], None,
+        )[0]
+        self.assertFalse(f["remediable"])
+        self.assertIsNone(f["remediation_kind"])
+
+    def test_unavailable_never_acknowledge(self):
+        # Use a value-range (Path A) check so Path B coverage routing
+        # doesn't interfere — the assertion is specifically that the
+        # Path A ack branch refuses to fire on an unavailable result.
+        check = {
+            "check": "value_range_soil_ph", "result": "unavailable",
+            "category": "ranges", "summary": "u",
+            "details": {"affected_cells": [(3, 0)]},
+        }
+        f = _build_remediable_findings([check], None)[0]
+        self.assertFalse(f["remediable"])
+        self.assertIsNone(f["remediation_kind"])
+
+    def test_fail_never_acknowledge(self):
+        # A data-bearing fail defers to its substrate's own path (the
+        # defect tier handles physical defects via the per-cell marker).
+        check = {
+            "check": "value_range_soil_ph", "result": "fail",
+            "category": "ranges", "summary": "hard fail",
+            "details": {"affected_cells": [(3, 0)]},
+        }
+        f = _build_remediable_findings([check], None)[0]
+        self.assertFalse(f["remediable"])
+        self.assertIsNone(f["remediation_kind"])
+
+    def test_cross_repo_parity_acknowledge_is_canonical_key(self):
+        # The producer emits 'acknowledge' as a canonical remediation_kind.
+        # The β consumer's REMEDIATION_KIND_TO_FINDING_KIND must carry
+        # this exact key (otherwise UNKNOWN-degrade fires). We pin the
+        # canonical string here so a typo on either side fails fast.
+        f = _build_remediable_findings(
+            [self._warning(affected=[(3, 0)])], None,
+        )[0]
+        self.assertEqual(f["remediation_kind"], "acknowledge")
+        # The full canonical key set the consumer must accept.
+        canonical = {"retry", "hwsd_fallback", "interpolate", "acknowledge"}
+        self.assertIn(f["remediation_kind"], canonical)
 
 
 if __name__ == "__main__":
