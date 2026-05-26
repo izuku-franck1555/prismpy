@@ -1,0 +1,107 @@
+# params Souna-type pearl millet (short-cycle, photoperiod-insensitive)
+# Adapted to deep-Sahel (>=14 deg N) - terminal-drought escape via short cycle.
+# Source: spec .local/SARRA-UC1-MILLET-VARIETY-MAPPING-SPEC.md.
+# Empirical anchor: in-memory proof in .local/SARRA-UC1-GRAINFILL-PROBE-MILLET.md
+# (SDJBVP=400 + PPsens=3.0 at Mopti 14.5N gave realistic 515-585 kg/ha vs landrace 0.8).
+#
+# Annotation convention: every parameter below is marked either "same as landrace
+# (species-trait)" or "DIFFERS - reason + citation". The only agronomically
+# defensible cultivar-trait differences vs the Sanio/HKP-type landrace are the
+# phenology timing (SDJ phase lengths) and photoperiod sensitivity (PPsens);
+# everything else is a pearl-millet species-trait that stays identical.
+
+# Phenology - DIFFERS from landrace (cultivar-trait)
+# SARRA  |---Levee---|---BVP---|---PSP---|---RPR---|---MATU1---|---MATU2---|
+SDJLevee: 70.0       # same as landrace (emergence - species)
+SDJBVP:   400.0      # SHORTER vs landrace 700 (Souna BVP ~350-450 degC.d;
+                     # CIRAD / Akinseye 2017 calibration range for short-cycle
+                     # pearl millet; empirical proof in GRAINFILL doc confirmed)
+SDJRPR:   400.0      # same as landrace (reproductive transition - species;
+                     # thermal-driven once PSP closes)
+SDJMatu1: 300.0      # same as landrace (grain-fill 1 duration - species)
+SDJMatu2: 150.0      # same as landrace (grain-fill 2 duration - species)
+# Net cycle: 1320 degC.d ~= 78 d @ 17 degC.d/d at Mopti
+# -> flowering ~early-Aug, grain-fill during the rains.
+
+# Yield potential coefficients - same as landrace (species; partitioning machinery)
+KRdtPotA: 0.5
+KRdtPotB: 100.0
+KRdtBiom: 0.0
+phaseDevVeg: 0       # same as landrace; activates rdtPot cap (bilan_carbo:865-868)
+                     # - correct for determinate Souna
+
+# Photoperiod - DIFFERS from landrace (cultivar-trait)
+# Per kernel doc (bilan_pheno.py around line 709; Dingkuhn 2008 Impatience
+# model; SARRA-H author C. Baron's note): "PPsens > 2.5 = variete non
+# photoperiodique [non-photoperiodic]". Souna IS day-neutral.
+PPsens:   3.0        # NON-PHOTOPERIODIC (vs landrace 0.66); Dingkuhn 2008 /
+                     # Baron convention; empirical proof confirmed
+PPExp:    0.12       # same as landrace (effectively moot at PPsens=3.0;
+                     # kept for kernel completeness)
+SeuilPP:  13.6       # same as landrace (moot at PPsens=3.0; kernel default)
+PPCrit:   11.0       # same as landrace (moot at PPsens=3.0)
+
+# Temperature limits - same as landrace (species: pearl millet)
+TBase: 11.0          # pearl millet base T (Sultan 2013; SARRA-H pearl millet std)
+TOpt1: 32.0
+TOpt2: 36.0
+TLim:  46.0
+
+# Reallocation / partitioning - same as landrace (species machinery)
+pcReallocFeuille: 0.6
+txConversion:     5.0   # RUE g/MJ - pearl millet species-trait
+                        # (3-6 g/MJ range; SARRA-H std)
+txAssimBVP:       1.0
+txAssimMatu1:     0.9
+txAssimMatu2:     0.7
+kRespMaint:       0.01
+tempMaint:        25.0
+
+# Above-ground partitioning - same as landrace (species)
+aeroTotBase:    0.6
+aeroTotPente:   5.0e-05
+feuilAeroBase:  0.65
+feuilAeroPente: -0.0002
+txRealloc:      0.4
+
+# Water - same as landrace (species; PFactor is a pearl-millet trait)
+kcMax:               1.15
+PFactor:             0.55
+seuilCstrMortality:  3.0
+kdf:                 0.4
+txResGrain:          0.5
+
+# Rooting velocity per phase - same as landrace (species; the SHORT cycle
+# naturally limits max root depth via fewer days, no need to alter daily
+# velocities)
+VRacLevee: 35.0
+VRacBVP:   35.0
+VRacPSP:   35.0
+VRacRPR:   35.0
+VRacMatu1: 25.0
+VRacMatu2: 25.0
+
+# Leaf - same as landrace (species)
+slaMin:   0.0016
+slaMax:   0.008
+slaPente: 0.4
+
+# Density / allometry
+densiteA: 0.7        # same as landrace (allometric - species)
+densiteP: 4.5        # same as landrace
+densOpti: 53333.0    # # TBC during calibration: Souna in practice is often
+                     # planted denser (~60-80k plants/ha vs landrace ~50k);
+                     # kept at landrace value for v1 to avoid a magic change.
+                     # Revisit during the sanity-check.
+
+# Grain
+poidsSecGrain: 0.028 # same as landrace (pearl-millet species TGW; SARRA-H
+                     # kernel uses this in the partitioning chain;
+                     # consistent across pearl millet)
+
+# Kernel internals - same as landrace
+AGauss: 1.0
+LGauss: 1.0
+NIYo:   1.0
+NIp:    0.0
+senCO2: 10.0
