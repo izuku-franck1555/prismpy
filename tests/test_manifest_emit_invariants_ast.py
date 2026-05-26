@@ -215,6 +215,10 @@ SPECIFIED_ADVISORY_FLAG_LITERALS: tuple[str, ...] = (
     "severity_tier:viz_layer_thresholds_v1",
     "roi_prices:viz_layer_regional_defaults",
     "herd_density:GLW_2020_default_supply_side_only",
+    # UC-GEN-S2-UC4-CONTRACT §3 MUST-3 — F-BP-15 sarra_py maize at deep-Sahel
+    # advisory (named-constant pattern, NOT templated).
+    "sarra_py_maize_over_prediction_pending_calibration:"
+    "biomass_WUE_~45_kg_per_mm_~2x_realistic_~20_kg_per_mm",
 )
 
 
@@ -282,6 +286,36 @@ def test_t3_uc6_pythia_gates_failed_disclosure_present() -> None:
         "UC6+PYTHIA platform_supports_uc gates_failed disclosure per "
         "v0.3 SH-4 must be reachable from canonical_uc_readiness_emitter "
         "body."
+    )
+
+
+def test_t3_sarra_py_maize_over_prediction_advisory_wired_under_uc4() -> None:
+    """UC-GEN-S2-UC4-CONTRACT §3 MUST-3 (F-BP-15) wiring guard.
+
+    The ``ADVISORY_FLAG_SARRA_PY_MAIZE_OVER_PREDICTION`` constant MUST
+    be emitted from inside the ``canonical_uc_readiness_emitter``
+    function (so the advisory rides on UC4 readiness) gated by a call
+    to the ``_sarra_py_maize_at_deep_sahel`` predicate. A refactor that
+    drops the helper call or moves the append outside the emitter
+    silently disables the F-BP-15 disclosure on every sarra_py + maize +
+    deep-Sahel package — exactly the regression the behavior tests
+    (test_t15*) wouldn't catch on a structurally rearranged code path.
+
+    Mirrors the UC1+UC2 advisory wiring pin pattern.
+    """
+    tree = _load_manifest_ast()
+    func = _find_function(tree, "canonical_uc_readiness_emitter")
+    func_src = ast.unparse(func)
+    assert "ADVISORY_FLAG_SARRA_PY_MAIZE_OVER_PREDICTION" in func_src, (
+        "ADVISORY_FLAG_SARRA_PY_MAIZE_OVER_PREDICTION must be referenced "
+        "from canonical_uc_readiness_emitter so the F-BP-15 advisory "
+        "rides on UC4 readiness."
+    )
+    assert "_sarra_py_maize_at_deep_sahel" in func_src, (
+        "canonical_uc_readiness_emitter must gate the F-BP-15 advisory "
+        "append on _sarra_py_maize_at_deep_sahel(platform, manifest_so_far) "
+        "— removing the predicate guard would leak the advisory across "
+        "all (platform, crop) packages with UC4 declared."
     )
 
 

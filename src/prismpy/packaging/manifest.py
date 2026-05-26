@@ -210,6 +210,93 @@ ADVISORY_FLAG_UC4_SEVERITY_TIER = "severity_tier:viz_layer_thresholds_v1"
 ADVISORY_FLAG_UC5_ROI_PRICES = "roi_prices:viz_layer_regional_defaults"
 ADVISORY_FLAG_UC6_HERD_DENSITY = "herd_density:GLW_2020_default_supply_side_only"
 
+# F-BP-15 — sarra_py maize over-prediction advisory (UC-GEN-S2-UC4-CONTRACT
+# §3 MUST-3). Named-constant pattern (NOT templated) mirroring
+# ADVISORY_FLAG_UC4_SEVERITY_TIER above: the disclosure is BINARY (the
+# package either lives at deep-Sahel maize lat or it does not), so the
+# magnitude (~45 kg/mm observed biomass-WUE vs ~20 kg/mm agronomic
+# realistic, ~2x over-prediction at the dry margin) is embedded in the
+# description half of the key:description literal. Emitted on UC4 readiness
+# only when the package is sarra_py + crop=maize + centroid lat > 14.0 degN
+# (see _sarra_py_maize_at_deep_sahel below).
+ADVISORY_FLAG_SARRA_PY_MAIZE_OVER_PREDICTION = (
+    "sarra_py_maize_over_prediction_pending_calibration:"
+    "biomass_WUE_~45_kg_per_mm_~2x_realistic_~20_kg_per_mm"
+)
+
+
+# UC-GEN-S2-UC4-CONTRACT §3 MUST-3: deep-Sahel latitude threshold. Strict
+# ``>`` matches the Phase 1 latitude-aware millet rule (one-term-per-concept)
+# so the borderline package at exactly 14.0 falls on the conservative
+# (no-advisory) side.
+_DEEP_SAHEL_LAT_THRESHOLD_DEG = 14.0
+
+
+def _sarra_py_maize_at_deep_sahel(
+    platform: str,
+    manifest_so_far: Dict[str, Any],
+) -> bool:
+    """Predicate for the F-BP-15 sarra_py maize over-prediction advisory.
+
+    Returns True iff:
+        * ``platform == "sarra_py"``, AND
+        * the package crop is maize (case-insensitive), AND
+        * the package centroid latitude is strictly greater than
+          ``_DEEP_SAHEL_LAT_THRESHOLD_DEG`` (14.0 degN).
+
+    Reads the package latitude from ``manifest_so_far["region"]
+    ["bounds_gis"]`` (standard ``[minx, miny, maxx, maxy]``) when
+    present; falls back to ``manifest_so_far["region"]
+    ["bounds_sarra_py"]`` (SARRA-Py ``[lat_NW, lon_NW, lat_SE, lon_SE]``)
+    otherwise. Both keys are populated by ``create_manifest`` from
+    ``project_config`` when the upstream translator carried them.
+
+    Returns False (no advisory) for every other platform, non-maize
+    crops, and bounds-missing packages -- silent-no-emit is the safe
+    default; we never raise a false F-BP-15 disclosure.
+
+    Spec: UC-GEN-S2-UC4-CONTRACT §3 MUST-3.
+    """
+    if platform != "sarra_py":
+        return False
+    crop_entry = manifest_so_far.get("crop")
+    if not isinstance(crop_entry, dict):
+        return False
+    if str(crop_entry.get("name") or "").strip().lower() != "maize":
+        return False
+    region_entry = manifest_so_far.get("region")
+    if not isinstance(region_entry, dict):
+        return False
+
+    lat_min: Optional[float] = None
+    lat_max: Optional[float] = None
+
+    bounds_gis = region_entry.get("bounds_gis")
+    if isinstance(bounds_gis, (list, tuple)) and len(bounds_gis) >= 4:
+        try:
+            lat_min = float(bounds_gis[1])
+            lat_max = float(bounds_gis[3])
+        except (TypeError, ValueError):
+            lat_min = lat_max = None
+
+    if lat_min is None or lat_max is None:
+        bounds_sp = region_entry.get("bounds_sarra_py")
+        if isinstance(bounds_sp, (list, tuple)) and len(bounds_sp) >= 4:
+            try:
+                # SARRA-Py format: [lat_NW, lon_NW, lat_SE, lon_SE].
+                # lat_NW is the northern (max) latitude; lat_SE the
+                # southern (min). See models/region.py to_sarra_py_format.
+                lat_max = float(bounds_sp[0])
+                lat_min = float(bounds_sp[2])
+            except (TypeError, ValueError):
+                return False
+
+    if lat_min is None or lat_max is None:
+        return False
+
+    lat_mid = (lat_min + lat_max) / 2.0
+    return lat_mid > _DEEP_SAHEL_LAT_THRESHOLD_DEG
+
 
 _PLATFORM_SUPPORTED_CROPS: Dict[str, FrozenSet[str]] = {
     "sarra_py": frozenset({
@@ -755,6 +842,15 @@ def canonical_uc_readiness_emitter(
             )
         elif uc_name == "drought_management":
             advisory_flags.append(ADVISORY_FLAG_UC4_SEVERITY_TIER)
+            # UC-GEN-S2-UC4-CONTRACT §3 MUST-3 — F-BP-15. Conditional
+            # named-constant advisory: emits only on sarra_py + crop=maize
+            # + centroid lat > 14.0 degN. UC4 still dispatches (advisory
+            # is not a block); the calibration follow-up is paired with
+            # the Phase-2 sarra_py soil-param cycle (v3.2).
+            if _sarra_py_maize_at_deep_sahel(platform, manifest_so_far):
+                advisory_flags.append(
+                    ADVISORY_FLAG_SARRA_PY_MAIZE_OVER_PREDICTION
+                )
         elif uc_name == "soil_fertility":
             advisory_flags.append(ADVISORY_FLAG_UC5_ROI_PRICES)
         elif uc_name == "livestock_feed":
