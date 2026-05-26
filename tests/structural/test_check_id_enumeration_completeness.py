@@ -252,11 +252,17 @@ def test_axis_unavailable_synthetic_prefix_round_trips_decision_record() -> None
 
 def test_unknown_synthetic_prefix_still_rejected() -> None:
     """Belt-and-suspenders — only the documented
-    ``__axis_unavailable__`` family relaxes the validator; an
-    arbitrary leading-underscore token still fails.
+    ``__axis_unavailable__:<axis>`` family relaxes the validator;
+    an arbitrary leading-underscore token still fails, and the
+    delimiter is part of the family (a no-colon variant like
+    ``__axis_unavailable__climate`` must NOT silently widen).
     """
     assert not matches_known_prefix("__foo__:bar")
     assert not matches_known_prefix("__not_a_known_prefix__:anything")
+    # Delimiter-stripped variant is malformed and must reject.
+    assert not matches_known_prefix("__axis_unavailable__climate")
+    # Empty-suffix variant carries no axis info and must reject.
+    assert not matches_known_prefix("__axis_unavailable__")
 
 
 def test_real_check_ids_still_validated_unchanged() -> None:

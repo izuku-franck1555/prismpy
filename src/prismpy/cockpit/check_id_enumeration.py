@@ -184,7 +184,11 @@ VALUE_RANGE_PREFIX_FAMILIES: Final[tuple[str, ...]] = (
 # synthetic family without false-positives on real value-range
 # checks.
 AXIS_UNAVAILABLE_PREFIX_FAMILIES: Final[tuple[str, ...]] = (
-    "__axis_unavailable__",
+    # The trailing colon is part of the documented token shape
+    # — without it ``startswith`` would also accept malformed
+    # tokens like ``__axis_unavailable__climate`` (no delimiter)
+    # and silently widen the family.
+    "__axis_unavailable__:",
 )
 
 
