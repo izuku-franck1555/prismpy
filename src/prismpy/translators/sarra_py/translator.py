@@ -214,7 +214,7 @@ class SarraPyTranslator(SarraPyTranslatorBase):
             output_files.append(config_file)
 
             # 3. Generate standalone parameter files
-            variety_file = self._generate_variety_yaml(data.crop_params)
+            variety_file = self._generate_variety_yaml(data.crop_params, data.region)
             output_files.append(variety_file)
 
             itk_file = self._generate_itk_yaml(data)
@@ -1491,37 +1491,155 @@ class SarraPyTranslator(SarraPyTranslatorBase):
     # PARAMETER FILE GENERATION METHODS
     # =========================================================================
 
-    def _generate_variety_yaml(self, crop_params: Optional[CropParameters]) -> Path:
+    def _resolve_package_bbox(self, region) -> Optional[Dict[str, float]]:
+        """Resolve the package bounding box for latitude-aware variety selection.
+
+        Priority order:
+        1. ``region.bounds`` if a region object is provided (in-memory, fastest).
+        2. The generated ``data/boundaries/bounds.json`` if already on disk (the
+           bounds.json file is written earlier in the translate flow).
+
+        Returns:
+            ``{"lat_min": float, "lat_max": float}`` or ``None`` if neither
+            source is usable; the caller treats ``None`` as "no latitude default"
+            and falls through to the existing variety cascade unchanged.
+        """
+        if region is not None:
+            try:
+                b = region.bounds
+                return {"lat_min": float(b.miny), "lat_max": float(b.maxy)}
+            except (AttributeError, TypeError, ValueError):
+                pass
+        bounds_path = self.output_dir / "data" / "boundaries" / "bounds.json"
+        if bounds_path.exists():
+            try:
+                with open(bounds_path) as f:
+                    bj = json.load(f)
+                gis = bj.get("gis_format") or []
+                if len(gis) >= 4:
+                    return {"lat_min": float(gis[1]), "lat_max": float(gis[3])}
+            except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                pass
+        return None
+
+    def _resolve_millet_variety_template(
+        self,
+        crop_name: Optional[str],
+        user_variety_template: Optional[str],
+        package_bbox: Optional[Dict[str, float]],
+    ) -> Optional[str]:
+        """Default-pick the millet variety template by package centroid latitude.
+
+        Spec: ``.local/SARRA-UC1-MILLET-VARIETY-MAPPING-SPEC.md`` §2. Returns the
+        template NAME (e.g. ``"millet_sahel_short"``); the caller resolves the
+        file path. Returns ``None`` for non-millet crops or when the bounding
+        box is unavailable, in which case the caller proceeds with the existing
+        cascade unchanged.
+
+        Rule (priority order):
+        1. Explicit user override (``user_variety_template`` non-empty) wins;
+           returns it verbatim so researchers can experiment with any cultivar
+           at any latitude.
+        2. Otherwise, for crop "Millet" only: package centroid latitude
+           ``(lat_min + lat_max) / 2 > 14.0`` -> ``"millet_sahel_short"``
+           (deep-Sahel Souna-type short-cycle default). Strict ``>`` so a
+           borderline package at exactly 14.0 defaults to the long-cycle
+           landrace (conservative tie-break).
+        3. Otherwise (millet at lat <= 14.0) -> ``"millet_west_africa"``
+           (long-cycle landrace, preserved untouched for ~13°N regions).
+        4. Non-millet crops -> ``None`` (cascade unchanged).
+        """
+        if user_variety_template:
+            return user_variety_template
+        if not crop_name or crop_name.strip().lower() != "millet":
+            return None
+        if not package_bbox:
+            return None
+        lat_mid = (
+            float(package_bbox["lat_min"]) + float(package_bbox["lat_max"])
+        ) / 2.0
+        return "millet_sahel_short" if lat_mid > 14.0 else "millet_west_africa"
+
+    def _generate_variety_yaml(
+        self,
+        crop_params: Optional[CropParameters],
+        region=None,
+    ) -> Path:
         """Generate variety.yaml from calibrated database, template, or config.
 
         Priority order:
-        1. Calibrated variety database (prismpy/data/sarra_py_varieties/{crop}.yaml)
-        2. Explicit template file (variety_template_file or templates_dir)
-        3. Generic config mapping (crop.phenology/physiology)
-        4. crop_params.parameters (from data loading)
-        5. Error - no variety source available
+        1. Calibrated variety database (prismpy/data/sarra_py_varieties/{name}.yaml).
+           For millet crops, the variety NAME is resolved by
+           ``_resolve_millet_variety_template`` (explicit user override > latitude
+           default > landrace). For other crops it remains ``{crop_lower}.yaml``.
+        2. Explicit template file (variety_template_file or templates_dir).
+        3. Generic config mapping (crop.phenology/physiology).
+        4. crop_params.parameters (from data loading).
+        5. Error - no variety source available.
 
         Args:
-            crop_params: CropParameters object or None
+            crop_params: CropParameters object or None.
+            region: optional Region object whose ``bounds.miny``/``bounds.maxy``
+                feed the latitude-aware millet variety selection. When ``None``
+                the helper falls back to the generated ``bounds.json`` on disk;
+                if neither is available the cascade behaves as before.
 
         Returns:
-            Path to variety.yaml
+            Path to variety.yaml.
         """
         variety_params = None
 
-        # Priority 1: Load from calibrated variety database (field-validated params)
+        # Latitude-aware millet variety selection (spec §2.1).
+        sarra_config = (
+            self.config.platform_config.sarra_py
+            if self.config.platform_config
+            else None
+        )
+        user_variety_template = (
+            getattr(sarra_config, 'variety_template', None)
+            if sarra_config
+            else None
+        )
+        resolved_variety = self._resolve_millet_variety_template(
+            crop_name=self.config.crop.name,
+            user_variety_template=user_variety_template,
+            package_bbox=self._resolve_package_bbox(region),
+        )
+
+        # Priority 1: Load from calibrated variety database (field-validated params).
         if variety_params is None:
             crop_lower = self.config.crop.name.lower()
+            # Names to try in order. The user-override case (resolved_variety set
+            # AND user_variety_template explicitly set) tries ONLY the user's
+            # name in the data dir; if missing there it falls through to
+            # Priority 2 (template) so the user-set name is still honored by
+            # _load_template via sarra_config.variety_template. The
+            # latitude-default case tries the resolved name first and falls
+            # back to crop_lower so the existing landrace data file
+            # (data/sarra_py_varieties/millet.yaml) keeps being loaded for
+            # millet at lat <= 14 N -- zero behaviour change for the landrace.
+            if resolved_variety and user_variety_template:
+                lookup_names = [resolved_variety]
+            elif resolved_variety:
+                lookup_names = [resolved_variety, crop_lower]
+            else:
+                lookup_names = [crop_lower]
+
             variety_db_dirs = [
                 Path(__file__).resolve().parents[4] / "data" / "sarra_py_varieties",
                 Path("data/sarra_py_varieties"),
             ]
             for db_dir in variety_db_dirs:
-                variety_file = db_dir / f"{crop_lower}.yaml"
-                if variety_file.exists():
-                    with open(variety_file, 'r') as f:
-                        variety_params = yaml.safe_load(f)
-                    logger.info(f"Loaded calibrated variety params from {variety_file}")
+                for name in lookup_names:
+                    variety_file = db_dir / f"{name}.yaml"
+                    if variety_file.exists():
+                        with open(variety_file, 'r') as f:
+                            variety_params = yaml.safe_load(f)
+                        logger.info(
+                            f"Loaded calibrated variety params from {variety_file}"
+                        )
+                        break
+                if variety_params is not None:
                     break
 
         # Priority 2: Try to load from explicit template
