@@ -1525,32 +1525,35 @@ class SarraPyTranslator(SarraPyTranslatorBase):
     def _resolve_millet_variety_template(
         self,
         crop_name: Optional[str],
-        user_variety_template: Optional[str],
         package_bbox: Optional[Dict[str, float]],
     ) -> Optional[str]:
         """Default-pick the millet variety template by package centroid latitude.
 
-        Spec: ``.local/SARRA-UC1-MILLET-VARIETY-MAPPING-SPEC.md`` §2. Returns the
-        template NAME (e.g. ``"millet_sahel_short"``); the caller resolves the
-        file path. Returns ``None`` for non-millet crops or when the bounding
-        box is unavailable, in which case the caller proceeds with the existing
-        cascade unchanged.
+        Spec: ``.local/SARRA-UC1-MILLET-VARIETY-MAPPING-SPEC.md`` §2 (amended,
+        see note below). Returns the template NAME (e.g.
+        ``"millet_sahel_short"``); the caller resolves the file path. Returns
+        ``None`` for non-millet crops or when the bounding box is unavailable,
+        in which case the caller proceeds with the existing cascade unchanged.
 
-        Rule (priority order):
-        1. Explicit user override (``user_variety_template`` non-empty) wins;
-           returns it verbatim so researchers can experiment with any cultivar
-           at any latitude.
-        2. Otherwise, for crop "Millet" only: package centroid latitude
+        Rule:
+        1. For crop "Millet" only: package centroid latitude
            ``(lat_min + lat_max) / 2 > 14.0`` -> ``"millet_sahel_short"``
            (deep-Sahel Souna-type short-cycle default). Strict ``>`` so a
            borderline package at exactly 14.0 defaults to the long-cycle
            landrace (conservative tie-break).
-        3. Otherwise (millet at lat <= 14.0) -> ``"millet_west_africa"``
-           (long-cycle landrace, preserved untouched for ~13°N regions).
-        4. Non-millet crops -> ``None`` (cascade unchanged).
+        2. Otherwise (millet at lat <= 14.0) -> ``"millet_west_africa"``
+           (long-cycle landrace, preserved untouched for ~13 deg N regions).
+        3. Non-millet crops or missing bbox -> ``None`` (cascade unchanged).
+
+        Spec amendment (post-#68): the original spec §2.1.1 routed user override
+        through the ``variety_template`` NAME field, but the schema's non-empty
+        default (``"maize_west_africa"``) plus the DOME-merger pre-populating
+        the field from ``crop.variety`` made every call look like an override
+        and the latitude rule never fired in practice (empirically caught on
+        the first post-merge Mopti regen). The override mechanism is now the
+        ``variety_template_file`` PATH field, honoured upstream by
+        ``_load_template``'s Priority 1 and bypassing this helper entirely.
         """
-        if user_variety_template:
-            return user_variety_template
         if not crop_name or crop_name.strip().lower() != "millet":
             return None
         if not package_bbox:
@@ -1589,38 +1592,30 @@ class SarraPyTranslator(SarraPyTranslatorBase):
         """
         variety_params = None
 
-        # Latitude-aware millet variety selection (spec §2.1).
-        sarra_config = (
-            self.config.platform_config.sarra_py
-            if self.config.platform_config
-            else None
-        )
-        user_variety_template = (
-            getattr(sarra_config, 'variety_template', None)
-            if sarra_config
-            else None
-        )
+        # Latitude-aware millet variety selection (spec §2 amended). The
+        # ``variety_template`` NAME field is intentionally NOT consulted here:
+        # the DOME-merger / executor auto-populates it from ``crop.variety``,
+        # so reading it would conflate auto-population with a true user
+        # override and the latitude rule would never fire (empirically caught
+        # on the first post-#68 Mopti regen). The user-override mechanism is
+        # ``variety_template_file`` (PATH), honoured upstream by
+        # ``_load_template``'s Priority 1 and bypassing this helper entirely.
         resolved_variety = self._resolve_millet_variety_template(
             crop_name=self.config.crop.name,
-            user_variety_template=user_variety_template,
             package_bbox=self._resolve_package_bbox(region),
         )
 
         # Priority 1: Load from calibrated variety database (field-validated params).
         if variety_params is None:
             crop_lower = self.config.crop.name.lower()
-            # Names to try in order. The user-override case (resolved_variety set
-            # AND user_variety_template explicitly set) tries ONLY the user's
-            # name in the data dir; if missing there it falls through to
-            # Priority 2 (template) so the user-set name is still honored by
-            # _load_template via sarra_config.variety_template. The
-            # latitude-default case tries the resolved name first and falls
-            # back to crop_lower so the existing landrace data file
-            # (data/sarra_py_varieties/millet.yaml) keeps being loaded for
-            # millet at lat <= 14 N -- zero behaviour change for the landrace.
-            if resolved_variety and user_variety_template:
-                lookup_names = [resolved_variety]
-            elif resolved_variety:
+            # Names to try in order: the latitude-resolved name first (when
+            # available), then ``crop_lower`` as the always-present fallback.
+            # The fallback is load-bearing for the landrace path: at lat <= 14
+            # the helper returns ``"millet_west_africa"`` but no such file
+            # exists in ``data/sarra_py_varieties/``; the cascade then finds
+            # the existing ``millet.yaml`` (the landrace's pre-existing data-
+            # dir mirror) -- zero behaviour change for ~13 deg N packages.
+            if resolved_variety:
                 lookup_names = [resolved_variety, crop_lower]
             else:
                 lookup_names = [crop_lower]
