@@ -111,6 +111,82 @@ def test_yaml_pair_is_byte_identical_and_has_only_two_deltas() -> None:
     }, f"unexpected param deltas vs landrace: {diffs}"
 
 
+def test_variety_template_file_path_override_loads_user_yaml(
+    tmp_path: Path,
+) -> None:
+    """Integration probe (sentinel-value adversarial, post-#69 amend):
+    an explicit ``variety_template_file`` PATH must override the latitude
+    rule and load the user's YAML verbatim. Mirrors the empirical probe
+    that codex's Gate B used to catch the cascade-order bug where
+    ``_load_template`` ran AFTER the lat-helper data-dir lookup, making
+    the path-field override dead code.
+
+    Writes a sentinel YAML and asserts the produced ``variety.yaml``
+    carries those sentinels (``SDJBVP=999.0``, ``PPsens=9.9``,
+    ``densOpti=12345.0``) — NOT the lat-cultivar's `millet_sahel_short`
+    defaults that would otherwise be picked at Mopti latitude.
+    """
+
+    sentinel_path = tmp_path / "custom_millet.yaml"
+    sentinel_path.write_text(
+        "SDJBVP: 999.0\nPPsens: 9.9\ndensOpti: 12345.0\n"
+    )
+
+    class _SarraConfig:
+        # Auto-populated by the DOME-merger from ``crop.variety``; would
+        # normally route to the landrace via Priority 2's data-dir cascade.
+        variety_template = "millet_west_africa"
+        # User explicit override via the PATH field — the post-#69 amend
+        # makes this the authoritative override mechanism.
+        variety_template_file = str(sentinel_path)
+        templates_dir = None
+        itk_template = "rainfed_opportunistic"
+        itk_template_file = None
+        soil_template = "default"
+        soil_template_file = None
+
+    class _PlatformConfig:
+        sarra_py = _SarraConfig()
+
+    class _Crop:
+        name = "Millet"
+        phenology = None
+        physiology = None
+
+    class _Config:
+        platform_config = _PlatformConfig()
+        crop = _Crop()
+
+    class _Bounds:
+        miny = 14.40  # Mopti-like; would normally trigger millet_sahel_short.
+        maxy = 14.55
+
+    class _Region:
+        bounds = _Bounds()
+
+    inst = SarraPyTranslator.__new__(SarraPyTranslator)
+    inst.config = _Config()
+    inst.output_dir = tmp_path
+    (tmp_path / "parameters").mkdir(parents=True, exist_ok=True)
+
+    inst._generate_variety_yaml(crop_params=None, region=_Region())
+
+    out = yaml.safe_load(
+        (tmp_path / "parameters" / "variety.yaml").read_text()
+    )
+    assert out["SDJBVP"] == 999.0, (
+        "variety_template_file PATH override failed to load user YAML "
+        f"(cascade-order regression): SDJBVP={out.get('SDJBVP')} "
+        "(would be 400.0 if the lat-cultivar was picked instead)"
+    )
+    assert out["PPsens"] == 9.9, (
+        f"sentinel PPsens not loaded; got {out.get('PPsens')}"
+    )
+    assert out["densOpti"] == 12345.0, (
+        f"sentinel densOpti not loaded; got {out.get('densOpti')}"
+    )
+
+
 def test_auto_populated_variety_template_yields_short_cycle_at_lat_above_14(
     tmp_path: Path,
 ) -> None:

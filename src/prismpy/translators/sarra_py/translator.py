@@ -1571,11 +1571,17 @@ class SarraPyTranslator(SarraPyTranslatorBase):
         """Generate variety.yaml from calibrated database, template, or config.
 
         Priority order:
-        1. Calibrated variety database (prismpy/data/sarra_py_varieties/{name}.yaml).
+        1. Explicit user-override template via ``_load_template('variety')``:
+           honors ``variety_template_file`` (explicit YAML path) or
+           ``templates_dir`` + ``variety_template`` (templates root + name).
+           Runs BEFORE the latitude-aware cascade so an explicit override
+           genuinely overrides (post-#69-amendment: the prior order made the
+           path-field override dead code, caught by codex Gate B sentinel
+           probe).
+        2. Calibrated variety database (prismpy/data/sarra_py_varieties/{name}.yaml).
            For millet crops, the variety NAME is resolved by
-           ``_resolve_millet_variety_template`` (explicit user override > latitude
-           default > landrace). For other crops it remains ``{crop_lower}.yaml``.
-        2. Explicit template file (variety_template_file or templates_dir).
+           ``_resolve_millet_variety_template`` (latitude-aware default).
+           For other crops the lookup uses ``{crop_lower}.yaml``.
         3. Generic config mapping (crop.phenology/physiology).
         4. crop_params.parameters (from data loading).
         5. Error - no variety source available.
@@ -1592,20 +1598,32 @@ class SarraPyTranslator(SarraPyTranslatorBase):
         """
         variety_params = None
 
+        # Priority 1: Explicit user-override template (post-#69-amendment).
+        # Runs BEFORE the latitude-aware cascade so ``variety_template_file``
+        # (or ``templates_dir`` + ``variety_template``) genuinely overrides
+        # the latitude default. The prior ordering made the path-field
+        # override dead code: the lat-helper data-dir lookup short-circuited
+        # before ``_load_template`` ever ran (caught by codex Gate B sentinel
+        # probe on PR #69).
+        if variety_params is None:
+            variety_params = self._load_template('variety')
+            if variety_params:
+                logger.info("Loaded variety params from explicit template (user override)")
+
         # Latitude-aware millet variety selection (spec §2 amended). The
         # ``variety_template`` NAME field is intentionally NOT consulted here:
         # the DOME-merger / executor auto-populates it from ``crop.variety``,
         # so reading it would conflate auto-population with a true user
         # override and the latitude rule would never fire (empirically caught
         # on the first post-#68 Mopti regen). The user-override mechanism is
-        # ``variety_template_file`` (PATH), honoured upstream by
-        # ``_load_template``'s Priority 1 and bypassing this helper entirely.
+        # ``variety_template_file`` (PATH), honoured by ``_load_template``
+        # above as TRUE Priority 1 and bypassing this helper entirely.
         resolved_variety = self._resolve_millet_variety_template(
             crop_name=self.config.crop.name,
             package_bbox=self._resolve_package_bbox(region),
         )
 
-        # Priority 1: Load from calibrated variety database (field-validated params).
+        # Priority 2: Load from calibrated variety database (field-validated params).
         if variety_params is None:
             crop_lower = self.config.crop.name.lower()
             # Names to try in order: the latitude-resolved name first (when
@@ -1636,12 +1654,6 @@ class SarraPyTranslator(SarraPyTranslatorBase):
                         break
                 if variety_params is not None:
                     break
-
-        # Priority 2: Try to load from explicit template
-        if variety_params is None:
-            variety_params = self._load_template('variety')
-            if variety_params:
-                logger.info("Loaded variety params from template")
 
         # Priority 3: Use generic mapping if phenology/physiology available
         if variety_params is None:
