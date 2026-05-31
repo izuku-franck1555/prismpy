@@ -2,9 +2,6 @@
 
 A methodological framework for data-to-model translation in spatial crop modeling.
 
-**Version**: 1.1.0
-**Status**: Production-ready with ICASA/DOME support
-
 ---
 
 ## Overview
@@ -141,8 +138,7 @@ platform_config:
     gadm_country_iso3: "MLI"
 ```
 
-**Design principle**: What you see in the DOME is exactly what the translator receives. No magic extraction or translation - explicit is better than implicit.
-
+**Design principle**: What you see in the DOME is exactly what the translator receives.
 ---
 
 ## CLI Commands
