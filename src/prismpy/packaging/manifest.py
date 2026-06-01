@@ -32,7 +32,7 @@ import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Optional, Tuple, Union
+from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple, Union
 
 from prismpy.cells.canonical_cell_area_km2 import (
     DEG2_TO_KM2_DEFAULT,
@@ -96,6 +96,56 @@ PER_UC_GATES: Dict[str, FrozenSet[str]] = {
         "manifest_crops_populated",
     }),
 }
+
+
+# F-BP-18: producer-side platform→UC support SSOT. Mirrors the prism-runner
+# CONSUMER ClassVars (``use_cases/<uc>/use_case.py`` ``supported_platforms``);
+# each value below was cross-checked against the live consumer ClassVar (NOT
+# guessed). HAND-MIRRORED — keep in sync with the consumer when a UC×platform
+# support changes (the v3.2 robustness play is to auto-derive). Replaces the
+# four+one drifted, hardcoded encodings (per-translator ``use_case_config``
+# literals + the hardcoded pythia reject) with one authoritative source so the
+# generic gate + the per-translator config builder both read from here.
+_UC_SUPPORTED_PLATFORMS: Dict[str, FrozenSet[str]] = {
+    "yield_forecast":      frozenset({"sarra_py", "pythia", "acea", "craft"}),
+    "climate_scenarios":   frozenset({"sarra_py", "pythia", "acea"}),
+    "sowing_optimization": frozenset({"sarra_py", "pythia"}),
+    "drought_management":  frozenset({"sarra_py", "pythia", "acea", "craft"}),
+    "soil_fertility":      frozenset({"pythia", "acea", "craft"}),    # sarra_py dropped (F-BP-19)
+    "livestock_feed":      frozenset({"sarra_py", "acea", "pythia"}),  # craft deferred (§16.UC6.1)
+}
+
+
+# The UCs a translator declares per package, BEFORE the platform-support filter.
+# ``climate_scenarios`` is excluded: it is a package-PAIRING UC surfaced via the
+# ``manifest.scenario`` block, not a per-package ``use_case_config`` entry.
+_PACKAGEABLE_UCS: Tuple[str, ...] = (
+    "yield_forecast",
+    "sowing_optimization",
+    "drought_management",
+    "soil_fertility",
+    "livestock_feed",
+)
+
+
+def use_case_config_for(
+    platform: str, requested_ucs: Iterable[str] = _PACKAGEABLE_UCS,
+) -> Dict[str, dict]:
+    """Build a translator's ``use_case_config`` from the platform→UC SSOT.
+
+    F-BP-18: replaces the per-translator hardcoded UC literals (which drifted
+    from the consumer) with one config-driven builder. Returns ``{uc: {}}`` (an
+    empty per-UC dict = "use UC defaults at dispatch time") for each requested UC
+    the platform actually supports per :data:`_UC_SUPPORTED_PLATFORMS`. Defaults
+    to the per-package :data:`_PACKAGEABLE_UCS` candidate set (climate_scenarios
+    excluded — it is a pairing UC). Order follows ``requested_ucs`` for
+    deterministic manifests.
+    """
+    return {
+        uc: {}
+        for uc in requested_ucs
+        if platform in _UC_SUPPORTED_PLATFORMS.get(uc, frozenset())
+    }
 
 
 ADVISORY_GATES: FrozenSet[str] = frozenset({
@@ -856,14 +906,18 @@ def canonical_uc_readiness_emitter(
         elif uc_name == "livestock_feed":
             advisory_flags.append(ADVISORY_FLAG_UC6_HERD_DENSITY)
 
-        if uc_name == "livestock_feed" and platform == "pythia":
+        # F-BP-18: GENERIC platform→UC support gate (replaces the hardcoded
+        # pythia-UC6 reject). Belt-and-suspenders with use_case_config_for():
+        # the config builder stops an unsupported UC from being DECLARED; this
+        # gate catches any UC that IS declared on a platform the SSOT does not
+        # support (e.g. a stale literal), with an accurate per-combo reason.
+        if platform not in _UC_SUPPORTED_PLATFORMS.get(uc_name, frozenset()):
             gates_failed.append({
                 "gate_id": "platform_supports_uc",
                 "reason": (
-                    "UC6 livestock_feed not yet activated on PYTHIA "
-                    "platform — UC6 hard-rejects PYTHIA dispatch per "
-                    "use_cases/livestock_feed/use_case.py "
-                    "supported_platforms list"
+                    f"{uc_name} not supported on platform {platform!r} "
+                    f"(supported: "
+                    f"{sorted(_UC_SUPPORTED_PLATFORMS.get(uc_name, frozenset()))})"
                 ),
                 "severity": "hard",
             })

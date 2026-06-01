@@ -2383,6 +2383,7 @@ if __name__ == "__main__":
         )
 
         # Build config dict for manifest/README
+        from prismpy.packaging.manifest import use_case_config_for
         package_config = {
             # Project info
             'project_name': self.config.project.name if hasattr(self.config, 'project') and self.config.project else 'ACEA Package',
@@ -2452,18 +2453,14 @@ if __name__ == "__main__":
                 'boundaries': boundary_label,
             },
 
-            # Closed-world UC declaration: ACEA-translated packages
-            # serve UC1 (yield_forecast), UC4 (drought_management), and
-            # UC5 (soil_fertility). UC3 (sowing_optimization) is a
-            # SARRA-Py/PYTHIA-leaning workflow and is not surfaced from
-            # ACEA emit; UC6 (livestock_feed) requires the residue
-            # aggregator path that ACEA does not currently feed. Empty
-            # per-UC dicts signal "use UC defaults at dispatch time".
-            'use_case_config': {
-                'yield_forecast': {},
-                'drought_management': {},
-                'soil_fertility': {},
-            },
+            # F-BP-18: config-driven from the platform→UC SSOT (was a hardcoded
+            # literal + a now-STALE comment claiming "ACEA does not currently
+            # feed" UC6). ACEA SECONDARY-supports livestock_feed via the
+            # consumer's HI-inversion path (adapters/_acea_preserve_raw.py derives
+            # biomass from yield, disclosed-degraded), so it now GAINS
+            # livestock_feed. sowing_optimization stays excluded (ACEA is not in
+            # its SSOT). Net delta: +livestock_feed.
+            'use_case_config': use_case_config_for("acea"),
         }
 
         # 1. Generate manifest. The UC5 P+K silent-no-op trigger is set

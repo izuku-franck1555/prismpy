@@ -275,17 +275,28 @@ def test_t3_uc5_pythia_pk_advisory_conditional_on_acea_trigger() -> None:
     )
 
 
-def test_t3_uc6_pythia_gates_failed_disclosure_present() -> None:
-    """SH-4 disclosure: when platform='pythia' AND UC6 declared, the
-    emitter appends a hard gates_failed entry for ``platform_supports_uc``.
+def test_t3_uc6_generic_platform_supports_uc_gate_wired() -> None:
+    """F-BP-18: the emitter carries a GENERIC ``platform_supports_uc``
+    hard gate that reads the ``_UC_SUPPORTED_PLATFORMS`` SSOT, REPLACING
+    the old hardcoded pythia-UC6 reject (which this test previously
+    pinned). New behavior: the gate fails ONLY for a (uc, platform) combo
+    absent from the SSOT, so PYTHIA — now a supported livestock_feed
+    platform — PASSES (no gates_failed). The wiring guard asserts the
+    generic gate-id and the SSOT it consults both remain reachable from
+    ``canonical_uc_readiness_emitter`` (a refactor dropping either would
+    silently disable the producer↔consumer support filter).
     """
     tree = _load_manifest_ast()
     func = _find_function(tree, "canonical_uc_readiness_emitter")
     func_src = ast.unparse(func)
     assert "platform_supports_uc" in func_src, (
-        "UC6+PYTHIA platform_supports_uc gates_failed disclosure per "
-        "v0.3 SH-4 must be reachable from canonical_uc_readiness_emitter "
-        "body."
+        "F-BP-18 generic platform_supports_uc gate must be reachable from "
+        "canonical_uc_readiness_emitter body."
+    )
+    assert "_UC_SUPPORTED_PLATFORMS" in func_src, (
+        "the generic platform_supports_uc gate must read the "
+        "_UC_SUPPORTED_PLATFORMS SSOT (not a hardcoded per-platform reject) "
+        "— F-BP-18 producer↔consumer support filter."
     )
 
 
@@ -535,8 +546,10 @@ def test_b1_translator_populates_use_case_config(translator_path: Path) -> None:
     ``canonical_uc_readiness_emitter`` iterated empty source → PR3's
     native-emission feature was non-functional in production
     (codex Gate B v1 BLOCKING-1). This test prevents regression by
-    AST-asserting each translator's package_config dict literal
-    contains the ``use_case_config`` key with at least one UC entry.
+    AST-asserting each translator's package_config declares the
+    ``use_case_config`` key, built (F-BP-18) by the SSOT-driven
+    ``use_case_config_for("<platform>")`` helper — guaranteeing a
+    non-empty, drift-proof UC keyset rather than a hand-maintained literal.
     """
     src = translator_path.read_text(encoding="utf-8")
     tree = ast.parse(src, filename=str(translator_path))
@@ -555,29 +568,33 @@ def test_b1_translator_populates_use_case_config(translator_path: Path) -> None:
         f"the manifest emitter sees an empty UC source and the "
         f"closed-world emit produces empty uc_readiness."
     )
-    assert isinstance(use_case_config_value, ast.Dict), (
-        f"{translator_path.parent.name} translator's 'use_case_config' "
-        f"value must be a dict literal (got "
-        f"{type(use_case_config_value).__name__})"
+    # F-BP-18: the per-translator dict LITERAL was replaced by the SSOT-driven
+    # builder ``use_case_config_for("<platform>")`` — this kills the
+    # per-translator drift class (the keyset can no longer hardcode/omit/drift a
+    # UC; it is derived from ``_UC_SUPPORTED_PLATFORMS``, which mirrors the
+    # consumer). The invariant is now: the value is a ``use_case_config_for(...)``
+    # call with a string-literal platform arg, NOT a dict literal.
+    assert isinstance(use_case_config_value, ast.Call), (
+        f"{translator_path.parent.name} translator's 'use_case_config' value "
+        f"must be a use_case_config_for(...) call (F-BP-18 config-driven); got "
+        f"{type(use_case_config_value).__name__}"
     )
-    declared_ucs = [
-        k.value for k in use_case_config_value.keys
-        if isinstance(k, ast.Constant) and isinstance(k.value, str)
-    ]
-    assert len(declared_ucs) >= 1, (
-        f"{translator_path.parent.name} translator must declare at "
-        f"least one UC in 'use_case_config' (got empty dict)."
+    _callee = use_case_config_value.func
+    _callee_name = getattr(_callee, "id", None) or getattr(_callee, "attr", None)
+    assert _callee_name == "use_case_config_for", (
+        f"{translator_path.parent.name} translator's 'use_case_config' must be "
+        f"built by use_case_config_for(...) (got call to {_callee_name!r})."
     )
-    for uc_name in declared_ucs:
-        assert uc_name in {
-            "yield_forecast",
-            "climate_scenarios",
-            "sowing_optimization",
-            "drought_management",
-            "soil_fertility",
-            "livestock_feed",
-        }, (
-            f"{translator_path.parent.name} translator declares "
-            f"unknown UC name {uc_name!r} in use_case_config; expected "
-            f"one of the 6 KNOWN_USE_CASE_NAMES."
-        )
+    assert use_case_config_value.args, (
+        f"{translator_path.parent.name}: use_case_config_for(...) requires the "
+        f"platform argument."
+    )
+    _plat_arg = use_case_config_value.args[0]
+    assert (
+        isinstance(_plat_arg, ast.Constant)
+        and isinstance(_plat_arg.value, str)
+        and _plat_arg.value
+    ), (
+        f"{translator_path.parent.name}: use_case_config_for() platform arg "
+        f"must be a non-empty string literal (got {ast.dump(_plat_arg)})."
+    )
