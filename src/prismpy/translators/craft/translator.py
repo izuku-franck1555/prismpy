@@ -3131,6 +3131,7 @@ class CraftTranslator(CraftTranslatorBase):
             self.config.region, 'country_iso3', 'ML'
         )[:2] if hasattr(self.config, 'region') else 'ML'
 
+        from prismpy.packaging.manifest import use_case_config_for
         package_config = {
             # Project info
             'project_name': self.config.project.name if hasattr(self.config, 'project') and self.config.project else 'CRAFT Package',
@@ -3199,19 +3200,13 @@ class CraftTranslator(CraftTranslatorBase):
             # discriminator above.
             'gadm_level': manifest_gadm_level,
 
-            # Closed-world UC declaration: CRAFT packages serve UC1
-            # (yield_forecast), UC3 (sowing_optimization), UC4
-            # (drought_management), UC5 (soil_fertility), and UC6
-            # (livestock_feed) — the Sahelian-six crop coverage matches
-            # all five operationally-active UCs. Empty per-UC dicts
-            # signal "use UC defaults at dispatch time".
-            'use_case_config': {
-                'yield_forecast': {},
-                'sowing_optimization': {},
-                'drought_management': {},
-                'soil_fertility': {},
-                'livestock_feed': {},
-            },
+            # F-BP-18: config-driven from the platform→UC SSOT (was a hardcoded
+            # literal that DRIFTED — it declared sowing_optimization +
+            # livestock_feed though the consumer supports NEITHER on craft).
+            # Net delta: drops sowing_optimization (craft not in its SSOT) +
+            # livestock_feed (craft DEFERRED per §16.UC6.1 — consumer-defer
+            # alignment, OQ-U6-1). Keeps yield/drought/soil_fertility.
+            'use_case_config': use_case_config_for("craft"),
         }
 
         # 1. Generate manifest. CRAFT routes through DSSAT (same engine

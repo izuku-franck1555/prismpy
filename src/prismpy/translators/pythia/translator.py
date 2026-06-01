@@ -3054,6 +3054,7 @@ class PythiaTranslator(PythiaTranslatorBase):
         # downstream dispatch may pass UC-specific config overrides at
         # run time but the emit-side declaration here gates which UCs
         # the prismweb confirm-card surfaces.
+        from prismpy.packaging.manifest import use_case_config_for
         project_config = {
             "project_name": self.config.project.name,
             "region_name": data.region.name,
@@ -3071,12 +3072,10 @@ class PythiaTranslator(PythiaTranslatorBase):
                 "crop_mask": "SPAM 2020",
                 "boundaries": boundary_label,
             },
-            "use_case_config": {
-                "yield_forecast": {},
-                "sowing_optimization": {},
-                "drought_management": {},
-                "soil_fertility": {},
-            },
+            # F-BP-18: config-driven from the platform→UC SSOT (was a hardcoded
+            # literal that drifted — it OMITTED livestock_feed though the
+            # consumer supports pythia UC6). pythia now gains livestock_feed.
+            "use_case_config": use_case_config_for("pythia"),
         }
 
         # Build the baseline scenario block. Every PYTHIA package

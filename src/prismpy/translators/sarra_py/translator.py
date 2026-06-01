@@ -1891,6 +1891,7 @@ class SarraPyTranslator(SarraPyTranslatorBase):
             resolved_boundary_source, manifest_gadm_level,
         )
 
+        from prismpy.packaging.manifest import use_case_config_for
         project_config = {
             "project_name": self.config.project.name,
             "region_name": data.region.name,
@@ -1912,13 +1913,11 @@ class SarraPyTranslator(SarraPyTranslatorBase):
                 "crop_parameters": "SARRA-Py defaults",
             },
             "package_name": f"{data.region.name.lower()}_{self.config.crop.name.lower()}_sarra_py_package",
-            "use_case_config": {
-                "yield_forecast": {},
-                "sowing_optimization": {},
-                "drought_management": {},
-                "soil_fertility": {},
-                "livestock_feed": {},
-            },
+            # F-BP-18: config-driven from the platform→UC SSOT (was a hardcoded
+            # literal). Net delta: drops soil_fertility (sarra_py is NOT in the
+            # soil_fertility SSOT — dropped per F-BP-19; the consumer rejects it),
+            # aligning producer↔consumer. Keeps yield/sowing/drought/livestock.
+            "use_case_config": use_case_config_for("sarra_py"),
         }
 
         # V2-20: Legacy System B provenance.json generation deleted.
