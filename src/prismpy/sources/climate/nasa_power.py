@@ -288,6 +288,15 @@ class NASAPowerSource(DataSource):
                             cached_data.records, start_date, end_date
                         )
                         cached_data.records = filtered
+                        coverage_error = self._coverage_error(
+                            filtered, start_date, end_date, latest_available,
+                        )
+                        if coverage_error is not None:
+                            return self.create_result(
+                                success=False,
+                                errors=[coverage_error],
+                                metadata=metadata,
+                            )
                         return self.create_result(
                             success=True,
                             data=cached_data,
@@ -357,7 +366,7 @@ class NASAPowerSource(DataSource):
             except Exception as e:
                 return self.create_result(
                     success=False,
-                    errors=[f"API request failed for year {year}: {e}"],
+                    errors=[f"failed to load climate for {year}: {e}"],
                     metadata=metadata,
                 )
 
@@ -399,6 +408,20 @@ class NASAPowerSource(DataSource):
         metadata["years_fetched"] = years_to_fetch
         metadata["record_count"] = len(climate_ts.records)
         metadata["parameters_retrieved"] = params_to_fetch
+
+        # Producer-honesty: report success only when the loaded climate covers
+        # the full requested window. An uncovered window is reported
+        # unavailable with an honest reason, never a silent partial.
+        coverage_error = self._coverage_error(
+            filtered_records, start_date, end_date, latest_available,
+        )
+        if coverage_error is not None:
+            return self.create_result(
+                success=False,
+                errors=[coverage_error],
+                warnings=warnings,
+                metadata=metadata,
+            )
 
         return self.create_result(
             success=True,
@@ -692,6 +715,46 @@ class NASAPowerSource(DataSource):
         filtered = [r for r in records if start_date <= r.date <= end_date]
         filtered.sort(key=lambda r: r.date)
         return filtered
+
+    def _coverage_error(self, records, start_date, end_date, latest_available):
+        """Return an honest error when ``records`` do not cover every day of
+        ``[start_date, end_date]`` with all required values, else ``None``.
+
+        The bar is endpoint-bracket plus zero interior missing days: the
+        series must begin on or before ``start_date``, end on or after
+        ``end_date``, and carry tmin / tmax / srad / precip for every calendar
+        day in the window (NASA POWER serves -999 for a gap, mapped to ``None``
+        on convert, so a fill counts as missing). Coverage honesty lives here
+        at the producer boundary; the climate is never gap-filled to pass.
+        """
+        required = ("tmin", "tmax", "srad", "precip")
+        complete_days = {
+            r.date for r in records
+            if start_date <= r.date <= end_date
+            and all(getattr(r, field) is not None for field in required)
+        }
+        needed_days = (end_date - start_date).days + 1
+        if len(complete_days) == needed_days:
+            return None
+
+        # Distinguish the honest causes. A series whose last day falls short of
+        # the window end, while the window itself runs past the latest
+        # published date, is simply not published yet; any other shortfall over
+        # an otherwise-published span is an incomplete or corrupt download.
+        in_window = [r.date for r in records
+                     if start_date <= r.date <= end_date]
+        last_covered = max(in_window) if in_window else None
+        if (last_covered is None or last_covered < end_date) \
+                and latest_available < end_date:
+            return (
+                f"climate through {end_date.isoformat()} is not yet published "
+                f"by NASA POWER (latest available: "
+                f"{latest_available.isoformat()})"
+            )
+        return (
+            f"incomplete or corrupt climate over {start_date.isoformat()} to "
+            f"{end_date.isoformat()} — refetch"
+        )
 
     def _get_year_cache_path(self, lat: float, lon: float, year: int) -> Path:
         """Get per-year cache file path for climate data."""
