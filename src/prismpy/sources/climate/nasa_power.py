@@ -315,9 +315,8 @@ class NASAPowerSource(DataSource):
             raise_if_cancelled(cancel_check, f"nasa_power.year={year}")
 
             year_start = date(year, 1, 1)
-            # Clamp the year's end to the requested window and to the latest
-            # date NASA POWER has published, so a request never reaches past
-            # published data into the future.
+            # Clamp the year end to the requested window and the latest
+            # published date so a fetch never reaches into the future.
             year_end = min(date(year, 12, 31), end_date, latest_available)
             try:
                 nasa_data = self._fetch_from_api(
@@ -337,10 +336,8 @@ class NASAPowerSource(DataSource):
                 )
                 cached_records.extend(year_ts.records)
 
-                # Cache the year only when it was fetched in full. A year the
-                # clamp shortened (its end is the window edge or the latest
-                # published date, not Dec 31) is partial and must not be reused
-                # as a complete year on a later run.
+                # Cache a year only when fetched in full; a clamp-shortened
+                # (partial) year must not be reused as complete on a later run.
                 if year_end == date(year, 12, 31):
                     year_cache_path = self._get_year_cache_path(lat, lon, year)
                     try:
@@ -737,10 +734,8 @@ class NASAPowerSource(DataSource):
         if len(complete_days) == needed_days:
             return None
 
-        # Distinguish the honest causes. A series whose last day falls short of
-        # the window end, while the window itself runs past the latest
-        # published date, is simply not published yet; any other shortfall over
-        # an otherwise-published span is an incomplete or corrupt download.
+        # A shortfall whose last covered day stops before a window that runs
+        # past the latest published date is unpublished; any other is corrupt.
         in_window = [r.date for r in records
                      if start_date <= r.date <= end_date]
         last_covered = max(in_window) if in_window else None

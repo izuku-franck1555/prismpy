@@ -76,10 +76,10 @@ def _run(src, start, end, latest, fetch, *, use_cache=False):
         )
 
 
-# ── T1 — Hukunsti repro (user-facing) ──────────────────────────────────────
-def test_t1_hukunsti_repro_cells_get_climate(tmp_path):
+# ── Reported repro: a wholly-past cross-year season loads its cells ─────────
+def test_reported_cross_year_season_loads_cells(tmp_path):
     # Cross-year season entirely in the past; published latest is well past the
-    # window end → the cells must load (the 0/646 all-unavailable bug is fixed).
+    # window end → the cells must load (the all-cells-unavailable bug is fixed).
     start, end, latest = date(2025, 1, 1), date(2026, 3, 15), date(2026, 5, 15)
     result = _run(_make_source(tmp_path), start, end, latest,
                   _fake_api(served_through=latest))
@@ -89,17 +89,21 @@ def test_t1_hukunsti_repro_cells_get_climate(tmp_path):
     assert start in days and end in days
 
 
-# ── T2 — coverage invariant, all three arms ────────────────────────────────
-def test_t2_fully_covered_is_success(tmp_path):
+# ── Coverage invariant: covered succeeds, uncovered is unavailable ─────────
+def test_fully_covered_window_succeeds_without_synthesis(tmp_path):
+    # A wholly-past window the API fully serves succeeds, brackets both
+    # endpoints, and returns only real served days (no synthesized rows).
     start, end, latest = date(2025, 1, 1), date(2025, 6, 30), date(2026, 1, 1)
-    result = _run(_make_source(tmp_path), start, end, latest,
-                  _fake_api(served_through=latest))
+    fake = _fake_api(served_through=latest)
+    result = _run(_make_source(tmp_path), start, end, latest, fake)
     assert result.success is True
     recs = sorted(result.data.records, key=lambda r: r.date)
     assert recs[0].date <= start and recs[-1].date >= end
+    served = {start + timedelta(n) for n in range((end - start).days + 1)}
+    assert {r.date for r in recs} <= served
 
 
-def test_t2_future_end_is_unavailable(tmp_path):
+def test_future_end_is_unavailable(tmp_path):
     start, end, latest = date(2025, 1, 1), date(2026, 12, 31), date(2026, 5, 15)
     result = _run(_make_source(tmp_path), start, end, latest,
                   _fake_api(served_through=latest))
@@ -107,7 +111,7 @@ def test_t2_future_end_is_unavailable(tmp_path):
     assert any("not yet published" in e for e in result.errors)
 
 
-def test_t2_transient_failure_is_unavailable(tmp_path):
+def test_transient_failure_is_unavailable(tmp_path):
     start, end, latest = date(2025, 1, 1), date(2026, 3, 15), date(2026, 5, 15)
 
     def boom(self, lat, lon, start_date, end_date, parameters,
@@ -119,7 +123,7 @@ def test_t2_transient_failure_is_unavailable(tmp_path):
     assert any("failed to load climate" in e for e in result.errors)
 
 
-def test_t2_cancel_propagates_not_swallowed(tmp_path):
+def test_cancel_propagates_not_swallowed(tmp_path):
     start, end, latest = date(2025, 1, 1), date(2026, 3, 15), date(2026, 5, 15)
 
     def cancel(self, lat, lon, start_date, end_date, parameters,
@@ -130,7 +134,7 @@ def test_t2_cancel_propagates_not_swallowed(tmp_path):
         _run(_make_source(tmp_path), start, end, latest, cancel)
 
 
-def test_silent_partial_guard_interior_gap_is_unavailable(tmp_path):
+def test_interior_gap_is_unavailable_not_silent_partial(tmp_path):
     # A window whose interior has a missing day (a -999 fill -> None) must NOT
     # be reported success=True — the producer cannot emit a silent partial.
     start, end, latest = date(2025, 1, 1), date(2025, 3, 31), date(2026, 1, 1)
@@ -149,8 +153,8 @@ def test_silent_partial_guard_interior_gap_is_unavailable(tmp_path):
     assert any("incomplete or corrupt" in e for e in result.errors)
 
 
-# ── T3 — genuinely-future: structural unreachability + anti-cooking ─────────
-def test_t3_no_future_requested_no_fabrication_earlier_cached(tmp_path):
+# ── Genuinely-future windows: no future request, no fabrication ────────────
+def test_no_future_requested_no_fabrication_earlier_cached(tmp_path):
     start, end, latest = date(2025, 1, 1), date(2026, 12, 31), date(2026, 5, 15)
     fake = _fake_api(served_through=latest)
     result = _run(_make_source(tmp_path), start, end, latest, fake,
@@ -172,20 +176,8 @@ def test_t3_no_future_requested_no_fabrication_earlier_cached(tmp_path):
     assert not any(n.endswith("_2026.json") for n in cached), cached
 
 
-def test_t3_covered_records_are_exactly_served_no_synthesis(tmp_path):
-    # On a covered window every returned record is a real served day — no
-    # interpolated / forward-filled / synthesized row appears.
-    start, end, latest = date(2025, 1, 1), date(2025, 4, 30), date(2026, 1, 1)
-    fake = _fake_api(served_through=latest)
-    result = _run(_make_source(tmp_path), start, end, latest, fake)
-    assert result.success is True
-    returned = {r.date for r in result.data.records}
-    served = {start + timedelta(n) for n in range((end - start).days + 1)}
-    assert returned <= served
-
-
-# ── T4 — cache integrity (A5) ──────────────────────────────────────────────
-def test_t4_partial_boundary_year_not_cached_and_refetched(tmp_path):
+# ── Cache integrity: a clamped partial year is never cached as full ────────
+def test_partial_boundary_year_not_cached_and_refetched(tmp_path):
     start, end, latest = date(2025, 1, 1), date(2026, 6, 30), date(2026, 6, 20)
     src = _make_source(tmp_path)
     fake1 = _fake_api(served_through=latest)
@@ -200,8 +192,8 @@ def test_t4_partial_boundary_year_not_cached_and_refetched(tmp_path):
     assert all(s.year != 2025 for (s, _e) in fake2.calls), fake2.calls
 
 
-# ── T5 — #24: exactly one "latest published date" computation ───────────────
-def test_t5_single_latest_available_source():
+# ── One published-date source: no current-date arithmetic in the source ────
+def test_single_latest_available_source():
     tree = ast.parse(_NASA_POWER.read_text(encoding="utf-8"))
     today_calls = [
         getattr(node, "lineno", "?")
@@ -217,8 +209,8 @@ def test_t5_single_latest_available_source():
     )
 
 
-# ── T6 — A6 helper: conservative, floored, deterministic ───────────────────
-def test_t6_availability_helper_arithmetic_floor_underclaim():
+# ── Published-date helper: conservative, floored, deterministic ────────────
+def test_availability_helper_arithmetic_floor_underclaim():
     today = date(2026, 6, 2)
     assert nasa_power_latest_available_date(10, today) == date(2026, 5, 23)
     assert nasa_power_latest_available_date(DEFAULT_LAG_DAYS, today) == (
