@@ -318,9 +318,9 @@ class NASAPowerSource(DataSource):
             # Clamp the year end to the requested window and the latest
             # published date so a fetch never reaches into the future.
             year_end = min(date(year, 12, 31), end_date, latest_available)
-            # A year wholly past the latest published date has nothing to
-            # fetch — skip it so the coverage check reports it unavailable.
-            if year_end < year_start:
+            # Skip a year with no in-window published day (wholly future, or a
+            # window starting after the latest published date) — nothing to fetch.
+            if year_end < max(year_start, start_date):
                 continue
             try:
                 nasa_data = self._fetch_from_api(

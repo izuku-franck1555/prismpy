@@ -190,6 +190,17 @@ def test_year_wholly_after_latest_is_not_fetched(tmp_path):
     assert all(s.year != 2027 for (s, _e) in fake.calls), fake.calls
 
 
+def test_future_start_within_year_issues_no_fetch(tmp_path):
+    # A window starting after the latest published date (within one year) must
+    # issue no fetch for that year — not a doomed fetch filtered out of window.
+    start, end, latest = date(2026, 10, 1), date(2026, 12, 31), date(2026, 5, 15)
+    fake = _fake_api(served_through=latest)
+    result = _run(_make_source(tmp_path), start, end, latest, fake)
+    assert result.success is False
+    assert any("not yet published" in e for e in result.errors)
+    assert fake.calls == [], fake.calls
+
+
 # ── Cache integrity: a clamped partial year is never cached as full ────────
 def test_partial_boundary_year_not_cached_and_refetched(tmp_path):
     start, end, latest = date(2025, 1, 1), date(2026, 6, 30), date(2026, 6, 20)
