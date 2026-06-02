@@ -176,6 +176,20 @@ def test_no_future_requested_no_fabrication_earlier_cached(tmp_path):
     assert not any(n.endswith("_2026.json") for n in cached), cached
 
 
+def test_year_wholly_after_latest_is_not_fetched(tmp_path):
+    # A requested window reaching into a calendar year entirely past the latest
+    # published date must not issue an inverted (end < start) fetch for that
+    # year; the year is skipped and the window reports unavailable.
+    start, end, latest = date(2025, 1, 1), date(2027, 6, 30), date(2026, 5, 15)
+    fake = _fake_api(served_through=latest)
+    result = _run(_make_source(tmp_path), start, end, latest, fake)
+    assert result.success is False
+    assert any("not yet published" in e for e in result.errors)
+    # no fetch is inverted, and the wholly-future year is never requested.
+    assert all(s <= e for (s, e) in fake.calls), fake.calls
+    assert all(s.year != 2027 for (s, _e) in fake.calls), fake.calls
+
+
 # ── Cache integrity: a clamped partial year is never cached as full ────────
 def test_partial_boundary_year_not_cached_and_refetched(tmp_path):
     start, end, latest = date(2025, 1, 1), date(2026, 6, 30), date(2026, 6, 20)
