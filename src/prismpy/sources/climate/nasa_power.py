@@ -29,6 +29,10 @@ import pandas as pd
 import requests
 
 from prismpy.sources.climate._cancel import PipelineCancelled, raise_if_cancelled
+from prismpy.sources.climate._availability import (
+    DEFAULT_LAG_DAYS,
+    nasa_power_latest_available_date,
+)
 
 from prismpy.models.climate import ClimateRecord, ClimateTimeSeries
 from prismpy.models.region import Region
@@ -79,6 +83,9 @@ class NASAPowerConfig:
     retry_delay: float = 5.0  # Delay between retries (seconds)
     request_delay: float = 1.0  # Delay between requests (rate limiting)
     parameters: List[str] = None  # Parameters to retrieve
+    # Days behind "today" (UTC) that NASA POWER data is assumed published;
+    # raise it for an even more conservative published-date estimate.
+    climate_lag_days: int = DEFAULT_LAG_DAYS
 
     def __post_init__(self):
         if self.parameters is None:
