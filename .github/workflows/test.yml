@@ -1,0 +1,66 @@
+# General test gate for prismpy.
+#
+# Runs the unit and structural test suites on a pinned Linux
+# runner so changes to the package source or those tests are
+# checked before merge. The existing bound-gen workflow is
+# path-filtered to the bounds and koppen substrate, so the rest
+# of the package (the climate sources included) had no CI gate;
+# this workflow covers that gap.
+name: test
+
+# Least privilege: the job only reads the repository to check out
+# and run tests. No write token is exposed to code that runs from
+# a pull request.
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/prismpy/**'
+      - 'tests/unit/**'
+      - 'tests/structural/**'
+      - 'pyproject.toml'
+      - '.github/workflows/test.yml'
+  pull_request:
+    paths:
+      - 'src/prismpy/**'
+      - 'tests/unit/**'
+      - 'tests/structural/**'
+      - 'pyproject.toml'
+      - '.github/workflows/test.yml'
+
+jobs:
+  test:
+    # Pin the runner image (not ubuntu-latest) so the toolchain
+    # stays stable across GitHub's image bumps.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+        with:
+          # Drop the auth header after checkout so the later
+          # steps, which run pull-request code, cannot reach the
+          # repository write token.
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          # Matches the local development interpreter and stays
+          # within the project's >=3.10,<3.13 requirement.
+          python-version: "3.11"
+
+      - name: Install prismpy and dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+
+      - name: Run unit and structural tests
+        # The pyproject addopts already pin "-v -m 'not slow'", so
+        # the slow tests that need real CDS credentials are
+        # excluded here without any extra flag.
+        run: pytest tests/unit tests/structural
