@@ -328,12 +328,16 @@ class NASAPowerSource(DataSource):
                 )
                 cached_records.extend(year_ts.records)
 
-                # Cache this year
-                year_cache_path = self._get_year_cache_path(lat, lon, year)
-                try:
-                    self._save_climate_cache(year_ts, year_cache_path)
-                except Exception as e:
-                    warnings.append(f"Failed to cache year {year}: {e}")
+                # Cache the year only when it was fetched in full. A year the
+                # clamp shortened (its end is the window edge or the latest
+                # published date, not Dec 31) is partial and must not be reused
+                # as a complete year on a later run.
+                if year_end == date(year, 12, 31):
+                    year_cache_path = self._get_year_cache_path(lat, lon, year)
+                    try:
+                        self._save_climate_cache(year_ts, year_cache_path)
+                    except Exception as e:
+                        warnings.append(f"Failed to cache year {year}: {e}")
 
                 # V2-22b L: cancel check BEFORE the inter-year sleep so
                 # operator cancel is observed on the next iteration
