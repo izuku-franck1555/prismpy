@@ -20,7 +20,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -29,6 +29,10 @@ import pandas as pd
 import requests
 
 from prismpy.sources.climate._cancel import PipelineCancelled, raise_if_cancelled
+from prismpy.sources.climate._availability import (
+    DEFAULT_LAG_DAYS,
+    nasa_power_latest_available_date,
+)
 
 from prismpy.models.climate import ClimateRecord, ClimateTimeSeries
 from prismpy.models.region import Region
@@ -79,6 +83,9 @@ class NASAPowerConfig:
     retry_delay: float = 5.0  # Delay between retries (seconds)
     request_delay: float = 1.0  # Delay between requests (rate limiting)
     parameters: List[str] = None  # Parameters to retrieve
+    # Days behind "today" (UTC) that NASA POWER data is assumed published;
+    # raise it for an even more conservative published-date estimate.
+    climate_lag_days: int = DEFAULT_LAG_DAYS
 
     def __post_init__(self):
         if self.parameters is None:
@@ -219,9 +226,16 @@ class NASAPowerSource(DataSource):
         metadata["latitude"] = lat
         metadata["longitude"] = lon
 
+        # Single source of NASA POWER's latest published date — the default
+        # end date, the per-year fetch clamp, and the coverage check all read
+        # this one value so they cannot disagree.
+        latest_available = nasa_power_latest_available_date(
+            self.config.climate_lag_days,
+        )
+
         # Parse dates
         start_date = self._parse_date(start_date) if start_date else self.SRAD_EARLIEST_DATE
-        end_date = self._parse_date(end_date) if end_date else date.today() - timedelta(days=1)
+        end_date = self._parse_date(end_date) if end_date else latest_available
 
         # Validate date range
         if start_date < self.SRAD_EARLIEST_DATE:
@@ -274,6 +288,15 @@ class NASAPowerSource(DataSource):
                             cached_data.records, start_date, end_date
                         )
                         cached_data.records = filtered
+                        coverage_error = self._coverage_error(
+                            filtered, start_date, end_date, latest_available,
+                        )
+                        if coverage_error is not None:
+                            return self.create_result(
+                                success=False,
+                                errors=[coverage_error],
+                                metadata=metadata,
+                            )
                         return self.create_result(
                             success=True,
                             data=cached_data,
@@ -292,9 +315,13 @@ class NASAPowerSource(DataSource):
             raise_if_cancelled(cancel_check, f"nasa_power.year={year}")
 
             year_start = date(year, 1, 1)
-            year_end = date(year, 12, 31)
-            # Clamp to actual request bounds for first/last year isn't needed —
-            # we always cache full years for maximum reuse
+            # Clamp the year end to the requested window and the latest
+            # published date so a fetch never reaches into the future.
+            year_end = min(date(year, 12, 31), end_date, latest_available)
+            # Skip a year with no in-window published day (wholly future, or a
+            # window starting after the latest published date) — nothing to fetch.
+            if year_end < max(year_start, start_date):
+                continue
             try:
                 nasa_data = self._fetch_from_api(
                     lat=lat,
@@ -313,12 +340,14 @@ class NASAPowerSource(DataSource):
                 )
                 cached_records.extend(year_ts.records)
 
-                # Cache this year
-                year_cache_path = self._get_year_cache_path(lat, lon, year)
-                try:
-                    self._save_climate_cache(year_ts, year_cache_path)
-                except Exception as e:
-                    warnings.append(f"Failed to cache year {year}: {e}")
+                # Cache a year only when fetched in full; a clamp-shortened
+                # (partial) year must not be reused as complete on a later run.
+                if year_end == date(year, 12, 31):
+                    year_cache_path = self._get_year_cache_path(lat, lon, year)
+                    try:
+                        self._save_climate_cache(year_ts, year_cache_path)
+                    except Exception as e:
+                        warnings.append(f"Failed to cache year {year}: {e}")
 
                 # V2-22b L: cancel check BEFORE the inter-year sleep so
                 # operator cancel is observed on the next iteration
@@ -338,7 +367,7 @@ class NASAPowerSource(DataSource):
             except Exception as e:
                 return self.create_result(
                     success=False,
-                    errors=[f"API request failed for year {year}: {e}"],
+                    errors=[f"failed to load climate for {year}: {e}"],
                     metadata=metadata,
                 )
 
@@ -380,6 +409,20 @@ class NASAPowerSource(DataSource):
         metadata["years_fetched"] = years_to_fetch
         metadata["record_count"] = len(climate_ts.records)
         metadata["parameters_retrieved"] = params_to_fetch
+
+        # Producer-honesty: report success only when the loaded climate covers
+        # the full requested window. An uncovered window is reported
+        # unavailable with an honest reason, never a silent partial.
+        coverage_error = self._coverage_error(
+            filtered_records, start_date, end_date, latest_available,
+        )
+        if coverage_error is not None:
+            return self.create_result(
+                success=False,
+                errors=[coverage_error],
+                warnings=warnings,
+                metadata=metadata,
+            )
 
         return self.create_result(
             success=True,
@@ -673,6 +716,44 @@ class NASAPowerSource(DataSource):
         filtered = [r for r in records if start_date <= r.date <= end_date]
         filtered.sort(key=lambda r: r.date)
         return filtered
+
+    def _coverage_error(self, records, start_date, end_date, latest_available):
+        """Return an honest error when ``records`` do not cover every day of
+        ``[start_date, end_date]`` with all required values, else ``None``.
+
+        The bar is endpoint-bracket plus zero interior missing days: the
+        series must begin on or before ``start_date``, end on or after
+        ``end_date``, and carry tmin / tmax / srad / precip for every calendar
+        day in the window (NASA POWER serves -999 for a gap, mapped to ``None``
+        on convert, so a fill counts as missing). Coverage honesty lives here
+        at the producer boundary; the climate is never gap-filled to pass.
+        """
+        required = ("tmin", "tmax", "srad", "precip")
+        complete_days = {
+            r.date for r in records
+            if start_date <= r.date <= end_date
+            and all(getattr(r, field) is not None for field in required)
+        }
+        needed_days = (end_date - start_date).days + 1
+        if len(complete_days) == needed_days:
+            return None
+
+        # A shortfall whose last covered day stops before a window that runs
+        # past the latest published date is unpublished; any other is corrupt.
+        in_window = [r.date for r in records
+                     if start_date <= r.date <= end_date]
+        last_covered = max(in_window) if in_window else None
+        if (last_covered is None or last_covered < end_date) \
+                and latest_available < end_date:
+            return (
+                f"climate through {end_date.isoformat()} is not yet published "
+                f"by NASA POWER (latest available: "
+                f"{latest_available.isoformat()})"
+            )
+        return (
+            f"incomplete or corrupt climate over {start_date.isoformat()} to "
+            f"{end_date.isoformat()} — refetch"
+        )
 
     def _get_year_cache_path(self, lat: float, lon: float, year: int) -> Path:
         """Get per-year cache file path for climate data."""
