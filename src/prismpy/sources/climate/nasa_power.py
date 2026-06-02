@@ -20,7 +20,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -226,9 +226,16 @@ class NASAPowerSource(DataSource):
         metadata["latitude"] = lat
         metadata["longitude"] = lon
 
+        # Single source of NASA POWER's latest published date — the default
+        # end date, the per-year fetch clamp, and the coverage check all read
+        # this one value so they cannot disagree.
+        latest_available = nasa_power_latest_available_date(
+            self.config.climate_lag_days,
+        )
+
         # Parse dates
         start_date = self._parse_date(start_date) if start_date else self.SRAD_EARLIEST_DATE
-        end_date = self._parse_date(end_date) if end_date else date.today() - timedelta(days=1)
+        end_date = self._parse_date(end_date) if end_date else latest_available
 
         # Validate date range
         if start_date < self.SRAD_EARLIEST_DATE:
@@ -299,9 +306,10 @@ class NASAPowerSource(DataSource):
             raise_if_cancelled(cancel_check, f"nasa_power.year={year}")
 
             year_start = date(year, 1, 1)
-            year_end = date(year, 12, 31)
-            # Clamp to actual request bounds for first/last year isn't needed —
-            # we always cache full years for maximum reuse
+            # Clamp the year's end to the requested window and to the latest
+            # date NASA POWER has published, so a request never reaches past
+            # published data into the future.
+            year_end = min(date(year, 12, 31), end_date, latest_available)
             try:
                 nasa_data = self._fetch_from_api(
                     lat=lat,
