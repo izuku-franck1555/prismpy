@@ -735,6 +735,10 @@ class NASAPowerSource(DataSource):
         """
         normalize_missing(records)
         fill_provenance = fill_short_gaps(records)
+        # An interpolated temperature can cross its real counterpart; drop any
+        # tmin/tmax pair the fill left inverted rather than emit an impossible
+        # record — the day then fails coverage honestly.
+        normalize_missing(records)
         recompute_means(records)
         coverage_error = self._coverage_error(
             records, start_date, end_date, latest_available,

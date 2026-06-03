@@ -16,6 +16,7 @@ from unittest import mock
 
 import pytest
 
+from prismpy.models.climate import ClimateRecord
 from prismpy.sources.climate import nasa_power as np_mod
 from prismpy.sources.climate._availability import (
     DEFAULT_LAG_DAYS,
@@ -319,6 +320,23 @@ def test_temp_gap_boundary_five_loads_six_unavailable(tmp_path):
                 temp_holes(5)).success is True
     assert _run(_make_source(tmp_path), start, end, latest,
                 temp_holes(6)).success is False
+
+
+def test_recover_coverage_rejects_a_fill_that_inverts_temperatures(tmp_path):
+    # Filling a missing tmin can produce a value above the day's real tmax; the
+    # impossible pair is dropped and the window reports unavailable, never an
+    # emitted tmin > tmax record.
+    src = _make_source(tmp_path)
+    recs = [
+        ClimateRecord(date=date(2025, 1, 1), tmax=10.0, tmin=0.0, precip=0.0, srad=10.0),
+        ClimateRecord(date=date(2025, 1, 2), tmax=2.0, tmin=None, precip=0.0, srad=10.0),
+        ClimateRecord(date=date(2025, 1, 3), tmax=10.0, tmin=10.0, precip=0.0, srad=10.0),
+    ]
+    error, _prov = src._recover_coverage(
+        recs, date(2025, 1, 1), date(2025, 1, 3), date(2026, 1, 1))
+    assert error is not None
+    mid = recs[1]
+    assert mid.tmin is None or mid.tmax is None or mid.tmin <= mid.tmax
 
 
 def test_impossible_srad_value_is_treated_as_missing_and_recovered(tmp_path):
