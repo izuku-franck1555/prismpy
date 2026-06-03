@@ -48,7 +48,8 @@ class ClimateRecord:
 
     def __post_init__(self):
         """Compute derived values if not provided."""
-        if self.tmean is None:
+        if (self.tmean is None and self.tmax is not None
+                and self.tmin is not None):
             self.tmean = (self.tmax + self.tmin) / 2
 
     @property

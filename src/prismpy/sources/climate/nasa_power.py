@@ -33,6 +33,11 @@ from prismpy.sources.climate._availability import (
     DEFAULT_LAG_DAYS,
     nasa_power_latest_available_date,
 )
+from prismpy.sources.climate._gapfill import (
+    fill_short_gaps,
+    normalize_missing,
+    recompute_means,
+)
 
 from prismpy.models.climate import ClimateRecord, ClimateTimeSeries
 from prismpy.models.region import Region
@@ -288,7 +293,7 @@ class NASAPowerSource(DataSource):
                             cached_data.records, start_date, end_date
                         )
                         cached_data.records = filtered
-                        coverage_error = self._coverage_error(
+                        coverage_error, fill_provenance = self._recover_coverage(
                             filtered, start_date, end_date, latest_available,
                         )
                         if coverage_error is not None:
@@ -297,6 +302,7 @@ class NASAPowerSource(DataSource):
                                 errors=[coverage_error],
                                 metadata=metadata,
                             )
+                        cached_data.metadata["gap_fill"] = fill_provenance
                         return self.create_result(
                             success=True,
                             data=cached_data,
@@ -413,7 +419,7 @@ class NASAPowerSource(DataSource):
         # Producer-honesty: report success only when the loaded climate covers
         # the full requested window. An uncovered window is reported
         # unavailable with an honest reason, never a silent partial.
-        coverage_error = self._coverage_error(
+        coverage_error, fill_provenance = self._recover_coverage(
             filtered_records, start_date, end_date, latest_available,
         )
         if coverage_error is not None:
@@ -423,6 +429,7 @@ class NASAPowerSource(DataSource):
                 warnings=warnings,
                 metadata=metadata,
             )
+        climate_ts.metadata["gap_fill"] = fill_provenance
 
         return self.create_result(
             success=True,
@@ -716,6 +723,27 @@ class NASAPowerSource(DataSource):
         filtered = [r for r in records if start_date <= r.date <= end_date]
         filtered.sort(key=lambda r: r.date)
         return filtered
+
+    def _recover_coverage(self, records, start_date, end_date, latest_available):
+        """Recover short interior gaps, then assess window coverage.
+
+        Normalizes impossible/sentinel values to missing and linearly fills
+        short interior runs of solar radiation and temperature from their
+        bracketing real days (rain is never filled), then returns an honest
+        coverage error (or ``None``) plus the per-variable fill record for
+        provenance. Mutates ``records`` in place.
+        """
+        normalize_missing(records)
+        fill_provenance = fill_short_gaps(records)
+        # An interpolated temperature can cross its real counterpart; drop any
+        # tmin/tmax pair the fill left inverted rather than emit an impossible
+        # record — the day then fails coverage honestly.
+        normalize_missing(records)
+        recompute_means(records)
+        coverage_error = self._coverage_error(
+            records, start_date, end_date, latest_available,
+        )
+        return coverage_error, fill_provenance
 
     def _coverage_error(self, records, start_date, end_date, latest_available):
         """Return an honest error when ``records`` do not cover every day of

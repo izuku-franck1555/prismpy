@@ -16,6 +16,7 @@ from unittest import mock
 
 import pytest
 
+from prismpy.models.climate import ClimateRecord
 from prismpy.sources.climate import nasa_power as np_mod
 from prismpy.sources.climate._availability import (
     DEFAULT_LAG_DAYS,
@@ -134,9 +135,10 @@ def test_cancel_propagates_not_swallowed(tmp_path):
         _run(_make_source(tmp_path), start, end, latest, cancel)
 
 
-def test_interior_gap_is_unavailable_not_silent_partial(tmp_path):
-    # A window whose interior has a missing day (a -999 fill -> None) must NOT
-    # be reported success=True — the producer cannot emit a silent partial.
+def test_interior_srad_gap_is_recovered_with_provenance(tmp_path):
+    # A single interior SRAD gap (-999 -> missing) is recovered by linear
+    # interpolation from its bracketing days: the cell loads, the fill is
+    # surfaced in provenance, and no -999/None reaches the output.
     start, end, latest = date(2025, 1, 1), date(2025, 3, 31), date(2026, 1, 1)
     fake = _fake_api(served_through=latest)
 
@@ -144,13 +146,14 @@ def test_interior_gap_is_unavailable_not_silent_partial(tmp_path):
                cancel_check=None, on_attempt=None):
         served = fake(self, lat, lon, start_date, end_date, parameters)
         hole = date(2025, 2, 10).strftime("%Y%m%d")
-        if hole in served.get("ALLSKY_SFC_SW_DWN", {}):
-            served["ALLSKY_SFC_SW_DWN"][hole] = -999
+        served["ALLSKY_SFC_SW_DWN"][hole] = -999
         return served
 
     result = _run(_make_source(tmp_path), start, end, latest, gapped)
-    assert result.success is False
-    assert any("incomplete or corrupt" in e for e in result.errors)
+    assert result.success is True
+    assert result.data.metadata.get("gap_fill") == {
+        "srad": {"n_filled_days": 1, "method": "linear-interp"}}
+    assert all(r.srad not in (None, -999, -999.0) for r in result.data.records)
 
 
 # ── Genuinely-future windows: no future request, no fabrication ────────────
@@ -250,6 +253,128 @@ def test_availability_helper_arithmetic_floor_underclaim():
     )
     # The estimate is always strictly in the past (under-claiming).
     assert nasa_power_latest_available_date(10, today) < today
+
+
+# ── Var-aware recovery: short gaps load, rain / over-long gaps reject ──────
+def test_clean_cell_carries_empty_fill_record(tmp_path):
+    start, end, latest = date(2025, 1, 1), date(2025, 3, 31), date(2026, 1, 1)
+    result = _run(_make_source(tmp_path), start, end, latest,
+                  _fake_api(served_through=latest))
+    assert result.success is True
+    assert result.data.metadata.get("gap_fill") == {}
+
+
+def test_interior_rain_gap_is_unavailable_no_fabrication(tmp_path):
+    start, end, latest = date(2025, 1, 1), date(2025, 3, 31), date(2026, 1, 1)
+    fake = _fake_api(served_through=latest)
+
+    def rain_hole(self, lat, lon, start_date, end_date, parameters,
+                  cancel_check=None, on_attempt=None):
+        served = fake(self, lat, lon, start_date, end_date, parameters)
+        served["PRECTOTCORR"][date(2025, 2, 10).strftime("%Y%m%d")] = -999
+        return served
+
+    result = _run(_make_source(tmp_path), start, end, latest, rain_hole)
+    assert result.success is False
+    assert any("incomplete or corrupt" in e for e in result.errors)
+    assert result.data is None or all(
+        r.precip not in (-999, -999.0) for r in result.data.records)
+
+
+def test_no_sentinel_or_impossible_in_loaded_output(tmp_path):
+    # A loaded cell whose SRAD gap was recovered carries no missing or
+    # impossible value in any required field.
+    start, end, latest = date(2025, 1, 1), date(2025, 3, 31), date(2026, 1, 1)
+    fake = _fake_api(served_through=latest)
+
+    def gapped(self, lat, lon, start_date, end_date, parameters,
+               cancel_check=None, on_attempt=None):
+        served = fake(self, lat, lon, start_date, end_date, parameters)
+        served["ALLSKY_SFC_SW_DWN"][date(2025, 2, 10).strftime("%Y%m%d")] = -999
+        return served
+
+    result = _run(_make_source(tmp_path), start, end, latest, gapped)
+    assert result.success is True
+    for r in result.data.records:
+        assert r.srad not in (None, -999, -999.0) and r.srad > 0
+        assert r.precip not in (None, -999, -999.0) and r.precip >= 0
+        assert r.tmax is not None and r.tmin is not None and r.tmax >= r.tmin
+
+
+def test_temp_gap_boundary_five_loads_six_unavailable(tmp_path):
+    start, end, latest = date(2025, 1, 1), date(2025, 3, 31), date(2026, 1, 1)
+    fake = _fake_api(served_through=latest)
+
+    def temp_holes(n):
+        def _fetch(self, lat, lon, start_date, end_date, parameters,
+                   cancel_check=None, on_attempt=None):
+            served = fake(self, lat, lon, start_date, end_date, parameters)
+            for k in range(n):
+                key = (date(2025, 2, 10) + timedelta(k)).strftime("%Y%m%d")
+                served["T2M_MIN"][key] = -999
+                served["T2M_MAX"][key] = -999
+            return served
+        return _fetch
+
+    assert _run(_make_source(tmp_path), start, end, latest,
+                temp_holes(5)).success is True
+    assert _run(_make_source(tmp_path), start, end, latest,
+                temp_holes(6)).success is False
+
+
+def test_recover_coverage_rejects_a_fill_that_inverts_temperatures(tmp_path):
+    # Filling a missing tmin can produce a value above the day's real tmax; the
+    # impossible pair is dropped and the window reports unavailable, never an
+    # emitted tmin > tmax record.
+    src = _make_source(tmp_path)
+    recs = [
+        ClimateRecord(date=date(2025, 1, 1), tmax=10.0, tmin=0.0, precip=0.0, srad=10.0),
+        ClimateRecord(date=date(2025, 1, 2), tmax=2.0, tmin=None, precip=0.0, srad=10.0),
+        ClimateRecord(date=date(2025, 1, 3), tmax=10.0, tmin=10.0, precip=0.0, srad=10.0),
+    ]
+    error, _prov = src._recover_coverage(
+        recs, date(2025, 1, 1), date(2025, 1, 3), date(2026, 1, 1))
+    assert error is not None
+    mid = recs[1]
+    assert mid.tmin is None or mid.tmax is None or mid.tmin <= mid.tmax
+
+
+def test_impossible_srad_value_is_treated_as_missing_and_recovered(tmp_path):
+    # A non-sentinel impossible SRAD (<= 0) is treated as missing and
+    # recovered, not admitted as a real value.
+    start, end, latest = date(2025, 1, 1), date(2025, 3, 31), date(2026, 1, 1)
+    fake = _fake_api(served_through=latest)
+
+    def neg_srad(self, lat, lon, start_date, end_date, parameters,
+                 cancel_check=None, on_attempt=None):
+        served = fake(self, lat, lon, start_date, end_date, parameters)
+        served["ALLSKY_SFC_SW_DWN"][date(2025, 2, 10).strftime("%Y%m%d")] = -5.0
+        return served
+
+    result = _run(_make_source(tmp_path), start, end, latest, neg_srad)
+    assert result.success is True
+    assert result.data.metadata.get("gap_fill") == {
+        "srad": {"n_filled_days": 1, "method": "linear-interp"}}
+    assert all(r.srad > 0 for r in result.data.records)
+
+
+def test_real_zero_solar_radiation_loads_and_is_preserved(tmp_path):
+    # A polar-night window of SRAD = 0 loads with the zeros preserved in the
+    # output and nothing interpolated (0 is real, not missing).
+    start, end, latest = date(2025, 1, 1), date(2025, 3, 31), date(2026, 1, 1)
+    fake = _fake_api(served_through=latest)
+
+    def zero_srad(self, lat, lon, start_date, end_date, parameters,
+                  cancel_check=None, on_attempt=None):
+        served = fake(self, lat, lon, start_date, end_date, parameters)
+        for key in served["ALLSKY_SFC_SW_DWN"]:
+            served["ALLSKY_SFC_SW_DWN"][key] = 0.0
+        return served
+
+    result = _run(_make_source(tmp_path), start, end, latest, zero_srad)
+    assert result.success is True
+    assert result.data.metadata.get("gap_fill") == {}
+    assert all(r.srad == 0.0 for r in result.data.records)
 
 
 # ── Consumer-routing pin (forward-prevention, behavior-preserving) ─────────
