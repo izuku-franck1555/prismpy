@@ -134,9 +134,10 @@ def test_cancel_propagates_not_swallowed(tmp_path):
         _run(_make_source(tmp_path), start, end, latest, cancel)
 
 
-def test_interior_gap_is_unavailable_not_silent_partial(tmp_path):
-    # A window whose interior has a missing day (a -999 fill -> None) must NOT
-    # be reported success=True — the producer cannot emit a silent partial.
+def test_interior_srad_gap_is_recovered_with_provenance(tmp_path):
+    # A single interior SRAD gap (-999 -> missing) is recovered by linear
+    # interpolation from its bracketing days: the cell loads, the fill is
+    # surfaced in provenance, and no -999/None reaches the output.
     start, end, latest = date(2025, 1, 1), date(2025, 3, 31), date(2026, 1, 1)
     fake = _fake_api(served_through=latest)
 
@@ -144,13 +145,14 @@ def test_interior_gap_is_unavailable_not_silent_partial(tmp_path):
                cancel_check=None, on_attempt=None):
         served = fake(self, lat, lon, start_date, end_date, parameters)
         hole = date(2025, 2, 10).strftime("%Y%m%d")
-        if hole in served.get("ALLSKY_SFC_SW_DWN", {}):
-            served["ALLSKY_SFC_SW_DWN"][hole] = -999
+        served["ALLSKY_SFC_SW_DWN"][hole] = -999
         return served
 
     result = _run(_make_source(tmp_path), start, end, latest, gapped)
-    assert result.success is False
-    assert any("incomplete or corrupt" in e for e in result.errors)
+    assert result.success is True
+    assert result.data.metadata.get("gap_fill") == {
+        "srad": {"n_filled_days": 1, "method": "linear-interp"}}
+    assert all(r.srad not in (None, -999, -999.0) for r in result.data.records)
 
 
 # ── Genuinely-future windows: no future request, no fabrication ────────────
