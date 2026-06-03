@@ -33,7 +33,11 @@ from prismpy.sources.climate._availability import (
     DEFAULT_LAG_DAYS,
     nasa_power_latest_available_date,
 )
-from prismpy.sources.climate._gapfill import fill_short_gaps, normalize_missing
+from prismpy.sources.climate._gapfill import (
+    fill_short_gaps,
+    normalize_missing,
+    recompute_means,
+)
 
 from prismpy.models.climate import ClimateRecord, ClimateTimeSeries
 from prismpy.models.region import Region
@@ -731,6 +735,7 @@ class NASAPowerSource(DataSource):
         """
         normalize_missing(records)
         fill_provenance = fill_short_gaps(records)
+        recompute_means(records)
         coverage_error = self._coverage_error(
             records, start_date, end_date, latest_available,
         )

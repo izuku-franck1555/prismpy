@@ -61,6 +61,16 @@ def fill_short_gaps(records: List) -> Dict[str, Dict[str, object]]:
     return provenance
 
 
+def recompute_means(records: List) -> None:
+    """Recompute the derived mean temperature, in place, for any day whose
+    ``tmin`` and ``tmax`` are present but whose mean is missing, so a day with
+    a recovered temperature keeps a mean consistent with its endpoints."""
+    for record in records:
+        if (record.tmean is None and record.tmin is not None
+                and record.tmax is not None):
+            record.tmean = (record.tmin + record.tmax) / 2
+
+
 def _fill_field(records: List, field: str) -> int:
     """Fill short, both-sides-bracketed gaps of one field; return the count of
     days filled. A run longer than the cap, or missing a real day on either
