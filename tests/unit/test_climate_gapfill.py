@@ -112,3 +112,13 @@ def test_recompute_means_restores_mean_for_recovered_temps():
     r.tmean = None  # a recovered temperature day whose source mean was missing
     recompute_means([r])
     assert r.tmean == 15.0
+
+
+def test_real_zero_solar_radiation_is_preserved_not_missing():
+    # SRAD of exactly 0.0 is a legitimate high-latitude polar-night value: it
+    # must be kept (not nulled, not interpolated). Only negatives are missing.
+    recs = _srad_seq(date(2025, 6, 1), [0.0, 0.0, 0.0])
+    normalize_missing(recs)
+    assert all(r.srad == 0.0 for r in recs)
+    assert fill_short_gaps(recs) == {}
+    assert all(r.srad == 0.0 for r in recs)

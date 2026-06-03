@@ -358,6 +358,25 @@ def test_impossible_srad_value_is_treated_as_missing_and_recovered(tmp_path):
     assert all(r.srad > 0 for r in result.data.records)
 
 
+def test_real_zero_solar_radiation_loads_and_is_preserved(tmp_path):
+    # A polar-night window of SRAD = 0 loads with the zeros preserved in the
+    # output and nothing interpolated (0 is real, not missing).
+    start, end, latest = date(2025, 1, 1), date(2025, 3, 31), date(2026, 1, 1)
+    fake = _fake_api(served_through=latest)
+
+    def zero_srad(self, lat, lon, start_date, end_date, parameters,
+                  cancel_check=None, on_attempt=None):
+        served = fake(self, lat, lon, start_date, end_date, parameters)
+        for key in served["ALLSKY_SFC_SW_DWN"]:
+            served["ALLSKY_SFC_SW_DWN"][key] = 0.0
+        return served
+
+    result = _run(_make_source(tmp_path), start, end, latest, zero_srad)
+    assert result.success is True
+    assert result.data.metadata.get("gap_fill") == {}
+    assert all(r.srad == 0.0 for r in result.data.records)
+
+
 # ── Consumer-routing pin (forward-prevention, behavior-preserving) ─────────
 def test_climate_consumer_sites_gate_success_before_data():
     for rel in ("acea/translator.py", "craft/translator.py",

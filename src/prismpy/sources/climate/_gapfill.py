@@ -29,10 +29,11 @@ _INTERPOLATED_FIELDS = ("srad", "tmin", "tmax")
 
 def normalize_missing(records: List) -> None:
     """Map physically-impossible values to missing, in place, so they cannot
-    reach the model: non-positive solar radiation, negative precipitation, and
-    an inverted temperature pair (``tmax < tmin``, both nulled)."""
+    reach the model: negative solar radiation, negative precipitation, and an
+    inverted temperature pair (``tmax < tmin``, both nulled). A real zero solar
+    value (a high-latitude polar-night day) is legitimate and kept."""
     for record in records:
-        if record.srad is not None and record.srad <= 0:
+        if record.srad is not None and record.srad < 0:
             record.srad = None
         if record.precip is not None and record.precip < 0:
             record.precip = None
