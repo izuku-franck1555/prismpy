@@ -3966,6 +3966,20 @@ class TranslationPipeline:
                     "cascade_rank": ts_meta.get("cascade_rank", 1),
                     "fallback_attempts": ts_meta.get("fallback_attempts", []),
                 }
+                # Surface the days the producer interpolated (estimated !=
+                # measured); omitted for a measured cell, method read not assumed.
+                gap_fill = ts_meta.get("gap_fill") or {}
+                if gap_fill:
+                    cell_data["climate_gap_fill"] = {
+                        "per_variable": [
+                            {
+                                "variable": variable,
+                                "n_filled_days": record["n_filled_days"],
+                                "method": record["method"],
+                            }
+                            for variable, record in gap_fill.items()
+                        ],
+                    }
             if sources_block:
                 cell_data["sources"] = sources_block
 
@@ -3990,6 +4004,7 @@ class TranslationPipeline:
                 and cid in sarra_climate_per_cell
                 and sarra_climate_per_cell[cid]
             ):
+                # Forward-drift surface: a future SARRA-Py per-cell climate fill would bypass the climate_gap_fill canonical emit above.
                 # V2-22c-PRE.2.3 (D14) — SARRA-Py per-cell `has_climate`
                 # derives from sampled-values presence, not from
                 # `unified_data.climate` (which is path-dict shaped for
@@ -4266,6 +4281,9 @@ class TranslationPipeline:
             # — see ``prismpy.cells.schema`` for the round-trip
             # discipline.
             "cell_summary_version": "2.1",
+            # This producer records gap-fill provenance — an absent flag means
+            # "old producer / not recorded", distinct from a cell with no fills.
+            "climate_gap_provenance_recorded": True,
             "n_cells": len(cells),
             "resolution": getattr(grid, 'resolution', '5arcmin'),
             "cells": cells,
