@@ -616,3 +616,77 @@ class TestSarraPyNDaysNotInflated:
         )
         cell = out["cells"][0]
         assert cell["n_days"] == 10
+
+
+class TestFloorRejectsWestNorthEdgeCells:
+    """Climate-coverage honesty (fix B) — the per-cell sampler converts
+    world→pixel coords with ``math.floor()``, NOT ``int()``.
+
+    ``int()`` truncates toward zero, so a cell whose center sits just WEST
+    or NORTH of the raster origin (negative ``col_f``/``row_f``, e.g. -0.42)
+    maps to pixel 0 and silently mis-samples an edge pixel ~0.09° away,
+    over-reporting ``has_climate`` — the real Mopti 6/9-reported vs honest-3/9
+    defect. ``floor(-0.42) = -1`` is correctly rejected by the existing
+    ``0 <= idx < dim`` bounds check. ``floor`` and ``int`` agree for all
+    non-negative coords, so no NEW in-bounds cell is dropped.
+
+    These pin the fix with a REAL affine (not the MagicMock used elsewhere)
+    so the floor-vs-int boundary is exercised by actual world→pixel math.
+    """
+
+    def _fake_open_real_affine(self):
+        """1×1 raster, 1° pixel, origin (lon=0, lat=15). The inverse affine
+        gives ``~transform * (lon, lat) == (lon, 15 - lat)``, so only
+        ``lon ∈ [0, 1)`` and ``lat ∈ (14, 15]`` land inside pixel (0, 0)."""
+        from affine import Affine
+        import numpy as np
+
+        fake_dataset = MagicMock()
+        fake_dataset.width = 1
+        fake_dataset.height = 1
+        fake_dataset.nodata = -9999.0
+        fake_dataset.read.return_value = np.array([[25.0]], dtype=float)
+        fake_dataset.transform = Affine(1.0, 0.0, 0.0, 0.0, -1.0, 15.0)
+
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=fake_dataset)
+        cm.__exit__ = MagicMock(return_value=False)
+        return MagicMock(return_value=cm)
+
+    def test_west_of_origin_cell_rejected_not_missampled(self, tmp_path):
+        _seed_var_subdirs(tmp_path, n_files=1)
+        # in_bounds: col_f=0.5, row_f=0.5 → floor (0,0) → IN.
+        # west_edge: col_f=-0.42 → floor=-1 → OUT (int(-0.42)=0 would be IN).
+        in_bounds = SimpleNamespace(cell_id=1, lon=0.5, lat=14.5)
+        west_edge = SimpleNamespace(cell_id=2, lon=-0.42, lat=14.5)
+        fake_open = self._fake_open_real_affine()
+        with patch("rasterio.open", fake_open):
+            result = sample_sarra_py_per_cell(tmp_path, [in_bounds, west_edge])
+        assert 1 in result, "in-bounds cell must sample climate"
+        assert 2 not in result, (
+            "west-of-origin cell (col_f=-0.42) must be REJECTED by floor(); "
+            "int() truncates to pixel 0 and over-reports has_climate"
+        )
+
+    def test_north_of_origin_cell_rejected(self, tmp_path):
+        _seed_var_subdirs(tmp_path, n_files=1)
+        # north_edge: lat=15.3 → row_f = 15 - 15.3 = -0.3 → floor=-1 → OUT.
+        in_bounds = SimpleNamespace(cell_id=1, lon=0.5, lat=14.5)
+        north_edge = SimpleNamespace(cell_id=3, lon=0.5, lat=15.3)
+        fake_open = self._fake_open_real_affine()
+        with patch("rasterio.open", fake_open):
+            result = sample_sarra_py_per_cell(tmp_path, [in_bounds, north_edge])
+        assert 1 in result
+        assert 3 not in result, (
+            "north-of-origin cell (row_f=-0.3) must be REJECTED by floor()"
+        )
+
+    def test_non_negative_coords_unaffected_by_floor(self, tmp_path):
+        """floor and int agree for non-negative coords — an in-bounds cell
+        still samples (no regression to the honest in-extent cells)."""
+        _seed_var_subdirs(tmp_path, n_files=1)
+        in_bounds = SimpleNamespace(cell_id=7, lon=0.5, lat=14.5)
+        fake_open = self._fake_open_real_affine()
+        with patch("rasterio.open", fake_open):
+            result = sample_sarra_py_per_cell(tmp_path, [in_bounds])
+        assert 7 in result and result[7], "non-negative-coord cell must sample"

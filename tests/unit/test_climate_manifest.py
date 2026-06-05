@@ -39,6 +39,27 @@ from prismpy.sources.climate.tamsat import (
     _legacy_warned_cache_paths,
 )
 from prismpy.sources.climate.agera5 import AgERA5Source
+from prismpy.utils.gis_utils import snap_bounds_outward_to_grid
+
+
+def _widened_fetch_bbox(region: Region, resolution: float) -> Dict[str, float]:
+    """Fix-C contract: the climate cache manifest records the WIDENED FETCH
+    extent (raw bounds snapped OUTWARD to enclosing native pixel edges so the
+    AgMIP perimeter cells get climate), NOT the raw config bounds. A re-run
+    with the same config recomputes an identical widened bbox and hits the
+    cache. Mirrors the widen in agera5.py (resolution=0.1) / tamsat.py
+    (resolution=0.0375); the stored bbox is keyed on what was actually
+    fetched, so a widening-logic change correctly invalidates the cache too.
+    """
+    widened = BoundingBox.from_gis_format(
+        list(
+            snap_bounds_outward_to_grid(
+                region.bounds.to_tuple(), resolution=resolution
+            )
+        ),
+        crs=region.bounds.crs,
+    )
+    return bbox_to_dict(widened)
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────
@@ -1195,7 +1216,7 @@ class TestTAMSATForceRedownloadWipe:
         new_manifest = json.loads(
             (data_dir / MANIFEST_FILENAME).read_text(encoding="utf-8")
         )
-        assert new_manifest["bbox"] == bbox_to_dict(maradi_region.bounds)
+        assert new_manifest["bbox"] == _widened_fetch_bbox(maradi_region, 0.0375)
 
 
 # ── Gate B BLOCKER regression: partial cache + stale manifest ─────────
@@ -1290,7 +1311,7 @@ class TestPartialCacheStaleManifestBlocker:
         new_manifest = json.loads(
             (data_dir / MANIFEST_FILENAME).read_text(encoding="utf-8")
         )
-        assert new_manifest["bbox"] == bbox_to_dict(maradi_region.bounds)
+        assert new_manifest["bbox"] == _widened_fetch_bbox(maradi_region, 0.0375)
         assert new_manifest["bbox"] != old_bbox
 
     def test_partial_cache_with_marker_triggers_invalidation(
@@ -1644,10 +1665,18 @@ class TestFileCountDriftLogIncludesCounts:
         data_dir.mkdir(parents=True)
         (data_dir / "TAMSAT_v3.1_Maradi_rfe_filled_2020_01_01.tif").write_bytes(b"PARTIAL")
 
-        # Manifest claims 1000 files; disk has 1 → drift
+        # Manifest claims 1000 files; disk has 1 → file_count drift. The bbox
+        # is the WIDENED fetch bbox (fix C) so it MATCHES the recomputed
+        # request bbox — isolating file_count as the sole drift signal. (A raw
+        # config bbox would now read as bbox_mismatch and pre-empt the
+        # file_count drift log this test pins.)
         write_cache_manifest(
             data_dir / MANIFEST_FILENAME,
-            **dict(manifest_args, file_count=1000),
+            **dict(
+                manifest_args,
+                bbox=_widened_fetch_bbox(maradi_region, 0.0375),
+                file_count=1000,
+            ),
         )
 
         def fake_download_tamsat(
@@ -1787,7 +1816,7 @@ class TestAgERA5ForceRedownloadWipe:
         new_manifest = json.loads(
             (data_dir / MANIFEST_FILENAME).read_text(encoding="utf-8")
         )
-        assert new_manifest["bbox"] == bbox_to_dict(maradi_region.bounds)
+        assert new_manifest["bbox"] == _widened_fetch_bbox(maradi_region, 0.1)
         assert new_manifest["source"] == "agera5"
 
 

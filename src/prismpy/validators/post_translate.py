@@ -13,6 +13,7 @@ Platform support:
 
 import hashlib
 import logging
+import math
 import pickle
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -664,8 +665,16 @@ def sample_sarra_py_per_cell(
                         # take a 1×1 window. `~transform` gives
                         # the pixel-from-world transform.
                         col_f, row_f = ~transform * (cell.lon, cell.lat)
-                        col = int(col_f)
-                        row = int(row_f)
+                        # floor(), NOT int(): int() truncates toward zero, so a
+                        # cell whose center sits just WEST/NORTH of the raster
+                        # origin (col_f/row_f negative, e.g. -0.42) maps to
+                        # pixel 0 and silently mis-samples the edge pixel ~0.09°
+                        # away, over-reporting has_climate. floor(-0.42) = -1 is
+                        # correctly rejected by the bounds check below. floor and
+                        # int agree for all non-negative coords, so this cannot
+                        # introduce NEW in-bounds false positives.
+                        col = math.floor(col_f)
+                        row = math.floor(row_f)
                         if not (0 <= row < height and 0 <= col < width):
                             continue
                         try:

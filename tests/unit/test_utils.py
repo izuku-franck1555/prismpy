@@ -28,6 +28,7 @@ from prismpy.utils.gis_utils import (
     haversine_distance,
     bounds_contain_point,
     expand_bounds,
+    snap_bounds_outward_to_grid,
     compute_cell_id_global,
     cell_id_to_rowcol,
     latlon_to_rowcol,
@@ -412,6 +413,76 @@ class TestExpandBounds:
         bounds = (-6.0, 11.5, -5.0, 12.5)
         result = expand_bounds(bounds, 0.0)
         assert result == bounds
+
+
+class TestSnapBoundsOutwardToGrid:
+    """Climate-fetch widening: snap a raw bbox outward to enclosing native
+    pixel edges so the AgMIP outward-snapped cell roster is fully covered.
+
+    The load-bearing case is the real Mopti AOI ``[-4.3, 14.4, -4.15, 14.55]``
+    (manual_bounds for the UC1/UC4/UC6 sarra packages), whose 9-cell 5-arcmin
+    roster admits perimeter cell centers up to half a sim-cell OUTSIDE the raw
+    bbox. The unbuffered fetch inward-snapped to a 2x1 AgERA5 raster and left
+    those cells without climate; the widened fetch must reach a 3x3 AgERA5
+    grid that encloses all 9 centers.
+    """
+
+    # The 9 reproduced 5-arcmin cell centers (lon, lat) for the Mopti AOI —
+    # byte-matching cell_summary.json (cell_ids 3911708..3920350). The widen
+    # changes ONLY the fetch extent; this roster is unchanged.
+    _MOPTI_RAW = (-4.3, 14.4, -4.15, 14.55)
+    _MOPTI_CENTERS = [
+        (-4.29167, 14.54167), (-4.20833, 14.54167), (-4.125, 14.54167),
+        (-4.29167, 14.45833), (-4.20833, 14.45833), (-4.125, 14.45833),
+        (-4.29167, 14.375),   (-4.20833, 14.375),   (-4.125, 14.375),
+    ]
+
+    def test_agera5_mopti_snaps_to_3x3_enclosing_target(self):
+        """AgERA5 (0.1 deg) widen reproduces the 3x3-producing fetch bbox and
+        encloses every one of the 9 admitted cell centers."""
+        snapped = snap_bounds_outward_to_grid(self._MOPTI_RAW, resolution=0.1)
+        minx, miny, maxx, maxy = snapped
+        # The geometric target: outward to 0.1 deg pixel edges + tolerance.
+        assert snapped == pytest.approx(
+            (-4.350001, 14.349999, -4.049999, 14.650001), abs=1e-6
+        )
+        # 3 native pixels wide and tall (0.3 deg span + 2x tolerance).
+        assert (maxx - minx) == pytest.approx(0.3, abs=1e-3)
+        assert (maxy - miny) == pytest.approx(0.3, abs=1e-3)
+        # Every admitted cell center lies strictly inside the fetch extent.
+        for lon, lat in self._MOPTI_CENTERS:
+            assert minx < lon < maxx and miny < lat < maxy, (
+                f"cell center ({lon}, {lat}) not enclosed by AgERA5 widen"
+            )
+
+    def test_tamsat_mopti_extends_south_past_data_bottom(self):
+        """TAMSAT (0.0375 deg) widen — lockstep with AgERA5 — must extend the
+        crop south below the southmost cell center 14.375 (and below the live
+        TAMSAT data bottom 14.4188 that the unbuffered crop stopped at), else
+        the southern row keeps dropping and coverage caps at 4/9."""
+        snapped = snap_bounds_outward_to_grid(self._MOPTI_RAW, resolution=0.0375)
+        minx, miny, maxx, maxy = snapped
+        assert miny < 14.375, "TAMSAT crop must reach the southmost cell center"
+        assert miny < 14.4188, "TAMSAT crop must extend past the live data bottom"
+        for lon, lat in self._MOPTI_CENTERS:
+            assert minx < lon < maxx and miny < lat < maxy
+
+    def test_widen_is_outward_only(self):
+        """Snapped bounds always enclose the raw bounds (never clip inward) —
+        for an arbitrary bbox at both native resolutions."""
+        raw = (-6.0, 11.5, -5.0, 12.5)
+        for res in (0.1, 0.0375):
+            minx, miny, maxx, maxy = snap_bounds_outward_to_grid(raw, resolution=res)
+            assert minx <= raw[0] and miny <= raw[1]
+            assert maxx >= raw[2] and maxy >= raw[3]
+
+    def test_roster_grid_math_is_independent_of_widen(self):
+        """The fetch widen takes a raw-bounds tuple and returns a new tuple;
+        it cannot mutate the caller's bounds, so the cell roster derived from
+        ``region.bounds`` elsewhere is structurally unaffected."""
+        raw = (-4.3, 14.4, -4.15, 14.55)
+        snap_bounds_outward_to_grid(raw, resolution=0.1)
+        assert raw == (-4.3, 14.4, -4.15, 14.55)
 
 
 class TestCellIdGlobal:
