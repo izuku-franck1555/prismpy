@@ -32,7 +32,8 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import numpy as np
 from filelock import FileLock, Timeout
 
-from prismpy.models.region import Region
+from prismpy.models.region import BoundingBox, Region
+from prismpy.utils.gis_utils import snap_bounds_outward_to_grid
 from prismpy.provenance.tracker import ProvenanceTracker
 from prismpy.sources.base import DataSource, RetrievalResult
 from prismpy.sources.climate._cancel import PipelineCancelled, raise_if_cancelled
@@ -158,7 +159,7 @@ def _count_agera5_stage_files(
 class AgERA5Config:
     """Configuration for AgERA5 data access."""
 
-    cds_url: str = "https://cds.climate.copernicus.eu/api/v2"
+    cds_url: str = "https://cds.climate.copernicus.eu/api"
     dataset: str = "sis-agrometeorological-indicators"
     resolution: float = 0.1  # ~10km
     data_dir: Optional[Path] = None
@@ -347,10 +348,26 @@ class AgERA5Source(DataSource):
             safe_name = region_cache_key_from_region(region)
             data_dir = self.cache_dir / "agera5" / f"AgERA5_{safe_name}"
 
-        # Get bounds
-        bounds_gis = region.bounds.to_gis_format()
-        bounds_sarra_py = region.bounds.to_sarra_py_format()
-        bbox_dict = bbox_to_dict(region.bounds)
+        # Widen the FETCH extent outward to enclosing AgERA5 native-pixel
+        # edges. The AgMIP cell roster is admitted by bbox_intersects, which
+        # lets cell centers sit up to half a sim-cell beyond the raw bbox; an
+        # unbuffered fetch inward-snaps to the coarse 0.1 deg grid and fails
+        # to cover those perimeter cells. Widening here (and ONLY here) feeds
+        # both the vendor request and the bbox-keyed cache below, so a stale
+        # narrow-bbox cache re-downloads; the roster/cell_ids are derived
+        # elsewhere from region.bounds and are unchanged.
+        fetch_bounds = BoundingBox.from_gis_format(
+            list(
+                snap_bounds_outward_to_grid(
+                    region.bounds.to_tuple(),
+                    resolution=self.config.resolution,
+                )
+            ),
+            crs=region.bounds.crs,
+        )
+        bounds_gis = fetch_bounds.to_gis_format()
+        bounds_sarra_py = fetch_bounds.to_sarra_py_format()
+        bbox_dict = bbox_to_dict(fetch_bounds)
 
         metadata["bounds_gis"] = bounds_gis
         metadata["bounds_sarra_py"] = bounds_sarra_py

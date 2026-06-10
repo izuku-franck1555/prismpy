@@ -33,6 +33,7 @@ import numpy as np
 from filelock import FileLock, Timeout
 
 from prismpy.models.region import BoundingBox, Region
+from prismpy.utils.gis_utils import snap_bounds_outward_to_grid
 from prismpy.provenance.tracker import DecisionType, ProvenanceTracker
 from prismpy.sources._cache_base import (
     BBOX_TOLERANCE_DEG,
@@ -242,10 +243,24 @@ class TAMSATSource(DataSource):
             # collide on "Unnamed study area".
             data_dir = self.cache_dir / "tamsat" / region_key
 
-        # Get bounds in both formats
-        bounds_gis = region.bounds.to_gis_format()
-        bounds_sarra_py = region.bounds.to_sarra_py_format()
-        bbox_dict = bbox_to_dict(region.bounds)
+        # Get bounds in both formats. Widen the FETCH/crop extent outward to
+        # enclosing TAMSAT native-pixel edges (lockstep with the AgERA5 fetch)
+        # so the AgMIP perimeter cells get rainfall too — notably the southern
+        # row, whose centers fall below the raw-bbox south edge and were being
+        # cropped away. Roster/cell_ids derive from region.bounds elsewhere and
+        # are unchanged; only the crop extent and bbox-keyed cache key widen.
+        fetch_bounds = BoundingBox.from_gis_format(
+            list(
+                snap_bounds_outward_to_grid(
+                    region.bounds.to_tuple(),
+                    resolution=self.RESOLUTION,
+                )
+            ),
+            crs=region.bounds.crs,
+        )
+        bounds_gis = fetch_bounds.to_gis_format()
+        bounds_sarra_py = fetch_bounds.to_sarra_py_format()
+        bbox_dict = bbox_to_dict(fetch_bounds)
 
         metadata["bounds_gis"] = bounds_gis
         metadata["bounds_sarra_py"] = bounds_sarra_py

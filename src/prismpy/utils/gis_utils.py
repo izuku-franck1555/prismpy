@@ -80,6 +80,77 @@ def expand_bounds(
     )
 
 
+# AgMIP 5-arcmin simulation grid. The bbox_intersects inclusion rule admits a
+# cell whenever its EXTENT touches the raw bbox, so an admitted cell CENTER can
+# sit up to HALF a sim-cell outside the raw bbox. The climate fetch must reach
+# at least that far past the bbox to enclose every admitted cell center.
+AGMIP_SIM_CELL_DEG: float = 5.0 / 60.0                       # 0.0833333 (5')
+AOI_CELL_OVERFLOW_MARGIN_DEG: float = AGMIP_SIM_CELL_DEG / 2.0  # 0.0416667
+# Defeats floating-point ties at native-pixel boundaries: the AgERA5 native
+# resolution round-trips as 0.09999999999999432, so an exact-edge request can
+# land a hair inside the half-open keep-rule and silently drop a boundary
+# pixel. The nudge is far smaller than half a native pixel (never pulls in an
+# extra pixel ring) and far larger than the floating-point noise it cancels.
+GRID_SNAP_TOLERANCE_DEG: float = 1e-6
+
+
+def snap_bounds_outward_to_grid(
+    bounds: Tuple[float, float, float, float],
+    resolution: float,
+    *,
+    margin: float = AOI_CELL_OVERFLOW_MARGIN_DEG,
+    tolerance: float = GRID_SNAP_TOLERANCE_DEG,
+    origin: float = 0.0,
+) -> Tuple[float, float, float, float]:
+    """Widen ``bounds`` outward to enclosing native-grid pixel edges.
+
+    Used only on the climate FETCH path (AgERA5 / TAMSAT) so the fetched
+    native pixels fully enclose the AgMIP outward-snapped cell roster. The
+    cell roster is derived elsewhere from the raw bounds and is NOT changed by
+    this function — only the fetch extent (and the bbox-keyed cache key) widen.
+
+    Two steps, reusing :func:`expand_bounds` for the pad:
+
+      1. Pad every edge by ``margin`` (default: half a sim-cell, the greatest
+         distance an admitted cell center can sit past the raw bbox) so the
+         padded box encloses every admitted center regardless of how the bbox
+         aligns to the sim grid.
+      2. Snap each padded edge OUTWARD to the enclosing native-grid pixel edge
+         (pixel centers at ``origin + resolution*k``; edges halfway between),
+         then nudge ``tolerance`` further out. Snapping to whole pixels means
+         any point inside the padded box also lies inside a fetched pixel; the
+         nudge defeats floating-point ties at the half-open request boundary.
+
+    Args:
+        bounds: ``(minx, miny, maxx, maxy)`` raw extent.
+        resolution: Native pixel size in degrees (AgERA5 0.1, TAMSAT 0.0375).
+        margin: Outward pad applied before snapping (degrees).
+        tolerance: Outward nudge past the snapped pixel edge (degrees).
+        origin: Native-grid phase — pixel centers at ``origin + resolution*k``.
+
+    Returns:
+        Widened ``(minx, miny, maxx, maxy)`` aligned to native pixel edges.
+    """
+    minx, miny, maxx, maxy = expand_bounds(bounds, margin)
+
+    def _edge_down(value: float) -> float:
+        """Largest native pixel edge <= ``value``."""
+        k = math.floor((value - origin) / resolution - 0.5)
+        return origin + (k + 0.5) * resolution
+
+    def _edge_up(value: float) -> float:
+        """Smallest native pixel edge >= ``value``."""
+        k = math.ceil((value - origin) / resolution - 0.5)
+        return origin + (k + 0.5) * resolution
+
+    return (
+        _edge_down(minx) - tolerance,
+        _edge_down(miny) - tolerance,
+        _edge_up(maxx) + tolerance,
+        _edge_up(maxy) + tolerance,
+    )
+
+
 def bounds_contain_point(
     bounds: Tuple[float, float, float, float],
     lon: float,
