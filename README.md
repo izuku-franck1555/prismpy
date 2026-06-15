@@ -1,6 +1,6 @@
 # prismpy
 
-A methodological framework for data-to-model translation in spatial crop modeling.
+A methodological framework for data-to-model translation in spatial crop modeling (Manuscript under review).
 
 ---
 
