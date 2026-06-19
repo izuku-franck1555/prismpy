@@ -97,6 +97,7 @@ class TestCreateManifestGadmLevelDefault(TestCase):
             'crop_name': 'Maize',
             'start_year': 2010,
             'end_year': 2020,
+            'data_sources': {'climate': 'AgERA5'},
         }
         base.update(overrides)
         return base

@@ -412,7 +412,7 @@ def test_a7_runtime_acea_manifest_omits_capability_when_uc4_absent() -> None:
             "start_year": 2018,
             "end_year": 2022,
             "spinup_years": 0,
-            "data_sources": {},
+            "data_sources": {"climate": "AgERA5"},
             "use_case_config": {
                 "yield_forecast": {},
                 "soil_fertility": {},
@@ -450,7 +450,7 @@ def test_a7_filter_strips_private_keys_keeps_capability() -> None:
             "start_year": 2018,
             "end_year": 2022,
             "spinup_years": 0,
-            "data_sources": {},
+            "data_sources": {"climate": "AgERA5"},
             "use_case_config": {
                 "drought_management": {},
                 "soil_fertility": {},

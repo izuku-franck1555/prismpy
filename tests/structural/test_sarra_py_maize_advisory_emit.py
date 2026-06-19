@@ -108,7 +108,7 @@ def _build_min_project_config(
         "start_year": start_year,
         "end_year": end_year,
         "spinup_years": 0,
-        "data_sources": {},
+        "data_sources": {"climate": "AgERA5"},
         "bounds_gis": bounds_gis,
         "use_case_config": {
             uc: dict(uc_keysets[uc]) for uc in use_cases if uc in uc_keysets

@@ -561,6 +561,7 @@ def test_baseline_block_round_trips_through_manifest_creation(
             "crop_name": "Sorghum",
             "start_year": 2013,
             "end_year": 2015,
+            "data_sources": {"climate": "AgERA5"},
         },
         platform="pythia",
         scenario=block,
