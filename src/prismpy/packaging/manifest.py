@@ -161,6 +161,10 @@ ADVISORY_GATES: FrozenSet[str] = frozenset({
 })
 
 
+# The 18 reserved top-level manifest keys. The 5 REQUIRED_AT_CREATION fields in
+# MANIFEST_L2_TIERS (region / crop / platform / temporal / data_sources — the
+# user-facing gen-time inputs) are a SUBSET of these; the rest are generator-emitted
+# (package_version / generator / summary / cells / files / uc_readiness / ...).
 _RESERVED_MANIFEST_KEYS: FrozenSet[str] = frozenset({
     "package_version",
     "generator",
@@ -192,7 +196,10 @@ UC_CONFIG_KEY_TABLE: Dict[str, Tuple[str, ...]] = {
         "cultivar_ids",
         "n_analogs",
     ),
-    "climate_scenarios": ("cores", "years", "scenario_packages"),
+    # ``years`` is NOT bake-eligible: it resolves from manifest.temporal, and the
+    # prism-runner L2 validator rejects a baked use_case_config.years (a per-run subset
+    # is a run-only --years override). Listing it here would bake an un-consumed key.
+    "climate_scenarios": ("cores", "scenario_packages"),
     "sowing_optimization": (
         "cores",
         "sowing_window_start",
@@ -217,9 +224,6 @@ UC_CONFIG_KEY_TABLE: Dict[str, Tuple[str, ...]] = {
     "soil_fertility": (
         "cores",
         "scenarios",
-        "metric",
-        "agg_level",
-        "organic_decomp_rate",
         "enable_cost_benefit",
     ),
     "livestock_feed": (
@@ -227,13 +231,114 @@ UC_CONFIG_KEY_TABLE: Dict[str, Tuple[str, ...]] = {
         "harvestable_fraction",
         "rg_ratio",
         "dpi_residue_weight",
-        "output_metric",
-        "agg_level",
         "no_grid_output",
         "enable_livestock_demand",
         "feed_scenarios",
     ),
 }
+
+
+# The gen-time L2 tier table — the creation-surface analog of the prism-runner
+# param registry's run-surface ParamSpec tiers. One row per USER-FACING gen-time
+# manifest field: these are FIXED when the package is built (chosen in the creation
+# wizard: region -> crop -> platform -> baked years -> data source), not per-run
+# tunables. The render_guide projection reads this table to render the CREATION
+# surface of the prismweb param guide uniformly with the run surface. The tier-name
+# strings are the shared-by-convention vocabulary, declared locally here (NOT
+# imported from prism-runner — the dependency is one-way prism-runner -> prismpy).
+MANIFEST_L2_TIERS: Dict[str, Dict[str, str]] = {
+    "region": {
+        "tier": "REQUIRED_AT_CREATION",
+        "surface": "creation",
+        "rationale": "the AOI; the package is built for it and it is fixed at run",
+    },
+    "crop": {
+        "tier": "REQUIRED_AT_CREATION",
+        "surface": "creation",
+        "rationale": "cultivar-coefficient / calibration basis; fixed at run",
+    },
+    "platform": {
+        "tier": "REQUIRED_AT_CREATION",
+        "surface": "creation",
+        "rationale": "the engine; the baked package shape",
+    },
+    "temporal": {
+        "tier": "REQUIRED_AT_CREATION",
+        "surface": "creation",
+        "rationale": (
+            "baked climate years; the analyzed-years domain for "
+            "target_year / baseline / years"
+        ),
+    },
+    "data_sources": {
+        "tier": "REQUIRED_AT_CREATION",
+        "surface": "creation",
+        "rationale": "climate/soil source; the package is un-buildable without it",
+    },
+}
+
+
+class ManifestError(ValueError):
+    """A package-manifest contract violation at generation time.
+
+    Raised by :func:`create_manifest` when a ``REQUIRED_AT_CREATION`` field
+    (:data:`MANIFEST_L2_TIERS`) is absent or empty in the freshly assembled
+    manifest — the gen-time fail-loud, the creation-surface analog of the run-side
+    required-parameter door. Subclasses ``ValueError`` so existing
+    ``except ValueError`` handlers keep catching manifest problems, while callers
+    that want the typed error can catch it specifically.
+    """
+
+
+def _check_required_at_creation(manifest: Dict[str, Any]) -> None:
+    """Hard-fail if any ``REQUIRED_AT_CREATION`` field is absent/empty in a freshly
+    assembled (prismpy-native) manifest.
+
+    Membership is driven by :data:`MANIFEST_L2_TIERS` (the SSOT for WHICH gen-time
+    fields are required). The check is field-ABSENT (the value is missing/empty),
+    NOT field-INADEQUATE (e.g. an N-year-span adequacy check — that is the separate
+    ``base_package_temporal_complete`` readiness gate). ``crop`` is satisfied by
+    EITHER the scalar ``crop.name`` OR a non-empty ``crops`` list. Per-field
+    emptiness is necessarily field-shaped (``region`` / ``temporal`` are nested), so
+    each required field carries a small explicit probe — the table decides
+    membership, the probe decides emptiness. Verified zero false-reject across every
+    real native package.
+    """
+    missing: List[str] = []
+    for field, spec in MANIFEST_L2_TIERS.items():
+        if spec.get("tier") != "REQUIRED_AT_CREATION":
+            continue
+        if field == "crop":
+            # crop|crops: EITHER a scalar crop.name OR a crops entry carrying a
+            # crop name satisfies. A crops list is always 1+ entries (the emitter
+            # never returns []), so the meaningful test is a non-empty NAME, not a
+            # non-empty list.
+            crop_named = bool((manifest.get("crop") or {}).get("name"))
+            crops_named = any(
+                (c or {}).get("crop_name") or (c or {}).get("name")
+                for c in (manifest.get("crops") or [])
+            )
+            if not crop_named and not crops_named:
+                missing.append("crop|crops")
+        elif field == "region":
+            if not (manifest.get("region") or {}).get("name"):
+                missing.append("region.name")
+        elif field == "temporal":
+            temporal = manifest.get("temporal") or {}
+            if temporal.get("start_year") is None or temporal.get("end_year") is None:
+                missing.append("temporal.start_year/end_year")
+        elif field == "data_sources":
+            if not manifest.get("data_sources"):
+                missing.append("data_sources")
+        else:  # scalar top-level field (platform, + any future scalar row)
+            if not manifest.get(field):
+                missing.append(field)
+    if missing:
+        raise ManifestError(
+            "package creation: required-at-creation manifest field(s) absent or "
+            f"empty: {missing}. These are fixed when the package is built; a package "
+            "cannot be created without them."
+        )
 
 
 UC_READINESS_SCHEMA_VERSION = "1.1.1"
@@ -1265,6 +1370,11 @@ def create_manifest(
                 "an already-serialized dict; got "
                 f"{type(scenario).__name__}"
             )
+
+    # Gen-time fail-loud: a package cannot be created without its fixed-at-creation
+    # fields (region / crop / platform / baked years / data source). Mirrors the
+    # run-side required-parameter door at the creation surface.
+    _check_required_at_creation(manifest)
 
     return manifest
 

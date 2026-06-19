@@ -354,7 +354,7 @@ def test_craft_manifest_write_boundary_omits_capability_when_uc4_absent(
             "start_year": 2018,
             "end_year": 2022,
             "spinup_years": 0,
-            "data_sources": {},
+            "data_sources": {"climate": "AgERA5"},
             "use_case_config": {"yield_forecast": {}},
         }
         manifest = create_manifest(

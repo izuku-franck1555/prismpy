@@ -354,6 +354,7 @@ def synthetic_config() -> Dict[str, Any]:
         "start_year": 2020,
         "end_year": 2022,
         "spinup_years": 0,
+        "data_sources": {"climate": "AgERA5"},
     }
 
 
