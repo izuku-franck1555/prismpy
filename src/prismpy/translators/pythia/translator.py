@@ -2929,7 +2929,7 @@ class PythiaTranslator(PythiaTranslatorBase):
 
 *PLANTING DETAILS
 @P PDATE EDATE  PPOP  PPOE  PLME  PLDS  PLRS  PLRD  PLDP  PLWT  PAGE  PENV  PLPH  SPRL                        PLNAME
- 1   -99   -99 {ppop:5.1f} {ppop:5.1f}     S     R {row_spacing:5.0f}   -99     5   -99   -99   -99   -99   -99                        auto
+ 1 {{{{ pdate | default(-99) }}}}   -99 {ppop:5.1f} {ppop:5.1f}     S     R {row_spacing:5.0f}   -99     5   -99   -99   -99   -99   -99                        auto
 
 *FERTILIZERS (INORGANIC)
 @F FDATE  FMCD  FACD  FDEP  FAMN  FAMP  FAMK  FAMC  FAMO  FOCD FERNAME
@@ -2953,7 +2953,7 @@ class PythiaTranslator(PythiaTranslatorBase):
 @N METHODS     WTHER INCON LIGHT EVAPO INFIL PHOTO HYDRO NSWIT MESOM MESEV MESOL
  1 ME              M     M     E     R     S     L     R     1     P     S     2
 @N MANAGEMENT  PLANT IRRIG FERTI RESID HARVS
- 1 MA              F {{{{ irrig }}}}     D     D     M
+ 1 MA              {{{{ plant_mode | default("F") }}}} {{{{ irrig }}}}     D     D     M
 @N OUTPUTS     FNAME OVVEW SUMRY FROPT GROUT CAOUT WAOUT NIOUT MIOUT DIOUT VBOSE CHOUT OPOUT FMOPT
  1 OU              N     N     Y    14     N     N     N     N     N     N     0     N     N     C
 
