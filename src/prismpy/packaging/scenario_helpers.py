@@ -38,6 +38,7 @@ from prismpy.models.scenario import (
     ScenarioBlock,
     ScenarioRole,
 )
+from prismpy.standards.co2_ppm import get_co2_ppm_with_provenance
 
 
 # ── Issue 2: baseline scenario block builder ────────────────────────
@@ -412,4 +413,108 @@ def build_baseline_scenario_block_for_period(
             f"interpolation, midpoint year {midpoint_year})"
         ),
         gcm_source=gcm_source,
+    )
+
+
+# ── Projection scenario block builder (ISIMIP3b GCM projections) ────
+
+
+# Every ISIMIP3b projection is ISIMIP3BASD v2.5.0 quantile-mapped against
+# the W5E5 v2.0 reference; this is the version-pinned citation default.
+_ISIMIP3B_BIAS_CORRECTION_PROVENANCE = (
+    "ISIMIP3BASD v2.5.0 quantile-mapping against W5E5 v2.0"
+)
+
+
+def _ascii_fold_token(text: str) -> str:
+    """Upper-case ASCII-fold a display name for a byte-clean label token."""
+    import unicodedata
+
+    folded = (
+        unicodedata.normalize("NFKD", text)
+        .encode("ASCII", "ignore")
+        .decode("ASCII")
+        .upper()
+        .replace(" ", "-")
+    )
+    return folded or "UNKNOWN"
+
+
+def build_projection_scenario_block_for_period(
+    *,
+    region_name: str,
+    crop_name: str,
+    gcm_source: str,
+    rcp_or_ssp: str,
+    time_slice_start: int,
+    time_slice_end: int,
+    baseline_reference_label: str,
+    bias_correction_method: BiasCorrectionMethod = BiasCorrectionMethod.QUANTILE_MAPPING,
+    scenario_bias_correction_provenance: str = _ISIMIP3B_BIAS_CORRECTION_PROVENANCE,
+) -> ScenarioBlock:
+    """Construct a PROJECTION ScenarioBlock for an ISIMIP3b GCM projection.
+
+    Projection-role sibling of
+    :func:`build_baseline_scenario_block_for_period`. The
+    ``co2_ppm`` + ``co2_ppm_provenance`` pair is pulled from the canonical
+    :func:`prismpy.standards.co2_ppm.get_co2_ppm_with_provenance` lookup so
+    the ScenarioBlock CO₂ post-validator — which cross-checks both against
+    the same table for a registered ``(rcp_or_ssp, time_slice)`` tuple —
+    agrees exactly. A caller-invented value or paraphrased citation fails
+    loud at construction rather than shipping an unauditable number.
+
+    The auto-derived ``scenario_label`` follows the baseline sibling's
+    ASCII-folded uppercase convention so the two helpers in this module
+    produce visually consistent labels; downstream consumers (UC2) read
+    the label as an opaque scenario tag.
+
+    Args:
+        region_name: Region display name (diacritics tolerated; the label
+            is ASCII-folded byte-clean for DSSAT consumers).
+        crop_name: Crop display name (e.g., ``"Cowpea"``).
+        gcm_source: ISIMIP3b GCM identifier (e.g., ``"gfdl-esm4"``).
+        rcp_or_ssp: Scenario identifier (e.g., ``"ssp245"`` / ``"ssp585"``).
+        time_slice_start: Inclusive start year. Must form a registered
+            ``(rcp_or_ssp, (start, end))`` tuple in the canonical CO₂ table
+            ((2046, 2065) or (2086, 2100) for SSP245 / SSP585).
+        time_slice_end: Inclusive end year. Must be >= start.
+        baseline_reference_label: ``scenario_label`` of the paired baseline
+            package the projection points back to.
+        bias_correction_method: Defaults to QUANTILE_MAPPING (ISIMIP3BASD).
+        scenario_bias_correction_provenance: Version-pinned citation;
+            defaults to the canonical ISIMIP3BASD v2.5.0 / W5E5 v2.0 string.
+            Override with fetch-time dataset metadata when available.
+
+    Returns:
+        A constructed projection :class:`ScenarioBlock` ready to embed at
+        ``manifest.scenario``.
+
+    Raises:
+        ValueError: When ``(rcp_or_ssp, (start, end))`` is not a registered
+            canonical CO₂ tuple (the lookup enumerates the supported keys).
+        MissingProvenanceError: When a provenance string violates the
+            ScenarioBlock provenance contract (e.g., a malformed citation).
+    """
+    co2_ppm, co2_ppm_provenance = get_co2_ppm_with_provenance(
+        rcp_or_ssp, (time_slice_start, time_slice_end)
+    )
+
+    label = (
+        f"PROJECTION_{_ascii_fold_token(region_name)}_"
+        f"{_ascii_fold_token(crop_name)}_{gcm_source}_{rcp_or_ssp}_"
+        f"{time_slice_start}-{time_slice_end}"
+    )
+
+    return ScenarioBlock(
+        scenario_label=label,
+        scenario_role=ScenarioRole.PROJECTION,
+        gcm_source=gcm_source,
+        rcp_or_ssp=rcp_or_ssp,
+        time_slice_start=time_slice_start,
+        time_slice_end=time_slice_end,
+        baseline_reference_label=baseline_reference_label,
+        bias_correction_method=bias_correction_method,
+        co2_ppm=co2_ppm,
+        co2_ppm_provenance=co2_ppm_provenance,
+        scenario_bias_correction_provenance=scenario_bias_correction_provenance,
     )
