@@ -582,12 +582,12 @@ class TranslationPipeline:
                                         ),
                                         rationale=(
                                             "pygadm provides programmatic access to "
-                                            "GADM v4.1 administrative boundaries "
-                                            "without requiring local data files. "
+                                            "GADM v4.1 administrative boundaries. "
                                             "Used as the standard boundary source "
-                                            "in prismweb. Boundaries are downloaded "
-                                            "on demand from the GADM web service "
-                                            "and cached locally for reuse."
+                                            "in prismweb. Boundaries are served from "
+                                            "the pinned local GADM 4.1 dataset via "
+                                            "pygadm, with the GADM web service as a "
+                                            "fallback when no local dataset is staged."
                                         ),
                                         alternatives=[
                                             "Local GADM shapefiles (when pre-downloaded)",
