@@ -69,6 +69,9 @@ dependencies = [
     # numpy + rasterio + xarray locked in Sprint E.0.5.
     "rioxarray>=0.15,<0.20",
     "requests>=2.31.0",
+    # urllib3 (transitive via requests) is imported directly by the GADM adapter
+    # to build the cached synthesized response.
+    "urllib3>=1.26,<3",
     "filelock>=3.12.0",
     "tqdm>=4.65.0",
     "python-dateutil>=2.8.0",
@@ -89,7 +92,9 @@ dependencies = [
     # install but missing from the CI-isolated venv that surfaced
     # the silent-skip class. Declaring it required keeps fresh
     # installs from inheriting the silent-fallback path.
-    "pygadm>=0.5,<1.0",
+    # Pinned exact: the GADM adapter couples to pygadm's session, URL shape, and
+    # by-position NAME_* overwrite, which an upgrade could silently break.
+    "pygadm==0.5.3",
     # pyodbc is the platform-portable Microsoft Access ODBC driver
     # the ACEA HWSD path uses to read ``.mdb`` files when the
     # preferred ``mdbtools`` system package is absent. Promoted to a
