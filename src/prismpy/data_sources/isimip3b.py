@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import uuid
 import zipfile
@@ -336,7 +337,14 @@ def discover_datasets(
     # boundary-flatten redesign (see Sprint H+ ISIMIP3b client
     # redesign) is the canonical-source alternative; until that lands
     # the helpers are the only sanctioned consumer path.
-    return results[0]
+    #
+    # Annotate the requested time_slice (prismpy-internal key) so the
+    # downstream ``_dataset_paths`` can select the slice-overlapping
+    # decadal ``.nc`` files for the cutout submission. A shallow copy
+    # keeps the upstream API object unmutated.
+    selected = dict(results[0])
+    selected["_prismpy_requested_slice"] = [int(time_slice[0]), int(time_slice[1])]
+    return selected
 
 
 # ── Cached cutout (AC-G-2) ───────────────────────────────────────────
@@ -421,9 +429,17 @@ def _cache_paths(
     gcm: str,
     variable: str,
     bbox: Dict[str, float],
+    slice_token: Optional[str] = None,
 ) -> Tuple[Path, Path]:
-    """Compute the (nc_path, meta_path) pair for a given query."""
+    """Compute the (nc_path, meta_path) pair for a given query.
+
+    ``slice_token`` (e.g. ``"2086_2100"``) is folded into the filename so
+    two different time-slices over the same product/scenario/gcm/variable/
+    bbox don't collide on one cache entry (their cutouts span different
+    decadal files). Omitted → the legacy slice-agnostic name.
+    """
     bk = _bbox_key(bbox)
+    name = f"{bk}__{slice_token}.nc" if slice_token else f"{bk}.nc"
     nc = (
         cache_root
         / "ISIMIP3b"
@@ -431,7 +447,7 @@ def _cache_paths(
         / scenario
         / gcm
         / variable
-        / f"{bk}.nc"
+        / name
     )
     meta = nc.with_suffix(".meta.json")
     return nc, meta
@@ -551,13 +567,93 @@ def _product_from_dataset(dataset: Dict[str, Any]) -> str:
     )
 
 
-def _dataset_paths(dataset: Dict[str, Any]) -> List[str]:
-    """Extract dataset path identifiers for upstream cutout submission.
+_DECADAL_FILENAME_RE = re.compile(r"_(\d{4})_(\d{4})\.nc4?$", re.IGNORECASE)
 
-    Returns the explicit ``path``/``paths`` field if present; otherwise
-    derives from the dataset's ``id``. The upstream cutout_bbox helper
-    accepts a list of dataset paths.
+
+def _file_year_range(path: str) -> Optional[Tuple[int, int]]:
+    """Parse the ``(start, end)`` year range from an ISIMIP decadal filename.
+
+    ISIMIP3b daily files are decadal, named ``..._<START>_<END>.nc``
+    (e.g. ``..._2091_2100.nc``). Returns ``None`` when that suffix is
+    absent so callers degrade to "keep the file" rather than drop data.
     """
+    m = _DECADAL_FILENAME_RE.search(str(path))
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _nc_file_paths(dataset: Dict[str, Any]) -> List[str]:
+    """Per-file ``.nc`` paths from the dataset's ``files`` metadata.
+
+    The ISIMIP v2 cutout API requires individual NetCDF FILE paths
+    (``..._<decade>.nc``), NOT the dataset-level path — submitting the
+    dataset path returns HTTP 400 ``"… is not a NetCDF file"``. Extracts
+    the ``files[].path`` entries ending in ``.nc``/``.nc4``.
+    """
+    out: List[str] = []
+    for entry in dataset.get("files") or []:
+        if not isinstance(entry, dict):
+            continue
+        p = entry.get("path")
+        if isinstance(p, str) and p.lower().endswith((".nc", ".nc4")):
+            out.append(p)
+    return out
+
+
+def _select_slice_nc_files(
+    dataset: Dict[str, Any], time_slice: Optional[Tuple[int, int]]
+) -> List[str]:
+    """Slice-overlapping ``.nc`` file paths, sorted by decade.
+
+    Keeps every file whose decadal ``_<start>_<end>.nc`` range overlaps
+    ``time_slice`` (a file with no parseable range is kept — defensive,
+    so an unexpected naming scheme never silently drops data). Returns
+    ``[]`` when the dataset carries no ``files`` metadata (synthetic-
+    fixture datasets) so the caller can fall back to the path/id form.
+    Raises :class:`IsimipFetchError` when ``.nc`` files exist but NONE
+    overlap the slice (an out-of-range / malformed slice) — refusing to
+    silently fetch everything ("none extra").
+    """
+    nc = _nc_file_paths(dataset)
+    if not nc:
+        return []
+    if not time_slice:
+        return sorted(nc)
+    s0, s1 = int(time_slice[0]), int(time_slice[1])
+    selected = [
+        p
+        for p in nc
+        if (_file_year_range(p) is None)
+        or (_file_year_range(p)[0] <= s1 and _file_year_range(p)[1] >= s0)
+    ]
+    if not selected:
+        raise IsimipFetchError(
+            f"No ISIMIP NetCDF files overlap the requested time_slice "
+            f"({s0}, {s1}); available decadal files: "
+            f"{[Path(p).name for p in sorted(nc)]!r}. The slice is out of "
+            f"range or malformed — refusing to silently fetch all files."
+        )
+    return sorted(selected)
+
+
+def _dataset_paths(dataset: Dict[str, Any]) -> List[str]:
+    """File paths for upstream cutout submission.
+
+    Prefers the per-file ``.nc`` paths from ``dataset["files"]`` filtered
+    to the requested ``time_slice`` (annotated onto the dataset by
+    :func:`discover_datasets`) — the form the ISIMIP v2 cutout API
+    accepts. Falls back to the dataset-level ``path``/``paths``/``id``
+    ONLY for datasets without ``files`` metadata (e.g. synthetic test
+    fixtures). The prior code returned the dataset-level path
+    unconditionally, which the live cutout API rejects with HTTP 400
+    ``"… is not a NetCDF file"`` (mock-masked; see the live integration
+    test).
+    """
+    requested_slice = dataset.get("_prismpy_requested_slice")
+    nc_files = _select_slice_nc_files(dataset, requested_slice)
+    if nc_files:
+        return nc_files
     if "paths" in dataset and dataset["paths"]:
         return list(dataset["paths"])
     if "path" in dataset and dataset["path"]:
@@ -565,7 +661,8 @@ def _dataset_paths(dataset: Dict[str, Any]) -> List[str]:
     if dataset.get("id"):
         return [str(dataset["id"])]
     raise IsimipDatasetNotFoundError(
-        f"Dataset has no path / paths / id field for cutout submission: {dataset!r}",
+        f"Dataset has no files / path / paths / id field for cutout "
+        f"submission: {dataset!r}",
         specifiers={"dataset_keys": sorted(dataset.keys())},
     )
 
@@ -601,6 +698,19 @@ def _submit_and_wait_cutout_job(
         raise IsimipFetchError(
             f"ISIMIP cutout_bbox submission failed: {exc!r}"
         ) from exc
+
+    # ``cutout_bbox`` -> ``post_job`` returns ``None`` (not raising) when
+    # the files API rejects the request (``parse_response`` yields no job
+    # on a non-200). Guard it here so a rejected submission surfaces as a
+    # typed IsimipFetchError instead of crashing on ``None.get('status')``.
+    if not isinstance(job, dict):
+        raise IsimipFetchError(
+            "ISIMIP cutout submission returned no job dict "
+            f"(got {job!r}). The files API likely rejected the request "
+            "(e.g. HTTP 4xx — verify the submitted paths are individual "
+            ".nc FILE paths, not a dataset path). "
+            f"paths[0]={paths[0] if paths else None!r}"
+        )
 
     deadline = time.monotonic() + total_timeout_seconds
     while True:
@@ -675,6 +785,115 @@ def _download_to_staging(
         ) from exc
 
 
+def _concat_zip_netcdf_members(
+    zf: "zipfile.ZipFile", members: List[str], work_dir: Path
+) -> bytes:
+    """Concatenate multiple NetCDF ZIP members along ``time`` → bytes.
+
+    A multi-decadal cutout slice returns one bbox-trimmed NetCDF per
+    decadal source file (e.g. ``…_2081_2090.nc`` + ``…_2091_2100.nc``).
+    They share grid + calendar (same GCM), so they concatenate cleanly
+    along the time axis. Returns the merged NetCDF file bytes for the
+    caller's atomic staging-write. Temp members + the merged file are
+    cleaned up; any merge failure surfaces as
+    :class:`InvalidIsimipResponseError`.
+    """
+    try:
+        import xarray as xr
+    except ImportError as exc:  # pragma: no cover - xarray is a hard dep
+        raise InvalidIsimipResponseError(
+            f"xarray is required to merge a {len(members)}-file ISIMIP "
+            f"cutout response: {exc!r}"
+        ) from exc
+
+    member_paths: List[Path] = []
+    loaded: List[Any] = []
+    merged_path = work_dir / f"{TMPFILE_PREFIX}concat-{uuid.uuid4().hex}.nc"
+    try:
+        for i, name in enumerate(sorted(members)):
+            mp = work_dir / f"{TMPFILE_PREFIX}member-{uuid.uuid4().hex}-{i}.nc"
+            mp.write_bytes(zf.read(name))
+            member_paths.append(mp)
+        # Open each member under a ``with`` (DP-1 close-discipline — a
+        # leaked handle SIGSEGVs libhdf5 at close) and ``.compute()`` it
+        # into memory so the file handle is released immediately while the
+        # concat + strict integrity checks still run on materialized data.
+        for p in member_paths:
+            # Decoding is left to xarray's DEFAULT — a standard calendar
+            # decodes to numpy datetime64 WITHOUT loading the cftime
+            # C-extension; only a non-standard GCM calendar (noleap /
+            # 360_day) pulls in cftime (which xarray then uses
+            # automatically). Forcing ``use_cftime=True`` loaded the
+            # ABI-mismatched cftime extension on every call and destabilised
+            # the shared netCDF4/HDF5 state for later tests in the same
+            # process (the bound-gen-job segfault). Keep the cftime surface
+            # to only the calendars that genuinely require it.
+            with xr.open_dataset(p) as _ds:
+                loaded.append(_ds.compute())
+        # Strict spatial-coord equality across members — an outer join
+        # would silently inject NaNs across mismatched grids. Check the
+        # grid coords explicitly for a clear typed error, then concat with
+        # ``join="exact"`` as the xarray-level backstop.
+        ref = loaded[0]
+        for d in loaded[1:]:
+            for coord in ("lat", "lon", "latitude", "longitude"):
+                if coord in ref.coords and coord in d.coords:
+                    if not ref[coord].equals(d[coord]):
+                        raise InvalidIsimipResponseError(
+                            f"ISIMIP cutout members disagree on the "
+                            f"{coord!r} coordinate; refusing to outer-align "
+                            f"mismatched grids (would inject NaNs)."
+                        )
+        merged = xr.concat(loaded, dim="time", join="exact").sortby("time")
+        # Post-merge time integrity via the pandas / CFTime index API
+        # (calendar-agnostic — a standard calendar yields a DatetimeIndex,
+        # a non-standard GCM calendar a CFTimeIndex; both expose
+        # ``is_monotonic_increasing`` / ``has_duplicates``, and adjacent
+        # scalar subtraction yields a timedelta with ``.days``): ≥2 steps,
+        # strictly monotonic + unique (no duplicate/overlap), and no
+        # multi-year gap (a dropped decadal member).
+        tidx = merged.indexes.get("time")
+        if tidx is None or len(tidx) < 2:
+            raise InvalidIsimipResponseError(
+                "Merged ISIMIP cutout has fewer than 2 timesteps; the "
+                "members did not concatenate as expected."
+            )
+        if not tidx.is_monotonic_increasing or tidx.has_duplicates:
+            raise InvalidIsimipResponseError(
+                "Merged ISIMIP cutout has duplicate or non-monotonic "
+                "timesteps (decade overlap)."
+            )
+        prev = None
+        for t in tidx:
+            if prev is not None and (t - prev).days > 366:
+                raise InvalidIsimipResponseError(
+                    f"Merged ISIMIP cutout has a {(t - prev).days}-day gap "
+                    f"near {prev!r}→{t!r} — a decadal member was dropped."
+                )
+            prev = t
+        merged.to_netcdf(merged_path)
+        merged.close()
+        return merged_path.read_bytes()
+    except InvalidIsimipResponseError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — wrap as typed invalid-response
+        raise InvalidIsimipResponseError(
+            f"Failed to merge {len(members)} ISIMIP cutout NetCDF members "
+            f"along time: {exc!r}"
+        ) from exc
+    finally:
+        for d in loaded:
+            try:
+                d.close()
+            except Exception:  # noqa: BLE001
+                pass
+        for p in member_paths + [merged_path]:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def _unwrap_zip_cutout_if_needed(staging_path: Path) -> None:
     """Replace ``staging_path`` with the inner NetCDF when the body is ZIP.
 
@@ -686,10 +905,13 @@ def _unwrap_zip_cutout_if_needed(staging_path: Path) -> None:
     carries the extracted NetCDF body — :func:`_validate_netcdf_magic`
     runs against the inner file, not the ZIP container.
 
-    A ZIP body that contains zero or more than one NetCDF entry, or
-    that has the ZIP magic prefix but is not a readable archive,
-    surfaces as :class:`InvalidIsimipResponseError` so the caller can
-    discriminate this from a network failure.
+    A single-NetCDF ZIP is unwrapped to that file. A multi-NetCDF ZIP
+    (a multi-decadal cutout slice → one bbox-trimmed file per decadal
+    source) is concatenated along ``time`` into one NetCDF via
+    :func:`_concat_zip_netcdf_members`. A ZIP with zero NetCDF entries,
+    or the ZIP magic prefix on a non-readable archive, surfaces as
+    :class:`InvalidIsimipResponseError` so the caller can discriminate
+    this from a network failure.
     """
     try:
         with staging_path.open("rb") as fh:
@@ -714,13 +936,15 @@ def _unwrap_zip_cutout_if_needed(staging_path: Path) -> None:
                     f"but contains no NetCDF entries (members: "
                     f"{zf.namelist()!r})."
                 )
-            if len(members) > 1:
-                raise InvalidIsimipResponseError(
-                    f"ISIMIP cutout response at {staging_path} is a ZIP "
-                    f"with multiple NetCDF entries; expected exactly 1: "
-                    f"{members!r}."
+            if len(members) == 1:
+                extracted = zf.read(members[0])
+            else:
+                # A multi-decadal slice returns one bbox-trimmed NetCDF
+                # per decadal source file; concatenate them along time
+                # into a single slice-spanning NetCDF.
+                extracted = _concat_zip_netcdf_members(
+                    zf, members, staging_path.parent
                 )
-            extracted = zf.read(members[0])
     except zipfile.BadZipFile as exc:
         raise InvalidIsimipResponseError(
             f"ISIMIP cutout response at {staging_path} has ZIP magic "
@@ -851,6 +1075,12 @@ def cached_cutout(
     expected_version = dataset.get("version")
     expected_doi = dataset.get("doi")
 
+    _slice = dataset.get("_prismpy_requested_slice")
+    slice_token = (
+        f"{int(_slice[0])}_{int(_slice[1])}"
+        if isinstance(_slice, (list, tuple)) and len(_slice) == 2
+        else None
+    )
     nc_path, meta_path = _cache_paths(
         cache_root,
         product=product,
@@ -858,6 +1088,7 @@ def cached_cutout(
         gcm=gcm,
         variable=variable,
         bbox=bbox,
+        slice_token=slice_token,
     )
 
     # Best-effort cache root creation; surface as typed exception so the
@@ -873,7 +1104,10 @@ def cached_cutout(
     # same key; different keys overlap freely. Lock key includes
     # product/scenario/gcm/variable/bbox so two queries that differ in
     # any of those fields don't block each other.
-    lock_key = f"{product}-{scenario}-{gcm}-{variable}-{_bbox_key(bbox)}"
+    lock_key = (
+        f"{product}-{scenario}-{gcm}-{variable}-{_bbox_key(bbox)}"
+        f"-{slice_token or 'all'}"
+    )
     lock_path = cache_lock_path(cache_root, source="isimip3b", key=lock_key)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock = FileLock(str(lock_path))

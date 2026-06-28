@@ -1024,6 +1024,45 @@ def _make_zip_with_two_netcdfs() -> bytes:
     return buf.getvalue()
 
 
+def _make_zip_with_two_real_netcdfs() -> bytes:
+    """ZIP with two REAL concatenable netCDFs (disjoint daily time
+    ranges, same 1x1 grid) — mirrors the live multi-decadal cutout
+    response (one bbox-trimmed file per decadal source). The concat
+    path must merge these into one slice-spanning NetCDF."""
+    import tempfile
+
+    import numpy as np
+    import pandas as pd
+    import xarray as xr
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for i, (start, periods) in enumerate(
+            [("2091-01-01", 3), ("2091-01-04", 4)]
+        ):
+            times = pd.date_range(start, periods=periods, freq="D")
+            ds = xr.Dataset(
+                {
+                    "tasmax": (
+                        ("time", "lat", "lon"),
+                        np.zeros((periods, 1, 1), dtype="float32"),
+                    )
+                },
+                coords={"time": times, "lat": [8.5], "lon": [13.5]},
+            )
+            # Write via a temp file (the file-based netCDF4 engine) — the
+            # in-memory ``to_netcdf()`` would need the optional scipy
+            # engine. Mirrors how the production concat path writes too.
+            with tempfile.NamedTemporaryFile(suffix=".nc", delete=False) as tf:
+                tmp = Path(tf.name)
+            try:
+                ds.to_netcdf(tmp)
+                zf.writestr(f"cutout_{i}.nc", tmp.read_bytes())
+            finally:
+                tmp.unlink(missing_ok=True)
+    return buf.getvalue()
+
+
 def test_cached_cutout_unzips_zip_wrapped_response(
     cache_root: Path,
     fake_dataset: Dict[str, Any],
@@ -1075,28 +1114,31 @@ def test_cached_cutout_rejects_zip_with_no_netcdf_entries(
         )
 
 
-def test_cached_cutout_rejects_zip_with_multiple_netcdf_entries(
+def test_cached_cutout_concatenates_zip_with_multiple_netcdf_entries(
     cache_root: Path,
     fake_dataset: Dict[str, Any],
     http_responses: responses.RequestsMock,
 ) -> None:
-    """A ZIP body with more than one NetCDF entry surfaces as
-    InvalidIsimipResponseError. The cutout API always returns exactly
-    one NetCDF; an over-match is malformed output that must NOT be
-    silently picking the first entry."""
+    """A multi-decadal slice returns one bbox-trimmed NetCDF per decadal
+    source file; cached_cutout concatenates them along ``time`` into a
+    single cached NetCDF (the credible multi-GCM fetch needs multi-decade
+    slices like 2086-2100 = 2 decadal files). Pre-fix this raised
+    ``InvalidIsimipResponseError`` on the >1-entry ZIP."""
+    import xarray as xr
+
     http_responses.add(
-        responses.GET, _FAKE_FILE_URL, body=_make_zip_with_two_netcdfs()
+        responses.GET, _FAKE_FILE_URL, body=_make_zip_with_two_real_netcdfs()
     )
     client = _FakeISIMIP3bClient()
-    with pytest.raises(
-        InvalidIsimipResponseError, match="multiple NetCDF entries"
-    ):
-        cached_cutout(
-            client,  # type: ignore[arg-type]
-            fake_dataset,
-            bbox={"south": 13.0, "north": 14.5, "west": 1.5, "east": 3.0},
-            cache_dir=cache_root,
-        )
+    nc_path = cached_cutout(
+        client,  # type: ignore[arg-type]
+        fake_dataset,
+        bbox={"south": 13.0, "north": 14.5, "west": 1.5, "east": 3.0},
+        cache_dir=cache_root,
+    )
+    with xr.open_dataset(nc_path) as ds:
+        # 3 + 4 days from the two members, concatenated + time-sorted.
+        assert ds.sizes["time"] == 7
 
 
 def test_cached_cutout_rejects_corrupt_zip_archive(
@@ -1161,3 +1203,149 @@ def test_cached_cutout_unzips_nc4_extension_member(
     persisted = nc_path.read_bytes()
     assert persisted[:4] == b"\x89HDF"
     assert persisted == _FAKE_NETCDF_HDF5
+
+
+# ── Root-cause regression: _dataset_paths submits FILE paths, not the ──
+# ── dataset path (the HTTP-400 "is not a NetCDF file" bug). ────────────
+
+
+def test_dataset_paths_selects_slice_overlapping_nc_files() -> None:
+    """Root-cause pin: _dataset_paths returns the per-file ``.nc`` paths
+    from ``dataset["files"]`` filtered to the requested slice — NOT the
+    dataset-level path. Submitting the dataset path made the live ISIMIP
+    v2 cutout API return HTTP 400 ``"… is not a NetCDF file"`` (the
+    mock-masked production blocker)."""
+    base = (
+        "ISIMIP3b/InputData/climate/atmosphere/bias-adjusted/global/daily/"
+        "ssp585/GFDL-ESM4/gfdl-esm4_r1i1p1f1_w5e5_ssp585_tasmax_global_daily"
+    )
+    dataset = {
+        "path": base,  # the dataset-level path the buggy code returned
+        "files": [
+            {"path": f"{base}_{a}_{b}.nc"}
+            for a, b in [(2071, 2080), (2081, 2090), (2091, 2100)]
+        ],
+        "_prismpy_requested_slice": [2086, 2100],
+    }
+    paths = isimip3b._dataset_paths(dataset)
+    assert paths, "expected per-file .nc paths"
+    assert all(p.endswith(".nc") for p in paths)
+    assert base not in paths  # never the bare dataset path
+    assert any("_2081_2090.nc" in p for p in paths)
+    assert any("_2091_2100.nc" in p for p in paths)
+    # 2071-2080 does not overlap 2086-2100 → excluded.
+    assert not any("_2071_2080.nc" in p for p in paths)
+
+
+def test_dataset_paths_falls_back_to_id_when_no_files() -> None:
+    """Datasets without ``files`` metadata (synthetic fixtures) fall back
+    to path/paths/id so the existing mocked call-sites keep working."""
+    assert isimip3b._dataset_paths({"id": "x", "files": []}) == ["x"]
+    assert isimip3b._dataset_paths({"paths": ["a", "b"]}) == ["a", "b"]
+
+
+def test_dataset_paths_raises_when_slice_overlaps_no_files() -> None:
+    """SHOULD-1: an out-of-range slice (files exist, none overlap) fails
+    loud with IsimipFetchError rather than silently fetching ALL files
+    ("none extra")."""
+    base = (
+        "ISIMIP3b/InputData/.../gfdl-esm4_r1i1p1f1_w5e5_ssp585_tasmax_"
+        "global_daily"
+    )
+    dataset = {
+        "files": [
+            {"path": f"{base}_{a}_{b}.nc"}
+            for a, b in [(2015, 2020), (2021, 2030)]
+        ],
+        "_prismpy_requested_slice": [2086, 2100],
+    }
+    with pytest.raises(
+        IsimipFetchError, match="overlap the requested time_slice"
+    ):
+        isimip3b._dataset_paths(dataset)
+
+
+def test_cached_cutout_raises_when_cutout_job_is_none(
+    cache_root: Path,
+    fake_dataset: Dict[str, Any],
+) -> None:
+    """SHOULD-4: the None-guard is mutation-bound. When the upstream
+    cutout submission returns ``None`` (``post_job`` swallows a rejected
+    request to None), cached_cutout raises a typed IsimipFetchError —
+    not the pre-fix ``NoneType.get('status')`` crash."""
+
+    class _NoneJobClient:
+        def cutout_bbox(
+            self,
+            paths: List[str],
+            *,
+            west: float,
+            east: float,
+            south: float,
+            north: float,
+            **kwargs: Any,
+        ) -> None:
+            return None
+
+    with pytest.raises(IsimipFetchError, match="no job"):
+        cached_cutout(
+            _NoneJobClient(),  # type: ignore[arg-type]
+            fake_dataset,
+            bbox={"south": 13.0, "north": 14.5, "west": 1.5, "east": 3.0},
+            cache_dir=cache_root,
+        )
+
+
+@pytest.mark.skipif(
+    bool(os.environ.get("PRISMPY_SKIP_LIVE_ISIMIP")),
+    reason="live ISIMIP fetch disabled via PRISMPY_SKIP_LIVE_ISIMIP",
+)
+def test_cached_cutout_live_multi_decade_real_fetch(tmp_path: Path) -> None:
+    """LIVE integration (network): a real multi-decadal ISIMIP cutout end
+    to end — discover → cutout → download → ZIP-unwrap+concat → cached
+    NetCDF. This is the test the 35 mocked tests could NOT be: it
+    exercises the real v2 cutout API contract (file-paths, not dataset
+    path) that the production blocker failed against. Network-gated:
+    skipped if the API is unreachable or PRISMPY_SKIP_LIVE_ISIMIP=1."""
+    pytest.importorskip("isimip_client")
+    pytest.importorskip("xarray")
+    import requests as _rq
+
+    from prismpy.data_sources.isimip3b import (
+        ISIMIP3bClient,
+        discover_datasets,
+    )
+
+    try:
+        _rq.get("https://files.isimip.org/api/v2", timeout=10).raise_for_status()
+    except Exception:  # noqa: BLE001 — offline / CI without egress
+        pytest.skip("ISIMIP API unreachable")
+
+    client = ISIMIP3bClient()
+    # 2086-2100 spans TWO decadal files → exercises the concat path live.
+    dataset = discover_datasets(
+        client,
+        gcm="gfdl-esm4",
+        scenario="ssp585",
+        variable="tasmax",
+        time_slice=(2086, 2100),
+    )
+    nc_path = cached_cutout(
+        client,
+        dataset,
+        bbox={"south": 8.0, "north": 9.0, "west": 13.0, "east": 14.0},
+        cache_dir=tmp_path,
+    )
+    assert nc_path.exists()
+    assert nc_path.stat().st_size > 100_000  # a real cutout, not an error page
+    import xarray as xr
+
+    with xr.open_dataset(nc_path) as ds:
+        # Assert the span actually COVERS the requested 2086-2100 slice
+        # (two decadal members: 2081-2090 + 2091-2100) so a DROPPED
+        # member fails — not just a size threshold. ``.indexes["time"].year``
+        # is calendar-agnostic (DatetimeIndex or CFTimeIndex).
+        years = ds.indexes["time"].year
+        assert ds.sizes.get("time", 0) > 3000
+        assert int(min(years)) <= 2086, f"span starts too late: {min(years)}"
+        assert int(max(years)) >= 2100, f"span ends too early: {max(years)}"
