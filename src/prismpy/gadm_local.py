@@ -31,6 +31,9 @@ GADM_HOST = "https://geodata.ucdavis.edu"
 DEFAULT_GPKG = "/data/gadm/gadm_410.gpkg"
 _GADM_URL_RE = re.compile(r"/gadm41_(?P<iso3>[A-Z]{3})_(?P<level>\d)\.json")
 _GPKG_LAYER = "gadm_410"
+# Bound delegated (non-local) requests (connect, read) so a black-hole GADM host
+# fails fast instead of hanging the worker; pygadm itself passes timeout=None.
+_DELEGATE_TIMEOUT = (5, 30)
 
 
 class LocalGADMAdapter(HTTPAdapter):
@@ -58,10 +61,10 @@ class LocalGADMAdapter(HTTPAdapter):
     def send(self, request, **kwargs):
         match = _GADM_URL_RE.search(request.url or "")
         if match is None:
-            return super().send(request, **kwargs)  # non-GADM → network
+            return self._delegate(request, **kwargs)  # non-GADM → network
         body = self._synthesize(match.group("iso3"), int(match.group("level")))
         if body is None:
-            return super().send(request, **kwargs)  # unbundled country → network
+            return self._delegate(request, **kwargs)  # unbundled country → network
         raw = HTTPResponse(
             body=io.BytesIO(body),
             headers={"Content-Type": "application/json",
@@ -71,6 +74,13 @@ class LocalGADMAdapter(HTTPAdapter):
         )
         raw._request_url = request.url  # requests_cache reads this when caching
         return self.build_response(request, raw)
+
+    def _delegate(self, request, **kwargs):
+        # setdefault is a no-op here — pygadm passes timeout=None explicitly, so
+        # the key is present; replace a None timeout with the bounded default.
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = _DELEGATE_TIMEOUT
+        return super().send(request, **kwargs)
 
     def _synthesize(self, iso3: str, level: int) -> Optional[bytes]:
         """Build the GeoJSON FeatureCollection for one country+level, or None

@@ -35,10 +35,8 @@ def __getattr__(name: str):
     raise AttributeError(f"module 'prismpy' has no attribute {name!r}")
 
 
-# Mount the local-first GADM transport at import so the in-process web worker
-# (AppConfig.ready) and the standalone CLI both inherit the pinned-dataset
-# resilience. Graceful: an unset/missing gpkg falls through to the network and
-# never imports the geo stack; an unexpected error never breaks `import prismpy`.
+# Mount the local-first GADM transport at import so the web worker and CLI both
+# inherit it; graceful when no gpkg is staged, never breaks `import prismpy`.
 try:
     from prismpy.gadm_local import mount_local_gadm as _mount_local_gadm
     _mount_local_gadm()

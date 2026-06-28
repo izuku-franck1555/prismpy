@@ -259,3 +259,54 @@ def test_pygadm_pinned_exact():
         "session/URL/by-position-NAME internals."
     )
     assert '"pygadm>=0.5,<1.0"' not in pyproject, "the loose range must be gone"
+
+
+# --- SF4: delegated (non-local) requests fail fast, never hang -------------
+
+def test_delegate_bounds_timeout_even_when_explicitly_none():
+    # pygadm passes timeout=None EXPLICITLY, so setdefault would be a no-op; the
+    # delegate must replace None with the bounded default on BOTH delegate paths
+    # (unbundled country + non-GADM URL) so a black-hole host fails fast.
+    from requests.adapters import HTTPAdapter
+    from requests.models import PreparedRequest
+    adapter = LocalGADMAdapter(str(_FIXTURE))
+    captured = {}
+    real_send = HTTPAdapter.send
+
+    def spy(self, request, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        raise ConnectionError("stop before real network")
+
+    try:
+        HTTPAdapter.send = spy
+        for url in (
+            "https://geodata.ucdavis.edu/gadm/gadm4.1/json/gadm41_KEN_0.json",  # unbundled
+            "https://geodata.ucdavis.edu/some/other/path.txt",                  # non-GADM
+        ):
+            req = PreparedRequest()
+            req.prepare(method="GET", url=url)
+            captured.clear()
+            with pytest.raises(ConnectionError):
+                adapter.send(req, timeout=None)
+            assert captured["timeout"] == (5, 30), url
+    finally:
+        HTTPAdapter.send = real_send
+
+
+# --- Geometry teeth: synthesized geom equals the source (not just count) ----
+
+def test_synthesis_geometry_equals_source(mounted, gpkg_truth):
+    from shapely import equals_exact
+    # NGA L2 (no-dissolve): each synthesized geometry equals the source gpkg
+    # geometry exactly (the GeoJSON round-trip preserves coordinates).
+    nga = pygadm.Items(admin="NGA", content_level=2)
+    src_nga = gpkg_truth[gpkg_truth.GID_0 == "NGA"].set_index("GID_2")["geometry"]
+    for _, row in nga.iterrows():
+        assert equals_exact(row.geometry, src_nga[row["GID_2"]], tolerance=1e-9), \
+            row["GID_2"]
+    # MLI L2 (dissolve): each synthesized geometry equals the source dissolved
+    # by GID_2 — a single member polygon per group would FAIL this.
+    mli = pygadm.Items(admin="MLI", content_level=2)
+    src_mli = gpkg_truth[gpkg_truth.GID_0 == "MLI"].dissolve(by="GID_2")["geometry"]
+    for _, row in mli.iterrows():
+        assert row.geometry.equals(src_mli[row["GID_2"]]), row["GID_2"]
