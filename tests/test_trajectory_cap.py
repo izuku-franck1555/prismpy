@@ -53,7 +53,13 @@ _LOWER = 815
 #   Sprint E.3 Phase 1 close: 2600 (this canonical pin)
 #   Retry-migration test suites: n_collected ≈ 2658 →
 #     ceil((2658 + 200) / 50) * 50 = 2900.
-_UPPER = 2900
+#   isimip3b cutout-fix (feat/isimip3b-cutout-fix): +5 committed tests
+#     (root-cause file-path selection, slice-overlap fail-loud, None-guard,
+#     multi-decade concat, live integration) → committed n_collected ≈ 2839 →
+#     ceil((2839 + 200) / 50) * 50 = 3050. (Committed count measured with the
+#     untracked tests/phase3 scratch files excluded — they are NOT on the
+#     branch / in CI.)
+_UPPER = 3050
 
 
 class TestTrajectoryCap(TestCase):
