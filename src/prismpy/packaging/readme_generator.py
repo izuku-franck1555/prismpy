@@ -861,7 +861,7 @@ pythia --all config/pythia_config.json
 
 | Data Type | Source | Version | Description |
 |-----------|--------|---------|-------------|
-| Weather | NASA POWER | {start_year}-{end_year} | Daily SRAD, TMAX, TMIN, RAIN, TDEW, RHUM, WIND |
+| Weather | {climate_source} | {start_year}-{end_year} | Daily SRAD, TMAX, TMIN, RAIN, TDEW, RHUM, WIND |
 | Soil | eGHR (GGCMI) | v2 | DSSAT-compatible soil profiles |
 | Crop Mask | SPAM | 2020 v2.0 | Harvested area distribution |
 | Boundary | GADM | v4.1 | Administrative boundaries |
@@ -1068,10 +1068,7 @@ See `manifest.json` for file checksums and `provenance.json` for data lineage.
   note = {{Spatial DSSAT simulation framework}}
 }}
 
-@misc{{nasa_power,
-  title = {{NASA POWER: Prediction Of Worldwide Energy Resources}},
-  url = {{https://power.larc.nasa.gov/}}
-}}
+{climate_citation}
 ```
 
 ---
@@ -1466,6 +1463,12 @@ def generate_readme(
                 f"{region_name.lower()}_nasapower",
             ),
             'climate_source': _safe_get(config, 'climate_source', 'NASA POWER'),
+            'climate_citation': _safe_get(
+                config, 'climate_citation',
+                '@misc{nasa_power,\n  title = {NASA POWER: Prediction Of '
+                'Worldwide Energy Resources},\n  url = {https://power.larc.'
+                'nasa.gov/}\n}',
+            ),
 
             # Data sources
             # V2-19b-fix Finding 7: same fix as CRAFT — honest default.
@@ -1519,6 +1522,13 @@ def generate_readme(
             'plant_pop': _safe_get(config, 'plant_pop', 5.0),
             'row_spacing': _safe_get(config, 'row_spacing', 70),
             'irrigation': _safe_get(config, 'irrigation', 'Rainfed'),
+            'climate_source': _safe_get(config, 'climate_source', 'NASA POWER'),
+            'climate_citation': _safe_get(
+                config, 'climate_citation',
+                '@misc{nasa_power,\n  title = {NASA POWER: Prediction Of '
+                'Worldwide Energy Resources},\n  url = {https://power.larc.'
+                'nasa.gov/}\n}',
+            ),
         })
 
     # Format template

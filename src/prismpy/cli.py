@@ -179,6 +179,47 @@ def cmd_translate(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_generate_scenario_set(args: argparse.Namespace) -> int:
+    """Generate ISIMIP3b projection packages for a scenario set."""
+    logger = logging.getLogger(__name__)
+    from prismpy.packaging.scenario_set_generator import generate_scenario_set
+
+    try:
+        spec = load_raw_yaml(args.config)
+    except Exception as e:  # noqa: BLE001 — surface any load error to the CLI
+        logger.error(f"Failed to load scenario-set config: {e}")
+        return 1
+
+    try:
+        baseline_config = load_config(spec["baseline_config"])
+        result = generate_scenario_set(
+            baseline_package=spec["baseline_package"],
+            baseline_config=baseline_config,
+            aoi_bbox=spec["aoi_bbox"],
+            gcms=spec["gcms"],
+            ssps=spec["ssps"],
+            time_slices=[tuple(s) for s in spec["time_slices"]],
+            region_name=spec["region_name"],
+            crop_name=spec["crop_name"],
+            output_dir=spec["output_dir"],
+            cache_dir=Path(spec["cache_dir"]) if spec.get("cache_dir") else None,
+        )
+    except KeyError as e:
+        logger.error(f"Scenario-set config missing required key: {e}")
+        return 1
+    except Exception as e:  # noqa: BLE001 — report generation failure, exit non-zero
+        logger.error(f"Scenario-set generation failed: {e}")
+        return 1
+
+    print(f"Baseline: {result.baseline_package}")
+    print(f"Generated {len(result.projection_packages)} projection package(s):")
+    for package, (gcm, ssp, time_slice) in zip(
+        result.projection_packages, result.matrix
+    ):
+        print(f"  [{gcm} {ssp} {time_slice[0]}-{time_slice[1]}] {package}")
+    return 0
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     """Validate platform outputs.
 
@@ -600,6 +641,26 @@ For more information, see: https://github.com/your-repo/prismpy
         help="Run only a specific pipeline stage",
     )
     translate_parser.set_defaults(func=cmd_translate)
+
+    # generate-scenario-set command
+    scenario_set_parser = subparsers.add_parser(
+        "generate-scenario-set",
+        help="Generate ISIMIP3b projection packages for a scenario set",
+        description=(
+            "Clone-and-swap a baseline package into ISIMIP3b projection "
+            "packages across a (GCM x SSP x time-slice) matrix."
+        ),
+    )
+    scenario_set_parser.add_argument(
+        "-c", "--config",
+        required=True,
+        help=(
+            "Path to the scenario-set YAML (keys: baseline_package, "
+            "baseline_config, aoi_bbox, gcms, ssps, time_slices, region_name, "
+            "crop_name, output_dir; optional cache_dir)"
+        ),
+    )
+    scenario_set_parser.set_defaults(func=cmd_generate_scenario_set)
 
     # validate command
     validate_parser = subparsers.add_parser(
