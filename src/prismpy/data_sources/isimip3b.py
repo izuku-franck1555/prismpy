@@ -718,6 +718,19 @@ def _submit_and_wait_cutout_job(
         if status in {"finished", "complete", "completed", "success"}:
             return job
         if status in {"failed", "error", "cancelled"}:
+            meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
+            created_files = meta.get("created_files")
+            total_files = meta.get("total_files")
+            if created_files == 0 and total_files:
+                raise IsimipFetchError(
+                    "ISIMIP cutout job selected 0 grid cells "
+                    f"(meta.created_files=0, total_files={total_files}). "
+                    "ISIMIP3b is a 0.5° grid (cell centers at k*0.5+0.25, e.g. "
+                    "…8.25, 8.75…; …11.75, 12.25…); a sub-resolution or "
+                    "grid-misaligned bbox that contains no cell center yields "
+                    "an empty cutout. Widen / align the bbox so it spans at "
+                    f"least one 0.5° cell center. job={job!r}"
+                )
             raise IsimipFetchError(
                 f"ISIMIP cutout job ended in {status!r}: {job!r}"
             )

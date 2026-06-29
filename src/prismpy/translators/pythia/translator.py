@@ -530,6 +530,36 @@ class PythiaTranslator(PythiaTranslatorBase):
         logger.info(f"Generated PYTHIA sites CSV: {csv_path}")
         return csv_path
 
+    def write_weather_files(
+        self,
+        climate_data: Dict[int, ClimateTimeSeries],
+        *,
+        climate_kind,
+        grid: Optional[SpatialGrid] = None,
+    ) -> List[Path]:
+        """Write DSSAT ``.WTH`` weather files into this package's ``weather/``.
+
+        Public seam over the internal writer for clone-and-swap orchestration:
+        a scenario-set generator constructs the translator normally (via
+        ``__init__``), points ``output_dir`` at a cloned baseline package, and
+        calls this to write the projection weather without re-running the full
+        package pipeline. ``climate_kind=ClimateKind.PROJECTION`` selects the
+        projection WTH path (FAO-56 Tetens dewpoint from ``record.rh`` /
+        ``record.tmean`` when ``record.tdew`` is None). When ``grid`` is
+        provided, sequential WTH IDs match the ``sites.shp`` ID column.
+
+        Args:
+            climate_data: Mapping of cell_id to ClimateTimeSeries.
+            climate_kind: Source-provenance discriminator (OBSERVED / PROJECTION).
+            grid: Optional SpatialGrid for sites.shp-aligned sequential IDs.
+
+        Returns:
+            List of generated ``.WTH`` file paths.
+        """
+        return self._generate_weather_files(
+            climate_data, climate_kind=climate_kind, grid=grid
+        )
+
     def _generate_weather_files(
         self,
         climate_data: Dict[int, ClimateTimeSeries],

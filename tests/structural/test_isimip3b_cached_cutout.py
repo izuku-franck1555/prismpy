@@ -42,7 +42,6 @@ import time
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from unittest.mock import patch
 
 import pytest
 import responses
@@ -740,6 +739,29 @@ def test_cutout_job_failed_status_raises_typed_error(
             client,  # type: ignore[arg-type]
             fake_dataset,
             bbox={"south": 13.0, "north": 14.5, "west": 1.5, "east": 3.0},
+            cache_dir=cache_root,
+        )
+
+
+def test_cutout_job_zero_cells_raises_clear_bbox_error(
+    cache_root: Path, fake_dataset: Dict[str, Any]
+) -> None:
+    """A failed cutout with meta.created_files=0 (an empty sub-grid bbox)
+    surfaces a CLEAR error naming the 0-cell / 0.5°-grid cause, not the raw
+    job dump."""
+    client = _FakeISIMIP3bClient(
+        cutout_response={
+            "id": "job-empty",
+            "status": "failed",
+            "file_url": _FAKE_FILE_URL,
+            "meta": {"created_files": 0, "total_files": 3, "errors": {}},
+        }
+    )
+    with pytest.raises(IsimipFetchError, match="0 grid cells"):
+        cached_cutout(
+            client,  # type: ignore[arg-type]
+            fake_dataset,
+            bbox={"south": 11.9, "north": 12.2, "west": 8.3, "east": 8.7},
             cache_dir=cache_root,
         )
 
