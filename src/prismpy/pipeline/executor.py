@@ -2288,7 +2288,7 @@ class TranslationPipeline:
                 # supports the AC-7 arithmetic invariant).
                 grid_full_extent = SpatialGrid.from_bounds(
                     region.bounds,
-                    resolution="5arcmin",
+                    resolution=self.config.region.grid_resolution,
                     clip_geometry=None,
                     exclude_cells=None,
                 )
@@ -2320,7 +2320,7 @@ class TranslationPipeline:
 
                 grid = SpatialGrid.from_bounds(
                     region.bounds,
-                    resolution="5arcmin",
+                    resolution=self.config.region.grid_resolution,
                     clip_geometry=clip_geometry,
                     # NOTE: exclude_cells passed at Stage 4, not here —
                     # preserves the arithmetic invariant
