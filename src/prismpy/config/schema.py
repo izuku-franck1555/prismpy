@@ -554,6 +554,15 @@ class RegionConfig(BaseModel):
         default_factory=BoundaryConfig,
         description="Boundary extraction configuration"
     )
+    grid_resolution: Literal["5arcmin", "30arcmin"] = Field(
+        default="5arcmin",
+        description=(
+            "Site-grid resolution for SpatialGrid.from_bounds. Default "
+            "5arcmin preserves the established grid for every existing "
+            "UC; 30arcmin (0.5-degree) aligns the site grid to the "
+            "ISIMIP3b cells for the UC2 climate-scenario ensemble."
+        ),
+    )
     # V2-22c-PRE.3.1 (D10/D15) — list of cell IDs to drop from the
     # grid at construction time. Used by V2-22c remediation re-runs
     # for the bulk-fix Exclude class (D8): the cockpit submits a new
