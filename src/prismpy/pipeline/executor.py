@@ -2437,24 +2437,24 @@ class TranslationPipeline:
                     )
 
                 # V2-19 site #3: record AGGREGATION_METHOD decision for grid
-                # creation. The 5-arcmin resolution is hardcoded (not
-                # per-platform configurable) because all downstream
-                # platforms either use 5-arcmin directly or map to coarser
-                # grids internally at translate time.
+                # creation. The grid resolution is config-driven via
+                # region.grid_resolution (default 5arcmin); UC2's climate
+                # ensemble sets 30arcmin (0.5 deg) to match the ISIMIP3b /
+                # NASA POWER native grid.
                 if self.provenance.enabled:
                     self.provenance.record_decision(
                         decision_type=DecisionType.AGGREGATION_METHOD,
                         description=(
-                            f"5-arcmin uniform grid ({grid.n_cells} cells) "
+                            f"{grid.resolution} uniform grid ({grid.n_cells} cells) "
                             f"within region bounds"
                         ),
                         rationale=(
-                            "5-arcmin is the hardcoded canonical grid resolution "
-                            "in prismpy. It maximises boundary precision for "
-                            "small regions and is compatible with all target "
-                            "platforms. Platforms requiring coarser grids "
-                            "(e.g., ACEA 30-arcmin) handle resolution mapping "
-                            "internally at translate time."
+                            f"Grid resolution {grid.resolution} is set via "
+                            "region.grid_resolution (default 5arcmin). It "
+                            "balances boundary precision against the climate "
+                            "source native resolution; the UC2 climate "
+                            "ensemble uses 30arcmin (0.5 deg) to align with the "
+                            "ISIMIP3b / NASA POWER 0.5 deg grid."
                         ),
                         alternatives=[
                             "30-arcmin (ACEA native)",
@@ -2466,7 +2466,7 @@ class TranslationPipeline:
                     self.provenance.record_transformation(
                         operation=OperationType.BUILD_GRID,
                         parameters={
-                            "resolution": "5arcmin",
+                            "resolution": grid.resolution,
                             "n_cells": grid.n_cells,
                             "clipped": clip_geometry is not None,
                             "bounds": region.bounds.to_gis_format()
@@ -2477,7 +2477,7 @@ class TranslationPipeline:
 
                     # V2-19 B1: effective-resolution warning. Determine which
                     # sources are active for this run from platform defaults,
-                    # then check if target 5-arcmin is finer than any native.
+                    # then check if the target grid resolution is finer than any native.
                     active_sources: List[str] = []
                     from prismpy.config.schema import Platform
                     enabled_platforms = self.config.get_enabled_platforms()
@@ -2500,8 +2500,8 @@ class TranslationPipeline:
                         if not (s in seen or seen.add(s))
                     ]
                     self._record_effective_resolution_warning(
-                        target_resolution_deg=5.0 / 60.0,  # 5 arc-minutes
-                        target_resolution_label="5-arcmin (~9 km)",
+                        target_resolution_deg=grid.increment_deg,
+                        target_resolution_label=f"{grid.resolution} (~{grid.increment_deg * 111:.0f} km)",
                         active_sources=active_sources,
                     )
 
