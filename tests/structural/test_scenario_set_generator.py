@@ -63,7 +63,10 @@ _UC2_REQUIRED_FIELDS = _GOLDEN_SCENARIO_KEYS - {
 }
 
 _DEWPOINT_POLICY = "FAO-56 Tetens dewpoint from hurs; propagate-missing on bad RH."
-_CALENDAR_KEY = "calendar_noleap_dropped_feb29"
+# gfdl-esm4 is non-standard-native (noleap) but ISIMIP3b delivers it gregorian
+# → the bridge emits the upstream-harmonisation provenance note, NOT a
+# pipeline "dropped Feb 29" limitation (UC2 Bar-1 calendar-disclosure fix).
+_CALENDAR_KEY = "calendar_harmonization"
 
 
 def _project_config(output_dir: Path) -> ProjectConfig:
@@ -195,7 +198,10 @@ def _projection_climate() -> Dict[int, ClimateTimeSeries]:
             records=records,
             metadata={
                 "calendar_limitation_key": _CALENDAR_KEY,
-                "calendar_limitation_value": "noleap source; Feb 29 missing.",
+                "calendar_limitation_value": (
+                    "ISIMIP3b delivered gregorian; calendar harmonised upstream "
+                    "by ISIMIP (not this pipeline)."
+                ),
                 "dewpoint_policy": _DEWPOINT_POLICY,
             },
         )
