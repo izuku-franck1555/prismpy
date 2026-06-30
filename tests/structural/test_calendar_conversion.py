@@ -1,16 +1,26 @@
-"""Structural pin: AC-G-7d calendar conversion semantics.
+"""Structural pin: AC-G-7d DATA-DRIVEN calendar handling semantics.
 
-Sprint G AC-G-7d converts every ISIMIP3b GCM cutout to standard
-gregorian calendar. The three source-calendar paths must be
-deterministic + version-pinned + signal their information loss
-honestly:
+``convert_to_gregorian`` keys off the calendar the data ACTUALLY
+carries (detected via ``.dt.calendar``), NOT the GCM's nominal native
+calendar — so a limitation is recorded only when this pipeline really
+manipulates data:
 
-* ``noleap`` (GFDL-ESM4) → drop Feb 29 (no source value); record
-  ``manifest.limitations.calendar_noleap_dropped_feb29``.
-* ``360_day`` (UKESM1-0-LL) → ``xarray.convert_calendar('standard',
-  missing='interpolate')``; record
-  ``manifest.limitations.calendar_360_day_resampled``.
-* ``gregorian`` family (IPSL/MPI/MRI) → pass-through.
+* Already gregorian / standard / proleptic_gregorian (the ISIMIP3b
+  W5E5 delivery for EVERY GCM) → pass through unchanged, no
+  conversion. Non-standard-native GCMs (GFDL-ESM4 noleap, UKESM1-0-LL
+  360_day) get the ``calendar_harmonization`` provenance note
+  crediting ISIMIP's UPSTREAM harmonisation; gregorian-native GCMs
+  (IPSL/MPI/MRI) get no calendar key.
+* Genuinely ``noleap`` DATA → drop Feb 29; record
+  ``calendar_noleap_dropped_feb29`` (does NOT fire for the ISIMIP3b
+  product, which is delivered gregorian).
+* Genuinely ``360_day`` DATA → insert + interpolate gap days; record
+  ``calendar_360_day_resampled`` (likewise never fires for ISIMIP3b).
+
+The §13 tests are the disclosure-matches-data guard: a "missing"/
+"interpolated" claim is asserted only when the data was actually
+dropped/gap-filled, and gregorian-delivered data must carry NO false
+calendar limitation.
 
 Per durable §24 the GCM → calendar table lives ONCE at
 :data:`prismpy.standards.isimip_versions.CALENDAR_BY_GCM`. This
@@ -32,6 +42,7 @@ import xarray as xr
 from prismpy.harmonize.calendar_conversion import (
     EXPECTED_BACKEND,
     LIMITATION_KEY_360_RESAMPLED,
+    LIMITATION_KEY_CALENDAR_HARMONIZATION,
     LIMITATION_KEY_NOLEAP_DROPPED,
     CalendarConversionResult,
     calendar_for_gcm,
@@ -266,9 +277,9 @@ def test_360_day_converts_with_resampled_limitation() -> None:
 
 
 def test_360_day_conversion_yields_full_year_coverage() -> None:
-    """Converting a 1-year 360-day series should yield 365 days
-    (xarray.convert_calendar with missing='interpolate' fills the
-    5-day gap)."""
+    """Converting a 1-year GENUINE 360-day series should yield 365 days
+    (convert_calendar(align_on='year', missing=np.nan) then interpolate_na
+    fills the 5-day gap)."""
     ds = _three60_day_dataset(start_year=2046, n_years=1)
     result = convert_to_gregorian(ds, source_calendar="360_day")
     n_days = result.data["tasmax"].size
@@ -472,3 +483,113 @@ def test_time_dim_parameter_threads_for_noleap() -> None:
     )
     assert result.target_calendar == "standard"
     assert "DATE" in result.data.dims
+
+
+# ── §13 Data-driven detection + Option-(c) harmonisation disclosure ───
+# Root-cause guard for the UC2 Bar-1 finding. The ISIMIP3b W5E5 bias-adjusted
+# product is delivered on a standard gregorian calendar for ALL GCMs — even
+# ones whose NATIVE calendar is noleap/360_day. ``convert_to_gregorian`` must:
+#   (1) branch on the ACTUAL data calendar (never stamp a "dropped Feb 29" /
+#       "interpolated gaps" limitation on data it did not manipulate);
+#   (2) for non-standard-native GCMs delivered gregorian, emit the Option-(c)
+#       provenance NOTE crediting ISIMIP's UPSTREAM harmonisation (honesty, not
+#       silence); gregorian-native GCMs emit no calendar key.
+
+# Phrases that would be FALSE pipeline claims for the ISIMIP3b reality.
+_FALSE_PIPELINE_CLAIMS = (
+    "treat as missing",
+    "no climate value for feb 29",
+)
+
+
+def test_gregorian_delivered_noleap_nominal_emits_harmonization_note():
+    """gfdl-esm4 reality: cutout delivered gregorian (Feb 29 present) while the
+    GCM's nominal calendar is noleap. NO "dropped Feb 29 / treat as missing"
+    claim; instead the Option-(c) upstream-harmonisation note, data unchanged.
+    """
+    ds = _gregorian_dataset(start_year=2048, n_years=1)  # leap year, has Feb 29
+    before_vals = ds["tasmax"].values.copy()
+    before_times = ds["time"].values.copy()
+    n_in = ds["tasmax"].size
+    result = convert_to_gregorian(ds, source_calendar="noleap")
+    assert result.limitation_key == LIMITATION_KEY_CALENDAR_HARMONIZATION
+    assert result.limitation_key != LIMITATION_KEY_NOLEAP_DROPPED
+    note = (result.limitation_value or "").lower()
+    assert "no calendar conversion was applied in this pipeline" in note
+    assert "upstream by isimip" in note
+    for false_claim in _FALSE_PIPELINE_CLAIMS:
+        assert false_claim not in note, f"false pipeline claim: {false_claim!r}"
+    # Case (a) data-UNTOUCHED guarantee: the passed-through values AND the time
+    # axis are value-identical to the input — no drop, no re-stamp, no Feb-29
+    # fabrication. (Presence alone is not enough; the VALUES must be unchanged.)
+    assert result.data["tasmax"].size == n_in == 366
+    np.testing.assert_array_equal(result.data["tasmax"].values, before_vals)
+    np.testing.assert_array_equal(result.data["time"].values, before_times)
+    feb29 = [t for t in result.data["time"].values if "02-29" in str(t)]
+    assert len(feb29) == 1, "Feb 29 must be preserved (real ISIMIP value)"
+    assert result.target_calendar == "standard"
+
+
+def test_gregorian_delivered_360day_nominal_emits_harmonization_note():
+    """ukesm1-0-ll reality: cutout delivered gregorian while nominal calendar is
+    360_day. NO "inserted gaps + interpolated" claim, no values changed; the
+    Option-(c) harmonisation note instead."""
+    ds = _gregorian_dataset(start_year=2046, n_years=1)
+    before = ds["tasmax"].values.copy()
+    result = convert_to_gregorian(ds, source_calendar="360_day")
+    assert result.limitation_key == LIMITATION_KEY_CALENDAR_HARMONIZATION
+    assert result.limitation_key != LIMITATION_KEY_360_RESAMPLED
+    # No interpolation occurred — values identical pass-through.
+    np.testing.assert_array_equal(result.data["tasmax"].values, before)
+
+
+def test_gregorian_native_emits_no_calendar_key():
+    """ipsl/mpi/mri reality: gregorian-native, delivered gregorian → nothing
+    harmonised anywhere → NO calendar key at all."""
+    ds = _gregorian_dataset(start_year=2046, n_years=1)
+    result = convert_to_gregorian(ds, source_calendar="gregorian")
+    assert result.limitation_key is None
+    assert result.applies_limitation() is False
+
+
+def test_harmonization_note_is_specialist_validated_and_honest():
+    """VERBATIM LOCK: the emitted note MUST equal the exact specialist-validated
+    string (an independent literal here, so a future paraphrase of the source
+    constant FAILS this test). Publishable-grade disclosure must not drift."""
+    expected = (
+        "Climate forcing is ISIMIP3b bias-adjusted and statistically "
+        "downscaled CMIP6 output (ISIMIP3BASD v2.5; Lange 2019, 2021), "
+        "delivered on the proleptic Gregorian calendar for all GCMs. No "
+        "calendar conversion was applied in this pipeline; inputs are "
+        "complete daily series (no missing steps, no gap-filling by us). "
+        "Calendar harmonisation for GCMs with non-standard native calendars "
+        "(GFDL-ESM4: 365_day/noleap; UKESM1-0-LL: 360_day) was performed "
+        "upstream by ISIMIP via linear time interpolation prior to bias "
+        "adjustment; harmonised days are therefore quantile-mapped, not raw "
+        "interpolations."
+    )
+    ds = _gregorian_dataset(start_year=2048, n_years=1)
+    note = convert_to_gregorian(ds, source_calendar="noleap").limitation_value
+    assert note == expected, (
+        "harmonisation note drifted from the specialist-validated text"
+    )
+
+
+def test_genuine_noleap_dropped_claim_requires_feb29_actually_absent():
+    """Positive disclosure-matches-data: a "dropped Feb 29" limitation requires
+    the converted data to ACTUALLY lack Feb 29 (genuine noleap source — never
+    the ISIMIP3b reality, but the branch must stay correct)."""
+    ds = _noleap_dataset(start_year=2048, n_years=1)  # genuine noleap, leap yr
+    result = convert_to_gregorian(ds, source_calendar="noleap")
+    assert result.limitation_key == LIMITATION_KEY_NOLEAP_DROPPED
+    feb29 = [t for t in result.data["time"].values if "02-29" in str(t)]
+    assert feb29 == [], "dropped-Feb29 claim requires Feb 29 actually absent"
+
+
+def test_genuine_360day_resampled_claim_requires_actual_gapfill():
+    """Positive disclosure-matches-data: a "resampled/interpolated" limitation
+    requires the source to actually be 360_day (gap-filled to 365/366)."""
+    ds = _three60_day_dataset(start_year=2046, n_years=1)  # genuine 360_day
+    result = convert_to_gregorian(ds, source_calendar="360_day")
+    assert result.limitation_key == LIMITATION_KEY_360_RESAMPLED
+    assert result.data["tasmax"].size == 365  # 360 source gap-filled to 365
