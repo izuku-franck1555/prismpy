@@ -2973,7 +2973,7 @@ class PythiaTranslator(PythiaTranslatorBase):
 
 *ENVIRONMENT MODIFICATIONS
 @E ODATE EDAY  ERAD  EMAX  EMIN  ERAIN ECO2  EDEW  EWIND ENVNAME
- 1 {{{{ sdate }}}} A   0 A   0 A   0 A   0 A   0 {{% if eco2_override_active|default(false) %}}R {{{{ co2_ppm }}}}{{% else %}}A   0{{% endif %}} A   0 A   0 ENV modify
+ 1 {{{{ sdate }}}} A   0 A   0 A   0 A   0 A   0 {{% if eco2_override_active|default(false) %}}R{{{{ "%4d"|format(co2_ppm) }}}}{{% else %}}A   0{{% endif %}} A   0 A   0 ENV modify
 
 *SIMULATION CONTROLS
 @N GENERAL     NYERS NREPS START SDATE RSEED SNAME.................... SMODEL

@@ -34,10 +34,18 @@ from prismpy.translators.pythia.translator import PythiaTranslator
 # pythia.py:1800-1801 sets ctx["co2_ppm"] (int) + ctx["eco2_override_active"]
 # (bool)). The generated package SNX MUST carry these verbatim or CO₂ cannot
 # cross the repo boundary.
+# FIXED-WIDTH ECO2 (Bar-1 factorial-smoke Finding 1): the value must be a
+# 4-wide right-justified field (``R{{ "%4d"|format(co2_ppm) }}`` → ``R 571`` /
+# ``R1054``, both 5 chars). The old variable-width ``R {{ co2_ppm }}`` rendered
+# ``R 1054`` (6 chars) for 4-digit ppm → overflowed DSSAT's fixed-width @E field
+# → all sites failed (SSP585 end-century, 1054 ppm). builder-3's prism-runner
+# ``_templates/`` carry the byte-identical string (lockstep).
 _ECO2_JINJA = (
     "{% if eco2_override_active|default(false) %}"
-    "R {{ co2_ppm }}{% else %}A   0{% endif %}"
+    'R{{ "%4d"|format(co2_ppm) }}{% else %}A   0{% endif %}'
 )
+# The old variable-width form that broke 4-digit CO₂ — must NOT reappear.
+_ECO2_JINJA_VARIABLE_WIDTH_BUG = "R {{ co2_ppm }}"
 _ME_JINJA = "{% if eco2_override_active|default(false) %}1{% else %}0{% endif %}"
 
 
@@ -110,7 +118,22 @@ def test_snx_co2_jinja_uses_the_adapter_ctx_key_contract():
     default, not raise under StrictUndefined)."""
     snx = _snx()
     assert "eco2_override_active|default(false)" in snx
-    assert "{{ co2_ppm }}" in snx
+    assert "co2_ppm" in snx
+
+
+def test_eco2_is_fixed_width_no_4digit_overflow():
+    """Bar-1 Finding 1 regression guard: the @E ECO2 value MUST be a 4-wide
+    right-justified field so 4-digit CO₂ (e.g. 1054 = SSP585 end-century) fits
+    the fixed-width @E column. The old ``R {{ co2_ppm }}`` rendered a 6-char
+    ``R 1054`` that overflowed → DSSAT failed every site. The render passed but
+    the RUN failed, so this pins the FORMAT (builder-3's integration test pins
+    the DSSAT consumption)."""
+    snx = _snx()
+    assert _ECO2_JINJA in snx, "@E ECO2 not the fixed-width R{{ '%4d'|... }} form"
+    assert _ECO2_JINJA_VARIABLE_WIDTH_BUG not in snx, (
+        "variable-width 'R {{ co2_ppm }}' reintroduced — 4-digit CO₂ (1054) "
+        "will render 6 chars and overflow DSSAT's fixed-width @E field"
+    )
 
 
 def test_co2_wiring_is_crop_agnostic():
