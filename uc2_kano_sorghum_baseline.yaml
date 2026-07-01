@@ -58,6 +58,8 @@ platform_config:
     eghr_database_path: "/Users/francktonle/Downloads/DATA-TO-MODEL-TRANSLATION/PYTHIA/Simulation_Data/eGHR/GHR.db"
     eghr_sol_dir: "/Users/francktonle/Downloads/DATA-TO-MODEL-TRANSLATION/PYTHIA/Simulation_Data/eGHR/"
     weather_download_delay: 1.0
+    spam_raster_dir: "/Users/francktonle/Downloads/DATA-TO-MODEL-TRANSLATION/data/spam/"
+    spam_version: "2020"
 
 data_sources:
   climate:
