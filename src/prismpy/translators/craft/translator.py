@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from prismpy.cells.admission import canonical_climate_for_grid
-from prismpy.config.schema import Platform
+from prismpy.config.schema import Platform, craft_resolution_error
 from prismpy.data_sources.gadm import GADMDataSource
 from prismpy.models.climate import ClimateTimeSeries, ClimateRecord
 from prismpy.models.crop import CropParameters, CropCalendar
@@ -114,6 +114,11 @@ class CraftTranslator(CraftTranslatorBase):
         Returns:
             TranslationResult with output files and status
         """
+        # Translate-time guard: CRAFT consumes data.grid (the RUNTIME grid), so
+        # reject a non-5arcmin grid BEFORE any output/side-effect (the config
+        # guards check the declaration, not the consumed grid).
+        if data.grid is not None and data.grid.resolution != "5arcmin":
+            raise craft_resolution_error(data.grid.resolution)
         self.log_translation_start(data)
         errors = []
         warnings = []

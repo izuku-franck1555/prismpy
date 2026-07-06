@@ -132,6 +132,11 @@ def cmd_translate(args: argparse.Namespace) -> int:
                 logger.error(f"Unknown target platform: {t}")
                 return 1
         config.targets = targets
+        try:
+            config.assert_craft_resolution_compatible()
+        except ValueError as e:
+            logger.error(str(e))
+            return 1
         logger.info(f"Target platforms: {[t.value for t in targets]}")
 
     # Create and run pipeline

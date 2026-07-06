@@ -1990,6 +1990,19 @@ class ProjectInfo(BaseModel):
     created: Optional[date] = Field(default=None, description="Creation date")
 
 
+def craft_resolution_error(resolution) -> ValueError:
+    """The actionable CRAFT + non-5arcmin error (shared by the config-level and
+    translate-time guards)."""
+    return ValueError(
+        f"CRAFT does not support grid_resolution="
+        f"'{resolution}': CRAFT's cell-id encoding (row*4320+col) is fixed to "
+        f"the 5-arcmin global grid. For DSSAT-based simulation at 30-arcmin use "
+        f"PYTHIA (also DSSAT, variable-resolution), or run CRAFT at "
+        f"grid_resolution='5arcmin' and aggregate. ACEA is 30-arcmin-native but "
+        f"uses AquaCrop, a different crop model."
+    )
+
+
 class ProjectConfig(BaseModel):
     """Complete project configuration schema.
 
@@ -2096,6 +2109,17 @@ class ProjectConfig(BaseModel):
                     "Cells not matching any zone use defaults from 'management'. "
                     "First matching zone wins if zones overlap."
     )
+
+    def assert_craft_resolution_compatible(self, targets=None) -> None:
+        """CRAFT is fixed to the 5-arcmin global grid (cell-id row*4320+col)."""
+        targets = targets if targets is not None else self.targets
+        if Platform.CRAFT in targets and self.region.grid_resolution != "5arcmin":
+            raise craft_resolution_error(self.region.grid_resolution)
+
+    @model_validator(mode="after")
+    def validate_craft_requires_5arcmin(self) -> "ProjectConfig":
+        self.assert_craft_resolution_compatible()
+        return self
 
     def get_enabled_platforms(self) -> List[Platform]:
         """Get list of enabled target platforms."""

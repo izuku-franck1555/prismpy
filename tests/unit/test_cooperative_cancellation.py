@@ -378,7 +378,8 @@ class TestCarveOutRegression:
         # (+1 line at module top). Then 521 → 526 after a new
         # ``error_events`` field + 4-line docstring added to
         # ``StageResult``.
-        ("src/prismpy/pipeline/executor.py", 526),
+        # Then 526 -> 528 after the CRAFT 5-arcmin guard call in __init__ (+2).
+        ("src/prismpy/pipeline/executor.py", 528),
         # Provenance-flush inside the translator-dispatch except handler
         # in _execute_translate: writes decision records, cancel-inert.
         # Line shifted from 2338 → 2346 (PRE.3.3 thread-through)
@@ -445,7 +446,8 @@ class TestCarveOutRegression:
         # classification block + structured ``error_events`` population
         # at the per-platform broad-except site (~+13, with the
         # grid-total derive refactored off a try block).
-        ("src/prismpy/pipeline/executor.py", 2833),
+        # Then 2833 -> 2835 after the CRAFT 5-arcmin guard call in __init__ (+2).
+        ("src/prismpy/pipeline/executor.py", 2835),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed
