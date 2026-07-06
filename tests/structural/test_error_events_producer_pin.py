@@ -40,7 +40,7 @@ _EXECUTOR = _PRISMPY_ROOT / "src" / "prismpy" / "pipeline" / "executor.py"
 # are deferred-untyped — the pin keeps the gap visible while letting them
 # stay in production (they still fail loudly).
 F_AG_GATE_SITES: Tuple[Tuple[str, int, str], ...] = (
-    ("src/prismpy/translators/acea/translator.py", 514, "ClimateDownloadError"),
+    ("src/prismpy/translators/acea/translator.py", 519, "ClimateDownloadError"),
     ("src/prismpy/translators/pythia/translator.py", 1000, "ValueError"),
     ("src/prismpy/translators/pythia/translator.py", 1793, "ValueError"),
     ("src/prismpy/translators/pythia/translator.py", 2541, "BuildEghrSubstrateError"),

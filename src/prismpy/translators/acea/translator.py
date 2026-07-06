@@ -453,7 +453,11 @@ class AceaTranslator(AceaTranslatorBase):
             # than rescued by an intersection downstream.
             cell_ids_30arcmin_set = set(cell_ids_30arcmin)
             canonical = canonical_climate_for_grid(climate_data, data.grid)
-            missing_tiles = cell_ids_30arcmin_set - canonical.covered_tile_ids
+            # lat/lon-derived covered set (consistent with cell_ids_30arcmin);
+            # canonical.covered_tile_ids integer-reduces cell ids → wrong for
+            # 30-arcmin grids. canonical still did foreign-key admission.
+            covered_30 = self._covered_30arcmin_tiles(canonical, data.grid)
+            missing_tiles = cell_ids_30arcmin_set - covered_30
 
             if missing_tiles and data.grid and download_enabled:
                 # Download NASA POWER climate data for the missing 30-arcmin
@@ -464,7 +468,7 @@ class AceaTranslator(AceaTranslatorBase):
                 # retrieve-stage path-dict variants (matches CRAFT pattern).
                 logger.info(
                     f"Climate coverage incomplete "
-                    f"({len(canonical.covered_tile_ids)}/{len(cell_ids_30arcmin)} tiles) — "
+                    f"({len(covered_30)}/{len(cell_ids_30arcmin)} tiles) — "
                     f"downloading from NASA POWER for {len(missing_tiles)} missing tiles..."
                 )
 
@@ -506,9 +510,10 @@ class AceaTranslator(AceaTranslatorBase):
                 post_download_canonical = canonical_climate_for_grid(
                     climate_data, data.grid
                 )
-                still_missing = (
-                    cell_ids_30arcmin_set
-                    - post_download_canonical.covered_tile_ids
+                # lat/lon-derived covered set (consistent with
+                # cell_ids_30arcmin) — NOT the integer-reduced covered_tile_ids.
+                still_missing = cell_ids_30arcmin_set - self._covered_30arcmin_tiles(
+                    post_download_canonical, data.grid
                 )
                 if still_missing:
                     raise ClimateDownloadError(
@@ -530,7 +535,7 @@ class AceaTranslator(AceaTranslatorBase):
                 # downstream Coverage validator fires correctly.
                 warnings.append(
                     f"Climate coverage incomplete "
-                    f"({len(canonical.covered_tile_ids)}/{len(cell_ids_30arcmin)} tiles) "
+                    f"({len(covered_30)}/{len(cell_ids_30arcmin)} tiles) "
                     f"and download_climate=False; package will fail Coverage "
                     f"validator honestly."
                 )
@@ -806,6 +811,37 @@ class AceaTranslator(AceaTranslatorBase):
             data, cell_ids, climate_name, output_files
         )
 
+    def _cell_to_30arcmin_tile(self, cell) -> int:
+        """The 30-arcmin tile ID a grid cell belongs to, derived from its
+        lat/lon. SINGLE source of the cell→tile mapping — used by
+        ``_compute_30arcmin_cell_ids``, the NASA POWER download map-back, and
+        the coverage check, so all three agree. ACEA grids are 30-arcmin-keyed
+        (cell.cell_id IS already a tile id); the integer 5→30 reduction
+        ``cell_id_5arcmin_to_30arcmin_parent`` is CORRECT for 5-arcmin grids
+        but WRONG for 30-arcmin grids (it re-reduces an already-30-arcmin id).
+        Deriving from lat/lon is correct for BOTH resolutions (for 5-arcmin the
+        lat/lon tile provably equals the integer reduction)."""
+        resolution = 30 / 60  # 30 arcmin in degrees
+        row = int((90 - cell.lat) / resolution)
+        col = int((cell.lon + 180) / resolution)
+        row = max(0, min(row, self.GRID_ROWS_30ARCMIN - 1))
+        col = max(0, min(col, self.GRID_COLS_30ARCMIN - 1))
+        return row * self.GRID_COLS_30ARCMIN + col
+
+    def _covered_30arcmin_tiles(self, canonical, grid) -> set:
+        """30-arcmin tiles actually covered by an admitted canonical climate,
+        derived from each admitted cell's lat/lon (consistent with
+        ``_compute_30arcmin_cell_ids``) — NOT ``canonical.covered_tile_ids``,
+        which integer-reduces cell ids and so mis-maps 30-arcmin grids.
+        ``canonical`` still provides foreign-key admission (sentinel/foreign
+        keys are dropped before this fold)."""
+        if not grid or not grid.cells:
+            return set()
+        cid_to_tile = {c.cell_id: self._cell_to_30arcmin_tile(c)
+                       for c in grid.cells}
+        return {cid_to_tile[cid] for cid in canonical.per_cell
+                if cid in cid_to_tile}
+
     def _compute_30arcmin_cell_ids(self, grid: Optional[SpatialGrid]) -> List[int]:
         """Compute UNIQUE 30-arcmin cell IDs from grid.
 
@@ -825,19 +861,8 @@ class AceaTranslator(AceaTranslatorBase):
         if not grid or not grid.cells:
             return []
 
-        cell_ids_set = set()
-        resolution = 30 / 60  # 30 arcmin in degrees
-
-        for cell in grid.cells:
-            row = int((90 - cell.lat) / resolution)
-            col = int((cell.lon + 180) / resolution)
-
-            # Clamp to valid range
-            row = max(0, min(row, self.GRID_ROWS_30ARCMIN - 1))
-            col = max(0, min(col, self.GRID_COLS_30ARCMIN - 1))
-
-            cell_id = row * self.GRID_COLS_30ARCMIN + col
-            cell_ids_set.add(cell_id)
+        # Single source of truth: _cell_to_30arcmin_tile (lat/lon-derived).
+        cell_ids_set = {self._cell_to_30arcmin_tile(cell) for cell in grid.cells}
 
         # Return sorted list of unique IDs
         return sorted(cell_ids_set)
@@ -1234,17 +1259,18 @@ class AceaTranslator(AceaTranslatorBase):
 
         logger.info(f"Downloaded {len(climate_30)}/{len(centers_30)} unique 30-arcmin cells")
 
-        # Map back to 5-arcmin cell IDs for compatibility with the rest of the translator
+        # Fan the per-tile climate back out to every grid cell, keyed by the
+        # cell's OWN 30-arcmin tile (lat/lon-derived — the same helper that
+        # keyed ``climate_30`` above and ``_compute_30arcmin_cell_ids``). The
+        # prior code integer-reduced ``cell.cell_id`` (//4320 //6), which is
+        # only valid for 5-arcmin cell ids; for a 30-arcmin grid (cell.cell_id
+        # already a tile id) it produced a bogus parent that missed every
+        # ``climate_30`` key → empty ``climate_data`` → false "unfetched".
         climate_data = {}
-        COLS_5 = 4320
         for cell in grid.cells:
-            row_5 = cell.cell_id // COLS_5
-            col_5 = cell.cell_id % COLS_5
-            row_30 = row_5 // 6
-            col_30 = col_5 // 6
-            parent_30 = row_30 * self.GRID_COLS_30ARCMIN + col_30
-            if parent_30 in climate_30:
-                climate_data[cell.cell_id] = climate_30[parent_30]
+            tile_30 = self._cell_to_30arcmin_tile(cell)
+            if tile_30 in climate_30:
+                climate_data[cell.cell_id] = climate_30[tile_30]
 
         return climate_data
 
