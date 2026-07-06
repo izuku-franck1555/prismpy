@@ -2353,7 +2353,7 @@ class TranslationPipeline:
                 n_cells_excluded_by_min_share_percent = 0
                 if admin_geom is not None:
                     from shapely.geometry import box as _shp_box
-                    halfres = (5.0 / 60.0) / 2.0  # half-cell-edge for 5arcmin
+                    halfres = grid.increment_deg / 2.0  # resolution-derived half-cell-edge
                     cells_post_threshold = []
                     for cell in grid.cells:
                         cell_box = _shp_box(
