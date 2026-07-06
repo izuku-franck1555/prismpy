@@ -111,6 +111,7 @@ def generate_scenario_set(
     grid = _grid_from_baseline_package(baseline_package)
     baseline_reference_label = _baseline_reference_label(baseline_package)
     planting_doy = _baseline_planting_doy(baseline_package)
+    baseline_platform = _baseline_platform(baseline_package)
 
     projections: List[Path] = []
     matrix: List[Tuple[str, str, Tuple[int, int]]] = []
@@ -149,6 +150,12 @@ def generate_scenario_set(
                     output_dir=output_dir,
                     planting_doy=planting_doy,
                 )
+                # ACEA reads the cloned OBSERVED climate pickles, not the ISIMIP
+                # .WTH → an ACEA projection is a forced-CO₂ CO₂-SENSITIVITY, not a
+                # GCM future. Reconcile temporal/bias/co2/label to that reality.
+                # pythia/craft (.WTH-driven GCM projections) are left untouched.
+                if baseline_platform == "acea":
+                    finalize_acea_forced_co2_projection(projection, baseline_package)
                 projections.append(projection)
                 matrix.append((gcm, ssp, time_slice))
 
@@ -265,6 +272,220 @@ def assemble_projection_package(
     return projection_dir
 
 
+def _baseline_platform(baseline_package: Path) -> str:
+    """Platform of a baseline package (``manifest.platform``)."""
+    manifest = json.loads(
+        (Path(baseline_package) / "manifest.json").read_text(encoding="utf-8")
+    )
+    return str(manifest.get("platform") or "")
+
+
+def finalize_acea_forced_co2_projection(
+    projection_dir: Path, baseline_package: Path
+) -> None:
+    """Reconcile an ACEA projection into an honest forced-CO₂ CO₂-SENSITIVITY.
+
+    The ISIMIP generator path writes GCM weather as PYTHIA ``.WTH`` and clones
+    the WHOLE baseline package. ACEA reads the cloned OBSERVED climate pickles
+    (NOT the ``.WTH``), so an ACEA projection is observed-climate-HELD + CO₂
+    forced to the scenario level — a pure CO₂-fertilization / WUE sensitivity,
+    NOT a realized GCM future. The GCM-framed metadata the generator emits is
+    then inconsistent with the ACEA data and breaks the run four ways; this
+    reconciles all four (ACEA-only — pythia/craft, whose ``.WTH`` GCM climate
+    IS the projection, are untouched):
+
+      (a) ``manifest.temporal`` := baseline observed period. The GCM slice
+          (e.g. 2046-2065) ≠ the cloned climate's observed years, so ACEA's
+          ``_collect_annual_results`` year-filter (``year not in target_years``)
+          drops EVERY result → "No results collected" → physical run FAILS.
+      (b) ``scenario.bias_correction_method`` := ``"none"``. Observed climate
+          carries no ISIMIP bias correction; a mismatch vs the baseline's
+          ``"none"`` fails the UC2 comparison's consistent-method validation.
+      (c) the elevated CO₂ is written into the engine's ``co2/`` file (the file
+          ACEA actually reads). The generator sets ``manifest.scenario.co2_ppm``
+          but never writes it to the co2 file → ACEA runs at the historical
+          ~390 ppm → FLAT Δ=0 dose-response (a masquerade).
+      (d) honest framing: a ``forcedCO2`` ``scenario_label`` + a disclosure that
+          this is a CO₂-sensitivity (climate held), NOT a realized GCM future.
+    """
+    baseline_package = Path(baseline_package)
+    b_manifest = json.loads(
+        (baseline_package / "manifest.json").read_text(encoding="utf-8")
+    )
+    b_temporal = dict(b_manifest.get("temporal", {}))
+    b_label = (b_manifest.get("scenario") or {}).get("scenario_label", "OBSERVED")
+    b_start, b_end = int(b_temporal["start_year"]), int(b_temporal["end_year"])
+
+    manifest_path = Path(projection_dir) / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    scenario = dict(manifest.get("scenario", {}))
+    co2 = float(scenario["co2_ppm"])
+    ssp = scenario.get("rcp_or_ssp")
+    ts_start, ts_end = scenario.get("time_slice_start"), scenario.get("time_slice_end")
+
+    # (a) temporal := observed baseline period (matches the cloned ACEA climate)
+    manifest["temporal"] = b_temporal
+
+    # (b) no bias correction on the held observed climate
+    scenario["bias_correction_method"] = "none"
+    scenario["scenario_bias_correction_provenance"] = None
+
+    # (d) honest CO₂-sensitivity framing (not a GCM future)
+    scenario["scenario_label"] = (
+        f"{b_label}_forcedCO2-{int(round(co2))}ppm_{ssp}_{ts_start}-{ts_end}"
+    )
+    scenario["scenario_kind"] = "co2_sensitivity_climate_held"
+    scenario["disclosure"] = (
+        f"CO2-SENSITIVITY (NOT a realized GCM future): climate HELD at the observed "
+        f"{b_start}-{b_end} baseline; atmospheric CO2 forced to {int(round(co2))} ppm "
+        f"(the {ssp} level at the {ts_start}-{ts_end} time-slice). Deltas reflect the "
+        f"PURE CO2-fertilization / water-use-efficiency response, NOT GCM climate change."
+    )
+    manifest["scenario"] = scenario
+
+    data_sources = dict(manifest.get("data_sources", {}))
+    data_sources["climate"] = (
+        f"OBSERVED baseline climate (held) + CO2 forced to {int(round(co2))}ppm "
+        f"({ssp} {ts_start}-{ts_end} level) — CO2-sensitivity, not GCM downscaling"
+    )
+    manifest["data_sources"] = data_sources
+
+    # limitations := baseline acea (observed climate). Drop the ISIMIP GCM-bridge
+    # limitations _rewrite_projection_manifest injected (calendar_harmonization /
+    # dewpoint_policy describe the .WTH GCM climate ACEA never reads).
+    manifest["limitations"] = dict(b_manifest.get("limitations", {}))
+
+    # (c) write the elevated CO₂ into the engine's co2/ file (constant over run years)
+    co2_dir = Path(projection_dir) / "co2"
+    co2_dir.mkdir(parents=True, exist_ok=True)
+    for stale in co2_dir.glob("*.txt"):
+        stale.unlink()
+    lines = ["Year\tCO2_ppm"] + [f"{y}\t{co2:.2f}" for y in range(1980, b_end + 1)]
+    (co2_dir / "GlobalHistoricalCO2_NOAA_1980_2020.txt").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
+
+    # (d) honest acea-framed README + drop the inherited GCM weather/*.WTH ACEA
+    # never reads (a climate-held package must not ship GCM future weather).
+    _write_acea_forced_co2_readme(
+        Path(projection_dir),
+        b_manifest,
+        co2=co2,
+        ssp=ssp,
+        ts_start=ts_start,
+        ts_end=ts_end,
+        b_start=b_start,
+        b_end=b_end,
+    )
+    weather_dir = Path(projection_dir) / "weather"
+    if weather_dir.exists():
+        shutil.rmtree(weather_dir)
+
+    # refresh the per-file checksum inventory + summary after the co2 rewrite
+    files = collect_files_with_checksums(projection_dir)
+    manifest["files"] = files
+    total_size = sum(entry["size_bytes"] for entry in files)
+    manifest["summary"] = {
+        "total_files": len(files),
+        "total_size_bytes": total_size,
+        "total_size_mb": round(total_size / (1024 * 1024), 2),
+    }
+    save_manifest(manifest, manifest_path)
+
+
+def _write_acea_forced_co2_readme(
+    projection_dir: Path,
+    baseline_manifest: Dict[str, Any],
+    *,
+    co2: float,
+    ssp: Any,
+    ts_start: Any,
+    ts_end: Any,
+    b_start: int,
+    b_end: int,
+) -> None:
+    """Render an honest ACEA forced-CO2 README (not the PYTHIA clone template).
+
+    ``generate_readme(platform="acea")`` emits the AquaCrop package layout (acea
+    run cmd, ``climate/*.pckl`` + ``co2/`` inputs; no ``.WTH``/``.SOL``/``.SNX``).
+    A CO2-sensitivity disclosure is then injected: climate HELD at the observed
+    baseline, CO2 forced to the scenario level, deltas are CO2-fertilization/WUE,
+    NOT a GCM future. Package facts (cell count, crop code, climate prefix) are
+    read from disk so the README matches the actual on-disk package.
+    """
+    readme_path = projection_dir / "README.md"
+    climate_dir = projection_dir / "climate"
+    pickles = sorted(climate_dir.glob("*.pckl")) if climate_dir.exists() else []
+    n_climate = len(pickles)
+    climate_name = pickles[0].stem.rsplit("_", 1)[0] if pickles else ""
+    cell_ids = [
+        int(p.stem.rsplit("_", 1)[-1])
+        for p in pickles
+        if p.stem.rsplit("_", 1)[-1].isdigit()
+    ]
+
+    fao_code = ""
+    ha_dir = projection_dir / "harvested_areas"
+    if ha_dir.exists():
+        sub = [p.name for p in ha_dir.iterdir() if p.is_dir()]
+        if sub:
+            fao_code = sub[0]
+
+    region = baseline_manifest.get("region") or {}
+    crop = baseline_manifest.get("crop") or {}
+    ds = baseline_manifest.get("data_sources") or {}
+    config = {
+        "project_name": baseline_manifest.get("project_name", "projection"),
+        "package_name": projection_dir.name,
+        "region": region,
+        "region_name": region.get("name", ""),
+        "country": region.get("country", ""),
+        "crop": crop,
+        "crop_name": crop.get("name", ""),
+        "start_year": b_start,
+        "end_year": b_end,
+        "temporal": {"start_year": b_start, "end_year": b_end},
+        "n_cells": len(cell_ids) or n_climate,
+        "n_climate_files": n_climate,
+        "fao_code": fao_code or crop.get("fao_code", ""),
+        "climate_name": climate_name
+        or f"{str(region.get('name', '')).lower()}_nasapower",
+        "climate_source": f"NASA POWER (observed {b_start}-{b_end}, HELD)",
+        "soil_source": ds.get("soil", "iSDA S3 (30m)"),
+        "spam_source": ds.get("harvested_areas", "Dummy (placeholder)"),
+        "gaez_source": ds.get("crop_suitability", "FAO GAEZ v4 (auto-downloaded)"),
+        "gridcells": cell_ids,
+        "resolution": 0,
+        "scenarios": [1],
+        "clock_start": f"{b_start}/01/01",
+        "clock_end": f"{b_end}/12/31",
+    }
+    generate_readme(readme_path, config, platform="acea")
+
+    text = readme_path.read_text(encoding="utf-8")
+    banner = (
+        "\n> **CO2-SENSITIVITY EXPERIMENT (NOT a realized GCM future).**\n"
+        f"> Climate is HELD at the observed {b_start}-{b_end} baseline (NASA POWER);\n"
+        f"> atmospheric CO2 is FORCED to {co2:.0f} ppm (the {ssp} level at the\n"
+        f"> {ts_start}-{ts_end} time-slice). Reported deltas are the pure\n"
+        "> CO2-fertilization / water-use-efficiency response, NOT GCM climate change.\n"
+        "> ACEA consumes the observed `climate/*.pckl` + the forced `co2/` file; it\n"
+        "> reads NO GCM weather. (scenario_kind: co2_sensitivity_climate_held)\n"
+    )
+    text = text.replace(
+        "**ACEA (AquaCrop) Input Data Package**\n",
+        "**ACEA (AquaCrop) Input Data Package**\n" + banner,
+        1,
+    )
+    text = text.replace(
+        "| **CO2** | NOAA | Historical atmospheric CO2 levels |",
+        f"| **CO2** | NOAA baseline, FORCED to {co2:.0f} ppm "
+        f"| {ssp} {ts_start}-{ts_end} level (CO2-sensitivity; climate held) |",
+        1,
+    )
+    readme_path.write_text(text, encoding="utf-8")
+
+
 def _rewrite_projection_manifest(
     projection_dir: Path,
     *,
@@ -362,6 +583,11 @@ def _rewrite_projection_readme(
     ISIMIP3b provenance NATIVELY — no post-hoc string replacement, so no NASA
     citation key/url survives.
     """
+    # ACEA forced-CO2 projections take their honest, acea-framed README from
+    # finalize_acea_forced_co2_projection (climate held, CO2 forced): the pythia
+    # clone template below would masquerade a CO2-sensitivity as a GCM future.
+    if str(baseline_manifest.get("platform") or "") == "acea":
+        return
     readme_path = projection_dir / "README.md"
     projection_source = f"ISIMIP3b {gcm_source} {rcp_or_ssp}"
     title_inner = f"ISIMIP3b bias-adjusted GCM climate ({gcm_source} {rcp_or_ssp})"
