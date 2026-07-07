@@ -408,6 +408,15 @@ class CraftTranslatorBase(BaseTranslator):
     GLOBAL_COLS = 4320
     GLOBAL_ROWS = 2160
 
+    def __init__(self, *args, **kwargs):
+        # Root choke point + side-effect-free: check BEFORE super().__init__ creates
+        # the output dir. Any CRAFT instantiation produces CRAFT output regardless
+        # of config.targets, so force the CRAFT resolution check here.
+        config = args[0] if args else kwargs.get("config")
+        if config is not None:
+            config.assert_craft_resolution_compatible(targets=[Platform.CRAFT])
+        super().__init__(*args, **kwargs)
+
     def get_required_data(self) -> List[str]:
         return self.REQUIRED_DATA
 

@@ -251,6 +251,8 @@ class TranslationPipeline:
             provenance: Optional provenance tracker (created if not provided)
         """
         self.config = config
+        # Defense-in-depth: a post-construction targets mutation (CLI --targets) skips the model_validator.
+        config.assert_craft_resolution_compatible()
         self.logger = logging.getLogger(__name__)
 
         # Initialize provenance tracker

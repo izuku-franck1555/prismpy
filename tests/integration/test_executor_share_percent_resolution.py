@@ -71,6 +71,8 @@ def _shapely_or_skip(testcase: TestCase):
 def _make_pipeline(*, resolution: str, min_share_percent: float) -> TranslationPipeline:
     """Minimal pipeline whose BoundaryConfig carries bbox_intersects + the
     share threshold, at the requested grid resolution."""
+    # CRAFT is 5-arcmin-only (guarded); use ACEA for the 30-arcmin case.
+    target = Platform.CRAFT if resolution == "5arcmin" else Platform.ACEA
     cfg = ProjectConfig(
         project=ProjectInfo(
             name='executor_share_percent_resolution',
@@ -93,7 +95,7 @@ def _make_pipeline(*, resolution: str, min_share_percent: float) -> TranslationP
             calendar=CropCalendarConfig(planting_doy=166, maturity_doy=285),
         ),
         temporal=TemporalConfig(start_year=2015, end_year=2020, spinup_years=2),
-        targets=[Platform.CRAFT],
+        targets=[target],
         output=OutputConfig(base_dir='outputs', structure='by_platform'),
     )
     return TranslationPipeline(

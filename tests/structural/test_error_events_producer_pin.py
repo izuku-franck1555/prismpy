@@ -46,7 +46,8 @@ F_AG_GATE_SITES: Tuple[Tuple[str, int, str], ...] = (
     ("src/prismpy/translators/pythia/translator.py", 2541, "BuildEghrSubstrateError"),
     ("src/prismpy/translators/sarra_py/translator.py", 711, "ValueError"),
     ("src/prismpy/translators/sarra_py/translator.py", 1675, "ValueError"),
-    ("src/prismpy/translators/craft/translator.py", 1565, "ValueError"),
+    # 1565 -> 1570 after the translate-time data.grid guard added at translate() top.
+    ("src/prismpy/translators/craft/translator.py", 1570, "ValueError"),
     ("src/prismpy/translators/_shared/eghr_substrate.py", 461, "ValueError"),
     ("src/prismpy/translators/_shared/eghr_substrate.py", 466, "ValueError"),
 )
