@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 import logging
 import shutil
+import os
+import tempfile
 
 from prismpy.cells.cell_id_validation import is_real_climate_cell_id
 from prismpy.config.schema import ProjectConfig, Platform
@@ -151,13 +153,17 @@ class BaseTranslator(ABC):
 
         POST-CONDITION INVARIANT (fail-closed, closing the placement-bug class):
         on return, either (source supplied) dest is a REGULAR FILE, or (no source)
-        dest does NOT exist. Guarded two ways: (1) the whole body runs under an
-        outer OSError boundary, so any metadata probe or FS op that raises (incl.
-        shutil.SameFileError) becomes a typed ObservedTrialsCopyError; (2) dest is
-        enforced to live INSIDE output_dir (no symlinked parent / path escape)
-        before any removal / mkdir / copy. ANY deviation raises so the PACKAGE
-        stage fails loud (executor -> errors -> success=False) instead of shipping
-        a package that falsely reads as trials-present.
+        dest does NOT exist. Guarded three ways: (1) the whole body runs under a
+        catch-all boundary, so ANY exception (OSError, RuntimeError from a
+        resolve() symlink loop, RecursionError from rmtree, ...) becomes a typed
+        ObservedTrialsCopyError - only our own typed error passes through un-
+        rewrapped; (2) dest is enforced INSIDE output_dir (no symlinked parent /
+        path escape) before any FS op; (3) the copy is atomic (copy to a temp in
+        dest.parent, then os.replace) so a hard-linked external file is never
+        mutated in place and a partial copy is never the visible dest. ANY
+        deviation raises so the PACKAGE stage fails loud (executor -> errors ->
+        success=False) instead of shipping a package that falsely reads as
+        trials-present.
         """
         src = getattr(self.config, "n_trials_source_path", None)
         dest = self.output_dir / "data" / "n_trials.csv"
@@ -192,14 +198,25 @@ class BaseTranslator(ABC):
                 )
             # Refuse a non-regular-file already at the EXACT dest (a directory /
             # symlink would swallow or misdirect the copy). A stale regular file is
-            # fine - copy2 overwrites it in place.
+            # fine - the atomic replace below swaps it without mutating its inode.
             if dest.is_symlink() or (dest.exists() and not dest.is_file()):
                 raise ObservedTrialsCopyError(
                     f"observed-trials dest {dest} exists but is not a regular file: "
                     "refusing to copy (a directory/symlink would swallow the CSV)"
                 )
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src_path, dest)
+            # Atomic write: copy to a temp in the SAME dir, then os.replace onto
+            # dest. os.replace breaks any existing link (a stale dest HARD-LINKED
+            # to an external file is NOT mutated in place) and makes a partial copy
+            # never the visible dest.
+            fd, tmp_name = tempfile.mkstemp(dir=str(dest.parent), prefix=".n_trials-", suffix=".tmp")
+            os.close(fd)
+            tmp = Path(tmp_name)
+            try:
+                shutil.copy2(src_path, tmp)
+                os.replace(tmp, dest)
+            finally:
+                tmp.unlink(missing_ok=True)
             # Post-condition: the EXACT dest path is now a regular file.
             if dest.is_symlink() or not dest.is_file():
                 raise ObservedTrialsCopyError(
@@ -207,13 +224,16 @@ class BaseTranslator(ABC):
                 )
             self.logger.info("Copied observed N-trials CSV -> %s", dest)
             return dest
-        except OSError as exc:
-            # Outer fail-closed boundary (B3): is_file()/exists() re-raise
-            # EACCES/EIO/ESTALE (only the not-found class is swallowed), and
-            # mkdir/copy2 (incl. SameFileError, an OSError subclass) can raise.
-            # Type EVERY OSError so nothing escapes to a silent PACKAGE success.
-            # ObservedTrialsCopyError is a RuntimeError, so the explicit raises
-            # above fly through this handler untouched (no double-wrap).
+        except ObservedTrialsCopyError:
+            raise
+        except Exception as exc:
+            # Catch-all fail-closed boundary: every placement failure - OSError,
+            # RuntimeError (a resolve() symlink loop on py3.11), RecursionError
+            # (rmtree on a deep dir), shutil.SameFileError, ... - is typed so
+            # nothing escapes to a silent PACKAGE success. Our own
+            # ObservedTrialsCopyError is re-raised above un-rewrapped;
+            # BaseException (KeyboardInterrupt/SystemExit) is intentionally NOT
+            # caught.
             raise ObservedTrialsCopyError(
                 f"observed-trials placement failed for {dest}: {exc}"
             ) from exc
@@ -221,8 +241,8 @@ class BaseTranslator(ABC):
     def _remove_stale_trials_dest(self, dest: Path) -> None:
         """Remove a stale observed-trials artifact at ``dest`` (a regular file or
         a directory) from a reused output dir. Called only from within
-        ``_copy_observed_trials``'s outer OSError boundary, which types any
-        removal failure - so a reconcile can never fail silently."""
+        ``_copy_observed_trials``'s catch-all boundary, which types any removal
+        failure - so a reconcile can never fail silently."""
         if dest.is_dir() and not dest.is_symlink():
             shutil.rmtree(dest)
         elif dest.exists() or dest.is_symlink():

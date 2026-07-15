@@ -13,6 +13,7 @@ shared conftest builder).
 from __future__ import annotations
 
 import logging
+import os
 import types
 from pathlib import Path
 
@@ -359,6 +360,45 @@ def test_symlinked_data_parent_rejected_and_external_not_deleted(tmp_path):
     # the external target + its artifact survive — no destructive delete via symlink.
     assert external.is_dir()
     assert external_artifact.is_file(), "reconcile must NOT delete the external target"
+
+
+def test_symlink_loop_at_dest_makes_package_fail(tmp_path):
+    # A symlink loop on the dest path makes Path.resolve() raise RuntimeError (NOT
+    # OSError) on py3.11 — only a catch-all boundary types it → PACKAGE
+    # success=False, rather than escaping raw (past an OSError-only handler) to a
+    # silent success.
+    out = tmp_path / "pkg"
+    (out / "data").mkdir(parents=True)
+    dest = out / "data" / "n_trials.csv"
+    dest.symlink_to(dest)                      # self-referential symlink loop
+    cfg = types.SimpleNamespace(n_trials_source_path=None)
+    result = _run_package_stage(tmp_path, _TrialsOnlyTranslator(cfg, out))
+    assert result.success is False, (
+        f"a resolve() symlink loop must fail PACKAGE (catch-all); errors={result.errors}"
+    )
+    assert any("trials" in e.lower() or "placement" in e.lower() for e in result.errors)
+
+
+def test_hardlinked_stale_dest_not_mutated_by_atomic_write(tmp_path):
+    # A stale dest hard-linked to an external file shares its inode; a naive
+    # copy2(src, dest) would write THROUGH the shared inode → mutate the external
+    # file. The atomic write (copy to a temp + os.replace) breaks the link → the
+    # external content is UNCHANGED, while the package still receives fresh trials.
+    external = tmp_path / "external.csv"
+    external.write_text("EXTERNAL CONTENT - must stay unchanged\n")
+    out = tmp_path / "pkg"
+    (out / "data").mkdir(parents=True)
+    dest = out / "data" / "n_trials.csv"
+    os.link(external, dest)                     # dest hard-linked to external (shared inode)
+    src = tmp_path / "trials.csv"
+    src.write_text("cell_id,year\nc1,2016\n")
+    cfg = types.SimpleNamespace(n_trials_source_path=str(src))
+    result = _run_package_stage(tmp_path, _TrialsOnlyTranslator(cfg, out))
+    assert result.success is True, (
+        f"a valid copy over a hard-linked stale dest should succeed; errors={result.errors}"
+    )
+    assert dest.read_text() == src.read_text()          # the package got the fresh trials
+    assert external.read_text() == "EXTERNAL CONTENT - must stay unchanged\n"  # external UNCHANGED
 
 
 def test_stale_trials_dest_reconciled_on_no_source_rebuild(tmp_path):
