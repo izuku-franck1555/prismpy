@@ -41,13 +41,15 @@ _EXECUTOR = _PRISMPY_ROOT / "src" / "prismpy" / "pipeline" / "executor.py"
 # stay in production (they still fail loudly).
 F_AG_GATE_SITES: Tuple[Tuple[str, int, str], ...] = (
     ("src/prismpy/translators/acea/translator.py", 519, "ClimateDownloadError"),
-    ("src/prismpy/translators/pythia/translator.py", 1000, "ValueError"),
-    ("src/prismpy/translators/pythia/translator.py", 1793, "ValueError"),
-    ("src/prismpy/translators/pythia/translator.py", 2541, "BuildEghrSubstrateError"),
+    # pythia + craft raise sites shifted +7 by the §7 n_response_skill trials-copy
+    # wiring inserted at each generate_package top (n_response_skill generator PR).
+    ("src/prismpy/translators/pythia/translator.py", 1007, "ValueError"),
+    ("src/prismpy/translators/pythia/translator.py", 1800, "ValueError"),
+    ("src/prismpy/translators/pythia/translator.py", 2548, "BuildEghrSubstrateError"),
     ("src/prismpy/translators/sarra_py/translator.py", 711, "ValueError"),
     ("src/prismpy/translators/sarra_py/translator.py", 1675, "ValueError"),
-    # 1565 -> 1570 after the translate-time data.grid guard added at translate() top.
-    ("src/prismpy/translators/craft/translator.py", 1570, "ValueError"),
+    # 1565 -> 1570 (translate-time data.grid guard) -> 1577 (§7 trials-copy wiring).
+    ("src/prismpy/translators/craft/translator.py", 1577, "ValueError"),
     ("src/prismpy/translators/_shared/eghr_substrate.py", 461, "ValueError"),
     ("src/prismpy/translators/_shared/eghr_substrate.py", 466, "ValueError"),
 )

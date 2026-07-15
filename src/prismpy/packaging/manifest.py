@@ -48,6 +48,7 @@ KNOWN_USE_CASE_NAMES: Tuple[str, ...] = (
     "drought_management",
     "soil_fertility",
     "livestock_feed",
+    "n_response_skill",
 )
 
 
@@ -95,6 +96,16 @@ PER_UC_GATES: Dict[str, FrozenSet[str]] = {
         "manifest_cell_areas_populated",
         "manifest_crops_populated",
     }),
+    # n_response_skill (UC7) — a no-raw post-processor on soil_fertility (mirrors
+    # drought_management as a post-processor). The real gate is the observed-trials
+    # CSV (n_trials_present, HARD); soil_fertility_dependency_declared is
+    # structurally satisfied (soil_fertility auto-declares on the same platforms);
+    # platform_dssat_family is ADVISORY (acea = reduced N-cycle coverage per §6a).
+    "n_response_skill": frozenset({
+        "n_trials_present",
+        "soil_fertility_dependency_declared",
+        "platform_dssat_family",
+    }),
 }
 
 
@@ -113,6 +124,9 @@ _UC_SUPPORTED_PLATFORMS: Dict[str, FrozenSet[str]] = {
     "drought_management":  frozenset({"sarra_py", "pythia", "acea", "craft"}),
     "soil_fertility":      frozenset({"pythia", "acea", "craft"}),    # sarra_py dropped (F-BP-19)
     "livestock_feed":      frozenset({"sarra_py", "acea", "pythia"}),  # craft deferred (§16.UC6.1)
+    # n_response_skill post-processes soil_fertility → same platform set; acea/craft
+    # dispatch with REDUCED N-cycle coverage (§6a), not excluded.
+    "n_response_skill":    frozenset({"pythia", "acea", "craft"}),
 }
 
 
@@ -125,6 +139,7 @@ _PACKAGEABLE_UCS: Tuple[str, ...] = (
     "drought_management",
     "soil_fertility",
     "livestock_feed",
+    "n_response_skill",
 )
 
 
@@ -153,6 +168,9 @@ ADVISORY_GATES: FrozenSet[str] = frozenset({
     "n_years_gte_9_for_drought_freq_anomaly",
     "scenario_packages_temporal_aligned",
     "fertilizer_scenarios_resolvable",
+    # n_response_skill (UC7): acea runs soil_fertility but is not DSSAT-family →
+    # reduced N-cycle coverage (§6a); an advisory disclosure, never a dispatch block.
+    "platform_dssat_family",
     # UC-GEN-S1-UC1-CONTRACT §5 MUST-5 — UC1 forecast-adequacy disclosure
     # (>=30 WMO normal). Failure emits a templated advisory_flag carrying the
     # actual N (SF-1), NOT a dispatch block: >=4 lets the analog method run;
@@ -234,6 +252,13 @@ UC_CONFIG_KEY_TABLE: Dict[str, Tuple[str, ...]] = {
         "no_grid_output",
         "enable_livestock_demand",
         "feed_scenarios",
+    ),
+    "n_response_skill": (
+        "cores",
+        "observed_trials",
+        "skill_calibrated",
+        "trial_coord_tol_deg",
+        "full_curve_levels",
     ),
 }
 
@@ -774,6 +799,33 @@ def _eval_gate_fertilizer_scenarios_resolvable(
     return False
 
 
+def _eval_gate_n_trials_present(project_config: Dict[str, Any]) -> bool:
+    # n_response_skill (UC7) HARD gate — reads the ACTUAL copied artifact flag
+    # (``_n_trials_present``, injected by create_manifest from the package's
+    # data/n_trials.csv). Dest-based, NOT source-based: the translator fail-loud-
+    # copies the trials, so a copy failure raises before any manifest exists; if we
+    # reach here the flag reflects the real package. Missing → the UC is honestly
+    # not-ready (gates_failed); the package still builds (other UCs unaffected).
+    return bool(project_config.get("_n_trials_present"))
+
+
+def _eval_gate_soil_fertility_dependency_declared(
+    project_config: Dict[str, Any],
+) -> bool:
+    # n_response_skill (UC7) HARD gate: its soil_fertility substrate must be
+    # declared. Structurally satisfied when soil_fertility auto-packages on the
+    # same platform; a guard against a customized UC set that drops the substrate.
+    uc_config = project_config.get("use_case_config") or {}
+    return "soil_fertility" in uc_config
+
+
+def _eval_gate_platform_dssat_family(platform: str) -> bool:
+    # n_response_skill (UC7) ADVISORY gate: full N-cycle coverage needs the DSSAT
+    # engine family (pythia/craft). acea runs soil_fertility but with reduced
+    # N-cycle coverage (§6a) → advisory_flag, not a dispatch block.
+    return platform in {"pythia", "craft"}
+
+
 def _dispatch_gate(
     gate_name: str,
     project_config: Dict[str, Any],
@@ -811,6 +863,12 @@ def _dispatch_gate(
         return _eval_gate_manifest_adapter_capability_sowing_rule_default_present(manifest_so_far)
     if gate_name == "fertilizer_scenarios_resolvable":
         return _eval_gate_fertilizer_scenarios_resolvable(uc_config)
+    if gate_name == "n_trials_present":
+        return _eval_gate_n_trials_present(project_config)
+    if gate_name == "soil_fertility_dependency_declared":
+        return _eval_gate_soil_fertility_dependency_declared(project_config)
+    if gate_name == "platform_dssat_family":
+        return _eval_gate_platform_dssat_family(platform)
     return False
 
 
@@ -1335,6 +1393,15 @@ def create_manifest(
         manifest["region"]["bounds_sarra_py"] = project_config["bounds_sarra_py"]
     if "bounds_gis" in project_config:
         manifest["region"]["bounds_gis"] = project_config["bounds_gis"]
+
+    # §7 — surface the ACTUAL n_response_skill trials artifact to the readiness
+    # emitter's n_trials_present gate. Dest-based (the copied data/n_trials.csv),
+    # not source-based: the translator fail-loud-copies n_trials_source_path here,
+    # so this reflects the real package (a copy failure would have raised earlier).
+    project_config = dict(project_config)
+    project_config["_n_trials_present"] = (
+        package_dir / "data" / "n_trials.csv"
+    ).is_file()
 
     if additional_metadata:
         merged_project_config = dict(project_config)

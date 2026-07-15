@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 import logging
+import shutil
 
 from prismpy.cells.cell_id_validation import is_real_climate_cell_id
 from prismpy.config.schema import ProjectConfig, Platform
@@ -132,6 +133,34 @@ class BaseTranslator(ABC):
 
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _copy_observed_trials(self) -> Optional[Path]:
+        """§7 — copy the modeler-supplied observed N-trials CSV into the package at
+        ``data/n_trials.csv`` (the by-convention path prism-runner's n_response_skill
+        UC reads). Returns the dest ``Path``, or ``None`` when no
+        ``n_trials_source_path`` was supplied (then n_response_skill is honestly
+        not-ready via the n_trials_present gate — never a silent skip).
+
+        FAIL-LOUD: a supplied-but-uncopyable source (missing / not a file / copy
+        error) RAISES here — ``shutil.copy2`` is not wrapped — so a
+        source-present-but-copy-failed case cannot slip through to a package that
+        falsely reads as trials-present.
+        """
+        src = getattr(self.config, "n_trials_source_path", None)
+        if not src:
+            return None
+        src_path = Path(src)
+        if not src_path.is_file():
+            raise FileNotFoundError(
+                f"n_trials_source_path {src_path} is not a file — cannot copy the "
+                "observed-trials CSV for n_response_skill (UC7)."
+            )
+        data_dir = self.output_dir / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        dest = data_dir / "n_trials.csv"
+        shutil.copy2(src_path, dest)  # fail-loud: raises on any copy error
+        self.logger.info("Copied observed N-trials CSV -> %s", dest)
+        return dest
 
     @abstractmethod
     def translate(self, data: UnifiedData) -> TranslationResult:

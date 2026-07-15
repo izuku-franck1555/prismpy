@@ -2091,6 +2091,20 @@ class ProjectConfig(BaseModel):
         ),
     )
 
+    # §7 generator — the observed N-trials CSV a modeler supplies so a package can
+    # serve n_response_skill (UC7). The translator copies it to the package's
+    # data/n_trials.csv (the prism-runner UC's by-convention path). Absent → the
+    # n_trials_present HARD gate fails + the UC is disclosed not-ready (never silent).
+    n_trials_source_path: Optional[Path] = Field(
+        default=None,
+        description=(
+            "Path to an observed N-trials CSV. Copied to the package's "
+            "data/n_trials.csv so n_response_skill (UC7) can score model skill "
+            "against observations. Absent → n_response_skill is honestly not-ready "
+            "in uc_readiness (no silent skip)."
+        ),
+    )
+
     # Generic parameters (platform agnostic)
     management: Optional[ManagementConfig] = Field(
         default=None,
