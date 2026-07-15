@@ -42,7 +42,7 @@ _EXECUTOR = _PRISMPY_ROOT / "src" / "prismpy" / "pipeline" / "executor.py"
 F_AG_GATE_SITES: Tuple[Tuple[str, int, str], ...] = (
     ("src/prismpy/translators/acea/translator.py", 519, "ClimateDownloadError"),
     # pythia + craft raise sites shifted +7 by the §7 n_response_skill trials-copy
-    # wiring inserted at each generate_package top (n_response_skill generator PR).
+    # wiring inserted at each generate_package top.
     ("src/prismpy/translators/pythia/translator.py", 1007, "ValueError"),
     ("src/prismpy/translators/pythia/translator.py", 1800, "ValueError"),
     ("src/prismpy/translators/pythia/translator.py", 2548, "BuildEghrSubstrateError"),

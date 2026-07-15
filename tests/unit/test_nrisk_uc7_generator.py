@@ -2,8 +2,8 @@
 
 Proves a modeler can generate a package that serves n_response_skill (the model-
 skill post-processor on soil_fertility) for ANY region/crop/engine with zero code
-change (AC-7 Part-1). Covers the 6 manifest surfaces, the 3 readiness gates, the
-uc_readiness emit across platforms, and the shared fail-loud trial-CSV copy helper.
+change. Covers the 6 manifest surfaces, the 3 readiness gates, the uc_readiness
+emit across platforms, and the shared fail-loud trial-CSV copy helper.
 
 Self-contained: builds minimal project_configs with a NON-empty ``data_sources``
 so create_manifest's required-at-creation check is satisfied (independent of the
@@ -307,6 +307,58 @@ def test_directory_dest_makes_package_fail(tmp_path):
         f"directory-dest must fail PACKAGE; errors={result.errors}"
     )
     assert any("trials" in e.lower() for e in result.errors)
+
+
+def test_probe_permission_error_makes_package_fail(tmp_path, monkeypatch):
+    # A metadata probe that raises EACCES/EIO (Python's is_file re-raises non-not-
+    # found OSErrors) must be caught by the outer fail-closed boundary (typed →
+    # PACKAGE success=False), not escape raw → silent success. Pre-fix: the probe
+    # re-raise escaped the per-op wraps → generic executor catch → warning → True.
+    out = tmp_path / "pkg"
+    (out / "data").mkdir(parents=True)
+    (out / "data" / "n_trials.csv").write_text("stale\n")   # pre-existing dest → is_file() probed
+    src = tmp_path / "trials.csv"
+    src.write_text("cell_id,year\nc1,2016\n")
+    cfg = types.SimpleNamespace(n_trials_source_path=str(src))
+    real_is_file = Path.is_file
+
+    def _boom_is_file(self, *a, **k):
+        if self.name == "n_trials.csv":
+            raise PermissionError("stat denied probing the trials dest")
+        return real_is_file(self, *a, **k)
+
+    monkeypatch.setattr(Path, "is_file", _boom_is_file)
+    result = _run_package_stage(tmp_path, _TrialsOnlyTranslator(cfg, out))
+    assert result.success is False, (
+        f"a probe OSError must fail PACKAGE (outer boundary); errors={result.errors}"
+    )
+    assert any("trials" in e.lower() or "placement" in e.lower() for e in result.errors)
+
+
+def test_symlinked_data_parent_rejected_and_external_not_deleted(tmp_path):
+    # A symlinked data/ parent (data/ -> /external) must be REJECTED (typed →
+    # PACKAGE success=False) so trials never write off-package, AND the no-source
+    # reconcile must NOT delete the external target through the symlink. Pre-fix:
+    # the reconcile unlinked the external artifact AND reported success=True.
+    external = tmp_path / "external"
+    external.mkdir()
+    external_artifact = external / "n_trials.csv"
+    external_artifact.write_text("PRECIOUS external data - must NOT be deleted\n")
+    out = tmp_path / "pkg"
+    out.mkdir()
+    (out / "data").symlink_to(external, target_is_directory=True)   # data/ -> /external
+    cfg = types.SimpleNamespace(n_trials_source_path=None)          # no-source build
+    result = _run_package_stage(tmp_path, _TrialsOnlyTranslator(cfg, out))
+    assert result.success is False, (
+        f"symlinked data/ parent must fail PACKAGE; errors={result.errors}"
+    )
+    assert any(
+        "contain" in e.lower() or "off-package" in e.lower() or "trials" in e.lower()
+        for e in result.errors
+    )
+    # the external target + its artifact survive — no destructive delete via symlink.
+    assert external.is_dir()
+    assert external_artifact.is_file(), "reconcile must NOT delete the external target"
 
 
 def test_stale_trials_dest_reconciled_on_no_source_rebuild(tmp_path):
