@@ -76,6 +76,15 @@ class TranslationResult:
     error_events: List[Dict[str, Any]] = field(default_factory=list)
 
 
+class ObservedTrialsCopyError(RuntimeError):
+    """§7: the modeler-supplied observed N-trials CSV (n_trials_source_path)
+    could not be copied into the package (missing / not a file / OS copy
+    error). Typed so the PACKAGE stage treats a trials-copy failure as FATAL
+    (a config error, identical across platforms) while genuinely tolerable
+    per-platform generate_package failures stay non-fatal warnings.
+    """
+
+
 class BaseTranslator(ABC):
     """Abstract base class for platform-specific translators.
 
@@ -141,24 +150,38 @@ class BaseTranslator(ABC):
         ``n_trials_source_path`` was supplied (then n_response_skill is honestly
         not-ready via the n_trials_present gate — never a silent skip).
 
-        FAIL-LOUD: a supplied-but-uncopyable source (missing / not a file / copy
-        error) RAISES here — ``shutil.copy2`` is not wrapped — so a
-        source-present-but-copy-failed case cannot slip through to a package that
-        falsely reads as trials-present.
+        Because output dirs are reusable, a no-source build RECONCILES the
+        dest (removes any stale data/n_trials.csv from a prior build in the
+        same dir) so the n_trials_present gate reflects THIS build's inputs.
+
+        FAIL-LOUD: a supplied-but-uncopyable source (missing / not a file /
+        OS copy error) raises ObservedTrialsCopyError. The typed class lets
+        the PACKAGE stage treat a trials-copy failure as FATAL rather than
+        shipping a package that falsely reads as trials-present.
         """
         src = getattr(self.config, "n_trials_source_path", None)
+        dest = self.output_dir / "data" / "n_trials.csv"
         if not src:
+            # Reconcile: output dirs are reusable (mkdir exist_ok=True), so a prior
+            # build's trials CSV can linger. Drop any stale artifact so the dest-based
+            # n_trials_present gate reflects THIS build's inputs, never a false
+            # trials-present inherited from an earlier generate.
+            if dest.is_file():
+                dest.unlink()
             return None
         src_path = Path(src)
         if not src_path.is_file():
-            raise FileNotFoundError(
+            raise ObservedTrialsCopyError(
                 f"n_trials_source_path {src_path} is not a file — cannot copy the "
                 "observed-trials CSV for n_response_skill (UC7)."
             )
-        data_dir = self.output_dir / "data"
-        data_dir.mkdir(parents=True, exist_ok=True)
-        dest = data_dir / "n_trials.csv"
-        shutil.copy2(src_path, dest)  # fail-loud: raises on any copy error
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_path, dest)
+        except OSError as exc:
+            raise ObservedTrialsCopyError(
+                f"failed to copy observed-trials CSV {src_path} -> {dest}: {exc}"
+            ) from exc
         self.logger.info("Copied observed N-trials CSV -> %s", dest)
         return dest
 

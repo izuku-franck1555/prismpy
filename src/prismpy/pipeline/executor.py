@@ -3467,6 +3467,9 @@ class TranslationPipeline:
         provenance_path = None
         package_summary = {}
 
+        # Local (not module-top): a top import would shift the cancel-carveout whitelist line-map.
+        from prismpy.translators.base import ObservedTrialsCopyError
+
         # Generate per-platform packages via translator.generate_package()
         for platform_name, result in translation_results.items():
             if not result.success:
@@ -3487,6 +3490,18 @@ class TranslationPipeline:
                     }
                     self.logger.info(
                         f"  {platform_name}: {len(package_files)} package files generated"
+                    )
+                except ObservedTrialsCopyError as e:
+                    # FATAL: a supplied observed-trials source that cannot be copied
+                    # is a config error (identical across platforms). Record it in
+                    # errors so PACKAGE reports success=False rather than silently
+                    # shipping a package that reads as trials-present for
+                    # n_response_skill (UC7) when no trials were actually copied.
+                    errors.append(
+                        f"{platform_name}: observed-trials copy failed: {e}"
+                    )
+                    self.logger.error(
+                        f"Observed-trials copy failed for {platform_name}: {e}"
                     )
                 except Exception as e:
                     warnings.append(f"{platform_name}: Package generation failed: {e}")

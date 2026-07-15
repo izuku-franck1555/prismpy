@@ -29,7 +29,7 @@ from prismpy.packaging.manifest import (
     create_manifest,
     use_case_config_for,
 )
-from prismpy.translators.base import BaseTranslator
+from prismpy.translators.base import BaseTranslator, ObservedTrialsCopyError
 
 _UC = "n_response_skill"
 
@@ -167,6 +167,104 @@ def test_copy_observed_trials_fails_loud_on_missing_source(tmp_path):
     out = tmp_path / "pkg"
     out.mkdir()
     missing = tmp_path / "does_not_exist.csv"
-    # supplied-but-uncopyable → RAISES (never a silent trials-absent package).
-    with pytest.raises(FileNotFoundError):
+    # supplied-but-uncopyable → RAISES the typed error (never a silent trials-absent
+    # package; the typed class lets the PACKAGE stage treat it as FATAL).
+    with pytest.raises(ObservedTrialsCopyError):
         BaseTranslator._copy_observed_trials(_translator_stub(str(missing), out))
+
+
+def test_copy_observed_trials_wraps_os_error_as_typed(tmp_path):
+    # Root-cause: ALL failures placing the trials (mkdir / copy) surface as the
+    # typed ObservedTrialsCopyError so the executor can route them fatally — not
+    # only the missing-source case.
+    src = tmp_path / "trials.csv"
+    src.write_text("cell_id,year\nc1,2016\n")
+    out = tmp_path / "pkg"
+    out.mkdir()
+    (out / "data").write_text("a file sits where the data/ dir must go")  # mkdir -> OSError
+    with pytest.raises(ObservedTrialsCopyError):
+        BaseTranslator._copy_observed_trials(_translator_stub(str(src), out))
+
+
+# ── fail-loud + honest-signal edges (trials-copy fatal; no-source reconcile) ──
+
+
+def test_uncopyable_trials_make_package_fail_not_silent_success(tmp_path):
+    # A supplied-but-uncopyable n_trials_source_path must land in PACKAGE errors
+    # (success=False), NOT a swallowed warning. Drives the real executor PACKAGE
+    # catch and asserts the PACKAGE flag (not just the helper raise).
+    from prismpy.pipeline.executor import TranslationPipeline
+    from prismpy.translators.base import TranslationResult
+    from prismpy.config.schema import Platform
+
+    class _RaisingTranslator:
+        def generate_package(self, unified_data, output_files):
+            raise ObservedTrialsCopyError("n_trials_source_path /x.csv is not a file")
+
+    class _Prov:
+        session_id = "t"
+
+        def save(self, output_path=None):
+            p = Path(output_path)
+            p.write_text("{}")
+            return p
+
+        def get_report(self):
+            return ""
+
+    pipe = TranslationPipeline.__new__(TranslationPipeline)
+    pipe.logger = logging.getLogger("nrisk_pkg_test")
+    pipe._translators = {Platform.PYTHIA: _RaisingTranslator()}
+    pipe.config = types.SimpleNamespace(
+        output=types.SimpleNamespace(base_dir=str(tmp_path))
+    )
+    pipe.provenance = _Prov()
+
+    tr = TranslationResult(
+        success=True, platform=Platform.PYTHIA, output_dir=tmp_path,
+        output_files=[], errors=[], warnings=[], metadata={},
+    )
+    result = pipe._execute_package(
+        unified_data=types.SimpleNamespace(grid=None, metadata=None),
+        translation_results={"pythia": tr},
+    )
+    assert any("trials" in e.lower() for e in result.errors), (
+        f"trials-copy failure must be recorded in PACKAGE errors; got {result.errors}"
+    )
+    assert result.success is False
+
+
+def test_stale_trials_dest_reconciled_on_no_source_rebuild(tmp_path):
+    # A reused output dir that held trials from a prior build must NOT keep reading
+    # trials-present after a no-source rebuild.
+    src = tmp_path / "trials.csv"
+    src.write_text("cell_id,year,scenario_label,n_level_kg_ha\nc1,2016,N60,60\n")
+    out = _pkg(tmp_path, "pkg", with_trials=False)  # metadata.json, no data/
+    cfg = _cfg("pythia")
+    # Build 1: trials supplied → copied in → gate READY.
+    dest = BaseTranslator._copy_observed_trials(_translator_stub(str(src), out))
+    assert dest.is_file()
+    m1 = create_manifest(out, cfg, platform="pythia")
+    assert "n_trials_present" in m1["uc_readiness"][_UC]["gates_passed"]
+    # Build 2: SAME dir, no source → reconcile must drop the stale artifact.
+    assert BaseTranslator._copy_observed_trials(_translator_stub(None, out)) is None
+    assert not dest.is_file()
+    m2 = create_manifest(out, cfg, platform="pythia")
+    assert any(
+        g["gate_id"] == "n_trials_present"
+        for g in m2["uc_readiness"][_UC].get("gates_failed", [])
+    ), "stale trials dest must be reconciled → n_trials_present HARD-fails"
+
+
+def test_soil_fertility_dependency_gate_hard_fails_when_substrate_undeclared():
+    # A customized UC set that declares n_response_skill but DROPS its soil_fertility
+    # substrate → the HARD dependency gate must fail (honest not-ready). Pins the
+    # failing branch of the substrate gate.
+    uc_cfg = dict(use_case_config_for("pythia"))
+    uc_cfg.pop("soil_fertility", None)                 # drop the substrate
+    assert _UC in uc_cfg                                # n_response_skill still declared
+    pc = {"use_case_config": uc_cfg, "_n_trials_present": True}
+    e = canonical_uc_readiness_emitter(pc, "pythia", {})[_UC]
+    failed = {g["gate_id"] for g in e.get("gates_failed", [])}
+    assert "soil_fertility_dependency_declared" in failed
+    assert "n_trials_present" in e["gates_passed"]      # only the substrate gate fails
