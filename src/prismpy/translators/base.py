@@ -144,36 +144,44 @@ class BaseTranslator(ABC):
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def _copy_observed_trials(self) -> Optional[Path]:
-        """§7 — copy the modeler-supplied observed N-trials CSV into the package at
-        ``data/n_trials.csv`` (the by-convention path prism-runner's n_response_skill
-        UC reads). Returns the dest ``Path``, or ``None`` when no
-        ``n_trials_source_path`` was supplied (then n_response_skill is honestly
-        not-ready via the n_trials_present gate — never a silent skip).
+        """§7: place the modeler-supplied observed N-trials CSV at the package's
+        data/n_trials.csv (the by-convention path prism-runner's n_response_skill
+        UC reads). Returns the dest Path when a source is supplied, or None when
+        none is (n_response_skill is then honestly not-ready via n_trials_present).
 
-        Because output dirs are reusable, a no-source build RECONCILES the
-        dest (removes any stale data/n_trials.csv from a prior build in the
-        same dir) so the n_trials_present gate reflects THIS build's inputs.
-
-        FAIL-LOUD: a supplied-but-uncopyable source (missing / not a file /
-        OS copy error) raises ObservedTrialsCopyError. The typed class lets
-        the PACKAGE stage treat a trials-copy failure as FATAL rather than
-        shipping a package that falsely reads as trials-present.
+        POST-CONDITION INVARIANT (fail-closed, closing the placement-bug class):
+        on return, either (source supplied) dest is a REGULAR FILE, or (no source)
+        dest does NOT exist. Every filesystem step (stale-artifact removal, mkdir,
+        copy) is checked; ANY deviation raises ObservedTrialsCopyError so the
+        PACKAGE stage fails loud (executor routes it into errors, success=False)
+        instead of shipping a package that falsely reads as trials-present.
         """
         src = getattr(self.config, "n_trials_source_path", None)
         dest = self.output_dir / "data" / "n_trials.csv"
         if not src:
-            # Reconcile: output dirs are reusable (mkdir exist_ok=True), so a prior
-            # build's trials CSV can linger. Drop any stale artifact so the dest-based
-            # n_trials_present gate reflects THIS build's inputs, never a false
-            # trials-present inherited from an earlier generate.
-            if dest.is_file():
-                dest.unlink()
+            # No source: dest MUST NOT exist. Reconcile any stale artifact (regular
+            # file OR directory) left in a reused output dir, fail-closed, then
+            # assert the post-condition so no removal can fail silently.
+            self._remove_stale_trials_dest(dest)
+            if dest.exists() or dest.is_symlink():
+                raise ObservedTrialsCopyError(
+                    f"observed-trials reconcile failed: {dest} still present after removal"
+                )
             return None
         src_path = Path(src)
         if not src_path.is_file():
             raise ObservedTrialsCopyError(
-                f"n_trials_source_path {src_path} is not a file — cannot copy the "
+                f"n_trials_source_path {src_path} is not a file: cannot copy the "
                 "observed-trials CSV for n_response_skill (UC7)."
+            )
+        # Refuse a non-regular-file already at the EXACT dest: shutil.copy2 into a
+        # directory copies the source BENEATH it (silently), and copying through a
+        # symlink writes off-path. Fail loud rather than destroy it; a stale regular
+        # file is fine (copy2 overwrites it in place).
+        if dest.is_symlink() or (dest.exists() and not dest.is_file()):
+            raise ObservedTrialsCopyError(
+                f"observed-trials dest {dest} exists but is not a regular file: "
+                "refusing to copy (a directory/symlink would swallow the trials CSV)"
             )
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -182,8 +190,27 @@ class BaseTranslator(ABC):
             raise ObservedTrialsCopyError(
                 f"failed to copy observed-trials CSV {src_path} -> {dest}: {exc}"
             ) from exc
+        # Post-condition: the EXACT dest path is now a regular file.
+        if dest.is_symlink() or not dest.is_file():
+            raise ObservedTrialsCopyError(
+                f"post-copy invariant violated: {dest} is not a regular file"
+            )
         self.logger.info("Copied observed N-trials CSV -> %s", dest)
         return dest
+
+    def _remove_stale_trials_dest(self, dest: Path) -> None:
+        """Remove a stale observed-trials artifact at ``dest`` (a regular file or a
+        directory) from a reused output dir. Fail-closed: any removal error raises
+        ObservedTrialsCopyError so a reconcile cannot fail silently."""
+        try:
+            if dest.is_dir() and not dest.is_symlink():
+                shutil.rmtree(dest)
+            elif dest.exists() or dest.is_symlink():
+                dest.unlink()
+        except OSError as exc:
+            raise ObservedTrialsCopyError(
+                f"failed to remove stale observed-trials dest {dest}: {exc}"
+            ) from exc
 
     @abstractmethod
     def translate(self, data: UnifiedData) -> TranslationResult:

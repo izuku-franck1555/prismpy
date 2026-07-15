@@ -30,6 +30,7 @@ from prismpy.packaging.manifest import (
     use_case_config_for,
 )
 from prismpy.translators.base import BaseTranslator, ObservedTrialsCopyError
+from prismpy.config.schema import Platform
 
 _UC = "n_response_skill"
 
@@ -143,6 +144,8 @@ def _translator_stub(src, out):
     o.config = types.SimpleNamespace(n_trials_source_path=src)
     o.output_dir = Path(out)
     o.logger = logging.getLogger("nrisk_test")
+    # bind the REAL fail-closed remover so the stub exercises the real helper
+    o._remove_stale_trials_dest = BaseTranslator._remove_stale_trials_dest.__get__(o)
     return o
 
 
@@ -189,17 +192,38 @@ def test_copy_observed_trials_wraps_os_error_as_typed(tmp_path):
 # ── fail-loud + honest-signal edges (trials-copy fatal; no-source reconcile) ──
 
 
-def test_uncopyable_trials_make_package_fail_not_silent_success(tmp_path):
-    # A supplied-but-uncopyable n_trials_source_path must land in PACKAGE errors
-    # (success=False), NOT a swallowed warning. Drives the real executor PACKAGE
-    # catch and asserts the PACKAGE flag (not just the helper raise).
+class _TrialsOnlyTranslator(BaseTranslator):
+    """A real BaseTranslator subclass whose generate_package invokes the REAL
+    _copy_observed_trials (the code under test) — so the fatal trials-copy path is
+    exercised end-to-end through the executor, not faked by a stub that pre-raises."""
+
+    PLATFORM = Platform.PYTHIA
+
+    def __init__(self, config, output_dir):
+        self.config = config
+        self.output_dir = Path(output_dir)
+        self.logger = logging.getLogger("nrisk_realish_translator")
+
+    def translate(self, data):            # abstract stub — never called here
+        raise NotImplementedError
+
+    def validate_outputs(self):           # abstract stub — never called here
+        return []
+
+    def get_required_data(self):          # abstract stub — never called here
+        return ["region"]
+
+    def generate_package(self, unified_data, output_files):
+        trials = self._copy_observed_trials()   # REAL helper — the real flow
+        return [trials] if trials else []
+
+
+def _run_package_stage(tmp_path, translator):
+    """Drive the REAL executor PACKAGE stage over ``translator`` and return the
+    PACKAGE StageResult, so a test asserts the package-level success flag (not just
+    the helper raise)."""
     from prismpy.pipeline.executor import TranslationPipeline
     from prismpy.translators.base import TranslationResult
-    from prismpy.config.schema import Platform
-
-    class _RaisingTranslator:
-        def generate_package(self, unified_data, output_files):
-            raise ObservedTrialsCopyError("n_trials_source_path /x.csv is not a file")
 
     class _Prov:
         session_id = "t"
@@ -213,25 +237,76 @@ def test_uncopyable_trials_make_package_fail_not_silent_success(tmp_path):
             return ""
 
     pipe = TranslationPipeline.__new__(TranslationPipeline)
-    pipe.logger = logging.getLogger("nrisk_pkg_test")
-    pipe._translators = {Platform.PYTHIA: _RaisingTranslator()}
+    pipe.logger = logging.getLogger("nrisk_pkg_stage")
+    pipe._translators = {Platform.PYTHIA: translator}
     pipe.config = types.SimpleNamespace(
         output=types.SimpleNamespace(base_dir=str(tmp_path))
     )
     pipe.provenance = _Prov()
-
     tr = TranslationResult(
         success=True, platform=Platform.PYTHIA, output_dir=tmp_path,
         output_files=[], errors=[], warnings=[], metadata={},
     )
-    result = pipe._execute_package(
+    return pipe._execute_package(
         unified_data=types.SimpleNamespace(grid=None, metadata=None),
         translation_results={"pythia": tr},
     )
+
+
+def test_uncopyable_trials_make_package_fail_not_silent_success(tmp_path):
+    # A supplied-but-uncopyable n_trials_source_path must land in PACKAGE errors
+    # (success=False), NOT a swallowed warning. Drives a REAL BaseTranslator subclass
+    # (its generate_package calls the real _copy_observed_trials) through the real
+    # executor PACKAGE stage — asserts the PACKAGE flag, matching the real flow.
+    out = tmp_path / "pkg"
+    out.mkdir()
+    cfg = types.SimpleNamespace(n_trials_source_path=str(tmp_path / "missing.csv"))
+    result = _run_package_stage(tmp_path, _TrialsOnlyTranslator(cfg, out))
     assert any("trials" in e.lower() for e in result.errors), (
         f"trials-copy failure must be recorded in PACKAGE errors; got {result.errors}"
     )
     assert result.success is False
+
+
+def test_unlink_failure_on_no_source_makes_package_fail(tmp_path, monkeypatch):
+    # No-source rebuild in a reused dir: if removing the stale dest FAILS, the helper
+    # must fail CLOSED (typed → PACKAGE success=False), not leave the stale artifact
+    # and report success. Pre-fix: a bare unwrapped unlink lets a raw OSError escape
+    # → generic executor catch → warning → success=True.
+    out = tmp_path / "pkg"
+    (out / "data").mkdir(parents=True)
+    (out / "data" / "n_trials.csv").write_text("stale trials from a prior build\n")
+    cfg = types.SimpleNamespace(n_trials_source_path=None)     # no source this build
+    real_unlink = Path.unlink
+
+    def _guarded_unlink(self, *a, **k):
+        if self.name == "n_trials.csv":
+            raise PermissionError("cannot unlink n_trials.csv")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", _guarded_unlink)
+    result = _run_package_stage(tmp_path, _TrialsOnlyTranslator(cfg, out))
+    assert result.success is False, (
+        f"unlink-failure must fail PACKAGE (fail-closed); errors={result.errors}"
+    )
+    assert any("trials" in e.lower() for e in result.errors)
+
+
+def test_directory_dest_makes_package_fail(tmp_path):
+    # A directory sitting at the EXACT dest path: shutil.copy2 would copy the source
+    # BENEATH it (dest never becomes a regular file), silently. The helper must
+    # reject it (typed → PACKAGE success=False). Pre-fix: copy2-into-dir, no raise,
+    # success=True.
+    out = tmp_path / "pkg"
+    (out / "data" / "n_trials.csv").mkdir(parents=True)        # dir where the CSV must go
+    src = tmp_path / "trials.csv"
+    src.write_text("cell_id,year\nc1,2016\n")
+    cfg = types.SimpleNamespace(n_trials_source_path=str(src))
+    result = _run_package_stage(tmp_path, _TrialsOnlyTranslator(cfg, out))
+    assert result.success is False, (
+        f"directory-dest must fail PACKAGE; errors={result.errors}"
+    )
+    assert any("trials" in e.lower() for e in result.errors)
 
 
 def test_stale_trials_dest_reconciled_on_no_source_rebuild(tmp_path):
