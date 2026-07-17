@@ -59,7 +59,10 @@ _LOWER = 815
 #     ceil((2839 + 200) / 50) * 50 = 3050. (Committed count measured with the
 #     untracked tests/phase3 scratch files excluded — they are NOT on the
 #     branch / in CI.)
-_UPPER = 3050
+#   §7 nrisk generator (feat/nrisk-uc7-generator): tests/phase3/* are NOW
+#     COMMITTED (the §7 structural-emission probes, previously untracked scratch)
+#     → n_collected ≈ 3052 → ceil((3052 + 200) / 50) * 50 = 3300.
+_UPPER = 3300
 
 
 class TestTrajectoryCap(TestCase):
