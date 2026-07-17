@@ -805,11 +805,18 @@ class AceaTranslator(AceaTranslatorBase):
         Returns:
             List of generated package file paths
         """
+        # §7 — copy the observed-trials CSV (if supplied) to data/n_trials.csv
+        # BEFORE the manifest is built, so create_manifest's n_trials_present gate
+        # sees the real artifact. Fail-loud (see BaseTranslator._copy_observed_trials).
+        trials = self._copy_observed_trials()
         cell_ids = getattr(self, '_cell_ids_30arcmin', [])
         climate_name = getattr(self, '_climate_name', 'region_nasapower')
-        return self._generate_package_metadata(
+        package_files = self._generate_package_metadata(
             data, cell_ids, climate_name, output_files
         )
+        if trials is not None:
+            package_files.append(trials)
+        return package_files
 
     def _cell_to_30arcmin_tile(self, cell) -> int:
         """The 30-arcmin tile ID a grid cell belongs to, derived from its

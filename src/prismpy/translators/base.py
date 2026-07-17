@@ -10,6 +10,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 import logging
+import shutil
+import os
+import tempfile
 
 from prismpy.cells.cell_id_validation import is_real_climate_cell_id
 from prismpy.config.schema import ProjectConfig, Platform
@@ -75,6 +78,15 @@ class TranslationResult:
     error_events: List[Dict[str, Any]] = field(default_factory=list)
 
 
+class ObservedTrialsCopyError(RuntimeError):
+    """§7: the modeler-supplied observed N-trials CSV (n_trials_source_path)
+    could not be copied into the package (missing / not a file / OS copy
+    error). Typed so the PACKAGE stage treats a trials-copy failure as FATAL
+    (a config error, identical across platforms) while genuinely tolerable
+    per-platform generate_package failures stay non-fatal warnings.
+    """
+
+
 class BaseTranslator(ABC):
     """Abstract base class for platform-specific translators.
 
@@ -132,6 +144,109 @@ class BaseTranslator(ABC):
 
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _copy_observed_trials(self) -> Optional[Path]:
+        """§7: place the modeler-supplied observed N-trials CSV at the package's
+        data/n_trials.csv (the by-convention path prism-runner's n_response_skill
+        UC reads). Returns the dest Path when a source is supplied, or None when
+        none is (n_response_skill is then honestly not-ready via n_trials_present).
+
+        POST-CONDITION INVARIANT (fail-closed, closing the placement-bug class):
+        on return, either (source supplied) dest is a REGULAR FILE, or (no source)
+        dest does NOT exist. Guarded three ways: (1) the whole body runs under a
+        catch-all boundary, so ANY exception (OSError, RuntimeError from a
+        resolve() symlink loop, RecursionError from rmtree, ...) becomes a typed
+        ObservedTrialsCopyError - only our own typed error passes through un-
+        rewrapped; (2) dest is enforced INSIDE output_dir (no symlinked parent /
+        path escape) before any FS op; (3) the copy is atomic (copy to a temp in
+        dest.parent, then os.replace) so a hard-linked external file is never
+        mutated in place and a partial copy is never the visible dest. ANY
+        deviation raises so the PACKAGE stage fails loud (executor -> errors ->
+        success=False) instead of shipping a package that falsely reads as
+        trials-present.
+        """
+        src = getattr(self.config, "n_trials_source_path", None)
+        dest = self.output_dir / "data" / "n_trials.csv"
+        try:
+            # Containment: dest must live inside output_dir. A symlinked parent
+            # (data/ -> /external) or any path escape would let mkdir/copy write
+            # off-package and let the reconcile removal destroy an EXTERNAL target.
+            # Enforce BEFORE any filesystem op (removal / mkdir / copy).
+            out_root = self.output_dir.resolve()
+            if dest.parent.is_symlink() or out_root not in dest.resolve().parents:
+                raise ObservedTrialsCopyError(
+                    f"observed-trials dest {dest} is not contained in the package "
+                    f"root {self.output_dir} (symlinked parent or path escape): "
+                    "refusing to place trials off-package"
+                )
+            if not src:
+                # No source: dest MUST NOT exist. Reconcile any stale artifact
+                # (regular file OR directory) left in a reused output dir, then
+                # assert the post-condition.
+                self._remove_stale_trials_dest(dest)
+                if dest.exists() or dest.is_symlink():
+                    raise ObservedTrialsCopyError(
+                        f"observed-trials reconcile failed: {dest} still present "
+                        "after removal"
+                    )
+                return None
+            src_path = Path(src)
+            if not src_path.is_file():
+                raise ObservedTrialsCopyError(
+                    f"n_trials_source_path {src_path} is not a file: cannot copy "
+                    "the observed-trials CSV for n_response_skill (UC7)."
+                )
+            # Refuse a non-regular-file already at the EXACT dest (a directory /
+            # symlink would swallow or misdirect the copy). A stale regular file is
+            # fine - the atomic replace below swaps it without mutating its inode.
+            if dest.is_symlink() or (dest.exists() and not dest.is_file()):
+                raise ObservedTrialsCopyError(
+                    f"observed-trials dest {dest} exists but is not a regular file: "
+                    "refusing to copy (a directory/symlink would swallow the CSV)"
+                )
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            # Atomic write: copy to a temp in the SAME dir, then os.replace onto
+            # dest. os.replace breaks any existing link (a stale dest HARD-LINKED
+            # to an external file is NOT mutated in place) and makes a partial copy
+            # never the visible dest.
+            fd, tmp_name = tempfile.mkstemp(dir=str(dest.parent), prefix=".n_trials-", suffix=".tmp")
+            os.close(fd)
+            tmp = Path(tmp_name)
+            try:
+                shutil.copy2(src_path, tmp)
+                os.replace(tmp, dest)
+            finally:
+                tmp.unlink(missing_ok=True)
+            # Post-condition: the EXACT dest path is now a regular file.
+            if dest.is_symlink() or not dest.is_file():
+                raise ObservedTrialsCopyError(
+                    f"post-copy invariant violated: {dest} is not a regular file"
+                )
+            self.logger.info("Copied observed N-trials CSV -> %s", dest)
+            return dest
+        except ObservedTrialsCopyError:
+            raise
+        except Exception as exc:
+            # Catch-all fail-closed boundary: every placement failure - OSError,
+            # RuntimeError (a resolve() symlink loop on py3.11), RecursionError
+            # (rmtree on a deep dir), shutil.SameFileError, ... - is typed so
+            # nothing escapes to a silent PACKAGE success. Our own
+            # ObservedTrialsCopyError is re-raised above un-rewrapped;
+            # BaseException (KeyboardInterrupt/SystemExit) is intentionally NOT
+            # caught.
+            raise ObservedTrialsCopyError(
+                f"observed-trials placement failed for {dest}: {exc}"
+            ) from exc
+
+    def _remove_stale_trials_dest(self, dest: Path) -> None:
+        """Remove a stale observed-trials artifact at ``dest`` (a regular file or
+        a directory) from a reused output dir. Called only from within
+        ``_copy_observed_trials``'s catch-all boundary, which types any removal
+        failure - so a reconcile can never fail silently."""
+        if dest.is_dir() and not dest.is_symlink():
+            shutil.rmtree(dest)
+        elif dest.exists() or dest.is_symlink():
+            dest.unlink()
 
     @abstractmethod
     def translate(self, data: UnifiedData) -> TranslationResult:

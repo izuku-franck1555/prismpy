@@ -436,11 +436,18 @@ class CraftTranslator(CraftTranslatorBase):
         Returns:
             List of generated package file paths
         """
+        # §7 — copy the observed-trials CSV (if supplied) BEFORE + OUTSIDE the
+        # try/except so a trials-copy failure FAILS LOUD (the manifest try/except
+        # below must not swallow it). See BaseTranslator._copy_observed_trials.
+        trials = self._copy_observed_trials()
         try:
-            return self._generate_package_metadata(data, output_files)
+            package_files = self._generate_package_metadata(data, output_files)
         except Exception as e:
             logger.warning(f"Failed to generate package metadata: {e}")
             return []
+        if trials is not None:
+            package_files.append(trials)
+        return package_files
 
     def _to_craft_cellid(self, cell_id_0: int) -> int:
         """Return the canonical 0-indexed cell ID for CRAFT companion files.

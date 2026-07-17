@@ -9,8 +9,8 @@ the COMMITTED ``packaging/manifest.py``:
 - MUST-1b (OQ-2): the orphan gen evaluator + its _dispatch_gate branch removed.
 - MUST-5 + SF-1: the >=30 adequacy ADVISORY gate + the templated flag carrying
   the actual N.
-- §10: prismpy catalog references 14 unique wire strings (no enum on the
-  producer side).
+- §10: prismpy catalog references 17 unique wire strings (14 for UC1-UC6 + 3
+  for n_response_skill UC7; no enum on the producer side).
 
 Placement note: this lives in ``tests/structural/`` (NOT the root
 ``tests/test_manifest_emit_invariants_ast.py`` that §10 names "primary")
@@ -87,12 +87,14 @@ def test_uc1_adequacy_gate_is_advisory() -> None:
 # ── §10: catalog-unique count ───────────────────────────────────────────────
 
 
-def test_catalog_unique_wire_strings_is_14() -> None:
+def test_catalog_unique_wire_strings_is_17() -> None:
     from prismpy.packaging.manifest import PER_UC_GATES
 
     unique = {g for gates in PER_UC_GATES.values() for g in gates}
-    assert len(unique) == 14, (
-        f"expected 14 unique catalog wire strings, got {len(unique)}: "
+    # 14 (UC1-UC6) + 3 for n_response_skill (UC7): n_trials_present,
+    # soil_fertility_dependency_declared, platform_dssat_family.
+    assert len(unique) == 17, (
+        f"expected 17 unique catalog wire strings, got {len(unique)}: "
         f"{sorted(unique)}"
     )
     assert "forecast_or_analog_mode_resolved" not in unique

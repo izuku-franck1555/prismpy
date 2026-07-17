@@ -451,7 +451,14 @@ class PythiaTranslator(PythiaTranslatorBase):
         Returns:
             List of generated package file paths
         """
-        return self._generate_package_files(data)
+        # §7 — copy the observed-trials CSV (if supplied) to data/n_trials.csv
+        # BEFORE the manifest is built, so create_manifest's n_trials_present gate
+        # sees the real artifact. Fail-loud (see BaseTranslator._copy_observed_trials).
+        trials = self._copy_observed_trials()
+        package_files = self._generate_package_files(data)
+        if trials is not None:
+            package_files.append(trials)
+        return package_files
 
     def _generate_sites_shapefile(
         self,
