@@ -1136,6 +1136,19 @@ class PythiaTranslator(PythiaTranslatorBase):
         dt = datetime(year, 1, 1) + timedelta(days=doy - 1)
         return dt.strftime("%Y-%m-%d")
 
+    @staticmethod
+    def _plant_mode_from_sowing(sowing_mode: str) -> str:
+        """sowing_mode -> DSSAT SNX PLANT method: opportunistic -> "A" (reads the
+        PFRST/PLAST window), fixed_date -> "R" (on PDATE). "F" is non-standard/never
+        emitted; unknown raises. Schema normalizes the "fixed" alias to "fixed_date"."""
+        mapping = {"opportunistic": "A", "fixed_date": "R"}
+        if sowing_mode not in mapping:
+            raise ValueError(
+                f"Unknown sowing_mode {sowing_mode!r}: expected one of "
+                f"{sorted(mapping)} (schema normalizes 'fixed'->'fixed_date')."
+            )
+        return mapping[sowing_mode]
+
     def _map_generic_to_pythia_config(self) -> Dict[str, Any]:
         """Map generic config to PYTHIA JSON default_setup parameters.
 
@@ -1236,6 +1249,9 @@ class PythiaTranslator(PythiaTranslatorBase):
         plast_doy = min(planting_doy + planting_window, 365)
         plast_date = self._doy_to_calendar_date(plast_doy, start_year)
 
+        # sowing_mode -> DSSAT PLANT method (shared helper); PDATE = window start.
+        plant_mode = self._plant_mode_from_sowing(getattr(mgmt, "sowing_mode", "opportunistic"))
+
         return {
             # Temporal settings
             "nyers": nyers,
@@ -1244,6 +1260,10 @@ class PythiaTranslator(PythiaTranslatorBase):
             # Planting window (calendar date format: YYYY-MM-DD)
             "pfrst": pfrst_date,
             "plast": plast_date,
+
+            # DSSAT PLANT method + PDATE; consumed by _generate_pythia_json default_setup.
+            "plant_mode": plant_mode,
+            "pdate": pfrst_date,
 
             # Soil moisture threshold for planting (%)
             "ph2ol": ph2ol,
@@ -1778,6 +1798,8 @@ class PythiaTranslator(PythiaTranslatorBase):
             pfrst = config_params["pfrst"]
             plast = config_params["plast"]
             irrig = config_params["irrig"]
+            plant_mode = config_params["plant_mode"]
+            pdate = config_params["pdate"]
             fen_tot = fertilizer_params["fen_tot"]
             ingeno = cultivar_params["ingeno"]
             cname = cultivar_params["cname"]
@@ -1821,6 +1843,8 @@ class PythiaTranslator(PythiaTranslatorBase):
             # Get management settings
             mgmt = self.config.management
             irrig = "A" if mgmt and mgmt.irrigation else "N"
+            plant_mode = self._plant_mode_from_sowing(getattr(mgmt, "sowing_mode", "opportunistic"))
+            pdate = pfrst
             fen_tot = mgmt.fertilizer_n_total if mgmt and hasattr(mgmt, 'fertilizer_n_total') else 60
 
             # Use cultivar from config override or default mapping
@@ -1871,6 +1895,8 @@ class PythiaTranslator(PythiaTranslatorBase):
                 "wsta": f"lookup_wth::{self._get_wsta_prefix()}::vector::{sites_file}::ID",
                 "ic_layers": "generate_ic_layers::$id_soil",
                 "irrig": irrig,
+                "plant_mode": plant_mode,
+                "pdate": pdate,
                 "ingeno": ingeno,
                 "cname": cname,
             },
@@ -1897,6 +1923,8 @@ class PythiaTranslator(PythiaTranslatorBase):
             "startYear": start_year,
             "fen_tot": 0,
             "irrig": irrig,
+            "plant_mode": plant_mode,
+            "pdate": pdate,
             "ingeno": ingeno,
             "cname": f"{cname}_BASELINE",
         }
@@ -1909,6 +1937,8 @@ class PythiaTranslator(PythiaTranslatorBase):
             "startYear": start_year,
             "fen_tot": fen_tot,
             "irrig": irrig,
+            "plant_mode": plant_mode,
+            "pdate": pdate,
             "ingeno": ingeno,
             "cname": f"{cname}_FERTILIZED",
         }
@@ -2990,7 +3020,7 @@ class PythiaTranslator(PythiaTranslatorBase):
 @N METHODS     WTHER INCON LIGHT EVAPO INFIL PHOTO HYDRO NSWIT MESOM MESEV MESOL
  1 ME              M     M     E     R     S     L     R     1     P     S     2
 @N MANAGEMENT  PLANT IRRIG FERTI RESID HARVS
- 1 MA              {{{{ plant_mode | default("F") }}}} {{{{ irrig }}}}     D     D     M
+ 1 MA              {{{{ plant_mode | default("R") }}}} {{{{ irrig }}}}     D     D     M
 @N OUTPUTS     FNAME OVVEW SUMRY FROPT GROUT CAOUT WAOUT NIOUT MIOUT DIOUT VBOSE CHOUT OPOUT FMOPT
  1 OU              N     N     Y    14     N     N     N     N     N     N     0     N     N     C
 
