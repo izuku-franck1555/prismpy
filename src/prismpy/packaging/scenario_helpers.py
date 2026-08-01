@@ -18,8 +18,8 @@ Two helpers ship today:
   pre-flight validator hard-fails.
 
 * :func:`rewrite_pythia_config_for_scenario` — overwrites the
-  ``sdate`` / ``pfrst`` / ``plast`` / ``runs[*].startYear`` fields
-  in a delivered package's ``pythia_config.json`` to align with a
+  ``sdate`` / ``pfrst`` / ``pdate`` / ``plast`` / ``runs[*].startYear``
+  fields in a delivered package's ``pythia_config.json`` to align with a
   scenario's ``time_slice_start`` / ``time_slice_end``. Required for
   cloned-baseline-then-swap-climate flows where the projection's
   config file would otherwise inherit the baseline's year fields and
@@ -160,8 +160,9 @@ def rewrite_pythia_config_for_scenario(
     scenarios use case clones a baseline package, wipes
     ``weather/*.WTH``, and writes projection WTH files in their place.
     The cloned package's ``config/pythia_config.json`` still carries
-    the baseline's ``sdate`` / ``pfrst`` / ``plast`` / ``runs[*].startYear``
-    fields. DSSAT then requests weather records for baseline years
+    the baseline's ``sdate`` / ``pfrst`` / ``pdate`` / ``plast`` /
+    ``runs[*].startYear`` fields. DSSAT then requests weather records
+    for baseline years
     (e.g., 2013-001) which are not present in the projection's WTH
     files (e.g., 2046-2048), and the model silently produces zero
     yields per cell with a ``WARNING.OUT: Weather record not found``.
@@ -178,10 +179,16 @@ def rewrite_pythia_config_for_scenario(
     - ``default_setup.pfrst`` → ``"<time_slice_start>-MM-DD"`` where
       MM-DD is computed from ``planting_doy`` (or kept from input
       if ``planting_doy`` is None).
+    - ``default_setup.pdate`` → mirrors ``pfrst`` (the reported
+      planting date DSSAT reads under PLANT="R"; kept equal to the
+      window start so a fixed_date projection plants in-period, not
+      the stale baseline year). Ignored by DSSAT under PLANT="A".
     - ``default_setup.plast`` → start_year + planting_window_days.
     - ``runs[i].startYear`` → ``time_slice_start`` for every entry.
     - ``runs[i].nyers`` → ``time_slice_end - time_slice_start + 1``
       for every entry.
+    - ``runs[i].pdate`` → mirrors ``default_setup.pdate`` for every
+      entry that carries it.
 
     Args:
         pythia_config_path: Path to the package's
@@ -251,6 +258,18 @@ def rewrite_pythia_config_for_scenario(
             setup["plast"] = _replace_year_prefix(
                 setup["plast"], time_slice_start
             )
+        # pdate mirrors pfrst under the emit invariant pdate == pfrst
+        # (the planting-window start). PLANT="R" (fixed_date) packages
+        # read PDATE as the planting date, so a cloned projection must
+        # move it into the new period or DSSAT plants in the stale
+        # baseline year. PLANT="A" (opportunistic) ignores PDATE — a
+        # no-op there, but kept period-aligned so both modes stay valid.
+        if new_pfrst is not None:
+            setup["pdate"] = new_pfrst
+        elif "pdate" in setup and isinstance(setup["pdate"], str):
+            setup["pdate"] = _replace_year_prefix(
+                setup["pdate"], time_slice_start
+            )
 
     runs = config.get("runs")
     if isinstance(runs, list):
@@ -259,6 +278,14 @@ def rewrite_pythia_config_for_scenario(
                 continue
             run["startYear"] = time_slice_start
             run["nyers"] = nyers
+            # runs[*].pdate mirrors default_setup pdate (same window
+            # start); move it into the projection period too.
+            if new_pfrst is not None:
+                run["pdate"] = new_pfrst
+            elif "pdate" in run and isinstance(run["pdate"], str):
+                run["pdate"] = _replace_year_prefix(
+                    run["pdate"], time_slice_start
+                )
 
     with path.open("w", encoding="utf-8") as fh:
         json.dump(config, fh, indent=2, ensure_ascii=False)
