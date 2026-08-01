@@ -37,6 +37,52 @@ def _default_source_label(profile_id: int) -> str:
     return f"HWSD v2 SMU {profile_id}"
 
 
+# ── DSSAT SLTX texture codes (USDA 12-class triangle) ────────────────
+# The .SOL profile-header SLTX field is fixed-width. A spelled-out class
+# name (e.g. "SandyClayLoam", 13 chars) overflows the column and shifts
+# the depth field, so DSSAT's IPSOIL header parser reads the wrong
+# column and rejects the profile (Error 5010). Emit the canonical short
+# code (<=4 chars) instead — it always fits. Keyed by the class name
+# normalised to lower-case with spaces removed, so it matches both the
+# spelled-out ("Sandy Clay Loam") and space-stripped ("SandyClayLoam")
+# forms the ``SoilProfile.surface_texture`` classifier can produce.
+_DSSAT_SLTX_CODES: Dict[str, str] = {
+    "sand": "S",
+    "loamysand": "LS",
+    "sandyloam": "SL",
+    "loam": "L",
+    "siltloam": "SIL",
+    "silt": "SI",
+    "sandyclayloam": "SCL",
+    "clayloam": "CL",
+    "siltyclayloam": "SICL",
+    "sandyclay": "SC",
+    "siltyclay": "SIC",
+    "clay": "C",
+}
+
+
+def _dssat_sltx_code(surface_texture: "str | None") -> str:
+    """Map a USDA texture class to its DSSAT SLTX code (fail-loud).
+
+    The .SOL profile-header SLTX field is fixed-width; a spelled-out
+    class name overflows it and shifts the depth column, so DSSAT's
+    IPSOIL parser rejects the profile (Error 5010). The canonical short
+    code (<=4 chars) always fits. Raises on an absent/unrecognised class
+    rather than silently emitting an overflowing name.
+    """
+    key = (surface_texture or "").replace(" ", "").lower()
+    try:
+        return _DSSAT_SLTX_CODES[key]
+    except KeyError:
+        raise ValueError(
+            f"Unmapped soil texture class {surface_texture!r}: cannot emit a "
+            f"DSSAT SLTX code for the .SOL profile header. Expected one of the "
+            f"USDA 12-class set {sorted(_DSSAT_SLTX_CODES)} "
+            f"(matched case- and space-insensitively)."
+        ) from None
+
+
 def write_dssat_sol(
     soil_path: Path,
     profiles_by_id: Mapping[int, SoilProfile],
@@ -100,13 +146,25 @@ def write_dssat_sol(
             profile_name = f"{country_code}{smu_id:08d}"[:10]
             smu_to_profile_name[smu_id] = profile_name
 
-            # Profile header: *ID  ISO3  Texture  Depth  Source
-            texture_compact = (profile.surface_texture or "Unknown").replace(" ", "")
+            # Profile header aligned to DSSAT FORMAT 5030 (IPSOIL_Inp.for:627):
+            #   1X, A10, 2X, A11, 1X, A5, 1X, F5.0, 1X, A50
+            #   = *  id(2-11)  SLSOUR(14-24)  SLTX(26-30)  depth(32-36)  SLDESC(38+)
+            # SLTX carries the DSSAT texture CODE in the A5 field (cols 26-30);
+            # the code (<=4 chars) fits, so DSSAT reads the texture AND the depth
+            # at their fixed columns. The prior spelled-out class overflowed the
+            # field and shifted the depth column -> IPSOIL Error 5010.
+            # SLSOUR (DSSAT "Soil Source") carries the source tag (first token of
+            # the label, e.g. "eGHR"/"HWSD"); the full label + country go in the
+            # A50 SLDESC (country is also encoded in the PEDON id). Both are
+            # DSSAT-descriptive (not parsed for logic).
+            sltx_code = _dssat_sltx_code(profile.surface_texture)
             depth_cm = int((profile.total_depth or 0.2) * 100)
             source_desc = source_label_for_id(smu_id)
+            slsour = (source_desc.split() or ["-99"])[0][:11]
+            sldesc = f"{source_desc} ({region.country_iso3 or 'XXX'})"
             f.write(
-                f"*{profile_name:<10}    {region.country_iso3 or 'XXX':<6} "
-                f"{texture_compact:<10} {depth_cm:>3d}    {source_desc}\n"
+                f"*{profile_name:<10}  {slsour:<11} "
+                f"{sltx_code:<5} {depth_cm:>5d} {sldesc}\n"
             )
 
             # Site line (DSSAT format: 1X,A11,1X,A12,F8.3,F8.3,5X,A50)

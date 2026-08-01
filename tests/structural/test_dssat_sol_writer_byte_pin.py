@@ -33,11 +33,15 @@ FIXTURE_PATH = (
     / "expected_two_profiles.SOL"
 )
 
-# Pin recorded at first generation 2026-05-07 against the canonical writer.
-# Update only when the fixture is intentionally regenerated (e.g., a
-# DSSAT-spec format upgrade); paired with the fixture file so a SHA
-# update is meaningless without a corresponding fixture rewrite.
-EXPECTED_SHA256 = "456494ab0085551013b7b1d6ae0b2fc718303669e7a95621e06b2986afaf884d"
+# Pin recorded 2026-05-07; regenerated 2026-08-01 for the SLTX-code fix +
+# FORMAT 5030 column alignment. The *-header now emits the DSSAT SLTX code
+# in the A5 field at cols 26-30 and depth (F5.0) at cols 32-36, per
+# IPSOIL_Inp.for:627 (1X,A10,2X,A11,1X,A5,1X,F5.0,1X,A50) — so DSSAT reads
+# BOTH texture and depth at their fixed columns. The prior spelled-out class
+# overflowed the field and shifted the depth -> IPSOIL Error 5010. Update
+# only when the fixture is intentionally regenerated; paired with the fixture
+# file so a SHA update is meaningless without a corresponding fixture rewrite.
+EXPECTED_SHA256 = "77cfcd79a16fc56ec5a50a756f357f43a24c2e7162fd75aaf693b10be91b3b69"
 
 
 def _build_profiles() -> dict[int, SoilProfile]:
