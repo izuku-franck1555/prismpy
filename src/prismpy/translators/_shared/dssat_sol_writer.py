@@ -167,15 +167,17 @@ def write_dssat_sol(
                 f"{sltx_code:<5} {depth_cm:>5d} {sldesc}\n"
             )
 
-            # Site line (DSSAT format: 1X,A11,1X,A12,F8.3,F8.3,5X,A50)
-            # LAT at indices 26-33, LONG at indices 34-41 — column positions are critical
+            # Site value row aligned to DSSAT FORMAT 5035 (IPSOIL_Inp.for:628):
+            #   2(1X,A11), 2(1X,F8.3), 1X, A50 = SSITE(2-12) SCOUNT(14-24)
+            #   SLAT(26-33) SLONG(35-42) TAXON(44+). LAT/LONG are read at those
+            # FIXED columns (F8.3), so an off-by-one truncates a coordinate digit.
             f.write("@SITE        COUNTRY          LAT     LONG SCS FAMILY\n")
             site_name = sanitize_admin_name(region.name)[:11]
             texture = profile.surface_texture or "Unknown"
-            country_short = (region.country_iso3 or region.country or "XX")[:12]
+            country_short = (region.country_iso3 or region.country or "XX")[:11]
             f.write(
-                f" {site_name:<11} {country_short:<12} "
-                f"{profile.lat:8.3f}{profile.lon:8.3f}     {texture}\n"
+                f" {site_name:<11} {country_short:<11} "
+                f"{profile.lat:8.3f} {profile.lon:8.3f} {texture}\n"
             )
 
             # Surface properties block (DSSAT required)

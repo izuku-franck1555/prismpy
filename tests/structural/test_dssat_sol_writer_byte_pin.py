@@ -41,7 +41,7 @@ FIXTURE_PATH = (
 # overflowed the field and shifted the depth -> IPSOIL Error 5010. Update
 # only when the fixture is intentionally regenerated; paired with the fixture
 # file so a SHA update is meaningless without a corresponding fixture rewrite.
-EXPECTED_SHA256 = "77cfcd79a16fc56ec5a50a756f357f43a24c2e7162fd75aaf693b10be91b3b69"
+EXPECTED_SHA256 = "6e57f5fc5bbbc615e52648112249b831cb2ffe83e59fcd64fcd3746e783e6585"
 
 
 def _build_profiles() -> dict[int, SoilProfile]:
