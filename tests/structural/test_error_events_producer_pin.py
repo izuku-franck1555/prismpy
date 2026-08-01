@@ -44,8 +44,8 @@ F_AG_GATE_SITES: Tuple[Tuple[str, int, str], ...] = (
     # pythia + craft raise sites shifted +7 by the §7 n_response_skill trials-copy
     # wiring inserted at each generate_package top.
     ("src/prismpy/translators/pythia/translator.py", 1007, "ValueError"),
-    ("src/prismpy/translators/pythia/translator.py", 1800, "ValueError"),
-    ("src/prismpy/translators/pythia/translator.py", 2548, "BuildEghrSubstrateError"),
+    ("src/prismpy/translators/pythia/translator.py", 1822, "ValueError"),
+    ("src/prismpy/translators/pythia/translator.py", 2578, "BuildEghrSubstrateError"),
     ("src/prismpy/translators/sarra_py/translator.py", 711, "ValueError"),
     ("src/prismpy/translators/sarra_py/translator.py", 1675, "ValueError"),
     # 1565 -> 1570 (translate-time data.grid guard) -> 1577 (§7 trials-copy wiring).

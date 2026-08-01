@@ -226,6 +226,81 @@ def test_rewrite_updates_runs_start_year_and_nyers(
         assert run["nyers"] == 3
 
 
+# ── Case C regression: pdate must move into the projection period ────
+
+
+@pytest.fixture
+def baseline_pythia_config_with_pdate(tmp_path: Path) -> Path:
+    """Baseline config carrying ``pdate`` (== ``pfrst``) in default_setup + runs.
+
+    Mirrors the post-fix translator emit: ``default_setup`` and every run
+    dict carry ``pdate`` equal to the planting-window start (``pfrst``).
+    A cloned fixed_date ("R") projection must move ``pdate`` into the new
+    period or DSSAT reads a stale baseline-year PDATE and plants outside
+    the simulated window (zero yields per cell).
+    """
+    config = {
+        "default_setup": {
+            "sdate": "2013-01-01",
+            "pfrst": "2013-06-15",
+            "pdate": "2013-06-15",  # PDATE == window start (emit invariant)
+            "plast": "2013-07-15",
+            "plant_mode": "R",
+        },
+        "runs": [
+            {"name": "run-baseline", "startYear": 2013, "nyers": 3, "pdate": "2013-06-15"},
+            {"name": "run-fert", "startYear": 2013, "nyers": 3, "pdate": "2013-06-15"},
+        ],
+    }
+    path = tmp_path / "pythia_config.json"
+    with path.open("w", encoding="utf-8") as fh:
+        json.dump(config, fh, indent=2)
+    return path
+
+
+def test_rewrite_moves_pdate_into_scenario_period_no_doy(
+    baseline_pythia_config_with_pdate: Path,
+) -> None:
+    """pdate moves to the projection period and stays == pfrst (no DOY).
+
+    Regression for the fixed_date ("R") projection bug: PDATE is the
+    planting date under PLANT="R", so a cloned projection with a stale
+    baseline-year pdate plants outside the sim window. Reverting the
+    pdate rewrite in the helper reds this (pdate stays "2013-06-15").
+    """
+    rewrite_pythia_config_for_scenario(
+        baseline_pythia_config_with_pdate,
+        time_slice_start=2046,
+        time_slice_end=2048,
+    )
+    with baseline_pythia_config_with_pdate.open() as fh:
+        config = json.load(fh)
+    setup = config["default_setup"]
+    assert setup["pdate"] == "2046-06-15"     # moved into the period
+    assert setup["pdate"] == setup["pfrst"]   # pdate == pfrst invariant held
+    # every run dict's pdate moved too (default_setup + runs mirror).
+    assert all(run["pdate"] == "2046-06-15" for run in config["runs"])
+
+
+def test_rewrite_moves_pdate_with_doy(
+    baseline_pythia_config_with_pdate: Path,
+) -> None:
+    """With planting_doy, pdate is derived from the DOY in the new year (== pfrst)."""
+    rewrite_pythia_config_for_scenario(
+        baseline_pythia_config_with_pdate,
+        time_slice_start=2046,
+        time_slice_end=2048,
+        planting_doy=166,  # June 15 (non-leap year)
+        planting_window_days=30,
+    )
+    with baseline_pythia_config_with_pdate.open() as fh:
+        config = json.load(fh)
+    setup = config["default_setup"]
+    assert setup["pdate"] == "2046-06-15"
+    assert setup["pdate"] == setup["pfrst"]
+    assert all(run["pdate"] == "2046-06-15" for run in config["runs"])
+
+
 def test_rewrite_preserves_unrelated_fields(
     baseline_pythia_config: Path,
 ) -> None:
