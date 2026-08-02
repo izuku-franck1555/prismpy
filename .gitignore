@@ -114,3 +114,15 @@ Thumbs.db
 .local/
 .venv-py312/
 .venv-build/
+
+# Internal experiment / scratch configs + status docs — MUST NOT reach the
+# public repo. Added after PROJECT_STATUS.md and the nrisk/uc2 demo configs
+# were found tracked on the public `main`; these slipped the suffix patterns
+# above. Root is reserved for packaging files (pyproject/README/requirements).
+PROJECT_STATUS.md
+nrisk_demo*
+uc2_kano_*_baseline.yaml
+# Transient run logs / captured stdout + underscore-prefixed root sandbox files
+*.log
+*.out
+/_*
