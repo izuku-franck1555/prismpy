@@ -15,14 +15,17 @@ missing or unset gpkg falls through to the real network path; non-GADM URLs and
 unbundled countries delegate to the network too.
 
 Only the requested country is read from the gpkg (an OGR attribute-filter
-pushdown, ``where="GID_0='<iso3>'"``), so the whole-world 2.76 GB gpkg is never
-materialized. Only the SYNTHESIZED bodies are cached (a byte-bounded LRU keyed
-on the exactly-measurable ``len(bytes)``), so a repeat request for a country
-skips the read and the rebuild. A NEW level of an already-seen country re-reads
-— a fast per-country filtered read, well within the latency bar. Frames are NOT
-cached: a geometry-object GeoDataFrame's true memory (the GEOS coordinate
-buffers) is not reliably measurable, so a frame cache could not honestly bound
-worker memory.
+pushdown), so the whole-world gpkg is never materialized. Only the SYNTHESIZED
+bodies are cached (a byte-bounded LRU keyed on the exactly-measurable
+``len(bytes)``). Frames are NOT cached: a geometry-object GeoDataFrame's true
+memory is not reliably measurable.
+
+Integrity: the mounted artifact is verified ONCE at mount (metadata I/O, never a
+2.76 GB rehash) — the sidecar manifest's SHA-256 must equal a pinned expected
+digest, the file's size+mtime must equal the manifest's, and the layer must
+carry a GID_0 index. Any failure leaves the adapter mounted but delegate-only.
+When the adapter is authoritative, the requests_cache URL tier is disabled so no
+stale cached response can serve ahead of the adapter.
 """
 from __future__ import annotations
 
@@ -31,6 +34,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import threading
 from collections import OrderedDict
 from typing import Optional
@@ -45,7 +49,15 @@ DEFAULT_GPKG = "/data/gadm/gadm_410.gpkg"
 _GADM_URL_RE = re.compile(r"/gadm41_(?P<iso3>[A-Z]{3})_(?P<level>\d)\.json")
 # The ONLY shape allowed into the interpolated OGR predicate (a bare ISO3).
 _ISO3_RE = re.compile(r"[A-Z]{3}")
-_GPKG_LAYER = "gadm_410"
+# The dataset version is the single source for the layer name (and the gate).
+EXPECTED_GADM_DATASET_VERSION = "410"  # == pygadm.__gadm_version__
+_GPKG_LAYER = f"gadm_{EXPECTED_GADM_DATASET_VERSION}"
+# SHA-256 of the FINAL (GID_0-indexed) artifact. DE sets this at staging to the
+# indexed gpkg's digest; the staged sidecar manifest carries the same value, and
+# the mount check requires manifest.sha256 == this (no 2.76 GB rehash). Until it
+# is set, every artifact fails the check and the adapter is delegate-only.
+EXPECTED_GADM_ARTIFACT_SHA256 = "SET_AT_STAGING"
+_MANIFEST_SUFFIX = ".manifest.json"
 # Bound delegated (non-local) requests (connect, read) so a black-hole GADM host
 # fails fast instead of hanging the worker; pygadm itself passes timeout=None.
 _DELEGATE_TIMEOUT = (5, 30)
@@ -110,9 +122,54 @@ class _LRU:
             return key in self._d
 
 
+def _read_manifest(gpkg_path: str) -> Optional[dict]:
+    """Read the minimal sidecar manifest ``{sha256, size_bytes, mtime_ns}``
+    beside the gpkg; None on any missing/malformed read (fail-closed upstream)."""
+    try:
+        with open(gpkg_path + _MANIFEST_SUFFIX, "r", encoding="utf-8") as f:
+            m = json.load(f)
+        return {"sha256": str(m["sha256"]),
+                "size_bytes": int(m["size_bytes"]),
+                "mtime_ns": int(m["mtime_ns"])}
+    except Exception:  # noqa: BLE001 — missing/malformed manifest → fail-closed
+        return None
+
+
+def _artifact_id(gpkg_path: str):
+    """Cheap stat identity ``(st_ino, st_size, st_mtime_ns)`` for detecting an
+    in-place artifact swap; None if the path can't be stat'd."""
+    try:
+        st = os.stat(gpkg_path)
+        return (st.st_ino, st.st_size, st.st_mtime_ns)
+    except OSError:
+        return None
+
+
+def _gid0_index_present(gpkg_path: str, layer: str) -> bool:
+    """True iff a SQLite index on ``layer`` covers GID_0 — metadata I/O, not a
+    rehash. Requires ``PRAGMA index_info`` to list GID_0 (a bare index NAME is
+    not enough). False on any error (unreadable gpkg → fail-closed)."""
+    con = None
+    try:
+        con = sqlite3.connect(gpkg_path)
+        for row in con.execute(f'PRAGMA index_list("{layer}")').fetchall():
+            name = row[1]
+            cols = [r[2] for r in con.execute(
+                f'PRAGMA index_info("{name}")').fetchall()]
+            if "GID_0" in cols:
+                return True
+        return False
+    except Exception:  # noqa: BLE001 — unreadable gpkg / SQL error → fail-closed
+        return False
+    finally:
+        if con is not None:
+            con.close()
+
+
 class LocalGADMAdapter(HTTPAdapter):
     """Serve ``gadm41_{ISO3}_{level}.json`` from a local gpkg; delegate every
-    other request (non-GADM URLs, unbundled countries) to the real network."""
+    other request (non-GADM URLs, unbundled countries, integrity failure) to the
+    real network."""
 
     def __init__(self, gpkg_path: str, layer: str = _GPKG_LAYER):
         super().__init__()
@@ -120,6 +177,27 @@ class LocalGADMAdapter(HTTPAdapter):
         self._layer = layer
         # Only synthesized bodies are retained (bytes are exactly measurable).
         self._synth_cache = _LRU(max_bytes=_SYNTH_CACHE_MAX_BYTES, sizeof=len)
+        # Mount-time artifact integrity: pin the stat identity + verify the
+        # manifest digest, size/mtime, and the GID_0 index. Fail-closed leaves
+        # the adapter mounted but delegate-only (every request delegates).
+        self._artifact_id = _artifact_id(gpkg_path)
+        self._integrity_ok = self._verify_artifact()
+        if not self._integrity_ok:
+            logger.warning(
+                "GADM artifact integrity check FAILED for %s; the adapter is "
+                "delegate-only (serving from UC-Davis).", gpkg_path)
+
+    def _verify_artifact(self) -> bool:
+        manifest = _read_manifest(self._gpkg_path)
+        if manifest is None:
+            return False
+        if manifest["sha256"] != EXPECTED_GADM_ARTIFACT_SHA256:
+            return False
+        st = self._artifact_id
+        if (st is None or st[1] != manifest["size_bytes"]
+                or st[2] != manifest["mtime_ns"]):
+            return False
+        return _gid0_index_present(self._gpkg_path, self._layer)
 
     def _read_country(self, iso3: str):
         """Filtered read of ONLY ``iso3``'s rows from the gpkg — an OGR
@@ -147,7 +225,7 @@ class LocalGADMAdapter(HTTPAdapter):
                 request.url, exc)
             return self._delegate(request, **kwargs)
         if body is None:
-            return self._delegate(request, **kwargs)  # unbundled country → network
+            return self._delegate(request, **kwargs)  # unbundled / integrity → network
         raw = HTTPResponse(
             body=io.BytesIO(body),
             headers={"Content-Type": "application/json",
@@ -167,16 +245,28 @@ class LocalGADMAdapter(HTTPAdapter):
 
     def _synthesize(self, iso3: str, level: int) -> Optional[bytes]:
         """Build the GeoJSON FeatureCollection for one country+level, or None
-        if ``iso3`` is invalid or not in the local gpkg (caller delegates)."""
+        (caller delegates) if ``iso3`` is invalid, integrity has failed, or
+        ``iso3`` is not in the local gpkg."""
         # Fail-closed injection guard AT the boundary: ``iso3`` is interpolated
         # into an OGR predicate, and direct callers bypass send()'s URL regex —
         # only a bare 3-letter code ever reaches _read_country's where-clause.
         if not isinstance(iso3, str) or not _ISO3_RE.fullmatch(iso3):
             return None
+        if not self._integrity_ok:
+            return None  # mount-time integrity failed → delegate
         key = (iso3, level)
         cached = self._synth_cache.get(key)
         if cached is not None:
             return cached
+        # On a cache MISS, re-stat before reading: an in-place swap of the
+        # artifact under the mounted adapter flips integrity off, so an
+        # unchecked (post-mount) artifact is never read.
+        if _artifact_id(self._gpkg_path) != self._artifact_id:
+            self._integrity_ok = False
+            logger.warning(
+                "GADM artifact changed under the mounted adapter (%s); "
+                "delegating.", self._gpkg_path)
+            return None
         import pygadm
         from shapely.geometry import mapping
         sub = self._read_country(iso3)
@@ -212,12 +302,23 @@ class LocalGADMAdapter(HTTPAdapter):
         return body
 
 
+def _disable_url_cache(session) -> None:
+    """Persistently disable the requests_cache URL tier on ``session`` (thread-
+    safe flag, NOT the per-call context) — it is a redundant stale surface once
+    the adapter is authoritative. Best-effort; never raises."""
+    try:
+        session.settings.disabled = True
+    except Exception:  # noqa: BLE001 — a non-CachedSession or API change → skip
+        pass
+
+
 def mount_local_gadm(gpkg_path: Optional[str] = None) -> bool:
     """Mount the local GADM adapter on ``pygadm.session`` (idempotent).
 
     Resolves the gpkg from ``gpkg_path`` else ``$GADM_LOCAL_GPKG`` else the
-    default. Returns True if mounted. Graceful: an unset/missing gpkg logs and
-    leaves pygadm on its network path; never raises.
+    default. Returns True if mounted (even delegate-only on integrity failure).
+    Graceful: an unset/missing gpkg logs and leaves pygadm on its network path;
+    never raises.
     """
     path = gpkg_path or os.environ.get("GADM_LOCAL_GPKG", DEFAULT_GPKG)
     if not path or not os.path.exists(path):
@@ -226,10 +327,20 @@ def mount_local_gadm(gpkg_path: Optional[str] = None) -> bool:
             path)
         return False
     import pygadm
-    if isinstance(pygadm.session.adapters.get(GADM_HOST), LocalGADMAdapter):
-        return True  # already mounted — idempotent
-    pygadm.session.mount(GADM_HOST, LocalGADMAdapter(path))
+    # The adapter is authoritative for this host → disable the requests_cache URL
+    # tier so no stale cached response serves ahead of it. Set for EVERY mount
+    # (incl. a delegate-only integrity-failed mount) and before the idempotent
+    # early return. The delegate path (UC-Davis) still works, just uncached.
+    _disable_url_cache(pygadm.session)
+    adapter = LocalGADMAdapter(path)
+    existing = pygadm.session.adapters.get(GADM_HOST)
+    if (isinstance(existing, LocalGADMAdapter)
+            and existing._gpkg_path == adapter._gpkg_path
+            and existing._layer == adapter._layer
+            and existing._artifact_id == adapter._artifact_id):
+        return True  # idempotent — same artifact (path, layer, identity)
+    pygadm.session.mount(GADM_HOST, adapter)
     logger.info(
-        "LocalGADMAdapter mounted on pygadm.session for %s (gpkg=%s).",
-        GADM_HOST, path)
+        "LocalGADMAdapter mounted on pygadm.session for %s (gpkg=%s, "
+        "integrity_ok=%s).", GADM_HOST, path, adapter._integrity_ok)
     return True

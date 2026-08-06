@@ -13,6 +13,7 @@ from pathlib import Path
 import geopandas as gpd
 import pytest
 
+import prismpy.gadm_local as gl
 from prismpy.gadm_local import (
     _SYNTH_CACHE_MAX_BYTES,
     _LRU,
@@ -21,6 +22,14 @@ from prismpy.gadm_local import (
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "gadm_subset_NGA_MLI.gpkg"
 _GADM_URL = "https://geodata.ucdavis.edu/gadm/gadm4.1/json/gadm41_{}_{}.json"
+
+
+@pytest.fixture(autouse=True)
+def _bypass_integrity(monkeypatch):
+    # These pins exercise the serving / injection / fallback paths, not the mount
+    # integrity control (tested in test_gadm_local_integrity.py) — so let the bare
+    # subset fixture pass the mount check.
+    monkeypatch.setattr(gl.LocalGADMAdapter, "_verify_artifact", lambda self: True)
 
 
 def _req(iso3="NGA", level=2):
