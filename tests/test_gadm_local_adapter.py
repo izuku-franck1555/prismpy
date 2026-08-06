@@ -193,13 +193,22 @@ def test_non_gadm_url_passes_through(mounted, block_ucdavis):
 
 # --- SF5: concurrent gpkg reads are stable -----------------------------------
 
-def test_concurrent_synthesis_is_stable(mounted):
-    # The adapter's gpkg read must be concurrency-safe (fresh derive per call,
-    # lazy-load under a lock) — N parallel synths return identical bytes.
-    ref = mounted._synthesize("NGA", 2)
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        results = list(ex.map(lambda _: mounted._synthesize("NGA", 2), range(24)))
-    assert all(r == ref for r in results)
+def test_concurrent_same_country_requests_are_stable(monkeypatch):
+    # frames are NOT cached, so there is no single-flight
+    # guarantee — concurrent cold requests for the same country may each read
+    # (fast, memory-safe). The contract is only that all return byte-identical
+    # results under concurrency (no torn/partial reads).
+    adapter = LocalGADMAdapter(str(_FIXTURE))
+    N = 8
+    start = threading.Barrier(N)
+
+    def _one(_):
+        start.wait()  # all N hit the cold adapter together
+        return adapter._synthesize("NGA", 2)
+
+    with ThreadPoolExecutor(max_workers=N) as ex:
+        results = list(ex.map(_one, range(N)))
+    assert all(r == results[0] for r in results)
     assert all(len(json.loads(r)["features"]) == 775 for r in results)
 
 
