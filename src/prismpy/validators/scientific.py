@@ -1116,12 +1116,23 @@ def _check_cross_variable_consistency(unified_data) -> Dict[str, Any]:
     }
     total_records = 0
     affected_cells = set()
+    # Per-cell fail-tier (physically-impossible) variables, each keyed to its FIRST
+    # offending (date, value). The return emits these as per-cell ``violation_details``
+    # in the canonical 7-key shape the executor pivot stamps as per-cell DEFECTS
+    # (mirroring the value_range family): a LOCALIZABLE impossibility routes to
+    # "exclude the cells and run again" — the good cells still produce output.
+    fail_details: Dict[Any, Dict[str, tuple]] = {}
+
+    def _mark_defect(cid, variable, when, value):
+        affected_cells.add(cid)
+        fail_details.setdefault(cid, {}).setdefault(variable, (when, value))
 
     for cell_id, ts in climate.items():
         if not hasattr(ts, 'records'):
             continue
         for record in ts.records:
             total_records += 1
+            when = getattr(record, 'date', None)
             tmax = getattr(record, 'tmax', None)
             tmin = getattr(record, 'tmin', None)
             precip = getattr(record, 'precip', None)
@@ -1131,24 +1142,24 @@ def _check_cross_variable_consistency(unified_data) -> Dict[str, Any]:
             if tmax is not None and tmin is not None:
                 if tmax < tmin:
                     violations["tmax_le_tmin"] += 1
-                    affected_cells.add(cell_id)
+                    _mark_defect(cell_id, "tmax", when, tmax)
                 elif abs(tmax - tmin) < 0.1:
                     violations["zero_diurnal_range"] += 1
 
             if precip is not None and precip < 0:
                 violations["negative_precip"] += 1
-                affected_cells.add(cell_id)
+                _mark_defect(cell_id, "precip", when, precip)
 
             if srad is not None:
                 if srad < 0:
                     violations["negative_srad"] += 1
-                    affected_cells.add(cell_id)
+                    _mark_defect(cell_id, "srad", when, srad)
                 elif srad > 40:
                     violations["excessive_srad"] += 1
 
             if wind is not None and wind < 0:
                 violations["negative_wind"] += 1
-                affected_cells.add(cell_id)
+                _mark_defect(cell_id, "wind", when, wind)
 
     # FAIL-level violations (physical impossibilities)
     fail_count = (
@@ -1167,6 +1178,32 @@ def _check_cross_variable_consistency(unified_data) -> Dict[str, Any]:
     else:
         result = "pass"
 
+    # One per-cell DEFECT entry per (cell, impossible variable), in the canonical
+    # 7-key violation_details shape (cell_id, layer_idx, variable, date, value, unit,
+    # bounds) + the additive ``defect`` marker — the same shape value_range emits, so
+    # the executor pivot's ``vd.get(...)`` flattener carries every key. A cross-variable
+    # impossibility is a relationship (tmax<tmin), not a single-range breach, so unit /
+    # bounds are None; layer_idx is None (climate, not a soil layer). The executor pivot
+    # reads ``violation_details[*].defect`` -> per-cell ``failed_checks`` defect marks
+    # -> the localizable "exclude the cells and run again" recovery.
+    violation_details = sorted(
+        (
+            {
+                "cell_id": cid,
+                "layer_idx": None,
+                "variable": var,
+                "date": when.isoformat() if hasattr(when, "isoformat") else when,
+                "value": float(value) if value is not None else None,
+                "unit": None,
+                "bounds": None,
+                "defect": True,
+            }
+            for cid, vars_ in fail_details.items()
+            for var, (when, value) in sorted(vars_.items())
+        ),
+        key=lambda d: (str(d["cell_id"]), d["variable"]),
+    )
+
     return {
         "check": "cross_variable_consistency",
         "scope": "per_record",
@@ -1184,6 +1221,10 @@ def _check_cross_variable_consistency(unified_data) -> Dict[str, Any]:
             # V2-22c-PRE.1.3 — un-truncated for cockpit drill-down.
             "affected_cells": list(affected_cells),
             "n_affected_cells": len(affected_cells),
+            # Per-cell physical-impossibility defects (fail tier) for the executor
+            # pivot -> per-cell exclude-and-rerun; the value_range defect shape.
+            "violation_details": violation_details,
+            "defect": fail_count > 0,
         },
     }
 

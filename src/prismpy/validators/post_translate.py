@@ -518,6 +518,15 @@ def _build_climate_checks(
             "n_files": n_files,
             "violations": consistency_violations,
             "data_source": "actual translator output (not placeholder)",
+            # Aggregate physical-impossibility DEFECT: this post-translate check counts
+            # violations per-record across files without a per-cell id, so it can't
+            # emit per-cell ``violation_details`` (the per-cell localizable exclude is
+            # cross_variable_consistency's job). The check-level ``defect`` still routes
+            # a translated package with impossible values through the defect block;
+            # ``defect_count`` carries the real N so the consumer never renders "1
+            # impossible value" for N>1.
+            "defect": fail_count > 0,
+            "defect_count": fail_count,
         },
     })
 
