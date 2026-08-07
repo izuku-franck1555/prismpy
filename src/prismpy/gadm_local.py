@@ -52,11 +52,19 @@ _ISO3_RE = re.compile(r"[A-Z]{3}")
 # The dataset version is the single source for the layer name (and the gate).
 EXPECTED_GADM_DATASET_VERSION = "410"  # == pygadm.__gadm_version__
 _GPKG_LAYER = f"gadm_{EXPECTED_GADM_DATASET_VERSION}"
-# SHA-256 of the FINAL (GID_0-indexed) artifact. DE sets this at staging to the
-# indexed gpkg's digest; the staged sidecar manifest carries the same value, and
-# the mount check requires manifest.sha256 == this (no 2.76 GB rehash). Until it
-# is set, every artifact fails the check and the adapter is delegate-only.
-EXPECTED_GADM_ARTIFACT_SHA256 = "SET_AT_STAGING"
+# SHA-256 of the FINAL (GID_0-indexed) artifact. Read from the
+# EXPECTED_GADM_ARTIFACT_SHA256 env var so DE can set the real digest at staging
+# without a code change; the staged sidecar manifest carries the same value, and
+# the mount check requires manifest.sha256 == this (no 2.76 GB rehash). When the
+# env is unset the "SET_AT_STAGING" sentinel fails every check and the adapter is
+# delegate-only. The env is read at import, so it must be set before prismpy is
+# first imported (a deploy-time environment variable, not a runtime setting).
+EXPECTED_GADM_ARTIFACT_SHA256 = os.environ.get(
+    "EXPECTED_GADM_ARTIFACT_SHA256", "SET_AT_STAGING")
+# A real SHA-256 is 64 hex chars; the sentinel, an empty/whitespace env value, or
+# any malformed string is not — so it can never equal a manifest digest and the
+# mount check fail-closes to delegate-only regardless of the manifest.
+_SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
 _MANIFEST_SUFFIX = ".manifest.json"
 # Bound delegated (non-local) requests (connect, read) so a black-hole GADM host
 # fails fast instead of hanging the worker; pygadm itself passes timeout=None.
@@ -193,6 +201,12 @@ class LocalGADMAdapter(HTTPAdapter):
     def _verify_artifact(self) -> bool:
         manifest = _read_manifest(self._gpkg_path)
         if manifest is None:
+            return False
+        # Fail closed unless the expected digest is a real SHA-256 — the
+        # "SET_AT_STAGING" sentinel, an unset/empty/whitespace env value, or any
+        # malformed string can never match a manifest, so an unstaged or
+        # misconfigured deploy is delegate-only regardless of the manifest.
+        if not _SHA256_RE.fullmatch(EXPECTED_GADM_ARTIFACT_SHA256 or ""):
             return False
         if manifest["sha256"] != EXPECTED_GADM_ARTIFACT_SHA256:
             return False
