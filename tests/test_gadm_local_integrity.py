@@ -11,6 +11,8 @@ import logging
 import os
 import shutil
 import sqlite3
+import subprocess
+import sys
 import types
 from pathlib import Path
 
@@ -309,3 +311,53 @@ def test_url_cache_disable_warns_and_returns_false_when_flag_ignored(caplog):
     assert ok is False
     assert any("URL-cache disable failed" in r.getMessage() for r in caplog.records), \
         "a silently-ignored disable flag must emit a WARNING"
+
+
+# ── the expected artifact SHA is env-overridable (DE sets it at staging) ──────
+
+def _imported_expected_sha(env_value):
+    """Import prismpy.gadm_local in a FRESH interpreter with the given
+    EXPECTED_GADM_ARTIFACT_SHA256 env (None → unset) and return the resolved
+    module constant. A subprocess so the import-time env read is exercised
+    cleanly, without reloading the module into this test session."""
+    env = {k: v for k, v in os.environ.items()
+           if k != "EXPECTED_GADM_ARTIFACT_SHA256"}
+    if env_value is not None:
+        env["EXPECTED_GADM_ARTIFACT_SHA256"] = env_value
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         "import prismpy.gadm_local as gl; print(gl.EXPECTED_GADM_ARTIFACT_SHA256)"],
+        capture_output=True, text=True, env=env, check=True)
+    return proc.stdout.strip()
+
+
+def test_expected_sha_reads_env_when_set():
+    # DE sets the real indexed-gpkg digest via the env at staging (no code edit).
+    sha = "a" * 64
+    assert _imported_expected_sha(sha) == sha
+
+
+def test_expected_sha_defaults_to_sentinel_when_env_unset():
+    # Env unset → the "SET_AT_STAGING" sentinel, so an unstaged deploy fails every
+    # integrity check and the adapter is delegate-only (unchanged fallback).
+    assert _imported_expected_sha(None) == "SET_AT_STAGING"
+
+
+@pytest.mark.parametrize("magic", [
+    "SET_AT_STAGING", "", "   ", "not-a-sha256", "a" * 63, "a" * 65,
+])
+def test_non_sha_expected_fails_closed_even_on_matching_manifest(tmp_path, monkeypatch, magic):
+    # A non-SHA expected digest (the sentinel, an empty/whitespace env value, or a
+    # malformed string) must fail-close to delegate-only — EVEN against a bogus
+    # manifest whose sha256 equals it — so an unstaged/misconfigured deploy can
+    # never serve unverified data on a magic-string collision.
+    gpkg = tmp_path / "gadm_410.gpkg"
+    shutil.copy(_SUBSET, gpkg)
+    _add_gid0_index(gpkg)
+    st = os.stat(gpkg)
+    Path(str(gpkg) + gl._MANIFEST_SUFFIX).write_text(json.dumps({
+        "sha256": magic, "size_bytes": st.st_size, "mtime_ns": st.st_mtime_ns}))
+    monkeypatch.setattr(gl, "EXPECTED_GADM_ARTIFACT_SHA256", magic)
+    a = LocalGADMAdapter(str(gpkg))
+    assert a._integrity_ok is False
+    assert a._synthesize("NGA", 2) is None
