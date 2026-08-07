@@ -23,6 +23,7 @@ import geopandas as gpd
 import pytest
 
 import pygadm
+import prismpy.gadm_local as gl
 from prismpy.gadm_local import (
     GADM_HOST,
     LocalGADMAdapter,
@@ -31,6 +32,13 @@ from prismpy.gadm_local import (
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "gadm_subset_NGA_MLI.gpkg"
 _GADM_URL = "https://geodata.ucdavis.edu/gadm/gadm4.1/json/gadm41_{}_{}.json"
+
+
+@pytest.fixture(autouse=True)
+def _bypass_integrity(monkeypatch):
+    # These serve/egress/fidelity tests are not the mount-integrity control
+    # (tested in test_gadm_local_integrity.py) — let the bare subset pass mount.
+    monkeypatch.setattr(gl.LocalGADMAdapter, "_verify_artifact", lambda self: True)
 
 
 @pytest.fixture(scope="module")
@@ -59,16 +67,20 @@ class _CountingAdapter(LocalGADMAdapter):
 
 @pytest.fixture
 def mounted(monkeypatch):
-    """Mount a counting LocalGADMAdapter on pygadm.session with a cold cache;
-    restore on teardown so the mount never leaks across tests."""
+    """Mount a counting LocalGADMAdapter on pygadm.session with the requests_cache
+    URL tier DISABLED — as mount_local_gadm does once the adapter is authoritative
+    — and a cold cache; restore both on teardown so nothing leaks across tests."""
     adapter = _CountingAdapter(str(_FIXTURE))
     prior = pygadm.session.adapters.get(GADM_HOST)
+    prior_disabled = pygadm.session.settings.disabled
     pygadm.session.mount(GADM_HOST, adapter)
+    pygadm.session.settings.disabled = True  # adapter authoritative → no URL tier
     pygadm.session.cache.clear()
     yield adapter
     pygadm.session.adapters.pop(GADM_HOST, None)
     if prior is not None:
         pygadm.session.mount(GADM_HOST, prior)
+    pygadm.session.settings.disabled = prior_disabled
     pygadm.session.cache.clear()
 
 
@@ -143,15 +155,25 @@ def test_synthesized_json_body_carries_country_pre_rename(mounted):
 
 # --- SF3: cold-cache served by adapter; warm-cache zero egress ---------------
 
-def test_cold_cache_served_by_adapter_warm_cache_no_resend(mounted):
+def test_url_cache_disabled_warm_rehits_adapter_but_synth_serves(monkeypatch, mounted):
+    # With the URL tier DISABLED (adapter authoritative) a warm request re-hits
+    # the adapter — inverting the old CachedSession-serves behaviour — BUT the
+    # adapter's synth cache serves it with NO second gpkg read.
+    import geopandas as gpd
+    reads = []
+    real_read = gpd.read_file
+    monkeypatch.setattr(gpd, "read_file",
+                        lambda *a, **k: (reads.append(k), real_read(*a, **k))[1])
     pygadm.session.cache.clear()
-    pygadm.Items(admin="NGA", content_level=2)
-    assert mounted.served >= 1, "cold cache must be served by the local adapter"
+    pygadm.Items(admin="NGA", content_level=2)  # cold
+    assert mounted.served >= 1, "cold request served by the local adapter"
     sends_after_cold = mounted.send_calls
+    reads_after_cold = len(reads)
     pygadm.Items(admin="NGA", content_level=2)  # warm
-    assert mounted.send_calls == sends_after_cold, (
-        "warm cache must serve from CachedSession without re-hitting the adapter"
-    )
+    assert mounted.send_calls > sends_after_cold, \
+        "URL cache disabled → the warm request re-hits the adapter"
+    assert len(reads) == reads_after_cold, \
+        "the synth cache serves the warm request with NO second gpkg read"
 
 
 # --- AC-G4(a)/(b): zero boundary egress under a hard block -------------------
@@ -193,13 +215,22 @@ def test_non_gadm_url_passes_through(mounted, block_ucdavis):
 
 # --- SF5: concurrent gpkg reads are stable -----------------------------------
 
-def test_concurrent_synthesis_is_stable(mounted):
-    # The adapter's gpkg read must be concurrency-safe (fresh derive per call,
-    # lazy-load under a lock) — N parallel synths return identical bytes.
-    ref = mounted._synthesize("NGA", 2)
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        results = list(ex.map(lambda _: mounted._synthesize("NGA", 2), range(24)))
-    assert all(r == ref for r in results)
+def test_concurrent_same_country_requests_are_stable(monkeypatch):
+    # frames are NOT cached, so there is no single-flight
+    # guarantee — concurrent cold requests for the same country may each read
+    # (fast, memory-safe). The contract is only that all return byte-identical
+    # results under concurrency (no torn/partial reads).
+    adapter = LocalGADMAdapter(str(_FIXTURE))
+    N = 8
+    start = threading.Barrier(N)
+
+    def _one(_):
+        start.wait()  # all N hit the cold adapter together
+        return adapter._synthesize("NGA", 2)
+
+    with ThreadPoolExecutor(max_workers=N) as ex:
+        results = list(ex.map(_one, range(N)))
+    assert all(r == results[0] for r in results)
     assert all(len(json.loads(r)["features"]) == 775 for r in results)
 
 
