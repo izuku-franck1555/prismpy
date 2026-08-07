@@ -146,17 +146,20 @@ def _artifact_id(gpkg_path: str):
 
 
 def _gid0_index_present(gpkg_path: str, layer: str) -> bool:
-    """True iff a SQLite index on ``layer`` covers GID_0 — metadata I/O, not a
-    rehash. Requires ``PRAGMA index_info`` to list GID_0 (a bare index NAME is
-    not enough). False on any error (unreadable gpkg → fail-closed)."""
+    """True iff a SQLite index on ``layer`` has GID_0 as its LEFTMOST column —
+    metadata I/O, not a rehash. GID_0 in a non-leading position (e.g. a composite
+    ``(NAME_0, GID_0)`` index) cannot serve the ``WHERE GID_0=?`` seek, so only a
+    leftmost-GID_0 index counts. False on any error (unreadable gpkg →
+    fail-closed)."""
     con = None
     try:
         con = sqlite3.connect(gpkg_path)
         for row in con.execute(f'PRAGMA index_list("{layer}")').fetchall():
             name = row[1]
+            # index_info lists key columns in index order → cols[0] is leftmost.
             cols = [r[2] for r in con.execute(
                 f'PRAGMA index_info("{name}")').fetchall()]
-            if "GID_0" in cols:
+            if cols and cols[0] == "GID_0":
                 return True
         return False
     except Exception:  # noqa: BLE001 — unreadable gpkg / SQL error → fail-closed
@@ -302,14 +305,24 @@ class LocalGADMAdapter(HTTPAdapter):
         return body
 
 
-def _disable_url_cache(session) -> None:
+def _disable_url_cache(session) -> bool:
     """Persistently disable the requests_cache URL tier on ``session`` (thread-
     safe flag, NOT the per-call context) — it is a redundant stale surface once
-    the adapter is authoritative. Best-effort; never raises."""
+    the adapter is authoritative. Returns True iff the disable is verified in
+    effect; otherwise (a non-CachedSession or a requests_cache API change that
+    silently ignores the flag) logs a WARNING and returns False, so a stale URL
+    surface can't sit ahead of the adapter unnoticed. Never raises."""
     try:
         session.settings.disabled = True
-    except Exception:  # noqa: BLE001 — a non-CachedSession or API change → skip
-        pass
+        if getattr(session.settings, "disabled", False) is True:
+            return True
+        reason = f"the flag did not take effect on {type(session).__name__}"
+    except Exception as exc:  # noqa: BLE001 — a non-CachedSession or API change
+        reason = str(exc)
+    logger.warning(
+        "GADM URL-cache disable failed (%s); a stale cached response could "
+        "serve ahead of the adapter.", reason)
+    return False
 
 
 def mount_local_gadm(gpkg_path: Optional[str] = None) -> bool:
