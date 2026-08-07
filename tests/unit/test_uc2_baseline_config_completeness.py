@@ -14,6 +14,13 @@ These tests assert the REAL behaviour, not inert YAML:
   2. with ``spam_raster_dir`` set (+ a SPAM raster present) the crop-mask step
      actually WRITES ``raster/harvest_area.tif``; without it, it is skipped.
 
+The real ``uc2_kano_*_baseline.yaml`` configs are internal experiment files,
+gitignored and absent from the public repo. Test 1 (the spam_raster_dir-survives-
+parse guard) SKIPS when they are absent and runs only where they exist; tests 2 & 3
+exercise the crop-mask against a hermetic minimal config written to ``tmp_path``
+(they override ``spam_raster_dir`` right after load, so any parseable pythia config
+with Kano-belt ``manual_bounds`` suffices — no dependency on the untracked files).
+
 Note ``include_spam_in_package`` is an ``AceaConfig`` field — under
 ``platform_config.pythia`` it is silently dropped, so a config/test that
 asserts it there is a masquerade (asserts an inert key that never reaches
@@ -29,6 +36,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import rasterio
+import yaml
 from rasterio.transform import from_bounds
 
 from prismpy.config.loader import load_config
@@ -48,7 +56,14 @@ def test_uc2_baseline_pythia_config_carries_effective_spam_raster_dir(
     """REAL parse (not raw YAML): ``spam_raster_dir`` must survive ``load_config``
     into the runtime ``PythiaConfig`` — the field the crop-mask step reads. If it
     is dropped/misnested/unset, harvest_area.tif is never produced."""
-    cfg = load_config(_REPO_ROOT / cfg_name)
+    cfg_path = _REPO_ROOT / cfg_name
+    if not cfg_path.exists():
+        pytest.skip(
+            f"{cfg_name} is an internal experiment config (gitignored, absent "
+            "from the public repo); this real-config guard runs only where it "
+            "is present."
+        )
+    cfg = load_config(cfg_path)
     pythia = cfg.platform_config.pythia
     assert pythia is not None, f"{cfg_name}: no platform_config.pythia"
     assert pythia.spam_raster_dir is not None, (
@@ -84,6 +99,44 @@ def _write_synthetic_spam(spam_dir: Path, crop_lower: str) -> Path:
     return path
 
 
+# Minimal pythia config the real ``load_config`` accepts. crop.name lowercases to
+# the synthetic raster's crop token (spam2020_cowpea.tif); manual_bounds sit inside
+# the synthetic SPAM extent (5-11 E, 11-13 N) so the crop-mask fallback (grid +
+# region.bounds absent) has a clip window.
+_MIN_PYTHIA_CONFIG = {
+    "project": {"name": "uc2_kano_cowpea_min"},
+    "region": {
+        "name": "Kano",
+        "country": "Nigeria",
+        "country_iso3": "NGA",
+        "boundary": {
+            "source": "manual",
+            "manual_bounds": {"minx": 8.0, "miny": 11.5, "maxx": 9.0, "maxy": 12.5},
+        },
+    },
+    "crop": {
+        "name": "Cowpea",
+        "name_short": "CP",
+        "calendar": {"planting_doy": 182, "maturity_doy": 260},
+    },
+    "temporal": {"start_year": 2015, "end_year": 2023},
+    "targets": ["pythia"],
+}
+
+
+def _write_min_pythia_config(tmp_path: Path) -> Path:
+    """A hermetic minimal pythia config written to ``tmp_path``.
+
+    Tests 2 & 3 override ``spam_raster_dir`` immediately after load, so they only
+    need a parseable config with ``platform_config.pythia`` present and Kano-belt
+    ``manual_bounds`` — no dependency on the untracked ``uc2_kano_*_baseline.yaml``.
+    """
+    cfg_path = tmp_path / "min_pythia_config.yaml"
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(_MIN_PYTHIA_CONFIG, f, sort_keys=False)
+    return cfg_path
+
+
 def test_spam_raster_dir_produces_harvest_area_tif(tmp_path: Path) -> None:
     """REAL behaviour: with spam_raster_dir set (+ a SPAM raster present), the
     crop-mask step writes ``raster/harvest_area.tif`` — what actually unblocks
@@ -92,7 +145,7 @@ def test_spam_raster_dir_produces_harvest_area_tif(tmp_path: Path) -> None:
     spam_dir.mkdir()
     _write_synthetic_spam(spam_dir, "cowpea")
 
-    cfg = load_config(_REPO_ROOT / "uc2_kano_cowpea_baseline.yaml")
+    cfg = load_config(_write_min_pythia_config(tmp_path))
     cfg.platform_config.pythia.spam_raster_dir = spam_dir  # override to synthetic
     t = PythiaTranslator(config=cfg, output_dir=tmp_path / "out")
     (t.output_dir / "raster").mkdir(parents=True, exist_ok=True)
@@ -107,7 +160,7 @@ def test_spam_raster_dir_produces_harvest_area_tif(tmp_path: Path) -> None:
 def test_crop_mask_skipped_without_spam_raster_dir(tmp_path: Path) -> None:
     """The exact gap: no spam_raster_dir → crop-mask skipped → no
     harvest_area.tif (the failure the smoke caught)."""
-    cfg = load_config(_REPO_ROOT / "uc2_kano_cowpea_baseline.yaml")
+    cfg = load_config(_write_min_pythia_config(tmp_path))
     cfg.platform_config.pythia.spam_raster_dir = None
     t = PythiaTranslator(config=cfg, output_dir=tmp_path / "out")
     (t.output_dir / "raster").mkdir(parents=True, exist_ok=True)
