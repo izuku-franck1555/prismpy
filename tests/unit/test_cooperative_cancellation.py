@@ -379,7 +379,8 @@ class TestCarveOutRegression:
         # ``error_events`` field + 4-line docstring added to
         # ``StageResult``.
         # Then 526 -> 528 after the CRAFT 5-arcmin guard call in __init__ (+2).
-        ("src/prismpy/pipeline/executor.py", 528),
+        # Then 528 -> 529 after a module-level `import os` (+1).
+        ("src/prismpy/pipeline/executor.py", 529),
         # Provenance-flush inside the translator-dispatch except handler
         # in _execute_translate: writes decision records, cancel-inert.
         # Line shifted from 2338 → 2346 (PRE.3.3 thread-through)
@@ -448,7 +449,9 @@ class TestCarveOutRegression:
         # grid-total derive refactored off a try block).
         # Then 2833 -> 2835 after the CRAFT 5-arcmin guard call in __init__ (+2).
         # Then 2835 -> 2842 after the empty-grid guard (+7) in _retrieve_hwsd_for_grid.
-        ("src/prismpy/pipeline/executor.py", 2842),
+        # Then 2842 -> 2831 after routing soil resolution through data_sources.soil
+        # (the per-platform fallback read removed, net ~-11).
+        ("src/prismpy/pipeline/executor.py", 2831),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed

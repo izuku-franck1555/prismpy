@@ -1809,12 +1809,10 @@ class CraftTranslator(CraftTranslatorBase):
         platform_config = self.get_platform_config()
         country_code = self._get_country_code(region)
 
-        # Get HWSD configuration from platform config
-        hwsd_bil_path = None
-        hwsd_mdb_path = None
-        if platform_config:
-            hwsd_bil_path = getattr(platform_config, 'hwsd_bil_path', None)
-            hwsd_mdb_path = getattr(platform_config, 'hwsd_mdb_path', None)
+        # Get HWSD configuration from the canonical data_sources.soil
+        soil_cfg = self.config.data_sources.soil
+        hwsd_bil_path = soil_cfg.hwsd_bil_path
+        hwsd_mdb_path = soil_cfg.hwsd_mdb_path
 
         # Get filtered cells (GADM boundary if available)
         filtered_cells = self._get_filtered_cells(grid)

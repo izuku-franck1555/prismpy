@@ -562,13 +562,12 @@ class AceaTranslator(AceaTranslatorBase):
             # ACEA requires soil data in NetCDF format (HWSD_soil_data_on_cropland_v2.3.nc)
             # We generate this from HWSD to make packages work on any ACEA installation
             soil_nc_file = None
-            hwsd_bil = None
-            hwsd_mdb = None
+            soil_cfg = self.config.data_sources.soil
+            hwsd_bil = soil_cfg.hwsd_bil_path
+            hwsd_mdb = soil_cfg.hwsd_mdb_path
             include_soil = True
 
             if platform_config:
-                hwsd_bil = getattr(platform_config, 'hwsd_bil_path', None)
-                hwsd_mdb = getattr(platform_config, 'hwsd_mdb_path', None)
                 include_soil = getattr(platform_config, 'include_soil_in_package', True)
 
             if hwsd_bil and hwsd_mdb and include_soil:
