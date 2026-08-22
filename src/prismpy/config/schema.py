@@ -1393,17 +1393,7 @@ class CraftConfig(BaseModel):
         description="Override planting date in MMDD format (e.g., '0604' for June 4)"
     )
 
-    # =========================================================================
-    # HWSD PATHS (for self-contained packages)
-    # =========================================================================
-    hwsd_bil_path: Optional[Path] = Field(
-        default=None,
-        description="Path to HWSD2.bil raster file"
-    )
-    hwsd_mdb_path: Optional[Path] = Field(
-        default=None,
-        description="Path to HWSD2.mdb database file"
-    )
+    # HWSD soil paths are declared ONCE in data_sources.soil (SoilSourceConfig), never per-platform.
 
     # =========================================================================
     # CRAFT SCHEMA GENERATION
@@ -1732,15 +1722,7 @@ class AceaConfig(BaseModel):
         description="Prefix for climate pickle files (auto-generated if not set)"
     )
 
-    # HWSD soil data paths (for self-contained packages)
-    hwsd_bil_path: Optional[Path] = Field(
-        default=None,
-        description="Path to HWSD2.bil raster file (user-provided)"
-    )
-    hwsd_mdb_path: Optional[Path] = Field(
-        default=None,
-        description="Path to HWSD2.mdb database file (user-provided)"
-    )
+    # HWSD soil paths are declared ONCE in data_sources.soil (SoilSourceConfig), never per-platform.
     include_soil_in_package: bool = Field(
         default=True,
         description="Include extracted soil data in output package"

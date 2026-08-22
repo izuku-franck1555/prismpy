@@ -101,6 +101,17 @@ class DomeMerger:
         # Merge DOME into base
         merged = self._deep_merge(merged, dome_copy)
 
+        # HWSD soil paths are canonical in data_sources.soil — translate the DOME's data_sources.hwsd into it.
+        ds = merged.get('data_sources')
+        if isinstance(ds, dict):
+            hwsd = ds.get('hwsd')
+            if isinstance(hwsd, dict) and (hwsd.get('bil_path') or hwsd.get('mdb_path')):
+                soil = ds.setdefault('soil', {})
+                if hwsd.get('bil_path'):
+                    soil.setdefault('hwsd_bil_path', hwsd['bil_path'])
+                if hwsd.get('mdb_path'):
+                    soil.setdefault('hwsd_mdb_path', hwsd['mdb_path'])
+
         # Add metadata about the merge
         merged['_merge_info'] = {
             'base_source': base.get('_meta', {}).get('source', 'unknown'),
@@ -214,12 +225,6 @@ class DomeMerger:
         # Data sources
         data_sources = dome.get('data_sources', {})
 
-        hwsd = data_sources.get('hwsd', {})
-        if hwsd.get('bil_path'):
-            config['hwsd_bil_path'] = hwsd['bil_path']
-        if hwsd.get('mdb_path'):
-            config['hwsd_mdb_path'] = hwsd['mdb_path']
-
         gadm = data_sources.get('gadm', {})
         if gadm.get('shp_dir'):
             config['gadm_data_path'] = gadm['shp_dir']
@@ -289,13 +294,6 @@ class DomeMerger:
         config = {}
 
         data_sources = dome.get('data_sources', {})
-
-        # HWSD
-        hwsd = data_sources.get('hwsd', {})
-        if hwsd.get('bil_path'):
-            config['hwsd_bil_path'] = hwsd['bil_path']
-        if hwsd.get('mdb_path'):
-            config['hwsd_mdb_path'] = hwsd['mdb_path']
 
         # SPAM
         spam = data_sources.get('spam', {})
@@ -456,11 +454,6 @@ class DomeMerger:
 
             # Data sources
             data_sources = {}
-            if config.get('hwsd_bil_path') or config.get('hwsd_mdb_path'):
-                data_sources['hwsd'] = {
-                    'bil_path': config.get('hwsd_bil_path'),
-                    'mdb_path': config.get('hwsd_mdb_path'),
-                }
             if config.get('spam_raster_path'):
                 data_sources['spam'] = {'raster_path': config['spam_raster_path']}
             if data_sources:

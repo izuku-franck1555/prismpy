@@ -16,6 +16,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Type
 import logging
+import os
 
 from prismpy.config.schema import ProjectConfig, Platform
 from prismpy.config.loader import load_config
@@ -736,12 +737,8 @@ class TranslationPipeline:
             else:
                 # Check if HWSD/iSDA will be available at harmonize time
                 # (per-cell soil retrieval happens after grid creation)
-                has_hwsd = False
-                for plat in self.config.get_enabled_platforms():
-                    pcfg = self.config.get_platform_config(plat)
-                    if pcfg and getattr(pcfg, 'hwsd_bil_path', None):
-                        has_hwsd = True
-                        break
+                soil_cfg = self.config.data_sources.soil
+                has_hwsd = bool(soil_cfg.hwsd_bil_path and soil_cfg.hwsd_mdb_path)
                 has_isda_local = any(
                     (Path(d) / "sand_content_1km.tif").exists()
                     for d in [
@@ -1919,11 +1916,10 @@ class TranslationPipeline:
         TODO: Move to a post-grid RETRIEVE phase when the pipeline
         architecture supports it.
 
-        Runs after grid creation in the HARMONIZE stage. Checks for HWSD
-        paths in three places (in order):
-          1. data_sources.soil.hwsd_bil_path / hwsd_mdb_path (top-level)
-          2. Platform-specific config (ACEA or CRAFT hwsd_bil_path)
-          3. Auto-discovery in known locations
+        Runs after grid creation in the HARMONIZE stage. Resolves HWSD
+        paths from two places (in order):
+          1. data_sources.soil.hwsd_bil_path / hwsd_mdb_path (the sole canonical location)
+          2. Auto-discovery in known locations
 
         Only runs when HWSD-dependent platforms (ACEA, CRAFT) are enabled.
 
@@ -1952,34 +1948,27 @@ class TranslationPipeline:
         if not hwsd_platforms.intersection(set(enabled)):
             return None, []
 
-        # Resolve HWSD paths: top-level data_sources > platform config > auto-discovery
+        # Resolve HWSD paths: the canonical data_sources.soil, else auto-discovery
         bil_path = None
         mdb_path = None
 
-        # 1. Top-level data_sources.soil config
+        # 1. The sole canonical location — data_sources.soil
         soil_cfg = self.config.data_sources.soil
         if soil_cfg.hwsd_bil_path and soil_cfg.hwsd_mdb_path:
             bil_path = Path(soil_cfg.hwsd_bil_path)
             mdb_path = Path(soil_cfg.hwsd_mdb_path)
 
-        # 2. Platform-specific config fallback (check all platforms that may have HWSD paths)
+        # 2. Auto-discovery — relative, package-parent, and the absolute /data/hwsd
+        # deployment mount (also honoured via PRISM_DATA_DIR / PRISMWEB_DATA_DIR).
         if not (bil_path and mdb_path):
-            for plat in [Platform.CRAFT, Platform.ACEA, Platform.SARRA_PY, Platform.PYTHIA]:
-                pcfg = self.config.get_platform_config(plat)
-                if pcfg:
-                    p_bil = getattr(pcfg, 'hwsd_bil_path', None)
-                    p_mdb = getattr(pcfg, 'hwsd_mdb_path', None)
-                    if p_bil and p_mdb:
-                        bil_path = Path(p_bil)
-                        mdb_path = Path(p_mdb)
-                        break
-
-        # 3. Auto-discovery in known locations
-        if not (bil_path and mdb_path):
+            data_dir_env = os.environ.get("PRISM_DATA_DIR") or os.environ.get("PRISMWEB_DATA_DIR")
             search_dirs = [
                 Path("data/hwsd"),
                 Path(__file__).resolve().parents[4] / "data" / "hwsd",
+                Path("/data/hwsd"),
             ]
+            if data_dir_env:
+                search_dirs.append(Path(data_dir_env) / "hwsd")
             for d in search_dirs:
                 candidate_bil = d / "HWSD2.bil"
                 candidate_mdb = d / "HWSD2.mdb"
