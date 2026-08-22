@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 
+from prismpy.models.provenance import DecisionType
 from prismpy.models.region import Region
 from prismpy.models.soil import SoilLayer, SoilProfile
 from prismpy.provenance.tracker import ProvenanceTracker
@@ -348,32 +349,41 @@ class HWSDSource(DataSource):
         # 'unavailable' with cause soil_no_hwsd_coverage.
         n_unavailable = len(self.unavailable_cells)
         if n_unavailable > 0 and self.provenance:
-            self.provenance.record_decision(
-                decision_type=DecisionType.FALLBACK_SUBSTITUTION,
-                description=(
-                    f"HWSD SMU-lookup miss: {n_unavailable} cells flagged "
-                    f"data_availability='unavailable' (cause: "
-                    f"soil_no_hwsd_coverage)"
-                ),
-                rationale=(
-                    "The HWSD BIL raster returned Soil Mapping Unit IDs for "
-                    "all queried coordinates, but some SMU IDs were absent "
-                    "from the MDB soil-properties table (HWSD2_LAYERS). "
-                    "This occurs for water bodies, bare rock, urban areas, "
-                    "or HWSD mapping gaps. The cells are routed to "
-                    "data_availability='unavailable' so downstream "
-                    "consumers see an honest missing-soil signal rather "
-                    "than a synthetic placeholder profile."
-                ),
-                alternatives=[
-                    "iSDA 30m (higher resolution, fewer gaps in Africa)",
-                    "Spatial interpolation from neighbouring HWSD cells",
-                    "Synthetic DEFAULT_SOIL profile (retired in Sprint D.1 "
-                    "as data cooking)",
-                ],
-                reference="prismpy.sources.soil.hwsd.HWSDSource._extract_from_bil_mdb",
-                artifact_id="soil",
-            )
+            # Provenance recording is bookkeeping - a tracker failure (a missing
+            # import, a ProvenanceStateError) must NEVER discard the soil profiles
+            # already built above. Log loud and swallow so ``return profiles`` runs.
+            try:
+                self.provenance.record_decision(
+                    decision_type=DecisionType.FALLBACK_SUBSTITUTION,
+                    description=(
+                        f"HWSD SMU-lookup miss: {n_unavailable} cells flagged "
+                        f"data_availability='unavailable' (cause: "
+                        f"soil_no_hwsd_coverage)"
+                    ),
+                    rationale=(
+                        "The HWSD BIL raster returned Soil Mapping Unit IDs for "
+                        "all queried coordinates, but some SMU IDs were absent "
+                        "from the MDB soil-properties table (HWSD2_LAYERS). "
+                        "This occurs for water bodies, bare rock, urban areas, "
+                        "or HWSD mapping gaps. The cells are routed to "
+                        "data_availability='unavailable' so downstream "
+                        "consumers see an honest missing-soil signal rather "
+                        "than a synthetic placeholder profile."
+                    ),
+                    alternatives=[
+                        "iSDA 30m (higher resolution, fewer gaps in Africa)",
+                        "Spatial interpolation from neighbouring HWSD cells",
+                        "Synthetic DEFAULT_SOIL profile (retired in Sprint D.1 "
+                        "as data cooking)",
+                    ],
+                    reference="prismpy.sources.soil.hwsd.HWSDSource._extract_from_bil_mdb",
+                    artifact_id="soil",
+                )
+            except Exception as prov_err:
+                self.logger.error(
+                    "HWSD provenance recording failed; preserving %d built "
+                    "profiles: %s", len(profiles), prov_err,
+                )
 
         return profiles
 

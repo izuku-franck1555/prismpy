@@ -447,7 +447,8 @@ class TestCarveOutRegression:
         # at the per-platform broad-except site (~+13, with the
         # grid-total derive refactored off a try block).
         # Then 2833 -> 2835 after the CRAFT 5-arcmin guard call in __init__ (+2).
-        ("src/prismpy/pipeline/executor.py", 2835),
+        # Then 2835 -> 2842 after the empty-grid guard (+7) in _retrieve_hwsd_for_grid.
+        ("src/prismpy/pipeline/executor.py", 2842),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed
