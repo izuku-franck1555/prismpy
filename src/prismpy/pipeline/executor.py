@@ -1997,6 +1997,13 @@ class TranslationPipeline:
         cell_coords = [(cell.lat, cell.lon) for cell in grid.cells]
         cell_ids = [cell.cell_id for cell in grid.cells]
 
+        # An empty grid has nothing to retrieve - return cleanly rather than call
+        # the sampler with [], which would report "no profiles" and mislabel a
+        # non-existent cell set (mirrors the iSDA path's empty-cells guard).
+        if not cell_coords:
+            self.logger.debug("HWSD: empty grid, no cells to retrieve")
+            return None, []
+
         self.logger.info(
             f"Retrieving HWSD soil data for {len(cell_coords)} grid cells..."
         )
