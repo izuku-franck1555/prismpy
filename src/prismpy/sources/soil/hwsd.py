@@ -29,15 +29,27 @@ from prismpy.warnings import WarningCategory
 logger = logging.getLogger(__name__)
 
 
-# HWSD variable mappings
+# HWSD column-name candidates per internal field, tried in order.
+# v2.0 renamed chemistry (ORG_CARBON/PH_WATER/BULK) from v1 (T_OC/...);
+# listing v2 first resolves either database vintage. bd = BULK (moist),
+# never REF_BULK (packed reference density, ~1.61).
 HWSD_VARIABLES = {
-    "sand": "T_SAND",  # Top-soil sand %
-    "clay": "T_CLAY",  # Top-soil clay %
-    "silt": "T_SILT",  # Top-soil silt %
-    "soc": "T_OC",     # Top-soil organic carbon %
-    "ph": "T_PH_H2O",  # Top-soil pH
-    "bd": "T_BULK_DENSITY",  # Top-soil bulk density
-    "gravel": "T_GRAVEL",  # Top-soil gravel %
+    "sand": ["T_SAND", "SAND"],            # Top-soil sand %
+    "clay": ["T_CLAY", "CLAY"],            # Top-soil clay %
+    "silt": ["T_SILT", "SILT"],            # Top-soil silt %
+    "soc": ["ORG_CARBON", "T_OC", "OC"],   # Top-soil organic carbon %
+    "ph": ["PH_WATER", "T_PH_H2O", "PH"],  # Top-soil pH (water)
+    "bd": ["BULK", "T_BULK_DENSITY", "BULK_DENSITY"],  # Bulk density g/cm³
+    "gravel": ["T_GRAVEL"],                # Top-soil gravel %
+}
+
+# Physically-plausible ranges for extracted chemistry. A value outside
+# these bounds is far more likely a mis-scaled or wrong-column read than
+# a real measurement, so the reader rejects it (falls back to absent).
+_CHEM_RANGES = {
+    "soc": (0.0, 40.0),  # organic carbon %
+    "ph": (3.0, 10.0),   # pH in water
+    "bd": (0.8, 2.0),    # bulk density g/cm³
 }
 
 # Default soil values (typical Sahel)
@@ -459,11 +471,14 @@ class HWSDSource(DataSource):
         with xr.open_dataset(self.config.nc_path) as ds:
             # Determine variable names (may vary by file)
             var_map = {}
-            for internal, hwsd_name in self.VARIABLES.items():
-                if hwsd_name in ds:
-                    var_map[internal] = hwsd_name
-                elif hwsd_name.lower() in ds:
-                    var_map[internal] = hwsd_name.lower()
+            for internal, candidates in self.VARIABLES.items():
+                for hwsd_name in candidates:
+                    if hwsd_name in ds:
+                        var_map[internal] = hwsd_name
+                        break
+                    if hwsd_name.lower() in ds:
+                        var_map[internal] = hwsd_name.lower()
+                        break
 
             if not var_map:
                 self.logger.warning("No recognized variables in NetCDF")
@@ -492,6 +507,42 @@ class HWSDSource(DataSource):
 
         return profiles
 
+    def _read_chem(
+        self,
+        props: Dict[str, Any],
+        field: str,
+    ) -> Optional[float]:
+        """Resolve an HWSD chemistry value from a raw MDB property row.
+
+        Tries the candidate column names in ``HWSD_VARIABLES`` order (v2.0
+        name first) so the value populates whether the row uses the v2.0
+        columns (ORG_CARBON/PH_WATER/BULK) or the v1 names (T_OC/...). A
+        value outside the plausible range in ``_CHEM_RANGES`` is treated
+        as a mis-scaled or wrong-column read and rejected (returns None so
+        the writer records an honest default).
+
+        HWSD-scoped: values are used as-is. iSDA stores bulk density in
+        cg/cm3 and pH x10, so this reader must not be shared with iSDA.
+        """
+        value = None
+        for name in self.VARIABLES.get(field, []):
+            candidate = props.get(name)
+            if candidate is not None and not pd.isna(candidate):
+                value = candidate
+                break
+        if value is None:
+            return None
+
+        low, high = _CHEM_RANGES.get(field, (None, None))
+        if low is not None and not (low <= value <= high):
+            logger.warning(
+                "HWSD %s value %s outside plausible range %s-%s; treating "
+                "as absent (likely a unit or column error)",
+                field, value, low, high,
+            )
+            return None
+        return value
+
     def _create_profile_from_hwsd(
         self,
         cell_id: int,
@@ -501,13 +552,15 @@ class HWSDSource(DataSource):
         region: Region,
     ) -> SoilProfile:
         """Create SoilProfile from HWSD database row."""
-        # Extract values with None handling
+        # Extract values with None handling. Chemistry (soc/ph/bd) routes
+        # through the candidate-list reader so HWSD v2.0 columns resolve;
+        # texture keeps its historical v1-or-bare fallback.
         sand = props.get("T_SAND") or props.get("SAND")
         clay = props.get("T_CLAY") or props.get("CLAY")
         silt = props.get("T_SILT") or props.get("SILT")
-        soc = props.get("T_OC") or props.get("OC")
-        ph = props.get("T_PH_H2O") or props.get("PH")
-        bd = props.get("T_BULK_DENSITY") or props.get("BULK_DENSITY")
+        soc = self._read_chem(props, "soc")
+        ph = self._read_chem(props, "ph")
+        bd = self._read_chem(props, "bd")
 
         # Calculate silt if missing
         if silt is None and sand is not None and clay is not None:

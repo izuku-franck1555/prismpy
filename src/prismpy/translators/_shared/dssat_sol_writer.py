@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Callable, Dict, Mapping
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from prismpy.models.region import Region
 from prismpy.models.soil import SoilProfile
@@ -83,6 +83,26 @@ def _dssat_sltx_code(surface_texture: "str | None") -> str:
         ) from None
 
 
+def _resolve_chem_default(
+    profile_id: int,
+    field: str,
+    value: Optional[float],
+    default: float,
+    log: List[Dict[str, Any]],
+) -> float:
+    """Return ``value`` when present, else the regional ``default``.
+
+    When the default is used the substitution is appended to ``log`` so a
+    genuinely-absent chemistry value is disclosed to provenance rather than
+    written as if it were a measurement. ``None`` (not falsiness) marks
+    absence, so a real ``0.0`` reading is kept instead of being defaulted.
+    """
+    if value is not None:
+        return value
+    log.append({"profile_id": profile_id, "field": field, "default": default})
+    return default
+
+
 def write_dssat_sol(
     soil_path: Path,
     profiles_by_id: Mapping[int, SoilProfile],
@@ -90,6 +110,7 @@ def write_dssat_sol(
     region: Region,
     file_header_suffix: str = "(HWSD-based)",
     source_label_for_id: Callable[[int], str] = _default_source_label,
+    chem_default_log: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[int, str]:
     """Write a DSSAT v4.8-spec .SOL file containing the supplied profiles.
 
@@ -135,6 +156,12 @@ def write_dssat_sol(
         return value.
     """
     smu_to_profile_name: Dict[int, str] = {}
+    # Chemistry defaults are disclosed, never silent: an internal list
+    # always lets the aggregate warning fire, and a caller-supplied log
+    # additionally captures each substitution for provenance.
+    chem_defaults: List[Dict[str, Any]] = (
+        chem_default_log if chem_default_log is not None else []
+    )
 
     with open(soil_path, "w", newline="\r\n") as f:
         f.write(
@@ -213,14 +240,20 @@ def write_dssat_sol(
                 sdul = layer.field_capacity or 0.25
                 ssat = layer.saturated_wc or 0.45
                 ssks = 10.0
-                sbdm = layer.bulk_density or 1.4
-                sloc = layer.organic_carbon or 0.5
+                sbdm = _resolve_chem_default(
+                    smu_id, "bulk_density", layer.bulk_density, 1.4, chem_defaults
+                )
+                sloc = _resolve_chem_default(
+                    smu_id, "organic_carbon", layer.organic_carbon, 0.5, chem_defaults
+                )
                 slcl = layer.clay or 18.0
                 slsi = layer.silt or (100 - (layer.sand or 60) - slcl)
                 slcf = 0.0
                 slni = 0.0
-                slhw = layer.ph or 6.5
-                slhb = layer.ph or 6.5
+                slhw = _resolve_chem_default(
+                    smu_id, "ph", layer.ph, 6.5, chem_defaults
+                )
+                slhb = slhw
                 srgf = max(
                     0.0,
                     1.0
@@ -250,5 +283,13 @@ def write_dssat_sol(
                 )
 
             f.write("\n")
+
+    if chem_defaults:
+        logger.warning(
+            "%d soil-chemistry field(s) across %d profile(s) fell back to a "
+            "regional default (absent in HWSD); these are not measured values.",
+            len(chem_defaults),
+            len({d["profile_id"] for d in chem_defaults}),
+        )
 
     return smu_to_profile_name

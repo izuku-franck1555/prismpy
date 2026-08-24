@@ -1959,12 +1959,42 @@ class CraftTranslator(CraftTranslatorBase):
         # translator because it is CRAFT-specific; the file format itself
         # is shared with PYTHIA's eGHR substrate builder, so a single
         # implementation prevents drift between the two emitters.
+        chem_defaults: List[Dict[str, Any]] = []
         smu_to_profile_name: Dict[int, str] = write_dssat_sol(
             soil_path=soil_path,
             profiles_by_id=smu_to_profile,
             country_code=country_code,
             region=region,
+            chem_default_log=chem_defaults,
         )
+        if chem_defaults and self.provenance:
+            # Provenance recording is bookkeeping - a tracker failure (a missing
+            # import, a ProvenanceStateError) must NEVER discard the .SOL file
+            # already written above. Log loud and swallow.
+            try:
+                self.provenance.record_decision(
+                    decision_type=DecisionType.FALLBACK_SUBSTITUTION,
+                    description=(
+                        f"Soil chemistry default written for {len(chem_defaults)} "
+                        f"profile-field cells across "
+                        f"{len({d['profile_id'] for d in chem_defaults})} profiles"
+                    ),
+                    rationale=(
+                        "HWSD returned no value for these chemistry fields, so the "
+                        ".SOL writer wrote a regional default (organic carbon 0.5%, "
+                        "pH 6.5, bulk density 1.4 g/cm3). These are not measured "
+                        "values; yields for the affected profiles rest on a default."
+                    ),
+                    reference=(
+                        "prismpy.translators._shared.dssat_sol_writer.write_dssat_sol"
+                    ),
+                    artifact_id="soil",
+                )
+            except Exception as prov_err:
+                logger.error(
+                    "CRAFT soil-chemistry-default provenance recording failed; "
+                    "preserving the generated .SOL: %s", prov_err,
+                )
 
         logger.info(f"Generated CRAFT soil file: {soil_path} ({len(smu_to_profile)} unique profiles)")
 
