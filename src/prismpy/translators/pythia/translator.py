@@ -1608,6 +1608,23 @@ class PythiaTranslator(PythiaTranslatorBase):
         'potato': 'PT', 'cassava': 'CS',
     }
 
+    # Per-crop DSSAT @P planting defaults (West African smallholder rainfed) — the fallback used
+    # ONLY when a real planting value is not recorded (a value the wizard supplies is threaded
+    # instead). ppop = plants/m² (PPOP is DSSAT-native plants/m²); plrs/pldp = cm. Sourced from a
+    # crop-modeling review of published West-African DSSAT calibration; keyed on crop.name.lower().
+    PLANTING_DEFAULTS = {
+        'maize':     {'ppop': 5.3, 'plrs': 75.0, 'pldp': 5.0},
+        'corn':      {'ppop': 5.3, 'plrs': 75.0, 'pldp': 5.0},
+        'sorghum':   {'ppop': 9.0, 'plrs': 75.0, 'pldp': 3.0},
+        'millet':    {'ppop': 3.0, 'plrs': 90.0, 'pldp': 2.0},
+        'rice':      {'ppop': 25.0, 'plrs': 20.0, 'pldp': 3.0},
+        'cowpea':    {'ppop': 13.0, 'plrs': 75.0, 'pldp': 4.0},
+        'groundnut': {'ppop': 15.0, 'plrs': 50.0, 'pldp': 5.0},
+        'peanut':    {'ppop': 15.0, 'plrs': 50.0, 'pldp': 5.0},
+    }
+    # An unmapped crop falls back to the wizard-generic maize density (plants/m²) — never -99.
+    PLANTING_DEFAULT_FALLBACK = {'ppop': 6.25, 'plrs': 70.0, 'pldp': 5.0}
+
     @staticmethod
     def _ascii_fold_for_dssat(value: str) -> str:
         """Strip diacritics and non-ASCII chars from a DSSAT identifier.
@@ -1650,6 +1667,33 @@ class PythiaTranslator(PythiaTranslatorBase):
         """Get 2-character DSSAT crop code for experiment filenames."""
         crop_lower = self.config.crop.name.lower()
         return self.DSSAT_CROP_CODES.get(crop_lower, self.config.crop.name_short[:2].upper())
+
+    def _crop_planting_default(self) -> Dict[str, float]:
+        """The per-crop @P fallback for this run's crop (or the generic fallback)."""
+        return self.PLANTING_DEFAULTS.get(
+            self.config.crop.name.lower(), self.PLANTING_DEFAULT_FALLBACK)
+
+    def _resolve_planting_params(self) -> Dict[str, float]:
+        """The DSSAT @P planting values, converted ONCE — the single home of the plants/ha ->
+        plants/m² conversion (no downstream re-division). ``ppop``/``ppoe`` are plants/m² (DSSAT
+        PPOP is native plants/m²): ``management.planting_density`` is plants/ha and is divided by
+        10000 here. ``plrs`` is ``management.row_spacing_cm`` (cm, direct). ``pldp`` has no PYTHIA
+        config source, so it takes the per-crop default. Each falls back to the per-crop default
+        when unrecorded — never -99. (A plants/m² ``plant_population`` override is a CRAFT-config
+        field handled in the CRAFT translator; the PYTHIA path carries no such override.)"""
+        mgmt = self.config.management
+        crop_default = self._crop_planting_default()
+
+        density_ha = getattr(mgmt, 'planting_density', None) if mgmt else None
+        ppop = (float(density_ha) / 10000.0 if density_ha is not None    # plants/ha -> plants/m²
+                else float(crop_default['ppop']))
+
+        row = getattr(mgmt, 'row_spacing_cm', None) if mgmt else None
+        plrs = float(row) if row is not None else float(crop_default['plrs'])
+
+        pldp = float(crop_default['pldp'])              # no PYTHIA depth field -> per-crop default
+
+        return {'ppop': ppop, 'ppoe': ppop, 'plrs': plrs, 'pldp': pldp}
 
     def _get_template_filename(self) -> str:
         """Get the actual template filename based on region and crop.
@@ -1867,6 +1911,10 @@ class PythiaTranslator(PythiaTranslatorBase):
         threads = pythia_config.threads if pythia_config and hasattr(pythia_config, 'threads') else 2
         cores = pythia_config.cores if pythia_config and hasattr(pythia_config, 'cores') else 4
 
+        # DSSAT-native planting values the runner reads directly (unit-aware; the ha->m² conversion
+        # lives once in the resolver). Absent-edge falls back to the per-crop default, never -99.
+        planting = self._resolve_planting_params()
+
         # Build PYTHIA JSON structure
         # All paths are relative (./) for portability - package can be moved anywhere
         pythia_json = {
@@ -1897,6 +1945,10 @@ class PythiaTranslator(PythiaTranslatorBase):
                 "irrig": irrig,
                 "plant_mode": plant_mode,
                 "pdate": pdate,
+                "ppop": planting['ppop'],
+                "ppoe": planting['ppoe'],
+                "plrs": planting['plrs'],
+                "pldp": planting['pldp'],
                 "ingeno": ingeno,
                 "cname": cname,
             },
@@ -2870,15 +2922,9 @@ class PythiaTranslator(PythiaTranslatorBase):
         cultivar_params = self._map_generic_to_cultivar()
         fertilizer_params = self._map_generic_to_fertilizer()
 
-        # Get management config for planting parameters
-        mgmt = self.config.management
-        planting_density = mgmt.planting_density if mgmt else 62500.0
-        row_spacing = mgmt.row_spacing_cm if mgmt and hasattr(mgmt, 'row_spacing_cm') else 70.0
-
-        # Calculate plants per m2 (PPOP in DSSAT is plants/m2)
-        ppop = planting_density / 10000.0  # Convert plants/ha to plants/m2
-
-        # Build SNX content
+        # Build SNX content. The @P planting values are jinja placeholders the runner fills from the
+        # discrete pythia_config fields — no longer computed/baked here (the ha->m² conversion lives
+        # once, in _resolve_planting_params, which feeds pythia_config's default_setup).
         template_content = self._build_snx_content(
             exp_id=exp_id,
             region_name=data.region.name,
@@ -2887,8 +2933,6 @@ class PythiaTranslator(PythiaTranslatorBase):
             cultivar=cultivar_params,
             fertilizer=fertilizer_params,
             config=config_params,
-            ppop=ppop,
-            row_spacing=row_spacing,
         )
 
         # Create templates directory
@@ -2962,6 +3006,12 @@ class PythiaTranslator(PythiaTranslatorBase):
         if mgmt and hasattr(mgmt, 'residue_amount_kg_ha'):
             residue_amount = int(mgmt.residue_amount_kg_ha)
 
+        # Per-crop @P fallback baked into each placeholder's ``default()`` — the runner fills
+        # ppop/ppoe/plrs/pldp from the discrete pythia_config fields; the default is the honest
+        # per-crop literal for the absent/malformed edge (never -99). Preserve the 1-space DSSAT
+        # separator + fixed width so the @P columns stay 6-wide.
+        pdef = self._crop_planting_default()
+
         content = f"""*EXP.DETAILS: {exp_id}{crop_code} {country} {region_name}, {crop_name} management scenarios
 
 *GENERAL
@@ -2996,7 +3046,7 @@ class PythiaTranslator(PythiaTranslatorBase):
 
 *PLANTING DETAILS
 @P PDATE EDATE  PPOP  PPOE  PLME  PLDS  PLRS  PLRD  PLDP  PLWT  PAGE  PENV  PLPH  SPRL                        PLNAME
- 1 {{{{ pdate | default(-99) }}}}   -99 {ppop:5.1f} {ppop:5.1f}     S     R {row_spacing:5.0f}   -99     5   -99   -99   -99   -99   -99                        auto
+ 1 {{{{ pdate | default(-99) }}}}   -99 {{{{ "%5.1f"|format(ppop|default({pdef['ppop']})) }}}} {{{{ "%5.1f"|format(ppoe|default({pdef['ppop']})) }}}}     S     R {{{{ "%5.0f"|format(plrs|default({pdef['plrs']})) }}}}   -99 {{{{ "%5.0f"|format(pldp|default({pdef['pldp']})) }}}}   -99   -99   -99   -99   -99                        auto
 
 *FERTILIZERS (INORGANIC)
 @F FDATE  FMCD  FACD  FDEP  FAMN  FAMP  FAMK  FAMC  FAMO  FOCD FERNAME
@@ -3248,8 +3298,11 @@ class PythiaTranslator(PythiaTranslatorBase):
 
         # Get management config
         mgmt = self.config.management
-        plant_pop = mgmt.planting_density / 10000.0 if mgmt else 5.0
-        row_spacing = mgmt.row_spacing_cm if mgmt and hasattr(mgmt, 'row_spacing_cm') else 70.0
+        # Planting values via the single resolver (the one ha->m² conversion + per-crop fallback),
+        # so the README reports the same ppop/plrs the SNX + pythia_config carry (no 2nd conversion).
+        _planting = self._resolve_planting_params()
+        plant_pop = _planting['ppop']
+        row_spacing = _planting['plrs']
 
         # Build config dictionary for template
         readme_config = {
