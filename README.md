@@ -307,6 +307,4 @@ MIT License
 
 ## Citation
 
-```
 Tonle, F.B.N., Segnon, A.C., Gouroubera, M.W., Zougmore, R.B. 2026. PRISM: A methodological framework for reproducible data-to-model translation in spatial crop modeling. Computers and Electronics in Agriculture 254: 112223. DOI: 10.1016/j.compag.2026.112223
-```
