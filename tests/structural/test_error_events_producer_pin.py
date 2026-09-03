@@ -41,11 +41,11 @@ _EXECUTOR = _PRISMPY_ROOT / "src" / "prismpy" / "pipeline" / "executor.py"
 # stay in production (they still fail loudly).
 F_AG_GATE_SITES: Tuple[Tuple[str, int, str], ...] = (
     ("src/prismpy/translators/acea/translator.py", 519, "ClimateDownloadError"),
-    # The lower two sites shifted down (1822 -> 1866, 2578 -> 2630) when the
-    # per-crop planting-default table and its resolver were added above them.
+    # These sites shift down as code is inserted above them
+    # (1822 -> 1866; 2578 -> 2630 -> 2645 with the fertilizer schedule emit).
     ("src/prismpy/translators/pythia/translator.py", 1007, "ValueError"),
     ("src/prismpy/translators/pythia/translator.py", 1866, "ValueError"),
-    ("src/prismpy/translators/pythia/translator.py", 2630, "BuildEghrSubstrateError"),
+    ("src/prismpy/translators/pythia/translator.py", 2645, "BuildEghrSubstrateError"),
     ("src/prismpy/translators/sarra_py/translator.py", 711, "ValueError"),
     ("src/prismpy/translators/sarra_py/translator.py", 1675, "ValueError"),
     # 1565 -> 1570 (translate-time data.grid guard) -> 1577 (§7 trials-copy wiring).

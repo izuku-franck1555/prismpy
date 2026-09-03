@@ -801,6 +801,25 @@ class PhysiologyConfig(BaseModel):
     )
 
 
+class FertilizerApplication(BaseModel):
+    """One nitrogen application in a fertilizer schedule.
+
+    ``timing`` is days after planting (0 = at planting); ``amount`` is
+    elemental nitrogen in kg/ha. Bounds match the DSSAT fixed-width
+    fertilizer row (FDATE is a 5-digit integer, FAMN a 5-char value).
+    """
+    timing: int = Field(
+        ge=0,
+        le=99999,
+        description="Days after planting for this application (0 = at planting)",
+    )
+    amount: float = Field(
+        ge=0,
+        le=999.9,
+        description="Nitrogen applied at this timing (kg N/ha)",
+    )
+
+
 class ManagementConfig(BaseModel):
     """Generic crop management parameters - platform agnostic.
 
@@ -853,6 +872,15 @@ class ManagementConfig(BaseModel):
     fertilizer_n_fractions: List[float] = Field(
         default=[0.5, 0.5],
         description="Fraction of total N applied at each split (must sum to 1.0)"
+    )
+    fertilizer_apps: List[FertilizerApplication] = Field(
+        default_factory=list,
+        max_length=200,
+        description=(
+            "Per-application nitrogen schedule (days after planting + kg N/ha). "
+            "When non-empty it supersedes the total/splits for the DSSAT @F rows; "
+            "empty falls back to fertilizer_n_total."
+        ),
     )
 
     # Residue management
