@@ -1968,6 +1968,17 @@ class PythiaTranslator(PythiaTranslatorBase):
         # Add runs/scenarios
         crop_name = self.config.crop.name
 
+        # Sort ascending by day: DSSAT reads @F rows in order and stops at the
+        # first future date, so an unsorted schedule would drop later rows.
+        mgmt = self.config.management
+        fert_schedule = [
+            {"fdap": app.timing, "famn": app.amount}
+            for app in sorted(mgmt.fertilizer_apps, key=lambda a: a.timing)
+        ] if mgmt and mgmt.fertilizer_apps else []
+        # The emitted total is the sum actually applied (the recorded total can drift).
+        if fert_schedule:
+            fen_tot = sum(app["famn"] for app in fert_schedule)
+
         # Baseline run (no fertilizer)
         run_baseline = {
             "name": f"{crop_name}_baseline",
@@ -1994,6 +2005,10 @@ class PythiaTranslator(PythiaTranslatorBase):
             "ingeno": ingeno,
             "cname": f"{cname}_FERTILIZED",
         }
+        # The schedule rides the fertilized run only — the runner merges
+        # default_setup into every run, so a shared schedule would fertilize the baseline.
+        if fert_schedule:
+            run_fert["fertilizers"] = fert_schedule
         pythia_json["runs"].append(run_fert)
 
         # Write JSON file
