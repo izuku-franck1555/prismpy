@@ -1,14 +1,14 @@
 # prismpy
 
-A methodological framework for data-to-model translation in spatial crop modeling (Manuscript under review).
+PRISM: A methodological framework for reproducible data-to-model translation in spatial crop modeling.
 
 ---
 
 ## Overview
 
-Spatial crop modeling requires transforming heterogeneous, incomplete data into standardized, model-ready inputs. This translation step is repeatedly identified as a barrier in the literature, yet remains inconsistently implemented across studies—relying on ad-hoc scripts, undocumented assumptions, and workflows that are difficult to reproduce.
+Process-based crop models are increasingly applied to forecast yields and assess climate risks in rainfed smallholder agriculture. However, the prerequisite step of transforming heterogeneous agricultural data into standardized, model-ready inputs remains a major challenge for reproducible and comparable spatial crop modeling. Here we present PRISM (Platform-Ready Inputs for Spatial Modeling), a framework that formalizes data retrieval, quality control, gap-filling, spatial harmonization, and format conversion to produce standardized input packages compatible with multiple crop modeling frameworks. PRISM separates agronomic specifications from model-specific settings, with provenance records documenting preparation decisions.
 
-`prismpy` formalizes this data-to-model translation process. It produces **standardized, self-documenting data packages** for multiple spatial crop modeling platforms from a single configuration.
+`prismpy` implements the PRISMA framework. It produces **standardized, self-documenting data packages** for multiple spatial crop modeling platforms from a single configuration.
 
 ### Key Features
 
@@ -292,6 +292,7 @@ prismpy export-ace --config base.yaml --output experiment.json
 
 ## References
 
+- Tonle, F.B.N., Segnon, A.C., Gouroubera, M.W., Zougmore, R.B. 2026. PRISM: A methodological framework for reproducible data-to-model translation in spatial crop modeling. Computers and Electronics in Agriculture 254: 112223. DOI: 10.1016/j.compag.2026.112223
 - Porter, C. H., et al. (2014). Harmonization and translation of crop modeling data to ensure interoperability. *Environmental Modelling & Software*, 62, 495-508.
 - White, J. W., et al. (2013). Integrated description of agricultural field experiments and production: The ICASA Version 2.0 data standards. *Computers and Electronics in Agriculture*, 96, 1-12.
 - ICASA Dictionary: https://github.com/agmip/ICASA-Dictionary
@@ -306,10 +307,6 @@ MIT License
 
 ## Citation
 
-```bibtex
-@software{prismpy,
-  title = {prismpy: Data-to-Model Translation for Spatial Crop Modeling},
-  year = {2026},
-  url = {https://github.com/izuku-franck1555/prismpy}
-}
+```
+Tonle, F.B.N., Segnon, A.C., Gouroubera, M.W., Zougmore, R.B. 2026. PRISM: A methodological framework for reproducible data-to-model translation in spatial crop modeling. Computers and Electronics in Agriculture 254: 112223. DOI: 10.1016/j.compag.2026.112223
 ```
