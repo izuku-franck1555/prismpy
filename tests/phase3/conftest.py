@@ -170,6 +170,7 @@ def _minimal_uc_config(uc_name: str) -> dict[str, Any]:
             "cultivar_ids": None,
             "n_analogs": None,
             "detrend_order": None,
+            "observed_yields": None,
         },
         "climate_scenarios": {
             "cores": 1,
@@ -225,6 +226,7 @@ def build_project_config(
     use_cases: list[str] | None = None,
     cultivar_ids: list[str] | None = None,
     detrend_order: str | None = None,
+    observed_yields: str | None = None,
     drought_threshold_grid: list[float] | None = None,
     feed_scenarios: str | None = None,
     n_years: int = 6,
@@ -249,6 +251,8 @@ def build_project_config(
             cfg["cultivar_ids"] = cultivar_ids
         if uc == "yield_forecast" and detrend_order is not None:
             cfg["detrend_order"] = detrend_order
+        if uc == "yield_forecast" and observed_yields is not None:
+            cfg["observed_yields"] = observed_yields
         if uc == "drought_management" and drought_threshold_grid is not None:
             cfg["drought_threshold_grid"] = drought_threshold_grid
         if uc == "livestock_feed" and feed_scenarios is not None:

@@ -214,6 +214,13 @@ UC_CONFIG_KEY_TABLE: Dict[str, Tuple[str, ...]] = {
         "cultivar_ids",
         "n_analogs",
         "detrend_order",
+        # UC1-FORECAST v0.8 PR-4 (§6/§12): the observed-yield calibration-source
+        # override. Bakeable so the manifest-field tier of the prism-runner two-wire
+        # precedence (flag > manifest.observed_yields > package data/yields.csv >
+        # legacy) is functional — an unregistered baked key is silently filtered on
+        # emit, leaving a can't-resolve LOCKED tier (mirrors detrend_order's flow +
+        # observed_trials in the n_response_skill table).
+        "observed_yields",
     ),
     # ``years`` is NOT bake-eligible: it resolves from manifest.temporal, and the
     # prism-runner L2 validator rejects a baked use_case_config.years (a per-run subset
