@@ -213,6 +213,7 @@ UC_CONFIG_KEY_TABLE: Dict[str, Tuple[str, ...]] = {
         "max_runs",
         "cultivar_ids",
         "n_analogs",
+        "detrend_order",
     ),
     # ``years`` is NOT bake-eligible: it resolves from manifest.temporal, and the
     # prism-runner L2 validator rejects a baked use_case_config.years (a per-run subset

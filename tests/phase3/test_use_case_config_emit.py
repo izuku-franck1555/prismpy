@@ -156,6 +156,29 @@ def test_t4_json_encode_decode_preserves_list_str_shape(package_dir):
     )
 
 
+def test_uc1_detrend_order_survives_emit(package_dir):
+    """detrend_order (a UC1 affects_science calibration knob added to
+    UC_CONFIG_KEY_TABLE for prism-runner's --detrend-order registry two-wire) must
+    SURVIVE emit — a package carries it in use_case_config.yield_forecast, not
+    dropped by the allowlist filter (manifest.py canonical_use_case_config
+    serializer). Regression guard: pre-fix the key was absent from the table, so a
+    baked detrend_order was silently filtered. Round-trips through the JSON wire
+    (prismpy -> manifest.json -> prism-runner)."""
+    cfg = build_project_config(
+        use_cases=["yield_forecast"],
+        detrend_order="quadratic",
+    )
+    m = create_manifest(package_dir, cfg, platform="sarra_py")
+    val = m["use_case_config"]["yield_forecast"]["detrend_order"]
+    assert val == "quadratic", (
+        f"detrend_order dropped/drifted on emit: {val!r} (allowlist filter "
+        f"must carry it now that it is in UC_CONFIG_KEY_TABLE)"
+    )
+    # JSON wire round-trip (the prismpy -> manifest.json -> prism-runner boundary).
+    parsed = json.loads(json.dumps(m, sort_keys=True, ensure_ascii=False))
+    assert parsed["use_case_config"]["yield_forecast"]["detrend_order"] == "quadratic"
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # T5 — CLOSED-WORLD: non-emitted UCs ABSENT from use_case_config (v0.4 BL-2)
 # ──────────────────────────────────────────────────────────────────────────
