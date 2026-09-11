@@ -179,6 +179,34 @@ def test_uc1_detrend_order_survives_emit(package_dir):
     assert parsed["use_case_config"]["yield_forecast"]["detrend_order"] == "quadratic"
 
 
+def test_uc1_observed_yields_survives_emit(package_dir):
+    """observed_yields (the UC1 observed-yield calibration-source OVERRIDE added to
+    UC_CONFIG_KEY_TABLE for prism-runner's --observed-yields registry two-wire,
+    §6/§12) must SURVIVE emit — a package carries it in
+    use_case_config.yield_forecast, not dropped by the allowlist filter
+    (manifest.py canonical_use_case_config serializer). It is the manifest-field
+    tier of the LOCKED precedence (flag > manifest.observed_yields > package >
+    legacy); an unregistered baked key would be silently filtered, leaving a
+    can't-resolve tier. Round-trips through the JSON wire (prismpy -> manifest.json
+    -> prism-runner). Mirrors test_uc1_detrend_order_survives_emit."""
+    cfg = build_project_config(
+        use_cases=["yield_forecast"],
+        observed_yields="data/regional_obs_yields.csv",
+    )
+    m = create_manifest(package_dir, cfg, platform="sarra_py")
+    val = m["use_case_config"]["yield_forecast"]["observed_yields"]
+    assert val == "data/regional_obs_yields.csv", (
+        f"observed_yields dropped/drifted on emit: {val!r} (allowlist filter must "
+        f"carry it now that it is in UC_CONFIG_KEY_TABLE)"
+    )
+    # JSON wire round-trip (the prismpy -> manifest.json -> prism-runner boundary).
+    parsed = json.loads(json.dumps(m, sort_keys=True, ensure_ascii=False))
+    assert (
+        parsed["use_case_config"]["yield_forecast"]["observed_yields"]
+        == "data/regional_obs_yields.csv"
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # T5 — CLOSED-WORLD: non-emitted UCs ABSENT from use_case_config (v0.4 BL-2)
 # ──────────────────────────────────────────────────────────────────────────
