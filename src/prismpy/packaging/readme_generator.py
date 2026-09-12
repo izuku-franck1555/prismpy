@@ -842,7 +842,7 @@ pythia --all config/pythia_config.json
 │
 ├── raster/
 │   ├── soil.tif                 # eGHR soil ID raster
-│   ├── harvest_area.tif         # SPAM crop harvest area
+{crop_mask_tree_line}
 │   ├── fertilizer.tif           # Fertilizer application (kg N/ha)
 │   ├── planting_doy.tif         # Planting day of year
 │   └── cultivar.tif             # Cultivar zone
@@ -863,7 +863,7 @@ pythia --all config/pythia_config.json
 |-----------|--------|---------|-------------|
 | Weather | {climate_source} | {start_year}-{end_year} | Daily SRAD, TMAX, TMIN, RAIN, TDEW, RHUM, WIND |
 | Soil | eGHR (GGCMI) | v2 | DSSAT-compatible soil profiles |
-| Crop Mask | SPAM | 2020 v2.0 | Harvested area distribution |
+{crop_mask_row}
 | Boundary | GADM | v4.1 | Administrative boundaries |
 
 ---
@@ -1305,7 +1305,8 @@ def _resolve_admin_names(config: Dict[str, Any]) -> str:
 def generate_readme(
     output_path: Union[str, Path],
     config: Dict[str, Any],
-    platform: str = "sarra_py"
+    platform: str = "sarra_py",
+    mask_present: bool = False,
 ) -> Path:
     """
     Generate README from template.
@@ -1314,6 +1315,9 @@ def generate_readme(
         output_path: Path to output README
         config: Configuration dictionary with package metadata
         platform: Target platform name
+        mask_present: Whether a crop-mask raster was produced for this run;
+            drives the honest crop-mask provenance in the PYTHIA README. Defaults
+            False (conservative — an omitting caller never falsely claims a mask).
 
     Returns:
         Path to generated README
@@ -1500,7 +1504,17 @@ def generate_readme(
             default_n_years = int(end_year_p) - int(start_year_p) + 1
         except (TypeError, ValueError):
             default_n_years = 10
+        # Crop-mask provenance is honest per the actual run: with no mask the package ships
+        # no harvest_area.tif and the run is not restricted to the harvested crop area.
+        if mask_present:
+            crop_mask_tree_line = "│   ├── harvest_area.tif         # SPAM crop harvest area"
+            crop_mask_row = "| Crop Mask | SPAM | 2020 v2.0 | Harvested area distribution |"
+        else:
+            crop_mask_tree_line = "│   ├── (no harvest_area.tif)     # no crop mask applied — region-wide"
+            crop_mask_row = "| Crop Mask | none | — | No crop mask applied; run not restricted to harvested crop area |"
         values.update({
+            'crop_mask_tree_line': crop_mask_tree_line,
+            'crop_mask_row': crop_mask_row,
             # Package metadata
             'package_dir': _safe_get(config, 'package_dir', 'pythia'),
             'n_sites': _safe_get(config, 'n_sites', 0),

@@ -107,6 +107,10 @@ class PythiaTranslator(PythiaTranslatorBase):
             └── pythia_config.json
     """
 
+    # Per-run crop-mask presence (set in translate() from the real generation result, not a
+    # filesystem check); drives the harvest-area emit + package provenance for maskless runs.
+    _mask_present: bool = False
+
     def __init__(
         self,
         config: ProjectConfig,
@@ -301,10 +305,14 @@ class PythiaTranslator(PythiaTranslatorBase):
             # 4. Generate crop mask raster (clip from SPAM)
             logger.info("Step 4/8: Generating crop mask raster...")
             crop_mask = self._generate_crop_mask_raster(data)
+            self._mask_present = crop_mask is not None
             if crop_mask:
                 output_files.append(crop_mask)
             else:
-                warnings.append("Crop mask not generated (SPAM not configured)")
+                warnings.append(
+                    "No crop mask produced or applied; results are not restricted to "
+                    "the harvested crop area (region-wide simulation)."
+                )
 
             # 5. Generate management rasters
             logger.info("Step 5/8: Generating management rasters...")
@@ -1621,6 +1629,8 @@ class PythiaTranslator(PythiaTranslatorBase):
         'cowpea':    {'ppop': 13.0, 'plrs': 75.0, 'pldp': 4.0},
         'groundnut': {'ppop': 15.0, 'plrs': 50.0, 'pldp': 5.0},
         'peanut':    {'ppop': 15.0, 'plrs': 50.0, 'pldp': 5.0},
+        # common bean — East-African smallholder (50 cm rows x 10 cm within-row = 200,000/ha)
+        'beans':     {'ppop': 20.0, 'plrs': 50.0, 'pldp': 5.0},
     }
     # An unmapped crop falls back to the wizard-generic maize density (plants/m²) — never -99.
     PLANTING_DEFAULT_FALLBACK = {'ppop': 6.25, 'plrs': 70.0, 'pldp': 5.0}
@@ -1979,10 +1989,16 @@ class PythiaTranslator(PythiaTranslatorBase):
         if fert_schedule:
             fen_tot = sum(app["famn"] for app in fert_schedule)
 
+        # Omit harvestArea entirely (not an empty string) when no crop mask was produced, so the
+        # runner runs every otherwise-eligible region site instead of dropping them all.
+        harvest_area_field = (
+            {"harvestArea": f"raster::{harvest_area}"} if self._mask_present else {}
+        )
+
         # Baseline run (no fertilizer)
         run_baseline = {
             "name": f"{crop_name}_baseline",
-            "harvestArea": f"raster::{harvest_area}",
+            **harvest_area_field,
             "startYear": start_year,
             "fen_tot": 0,
             "irrig": irrig,
@@ -1996,7 +2012,7 @@ class PythiaTranslator(PythiaTranslatorBase):
         # Fertilized scenario (using mapped fen_tot)
         run_fert = {
             "name": f"{crop_name}_fertilized",
-            "harvestArea": f"raster::{harvest_area}",
+            **harvest_area_field,
             "startYear": start_year,
             "fen_tot": fen_tot,
             "irrig": irrig,
@@ -3140,6 +3156,12 @@ class PythiaTranslator(PythiaTranslatorBase):
     # Provenance is now handled by System A (prismpy.provenance.tracker)
     # and distributed via executor._execute_package.
 
+    def _crop_mask_provenance_label(self) -> str:
+        """Provenance string for manifest/README — honest when no crop mask was applied."""
+        if self._mask_present:
+            return "SPAM 2020"
+        return "none (no crop mask applied; run not restricted to harvested crop area)"
+
     def _generate_manifest(self, data: UnifiedData) -> Path:
         """Generate manifest.json with file inventory and checksums.
 
@@ -3201,7 +3223,7 @@ class PythiaTranslator(PythiaTranslatorBase):
             "data_sources": {
                 "climate": "NASA POWER",
                 "soil": "eGHR",
-                "crop_mask": "SPAM 2020",
+                "crop_mask": self._crop_mask_provenance_label(),
                 "boundaries": boundary_label,
             },
             # F-BP-18: config-driven from the platform→UC SSOT (was a hardcoded
@@ -3358,14 +3380,14 @@ class PythiaTranslator(PythiaTranslatorBase):
             'data_sources': {
                 'climate': 'NASA POWER',
                 'soil': 'eGHR (GGCMI)',
-                'crop_mask': 'SPAM 2020',
+                'crop_mask': self._crop_mask_provenance_label(),
                 'boundaries': boundary_label,
             }
         }
 
         # Generate README using centralized template
         readme_path = self.output_dir / "README.md"
-        generate_readme(readme_path, readme_config, platform="pythia")
+        generate_readme(readme_path, readme_config, platform="pythia", mask_present=self._mask_present)
 
         logger.info(f"Generated README: {readme_path}")
         return readme_path
