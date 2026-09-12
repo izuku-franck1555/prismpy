@@ -207,6 +207,33 @@ def test_uc1_observed_yields_survives_emit(package_dir):
     )
 
 
+def test_uc1_predictors_survives_emit(package_dir):
+    """predictors (the UC1-FORECAST §12 PR-6 seasonal-predictor selector/override list
+    added to UC_CONFIG_KEY_TABLE for prism-runner's --predictors registry two-wire) must
+    SURVIVE emit — a package carries it in use_case_config.yield_forecast, not dropped by
+    the allowlist filter (manifest.py canonical_use_case_config serializer). It is the
+    manifest-field tier of the LOCKED two-wire precedence; an unregistered baked key
+    would be silently filtered, leaving a can't-resolve tier. A LIST value (a bare
+    catalog id + an id=path override) round-trips through the JSON wire (prismpy ->
+    manifest.json -> prism-runner). Mirrors test_uc1_observed_yields_survives_emit."""
+    predictors = ["natl_mam_sst", "natl_mam_sst=data/user_sst.tsv"]
+    cfg = build_project_config(
+        use_cases=["yield_forecast"],
+        predictors=predictors,
+    )
+    m = create_manifest(package_dir, cfg, platform="sarra_py")
+    val = m["use_case_config"]["yield_forecast"]["predictors"]
+    assert val == predictors, (
+        f"predictors dropped/drifted on emit: {val!r} (allowlist filter must carry it "
+        f"now that it is in UC_CONFIG_KEY_TABLE)"
+    )
+    # JSON wire round-trip (the prismpy -> manifest.json -> prism-runner boundary): a
+    # bare id selector AND an id=path override both survive as raw strings (the coercion
+    # to PredictorRef + the containment/absolutize happen on the prism-runner side).
+    parsed = json.loads(json.dumps(m, sort_keys=True, ensure_ascii=False))
+    assert parsed["use_case_config"]["yield_forecast"]["predictors"] == predictors
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # T5 — CLOSED-WORLD: non-emitted UCs ABSENT from use_case_config (v0.4 BL-2)
 # ──────────────────────────────────────────────────────────────────────────
