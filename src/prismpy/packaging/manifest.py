@@ -492,8 +492,8 @@ _PLATFORM_SUPPORTED_CROPS: Dict[str, FrozenSet[str]] = {
         "Maize", "Sorghum", "Millet", "Cowpea", "Rice", "Groundnut",
     }),
     "pythia": frozenset({
-        "maize", "sorghum", "millet", "cowpea", "rice", "groundnut",
-        "Maize", "Sorghum", "Millet", "Cowpea", "Rice", "Groundnut",
+        "maize", "sorghum", "millet", "cowpea", "rice", "groundnut", "beans",
+        "Maize", "Sorghum", "Millet", "Cowpea", "Rice", "Groundnut", "Beans",
     }),
     "acea": frozenset({
         "maize", "wheat", "rice", "sorghum", "millet",

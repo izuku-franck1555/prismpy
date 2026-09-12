@@ -149,6 +149,14 @@ class TestECOCROPEnvelopesShape(unittest.TestCase):
         self.assertEqual(env["RMIN"], 400.0)
         self.assertEqual(env["RMAX"], 4000.0)
 
+    def test_beans_verbatim_envelope(self):
+        # Common bean (Phaseolus vulgaris, FAO ECOCROP id=1668).
+        env = self.envelopes["beans"]
+        self.assertEqual(env["TMIN"], 7.0)
+        self.assertEqual(env["TMAX"], 32.0)
+        self.assertEqual(env["RMIN"], 300.0)
+        self.assertEqual(env["RMAX"], 4300.0)
+
     def test_version_pinned(self):
         # Sprint F AC-F-0 bumps the substrate version to v2 to
         # signal that the cache key composed in
@@ -156,15 +164,14 @@ class TestECOCROPEnvelopesShape(unittest.TestCase):
         # any project whose cached verdicts reference v1 — a
         # 4-crop expansion is a substrate change even if the two
         # original entries are unchanged.
-        self.assertEqual(self.payload["version"], "ecocrop_v2_2026-05-04")
+        self.assertEqual(self.payload["version"], "ecocrop_v3_2026-09-12")
 
-    def test_license_footer_reflects_six_crops(self):
-        # Pin the license footer reframe per AC-F-0. A future
-        # crop-coverage expansion that bumps to 32+ facts must
-        # update both the JSON and this pin in the same commit
-        # so the test catches an unsynchronized footer.
+    def test_license_footer_reflects_seven_crops(self):
+        # Pin the license footer reframe. A future crop-coverage
+        # expansion must update both the JSON and this pin in the
+        # same commit so the test catches an unsynchronized footer.
         self.assertIn(
-            "24 numeric facts (6 crops × 4 fields)",
+            "28 numeric facts (7 crops × 4 fields)",
             self.payload["license"],
         )
 

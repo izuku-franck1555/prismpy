@@ -630,7 +630,12 @@ def _rewrite_projection_readme(
         "climate_source": projection_source,
         "climate_citation": climate_citation,
     }
-    generate_readme(readme_path, readme_config, platform="pythia")
+    # Carry the baseline's HONEST crop-mask state into the projection README: a projection
+    # cloned from a no-mask baseline must not re-claim a SPAM mask it never applied. A legacy
+    # baseline manifest lacking the field is treated conservatively as no-mask.
+    _baseline_crop_mask = (baseline_manifest.get("data_sources") or {}).get("crop_mask")
+    _mask_present = bool(_baseline_crop_mask) and not str(_baseline_crop_mask).lower().startswith("none")
+    generate_readme(readme_path, readme_config, platform="pythia", mask_present=_mask_present)
 
 
 def _open_cutout_variable(nc_path: Path, variable: str) -> Any:
