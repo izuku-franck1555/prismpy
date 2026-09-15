@@ -1645,7 +1645,7 @@ class PythiaConfig(BaseModel):
     planting_window_days: int = Field(
         default=30,
         ge=1,
-        le=90,
+        le=365,  # downstream planting paths cap the effective planting date at DOY 365
         description="Days after first planting date to search for planting conditions"
     )
 
