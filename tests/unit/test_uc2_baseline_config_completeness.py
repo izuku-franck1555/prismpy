@@ -85,10 +85,11 @@ def _mock_data() -> types.SimpleNamespace:
     )
 
 
-def _write_synthetic_spam(spam_dir: Path, crop_lower: str) -> Path:
-    """Minimal SPAM raster covering the Kano belt (simplified naming the
-    translator accepts: ``spam2020_<crop>.tif``)."""
-    path = spam_dir / f"spam2020_{crop_lower}.tif"
+def _write_synthetic_spam(spam_dir: Path, crop_code: str) -> Path:
+    """Minimal SPAM raster covering the Kano belt, named with the cropland-vintage
+    registry pattern for 2020/V2r2 (``spam2020_V2r2_global_H_{CODE}_A.tif``). The old
+    friendly ``spam2020_<crop>.tif`` alias path is removed (registry-only resolve)."""
+    path = spam_dir / f"spam2020_V2r2_global_H_{crop_code}_A.tif"
     width, height = 60, 40
     transform = from_bounds(5.0, 11.0, 11.0, 13.0, width, height)
     with rasterio.open(
@@ -138,22 +139,25 @@ def _write_min_pythia_config(tmp_path: Path) -> Path:
 
 
 def test_spam_raster_dir_produces_harvest_area_tif(tmp_path: Path) -> None:
-    """REAL behaviour: with spam_raster_dir set (+ a SPAM raster present), the
-    crop-mask step writes ``raster/harvest_area.tif`` — what actually unblocks
-    the pythia run. Uses a SYNTHETIC raster (no external data dependency)."""
+    """REAL behaviour: with spam_raster_dir + the SELECTED cropland vintage (year+release)
+    set and the matching registry-pattern raster present, the crop-mask step writes the
+    vintage-named ``raster/harvest_area_2020_V2r2.tif`` — what actually unblocks the pythia
+    run. Uses a SYNTHETIC raster (no external data dependency)."""
     spam_dir = tmp_path / "spam"
     spam_dir.mkdir()
-    _write_synthetic_spam(spam_dir, "cowpea")
+    _write_synthetic_spam(spam_dir, "COWP")  # Cowpea → SPAM code COWP (registry pattern name)
 
     cfg = load_config(_write_min_pythia_config(tmp_path))
     cfg.platform_config.pythia.spam_raster_dir = spam_dir  # override to synthetic
+    cfg.platform_config.pythia.spam_version = "2020"       # SELECTED cropland vintage (both
+    cfg.platform_config.pythia.spam_release = "V2r2"       # required — no silent default)
     t = PythiaTranslator(config=cfg, output_dir=tmp_path / "out")
     (t.output_dir / "raster").mkdir(parents=True, exist_ok=True)
 
     result = t._generate_crop_mask_raster(_mock_data())
     assert result is not None, "crop-mask returned None despite spam_raster_dir set"
-    assert (t.output_dir / "raster" / "harvest_area.tif").exists(), (
-        "harvest_area.tif not written — the pythia run would 'Prepared 0 sites'"
+    assert (t.output_dir / "raster" / "harvest_area_2020_V2r2.tif").exists(), (
+        "vintage-named harvest_area_2020_V2r2.tif not written — the pythia run would 'Prepared 0 sites'"
     )
 
 

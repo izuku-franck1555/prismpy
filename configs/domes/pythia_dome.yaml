@@ -27,8 +27,10 @@ platform_config:
     eghr_sol_dir: "data/eGHR/"
 
     # --- SPAM Crop Distribution ---
+    # Cropland vintage is a (year, release) pair — both required when spam_raster_dir is set.
     spam_raster_dir: "data/spam/"
     spam_version: "2020"
+    spam_release: "V2r2"
 
     # --- DSSAT Crop Model Selection ---
     # These are auto-detected from crop name if not set.

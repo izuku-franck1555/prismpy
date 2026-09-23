@@ -73,6 +73,15 @@ def _translator_and_data(tmp_path: Path, management, *, mask_present: bool,
                                   output_dir=str(tmp_path))
     (tmp_path / "config").mkdir(parents=True, exist_ok=True)
     translator._mask_present = mask_present
+    if mask_present:
+        # Mirror _generate_crop_mask_raster: a present mask ⟹ the single applied-vintage state is
+        # set (the helper renders artifacts directly, bypassing the resolve+clip step).
+        from prismpy.sources.crop_areas.spam_vintage import AppliedVintage
+        translator._applied_vintage = AppliedVintage(
+            year="2020", release="V2r2",
+            source_filename="spam2020_V2r2_global_H_BEAN_A.tif",
+            mask_filename="harvest_area_2020_V2r2.tif",
+        )
     data = UnifiedData(
         region=Region(
             name="Kacheliba", country="Kenya", country_iso3="KEN",
@@ -140,7 +149,7 @@ def test_masked_crops_still_emit_raster_on_every_run(tmp_path, crop_name):
 
 def test_crop_mask_provenance_label_is_honest(tmp_path):
     translator, _ = _translator_and_data(tmp_path, None, mask_present=True)
-    assert translator._crop_mask_provenance_label() == "SPAM 2020"
+    assert translator._crop_mask_provenance_label() == "SPAM 2020 V2r2"
     translator._mask_present = False
     assert "no crop mask applied" in translator._crop_mask_provenance_label().lower()
 
@@ -152,8 +161,11 @@ def test_manifest_and_readme_are_honest_about_the_mask(tmp_path, mask_present):
     manifest_text = Path(translator._generate_manifest(data)).read_text()
     readme_text = Path(translator._generate_readme(data)).read_text()
     if mask_present:
-        assert '"crop_mask": "SPAM 2020"' in manifest_text
-        assert "| Crop Mask | SPAM | 2020 v2.0 |" in readme_text
+        assert '"crop_mask": "SPAM 2020 V2r2"' in manifest_text
+        # add-a-field: the structured applied vintage rides alongside the honest string label.
+        assert '"crop_mask_vintage"' in manifest_text
+        assert '"release": "V2r2"' in manifest_text
+        assert "| Crop Mask | SPAM | 2020 V2r2 |" in readme_text
     else:
         # No false SPAM claim; the honest "none" label instead, in BOTH surfaces.
         assert '"crop_mask": "SPAM 2020"' not in manifest_text
@@ -167,11 +179,16 @@ def test_manifest_and_readme_are_honest_about_the_mask(tmp_path, mask_present):
 @pytest.mark.parametrize("mask_present", [True, False])
 def test_pythia_readme_template_crop_mask_row(tmp_path, mask_present):
     out = tmp_path / "README.md"
-    generate_readme(out, {}, platform="pythia", mask_present=mask_present)
+    _vintage = (
+        {"year": "2020", "release": "V2r2", "mask_filename": "harvest_area_2020_V2r2.tif"}
+        if mask_present else None
+    )
+    generate_readme(out, {}, platform="pythia", mask_present=mask_present,
+                    crop_mask_vintage=_vintage)
     text = out.read_text()
     if mask_present:
-        assert "| Crop Mask | SPAM | 2020 v2.0 |" in text
-        assert "harvest_area.tif         # SPAM crop harvest area" in text
+        assert "| Crop Mask | SPAM | 2020 V2r2 |" in text
+        assert "harvest_area_2020_V2r2.tif" in text
     else:
         assert "No crop mask applied" in text
         assert "| Crop Mask | SPAM |" not in text
@@ -184,20 +201,28 @@ def test_mask_present_defaults_false_until_translate_sets_it(tmp_path):
     # crop-mask step (crop_mask is not None). An un-run translator never claims a mask.
     translator, _ = _translator_and_data(tmp_path, None, mask_present=False)
     assert PythiaTranslator._mask_present is False
+    assert PythiaTranslator._applied_vintage is None
     translator._mask_present = True  # what translate() sets when a mask IS produced
-    assert translator._crop_mask_provenance_label() == "SPAM 2020"
+    from prismpy.sources.crop_areas.spam_vintage import AppliedVintage
+    translator._applied_vintage = AppliedVintage(
+        "2020", "V2r2", "spam2020_V2r2_global_H_BEAN_A.tif", "harvest_area_2020_V2r2.tif")
+    assert translator._crop_mask_provenance_label() == "SPAM 2020 V2r2"
 
 
-def _run_projection_readme(tmp_path: Path, crop_mask_value: str) -> str:
+def _run_projection_readme(tmp_path: Path, crop_mask_value: str,
+                           crop_mask_vintage: dict | None = None) -> str:
     from prismpy.packaging.scenario_set_generator import _rewrite_projection_readme
     proj = tmp_path / "proj_ssp585"
     (proj / "weather").mkdir(parents=True, exist_ok=True)
+    _ds = {"crop_mask": crop_mask_value}
+    if crop_mask_vintage is not None:
+        _ds["crop_mask_vintage"] = crop_mask_vintage
     baseline_manifest = {
         "platform": "pythia",
         "project_name": "beans_projection",
         "region": {"name": "Kacheliba", "country": "Kenya"},
         "crop": {"name": "Beans", "planting_doy": 74, "maturity_doy": 169},
-        "data_sources": {"crop_mask": crop_mask_value},
+        "data_sources": _ds,
     }
     _rewrite_projection_readme(
         proj, baseline_manifest=baseline_manifest,
@@ -217,7 +242,31 @@ def test_projection_readme_inherits_no_mask_from_baseline(tmp_path):
 
 
 def test_projection_readme_keeps_mask_from_masked_baseline(tmp_path):
-    # A projection from a MASKED baseline (real SPAM) correctly keeps the SPAM claim.
-    text = _run_projection_readme(tmp_path, "SPAM 2020")
-    assert "| Crop Mask | SPAM | 2020 v2.0 |" in text
-    assert "harvest_area.tif         # SPAM crop harvest area" in text
+    # A projection from a MASKED baseline (real SPAM) correctly keeps the SPAM claim, reading the
+    # vintage from the structured crop_mask_vintage field (add-a-field SSOT), not the string label.
+    text = _run_projection_readme(
+        tmp_path, "SPAM 2020 V2r2",
+        crop_mask_vintage={"year": "2020", "release": "V2r2",
+                           "mask_filename": "harvest_area_2020_V2r2.tif"})
+    assert "| Crop Mask | SPAM | 2020 V2r2 |" in text
+    assert "harvest_area_2020_V2r2.tif" in text
+
+
+def test_translator_reuse_masked_then_maskless_drops_stale_vintage(tmp_path):
+    # Regression: REUSING a translator instance for a MASKLESS run after a masked run must
+    # NOT retain the prior vintage. _generate_crop_mask_raster resets _applied_vintage at the top of
+    # every call, so a maskless manifest carries crop_mask:"none…" and NO crop_mask_vintage key.
+    from prismpy.sources.crop_areas.spam_vintage import AppliedVintage
+    translator, data = _translator_and_data(tmp_path, None, mask_present=False)
+    # Simulate a prior masked run's leftover state on the SAME instance:
+    translator._mask_present = True
+    translator._applied_vintage = AppliedVintage(
+        "2010", "V2r0", "spam2010V2r0_global_H_BEAN_A.tif", "harvest_area_2010_V2r0.tif")
+    # Beans config has no spam_raster_dir → this maskless run must CLEAR the leftover state.
+    assert translator._generate_crop_mask_raster(data) is None
+    assert translator._applied_vintage is None            # per-run reset happened
+    translator._mask_present = False                       # what translate() sets (crop_mask is None)
+    manifest = json.loads(Path(translator._generate_manifest(data)).read_text())
+    ds = manifest["data_sources"]
+    assert "crop_mask_vintage" not in ds                  # no stale / null vintage field emitted
+    assert str(ds["crop_mask"]).lower().startswith("none")  # honest maskless label

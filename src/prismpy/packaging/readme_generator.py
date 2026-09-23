@@ -1307,6 +1307,7 @@ def generate_readme(
     config: Dict[str, Any],
     platform: str = "sarra_py",
     mask_present: bool = False,
+    crop_mask_vintage: Optional[dict] = None,
 ) -> Path:
     """
     Generate README from template.
@@ -1507,8 +1508,20 @@ def generate_readme(
         # Crop-mask provenance is honest per the actual run: with no mask the package ships
         # no harvest_area.tif and the run is not restricted to the harvested crop area.
         if mask_present:
-            crop_mask_tree_line = "│   ├── harvest_area.tif         # SPAM crop harvest area"
-            crop_mask_row = "| Crop Mask | SPAM | 2020 v2.0 | Harvested area distribution |"
+            # Registry-driven, vintage-honest: render the applied vintage from the structured
+            # state (never a hardcoded year/release). Defensive fallback only if a caller passes
+            # no vintage dict (PYTHIA always supplies it when mask_present).
+            if crop_mask_vintage:
+                _mv_file = crop_mask_vintage.get("mask_filename") or "harvest_area.tif"
+                _mv_ver = "{} {}".format(
+                    crop_mask_vintage.get("year", ""),
+                    crop_mask_vintage.get("release", ""),
+                ).strip()
+                crop_mask_tree_line = f"│   ├── {_mv_file}   # SPAM {_mv_ver} crop harvest area"
+                crop_mask_row = f"| Crop Mask | SPAM | {_mv_ver} | Harvested area distribution |"
+            else:
+                crop_mask_tree_line = "│   ├── harvest_area.tif         # SPAM crop harvest area"
+                crop_mask_row = "| Crop Mask | SPAM | (vintage unspecified) | Harvested area distribution |"
         else:
             crop_mask_tree_line = "│   ├── (no harvest_area.tif)     # no crop mask applied — region-wide"
             crop_mask_row = "| Crop Mask | none | — | No crop mask applied; run not restricted to harvested crop area |"
