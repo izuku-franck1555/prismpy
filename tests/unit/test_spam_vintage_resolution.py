@@ -161,40 +161,46 @@ def test_generate_readme_renders_vintage_from_structured_field(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Boundary guard — resolver wired into PYTHIA ONLY (ACEA + CRAFT untouched) #
+# Boundary guard — the dir-resolver is PYTHIA-only; ACEA is fully untouched.    #
+# CRAFT consumes identify_vintage for its honest label but never resolves.      #
 # --------------------------------------------------------------------------- #
 def test_boundary_resolver_wired_into_pythia_only():
     import prismpy.translators.acea.translator as acea_mod
     import prismpy.translators.craft.translator as craft_mod
     import prismpy.translators.pythia.translator as pythia_mod
 
-    for mod in (acea_mod, craft_mod):
-        src = Path(mod.__file__).read_text()
-        assert "spam_vintage" not in src, (
-            f"{mod.__name__} must not reference the cropland-vintage module "
-            "(boundary: ACEA/CRAFT vintage-honesty is a separate change)."
-        )
-        assert "resolve_spam_raster" not in src, (
-            f"{mod.__name__} must not call resolve_spam_raster."
-        )
+    # ACEA is out of scope for the whole cropland-vintage module (a separate change).
+    acea_src = Path(acea_mod.__file__).read_text()
+    assert "spam_vintage" not in acea_src, (
+        "ACEA must not reference the cropland-vintage module (ACEA vintage-honesty is separate)."
+    )
+    assert "resolve_spam_raster" not in acea_src, "ACEA must not call resolve_spam_raster."
+
+    # CRAFT MAY consume identify_vintage for the basename-derived honest label, but it reads a
+    # verbatim spam_raster_path — it must NEVER call the dir-resolver resolve_spam_raster.
+    craft_src = Path(craft_mod.__file__).read_text()
+    assert "resolve_spam_raster" not in craft_src, (
+        "CRAFT reads a verbatim spam_raster_path — it must never call resolve_spam_raster."
+    )
 
     psrc = Path(pythia_mod.__file__).read_text()
     assert "resolve_spam_raster" in psrc, "PYTHIA must wire the fail-loud resolver."
 
 
 def test_boundary_files_byte_identical_to_base():
-    """Stronger boundary guard: the ACEA + CRAFT translators, the ACEA-only
-    ``SPAMSource`` module (spam.py), and the provenance model + tracker must be BYTE-IDENTICAL to
-    the merge-base with ``origin/main``. this change touches none of them, so no ACEA/CRAFT vintage behavior
-    and no provenance schema can shift — identical source ⇒ identical runtime for these files. Skips
-    where git history / ``origin/main`` is unavailable (the grep guard above still runs everywhere).
+    """Stronger boundary guard: the ACEA translator, the ACEA-only ``SPAMSource`` module
+    (spam.py), and the provenance model + tracker must be BYTE-IDENTICAL to the merge-base with
+    ``origin/main``. This change intentionally touches CRAFT (its basename-derived honest label +
+    the silent-uniform fail-loud), so craft/translator.py is NO LONGER in this frozen set — but
+    ACEA and the provenance layer (attestation is a separate change) stay untouched, so no ACEA
+    behavior and no provenance schema can shift. Skips where git history / ``origin/main`` is
+    unavailable (the grep guard above still runs everywhere).
     """
     import subprocess
 
     repo = Path(__file__).resolve().parents[2]
     boundary = (
         "src/prismpy/translators/acea/translator.py",
-        "src/prismpy/translators/craft/translator.py",
         "src/prismpy/sources/crop_areas/spam.py",
         "src/prismpy/models/provenance.py",
         "src/prismpy/provenance/tracker.py",
@@ -214,5 +220,5 @@ def test_boundary_files_byte_identical_to_base():
     ]
     assert not breached, (
         "Boundary breached — these files must be byte-identical to the base "
-        f"(this change touches no ACEA/CRAFT/provenance code): {breached}"
+        f"(this change touches only CRAFT + spam_vintage.py, not ACEA/provenance): {breached}"
     )
