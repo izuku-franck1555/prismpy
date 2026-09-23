@@ -94,6 +94,7 @@ platform_config:
     eghr_sol_dir: "PYTHIA/Simulation_Data/eGHR/"
     spam_raster_dir: "PYTHIA/Simulation_Data/raster/"
     spam_version: "2020"
+    spam_release: "V2r2"
     # Weather download settings (optional - defaults to temporal config)
     # climate_start_date: "1984-01-01"
     # climate_end_date: "2020-12-31"

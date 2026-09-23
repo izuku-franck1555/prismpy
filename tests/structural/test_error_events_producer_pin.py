@@ -42,11 +42,13 @@ _EXECUTOR = _PRISMPY_ROOT / "src" / "prismpy" / "pipeline" / "executor.py"
 F_AG_GATE_SITES: Tuple[Tuple[str, int, str], ...] = (
     ("src/prismpy/translators/acea/translator.py", 519, "ClimateDownloadError"),
     # These sites shift down as code is inserted above them
-    # (1822 -> 1866 -> 1876; 2578 -> 2630 -> 2645 -> 2661; 1007 -> 1015 with the
-    # beans no-mask harvest-area emit + PLANTING_DEFAULTS entry + provenance helper).
-    ("src/prismpy/translators/pythia/translator.py", 1015, "ValueError"),
-    ("src/prismpy/translators/pythia/translator.py", 1876, "ValueError"),
-    ("src/prismpy/translators/pythia/translator.py", 2661, "BuildEghrSubstrateError"),
+    # (1822 -> 1866 -> 1876 -> 1887; 2578 -> 2630 -> 2645 -> 2661 -> 2684 -> 2690; 1007 -> 1015 ->
+    # 1020; last shift: SPAM cropland-vintage (applied-vintage class attr + vintage-named mask
+    # JSON + fail-loud resolver + per-run vintage-state reset in _generate_crop_mask_raster, which
+    # sits above the BuildEghrSubstrateError site → 2684 -> 2690).
+    ("src/prismpy/translators/pythia/translator.py", 1020, "ValueError"),
+    ("src/prismpy/translators/pythia/translator.py", 1887, "ValueError"),
+    ("src/prismpy/translators/pythia/translator.py", 2690, "BuildEghrSubstrateError"),
     ("src/prismpy/translators/sarra_py/translator.py", 711, "ValueError"),
     ("src/prismpy/translators/sarra_py/translator.py", 1675, "ValueError"),
     # 1565 -> 1570 (translate-time data.grid guard) -> 1577 (§7 trials-copy wiring).

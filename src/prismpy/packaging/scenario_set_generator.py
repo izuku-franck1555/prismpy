@@ -635,7 +635,14 @@ def _rewrite_projection_readme(
     # baseline manifest lacking the field is treated conservatively as no-mask.
     _baseline_crop_mask = (baseline_manifest.get("data_sources") or {}).get("crop_mask")
     _mask_present = bool(_baseline_crop_mask) and not str(_baseline_crop_mask).lower().startswith("none")
-    generate_readme(readme_path, readme_config, platform="pythia", mask_present=_mask_present)
+    # Structured applied-vintage (add-a-field SSOT): read it from the baseline manifest and render
+    # the vintage — never parse the filename/label. Absent (legacy/non-vintage baseline) → None.
+    _baseline_crop_mask_vintage = (baseline_manifest.get("data_sources") or {}).get("crop_mask_vintage")
+    generate_readme(
+        readme_path, readme_config, platform="pythia",
+        mask_present=_mask_present,
+        crop_mask_vintage=_baseline_crop_mask_vintage,
+    )
 
 
 def _open_cutout_variable(nc_path: Path, variable: str) -> Any:

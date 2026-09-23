@@ -111,6 +111,11 @@ class PythiaTranslator(PythiaTranslatorBase):
     # filesystem check); drives the harvest-area emit + package provenance for maskless runs.
     _mask_present: bool = False
 
+    # Per-run single canonical applied cropland-vintage state (AppliedVintage), produced ONCE in
+    # _generate_crop_mask_raster and threaded to every emitted surface (JSON mask ref, README,
+    # manifest label + structured crop_mask_vintage field). None when no crop mask was applied.
+    _applied_vintage = None
+
     def __init__(
         self,
         config: ProjectConfig,
@@ -1832,7 +1837,13 @@ class PythiaTranslator(PythiaTranslatorBase):
         sites_file = "./shapes/sites.shp"
         weather_dir = "./weather/"
         soil_raster = "./raster/soil.tif"
-        harvest_area = "./raster/harvest_area.tif"
+        # Point at the vintage-named mask (single applied-vintage state) so the JSON the runner
+        # consumes references the exact emitted file; falls back to the generic name pre-mask.
+        harvest_area = (
+            f"./raster/{self._applied_vintage.mask_filename}"
+            if self._applied_vintage is not None
+            else "./raster/harvest_area.tif"
+        )
 
         # Get parameters from generic config mapping
         use_generic_mapping = (
@@ -2150,7 +2161,7 @@ class PythiaTranslator(PythiaTranslatorBase):
             return None
 
     def _generate_crop_mask_raster(self, data: UnifiedData) -> Optional[Path]:
-        """Clip SPAM 2020 harvest area raster to region bounds.
+        """Clip the SELECTED cropland-vintage harvest-area raster to region bounds.
 
         Args:
             data: UnifiedData with grid info
@@ -2158,6 +2169,12 @@ class PythiaTranslator(PythiaTranslatorBase):
         Returns:
             Path to crop mask raster or None if not configured
         """
+        # Reset the per-run applied-vintage state at the START of every call, so a masked→maskless
+        # translator REUSE never retains a prior run's vintage. Only a successful clip below sets it;
+        # every early return (no dir, etc.) therefore leaves it None. Pairs with `_mask_present`,
+        # which the caller resets at the crop-mask step.
+        self._applied_vintage = None
+
         # Get SPAM raster directory from config
         pythia_config = None
         if self.config.platform_config and hasattr(self.config.platform_config, 'pythia'):
@@ -2167,34 +2184,34 @@ class PythiaTranslator(PythiaTranslatorBase):
             logger.warning("SPAM raster directory not configured, skipping crop mask generation")
             return None
 
-        # Get SPAM crop code from crop name
+        # Cropland-vintage: resolve the web-app-SELECTED vintage (year + release) via the
+        # registry-only fail-loud resolver — NO silent "2020" default, NO wildcard/alias fallback.
+        # If the resolver returns a path, that path IS the selected vintage's raster, so a
+        # completed masked run necessarily applied the selected vintage (applied == selected).
+        from prismpy.sources.crop_areas.spam_vintage import (
+            resolve_spam_raster,
+            AppliedVintage,
+        )
+
         crop_code = self._get_spam_crop_code()
-        spam_version = pythia_config.spam_version or "2020"
+        spam_version = pythia_config.spam_version
+        spam_release = getattr(pythia_config, "spam_release", None)
+        if not spam_version or not spam_release:
+            raise ValueError(
+                "PYTHIA SPAM masking was requested (spam_raster_dir is set) but the cropland "
+                f"vintage is incomplete: spam_version={spam_version!r}, spam_release={spam_release!r}. "
+                "Both are required — a masked run must not silently default to a vintage."
+            )
 
-        # Build SPAM raster filename
-        if spam_version == "2020":
-            spam_filename = f"spam2020_V2r0_global_H_{crop_code}_A.tif"
-        else:
-            spam_filename = f"spam2010V2r0_global_H_{crop_code}_A.tif"
-
-        # Resolve path
         spam_dir = Path(pythia_config.spam_raster_dir)
         if not spam_dir.is_absolute():
             spam_dir = Path.cwd() / spam_dir
 
-        spam_path = spam_dir / spam_filename
-
-        if not spam_path.exists():
-            # Try simplified naming convention (e.g., spam2020_cowpea.tif)
-            crop_lower = self.config.crop.name.lower()
-            alt_filename = f"spam{spam_version}_{crop_lower}.tif"
-            alt_path = spam_dir / alt_filename
-            if alt_path.exists():
-                spam_path = alt_path
-                logger.info(f"Using simplified SPAM filename: {alt_filename}")
-            else:
-                logger.error(f"SPAM raster not found: {spam_path} or {alt_path}")
-                return None
+        # PYTHIA masks with the '_A' (all-technologies = total harvested area) stratum. Raises a
+        # distinct SpamVintageError (unregistered / crop-not-in-vintage / stratum-absent / absent).
+        spam_path = resolve_spam_raster(
+            spam_dir, spam_version, spam_release, crop_code, tech="A"
+        )
 
         # Calculate bounds from grid
         if data.grid and data.grid.cells:
@@ -2210,17 +2227,29 @@ class PythiaTranslator(PythiaTranslatorBase):
                 if mb:
                     bounds = (mb.minx, mb.miny, mb.maxx, mb.maxy)
                 else:
-                    logger.error("Cannot determine region bounds")
-                    return None
+                    raise ValueError(
+                        "Cannot determine region bounds for the SPAM crop-mask clip, but a "
+                        "cropland vintage was selected — failing loud rather than shipping an "
+                        "unmasked run under a mask request."
+                    )
 
-        # Output path
-        output_path = self.output_dir / "raster" / "harvest_area.tif"
+        # Output path — vintage-named so the emitted mask filename independently verifies the
+        # applied (year, release), not a generic harvest_area.tif.
+        mask_filename = f"harvest_area_{spam_version}_{spam_release}.tif"
+        output_path = self.output_dir / "raster" / mask_filename
 
-        try:
-            return self._clip_global_raster(spam_path, output_path, bounds)
-        except Exception as e:
-            logger.error(f"Failed to clip SPAM raster: {e}")
-            return None
+        # Masking was requested AND the vintage resolved — let a clip failure propagate (fail
+        # loud) rather than silently shipping a whole-grid run under a "no mask" label.
+        mask_path = self._clip_global_raster(spam_path, output_path, bounds)
+
+        # Produce the single canonical applied-vintage state ONCE, after a successful clip.
+        self._applied_vintage = AppliedVintage(
+            year=spam_version,
+            release=spam_release,
+            source_filename=spam_path.name,
+            mask_filename=mask_filename,
+        )
+        return mask_path
 
     def _get_spam_crop_code(self) -> str:
         """Get SPAM crop code from config or auto-detect from crop name.
@@ -3157,9 +3186,13 @@ class PythiaTranslator(PythiaTranslatorBase):
     # and distributed via executor._execute_package.
 
     def _crop_mask_provenance_label(self) -> str:
-        """Provenance string for manifest/README — honest when no crop mask was applied."""
-        if self._mask_present:
-            return "SPAM 2020"
+        """Honest human-readable crop-mask label for manifest/README.
+
+        Reads the single applied-vintage state (``"SPAM {year} {release}"``) — never a hardcoded
+        year/release. Honest ``"none"`` when no crop mask was applied.
+        """
+        if self._mask_present and self._applied_vintage is not None:
+            return self._applied_vintage.label
         return "none (no crop mask applied; run not restricted to harvested crop area)"
 
     def _generate_manifest(self, data: UnifiedData) -> Path:
@@ -3223,7 +3256,13 @@ class PythiaTranslator(PythiaTranslatorBase):
             "data_sources": {
                 "climate": "NASA POWER",
                 "soil": "eGHR",
+                # Human-readable STRING label (add-a-field: type unchanged so ACEA/CRAFT/legacy/
+                # prismweb consumers of `crop_mask` are unaffected).
                 "crop_mask": self._crop_mask_provenance_label(),
+                # Structured applied-vintage — the projection reads this field. Emitted ONLY on a
+                # masked run; a maskless run carries NO crop_mask_vintage key at all (never null).
+                **({"crop_mask_vintage": self._applied_vintage.to_manifest_dict()}
+                   if self._applied_vintage is not None else {}),
                 "boundaries": boundary_label,
             },
             # F-BP-18: config-driven from the platform→UC SSOT (was a hardcoded
@@ -3381,13 +3420,23 @@ class PythiaTranslator(PythiaTranslatorBase):
                 'climate': 'NASA POWER',
                 'soil': 'eGHR (GGCMI)',
                 'crop_mask': self._crop_mask_provenance_label(),
+                # Emitted ONLY on a masked run (no null key on a maskless run).
+                **({'crop_mask_vintage': self._applied_vintage.to_manifest_dict()}
+                   if self._applied_vintage is not None else {}),
                 'boundaries': boundary_label,
             }
         }
 
         # Generate README using centralized template
         readme_path = self.output_dir / "README.md"
-        generate_readme(readme_path, readme_config, platform="pythia", mask_present=self._mask_present)
+        generate_readme(
+            readme_path, readme_config, platform="pythia",
+            mask_present=self._mask_present,
+            crop_mask_vintage=(
+                self._applied_vintage.to_manifest_dict()
+                if self._applied_vintage is not None else None
+            ),
+        )
 
         logger.info(f"Generated README: {readme_path}")
         return readme_path

@@ -1603,11 +1603,15 @@ class PythiaConfig(BaseModel):
     )
     spam_raster_dir: Optional[Path] = Field(
         default=None,
-        description="Directory containing SPAM 2020 harvest area rasters"
+        description="Directory containing SPAM harvest-area rasters (vintage selected via spam_version + spam_release)"
     )
-    spam_version: str = Field(
-        default="2020",
-        description="SPAM data version (2010 or 2020)"
+    spam_version: Optional[str] = Field(
+        default=None,
+        description="SPAM cropland-vintage reference year (e.g. '2010' or '2020'). Required when spam_raster_dir is set — a masked run must not silently default to a vintage."
+    )
+    spam_release: Optional[str] = Field(
+        default=None,
+        description="SPAM cropland-vintage release string (e.g. 'V2r0', 'V2r2'). Required when spam_raster_dir is set; paired with spam_version to resolve the exact provisioned raster."
     )
     spam_crop_code: Optional[str] = Field(
         default=None,
