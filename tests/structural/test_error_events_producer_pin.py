@@ -51,8 +51,9 @@ F_AG_GATE_SITES: Tuple[Tuple[str, int, str], ...] = (
     ("src/prismpy/translators/pythia/translator.py", 2690, "BuildEghrSubstrateError"),
     ("src/prismpy/translators/sarra_py/translator.py", 711, "ValueError"),
     ("src/prismpy/translators/sarra_py/translator.py", 1675, "ValueError"),
-    # 1565 -> 1570 (translate-time data.grid guard) -> 1577 (§7 trials-copy wiring).
-    ("src/prismpy/translators/craft/translator.py", 1577, "ValueError"),
+    # 1565 -> 1570 (translate-time data.grid guard) -> 1577 (trials-copy wiring) -> 1583
+    # (the SPAM cropland-vintage import block added to the top of craft/translator.py shifted +6).
+    ("src/prismpy/translators/craft/translator.py", 1583, "ValueError"),
     ("src/prismpy/translators/_shared/eghr_substrate.py", 461, "ValueError"),
     ("src/prismpy/translators/_shared/eghr_substrate.py", 466, "ValueError"),
 )

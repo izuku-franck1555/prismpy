@@ -7,10 +7,12 @@ path, that path *is* the selected vintage's raster; otherwise it raises one of
 four distinct, actionable errors. This is what makes a completed masked PYTHIA
 run guarantee *applied == selected* without needing any provenance record.
 
-Scope note: this module is consumed by the PYTHIA translator only. ACEA resolves
-harvested areas through its own ``SPAMSource`` / ``_clip_spam_data`` path and is
-intentionally NOT wired here. CRAFT reads a verbatim raster path and does not
-resolve.
+Scope note: the resolver :func:`resolve_spam_raster` is consumed by the PYTHIA
+translator. ACEA resolves harvested areas through its own ``SPAMSource`` /
+``_clip_spam_data`` path and is intentionally NOT wired here. CRAFT reads a
+verbatim raster path and does not resolve — it consumes :func:`identify_vintage`
+to derive an honest ``SPAM <year> <release>`` label from that path's basename,
+and fails loud when the basename matches no registered vintage.
 
 The per-vintage crop/stratum inventories are LITERAL frozensets generated from
 the actually-provisioned MapSPAM files, so ``CropNotInVintageError`` and
@@ -28,8 +30,10 @@ vintage" is already a real, reachable condition, not hypothetical.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional, Tuple
 
 __all__ = [
     "VintageSpec",
@@ -41,6 +45,7 @@ __all__ = [
     "StratumNotInVintageError",
     "VintageRasterAbsentError",
     "resolve_spam_raster",
+    "identify_vintage",
 ]
 
 
@@ -193,3 +198,30 @@ def resolve_spam_raster(
             f"fails loud rather than silently applying a different vintage."
         )
     return path
+
+
+def identify_vintage(filename) -> Optional[Tuple[str, str]]:
+    """Reverse-lookup a raster BASENAME to its registered cropland vintage ``(year, release)``.
+
+    CRAFT reads a verbatim ``spam_raster_path`` — it never calls :func:`resolve_spam_raster` —
+    so its honest cropland-vintage label must be derived from the ACTUAL file on disk, never a
+    separately-declared vintage that could disagree with the basename. This is that single
+    source of vintage identity: it matches the basename against every registered vintage's
+    ``pattern`` with the ``{code}``/``{tech}`` slots constrained to that vintage's OWN crop and
+    stratum inventories, so a 2010 raster can never be misread as 2020 (or vice-versa), and an
+    unrecognized / wrong file returns ``None`` (the caller fails loud rather than emit a
+    dishonest label).
+
+    Returns the matching ``(year, release)``, or ``None`` when the basename is not a recognized
+    provisioned raster of any registered vintage.
+    """
+    base = Path(filename).name
+    for (year, release), spec in SPAM_VINTAGES.items():
+        codes = "|".join(sorted(spec.crops))
+        techs = "|".join(sorted(spec.strata))
+        regex = re.escape(spec.pattern)
+        regex = regex.replace(re.escape("{code}"), f"(?:{codes})")
+        regex = regex.replace(re.escape("{tech}"), f"(?:{techs})")
+        if re.fullmatch(regex, base):
+            return (year, release)
+    return None

@@ -33,6 +33,12 @@ from prismpy.models.soil import SoilProfile, SoilLayer
 from prismpy.models.spatial import SpatialGrid
 from prismpy.provenance.tracker import DecisionType, ProvenanceTracker
 from prismpy.sources.climate._cancel import PipelineCancelled, raise_if_cancelled
+from prismpy.sources.crop_areas.spam_vintage import (
+    SpamVintageError,
+    VintageNotRegisteredError,
+    VintageRasterAbsentError,
+    identify_vintage,
+)
 from prismpy.translators._shared.dssat_sol_writer import write_dssat_sol
 # Sprint E.3 AC-E3-9 — cockpit override dispatch helper. The
 # climate / soil / management per-cell write sites in this
@@ -2055,21 +2061,43 @@ class CraftTranslator(CraftTranslatorBase):
         # Get GADM-filtered cells if available (for consistency with schema)
         filtered_cells = self._get_filtered_cells(grid)
 
-        # Determine mode based on config
-        use_raster = spam_path is not None and Path(spam_path).exists()
-
-        if use_raster:
-            # RASTER MODE: Extract from SPAM GeoTIFF
+        # Cropland-vintage honesty: a SELECTED SPAM mask that cannot be honored MUST
+        # fail loud — never silently degrade to a uniform mask (that would masquerade a
+        # "no cropland data" run as a real harvested-area-weighted one, the CRAFT-side
+        # analogue of PYTHIA's silent-whole-grid). Uniform mode stays legitimate ONLY when
+        # no SPAM raster was requested (spam_path is None).
+        if spam_path is not None:
+            spam_path = Path(spam_path)
+            if not spam_path.exists():
+                raise VintageRasterAbsentError(
+                    f"CRAFT SPAM crop mask was selected (spam_raster_path={spam_path}) but "
+                    f"the raster is not on disk — failing loud rather than silently shipping "
+                    f"a uniform mask under a masked-run label."
+                )
+            # ``spam_raster_path`` is a SPAM harvested-area raster BY CONTRACT (see the config
+            # field + its description). So a basename that is not a recognized, registered
+            # vintage — whether an unrelated file or a SPAM-named-but-unregistered one such as an
+            # unprovisioned 2020/V2r0 — is a wrong/unprovisioned file, not a custom cropland
+            # raster: fail loud rather than emit a dishonest label. (If this field is ever
+            # widened to accept a non-SPAM custom raster, revisit — degrade to an honest
+            # "custom mask, vintage unverified" label there, while still failing loud on a
+            # SPAM-named-but-unregistered basename.)
+            if identify_vintage(spam_path) is None:
+                raise VintageNotRegisteredError(
+                    f"CRAFT SPAM raster {spam_path.name!r} matches no registered cropland "
+                    f"vintage naming — cannot derive an honest label. A masked run must use a "
+                    f"provisioned vintage raster."
+                )
             logger.info(f"Crop mask mode: SPAM raster ({spam_path})")
             cell_percents = self._extract_crop_mask_from_spam(
                 filtered_cells, spam_path, cap_at_100, na_to_zero
             )
+            use_raster = True
         else:
-            # UNIFORM MODE: All cells get same percentage
-            if spam_path and not Path(spam_path).exists():
-                logger.warning(f"SPAM raster not found: {spam_path}, using uniform mode")
+            # UNIFORM MODE: no SPAM mask requested — the legitimate default.
             logger.info(f"Crop mask mode: uniform ({default_percent:.0%} coverage)")
             cell_percents = {cell.cell_id: default_percent for cell in filtered_cells}
+            use_raster = False
 
         with open(mask_path, 'w', newline='\r\n') as f:
             # Header (lowercase 'd' in CellId per CRAFT legacy format)
@@ -2127,10 +2155,14 @@ class CraftTranslator(CraftTranslatorBase):
         """
         try:
             import rasterio
-        except ImportError:
-            logger.error("rasterio not installed. Run: pip install rasterio")
-            logger.warning("Falling back to uniform mode")
-            return {}
+        except ImportError as exc:
+            # A SPAM mask was selected and its raster exists, but it cannot be read — fail
+            # loud rather than silently returning an empty (→ uniform) mask.
+            raise SpamVintageError(
+                "CRAFT SPAM crop mask was selected but rasterio is not installed, so the "
+                "harvested-area raster cannot be read — failing loud rather than silently "
+                "shipping a uniform mask. Install rasterio (pip install rasterio)."
+            ) from exc
 
         import pandas as pd
 
@@ -2150,6 +2182,18 @@ class CraftTranslator(CraftTranslatorBase):
             # Extract values at cell centroids
             coords = [(cell.lon, cell.lat) for cell in cells]
             values = list(src.sample(coords))
+
+            # A SELECTED SPAM mask must cover EVERY requested cell. A short sample would let the
+            # zip below truncate, leaving the trailing cells absent from cell_percents — they are
+            # then silently default-filled (100%) by the caller's .get(cell_id, default_percent).
+            # That is the per-cell form of the masquerade this fail-loud closes: raise here rather
+            # than ship a partially-defaulted mask.
+            if len(values) != len(cells):
+                raise SpamVintageError(
+                    f"CRAFT SPAM extraction sampled {len(values)} values for {len(cells)} "
+                    f"requested cells — a selected mask cannot be partially honored; failing "
+                    f"loud rather than shipping a partially-defaulted crop mask."
+                )
 
             na_count = 0
             over_100_count = 0
@@ -2199,6 +2243,20 @@ class CraftTranslator(CraftTranslatorBase):
             if estimated_area_count > 0:
                 logger.warning(f"  Cells using estimated area (not in schema): {estimated_area_count}")
 
+        # Coverage invariant: every requested cell must have a percent — else a selected mask
+        # would ship partially default-filled. This also catches an empty extraction HERE, before
+        # any mask.txt is written (never an all-default mask followed by a late min([]) crash).
+        # (The all-NA case is NOT partial — every cell is sampled and NA->0 via na_to_zero, which
+        # is correct; this guard is purely for coverage/truncation.)
+        requested_ids = {cell.cell_id for cell in cells}
+        if set(cell_percents) != requested_ids:
+            missing = len(requested_ids - set(cell_percents))
+            raise SpamVintageError(
+                f"CRAFT SPAM extraction produced a percent for {len(cell_percents)} of "
+                f"{len(requested_ids)} requested cells ({missing} missing) — a selected mask "
+                f"cannot be partially honored; failing loud rather than shipping a "
+                f"partially-defaulted crop mask."
+            )
         return cell_percents
 
     def _load_schema_areas(self) -> Optional[Dict[int, float]]:
@@ -3092,8 +3150,21 @@ class CraftTranslator(CraftTranslatorBase):
         if platform_config:
             spam_path = getattr(platform_config, 'spam_raster_path', None)
             if spam_path:
-                crop_mask_source = "SPAM 2020"
-                crop_mask_description = "Harvested area fractions from MapSPAM"
+                # Honest cropland-vintage label derived from the ACTUAL raster basename (never
+                # a separately-declared vintage that could disagree with the file). The
+                # crop-mask step already fail-louds on an unrecognized basename, so a set
+                # spam_path here resolves to a registered vintage.
+                vintage = identify_vintage(spam_path)
+                if vintage is None:
+                    raise VintageNotRegisteredError(
+                        f"CRAFT SPAM raster {Path(spam_path).name!r} matches no registered "
+                        f"cropland vintage — cannot emit an honest crop-mask label."
+                    )
+                year, release = vintage
+                crop_mask_source = f"SPAM {year} {release}"
+                crop_mask_description = (
+                    f"Harvested area fractions from MapSPAM {year} {release}"
+                )
 
         # Manifest derivation reads the RESOLVED runtime boundary
         # source so the package label tracks what actually landed
