@@ -152,6 +152,33 @@ def test_a_projection_readme_reports_how_the_run_plants(tmp_path, sowing, planti
     assert fields["Planting Window"] == planting
 
 
+def test_a_projection_readme_of_a_package_without_plant_mode_reports_its_window(tmp_path):
+    baseline = _baseline(tmp_path / "baseline", "Beans", "bns")
+    projection = tmp_path / "projection"
+    shutil.copytree(baseline, projection)
+    config_path = projection / "config" / "pythia_config.json"
+    run_config = json.loads(config_path.read_text())
+    # a package from before prismpy wrote plant_mode and pdate: its template plants automatically
+    for block in (run_config["default_setup"], *run_config["runs"]):
+        del block["plant_mode"], block["pdate"]
+    config_path.write_text(json.dumps(run_config))
+    fields = _summary(_rewrite(projection, "pythia", {"name": "Oromia", "country": "Ethiopia"},
+                               {"name": "Beans", "planting_doy": 74, "maturity_doy": 169}))
+    assert fields["Planting Window"] == _WINDOW
+
+
+def test_a_potato_readme_notes_the_planting_rule_for_any_spelling_of_the_crop(tmp_path):
+    reported = f"{_REPORTED_DATE}; DSSAT cannot plant pOtAtO automatically"
+    baseline = _baseline(tmp_path / "baseline", " pOtAtO ", "pot")
+    assert _summary((baseline / "README.md").read_text(encoding="utf-8"))[
+        "Planting Window"] == reported
+    projection = tmp_path / "projection"
+    shutil.copytree(baseline, projection)
+    fields = _summary(_rewrite(projection, "pythia", {"name": "Oromia", "country": "Ethiopia"},
+                               {"name": " pOtAtO ", "planting_doy": 74, "maturity_doy": 169}))
+    assert fields["Planting Window"] == reported
+
+
 def test_the_real_cowpea_projection_readme_invents_nothing(tmp_path):
     projection = tmp_path / "projection"
     shutil.copytree(_COWPEA_PROJECTION, projection)
