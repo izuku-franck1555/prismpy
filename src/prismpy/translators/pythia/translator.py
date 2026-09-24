@@ -1327,6 +1327,11 @@ class PythiaTranslator(PythiaTranslatorBase):
         """The dedicated-module profile for this run's crop, or None for CERES/CROPGRO crops."""
         return self._SPECIALIZED_MODULE_PROFILES.get(self.config.crop.name.lower().strip())
 
+    def _forced_harvest(self) -> Optional[Tuple[str, str]]:
+        """(HARVS letter, rendered 5-wide HDATE field) that forces this crop's harvest, or None
+        to harvest at model maturity. PENDING the harvest-mode decision: no crop forces yet."""
+        return None
+
     def _get_pythia_config(self):
         """Get PythiaConfig from platform_config, or None."""
         if self.config.platform_config and hasattr(self.config.platform_config, 'pythia'):
@@ -1657,8 +1662,8 @@ class PythiaTranslator(PythiaTranslatorBase):
         'peanut':    {'ppop': 15.0, 'plrs': 50.0, 'pldp': 5.0},
         # common bean — East-African smallholder (50 cm rows x 10 cm within-row = 200,000/ha)
         'beans':     {'ppop': 20.0, 'plrs': 50.0, 'pldp': 5.0},
-        # potato (SUBSTOR seed tubers) — 75 cm ridges x ~30 cm; plwt (kg dry matter/ha) and sprl
-        # (sprout length, cm) are the DSSAT SUBSTOR reference experiment WABE0301 values.
+        # potato seed tubers: plwt (kg dry matter/ha) + sprl (cm) are DSSAT's SUBSTOR reference
+        # experiment WABE0301 (Washington, USA); ppop/plrs/pldp are 75 cm ridges x ~30 cm.
         'potato':    {'ppop': 4.4, 'plrs': 75.0, 'pldp': 10.0, 'plwt': 444.0, 'sprl': 0.1},
     }
     # An unmapped crop falls back to the wizard-generic maize density (plants/m²) — never -99.
@@ -3104,6 +3109,14 @@ class PythiaTranslator(PythiaTranslatorBase):
              f'{{{{ "%5.1f"|format(sprl|default({pdef["sprl"]})) }}}}')
             if all(k in pdef for k in self._SEED_TUBER_FIELDS) else ("  -99", "  -99")
         )
+        forced_harvest = self._forced_harvest()
+        harvest_level, harvs = (1, forced_harvest[0]) if forced_harvest else (0, "M")
+        # DSSAT IPHAR reads this row as (I3,I5,3(1X,A5),2(1X,F5.0)): HDATE cols 4-8, HPC cols 28-32.
+        harvest_details = (
+            "*HARVEST DETAILS\n"
+            "@H HDATE  HSTG  HCOM HSIZE   HPC  HBPC HNAME\n"
+            f" 1 {forced_harvest[1]}   -99   -99   -99   100   -99\n\n"
+        ) if forced_harvest else ""
 
         content = f"""*EXP.DETAILS: {exp_id}{crop_code} {country} {region_name}, {crop_name} management scenarios
 
@@ -3117,7 +3130,7 @@ class PythiaTranslator(PythiaTranslatorBase):
 
 *TREATMENTS                        -------------FACTOR LEVELS------------
 @N R O C TNAME.................... CU FL SA IC MP MI MF MR MC MT ME MH SM
- 1 1 1 0 {tname} 1  1  0  1  1  0 {{% if fertilizers %}}1{{% else %}}0{{% endif %}}  1  0  0  {{% if eco2_override_active|default(false) %}}1{{% else %}}0{{% endif %}}  0  1
+ 1 1 1 0 {tname} 1  1  0  1  1  0 {{% if fertilizers %}}1{{% else %}}0{{% endif %}}  1  0  0  {{% if eco2_override_active|default(false) %}}1{{% else %}}0{{% endif %}}  {harvest_level}  1
 
 *CULTIVARS
 @C CR INGENO CNAME
@@ -3155,7 +3168,7 @@ class PythiaTranslator(PythiaTranslatorBase):
 @E ODATE EDAY  ERAD  EMAX  EMIN  ERAIN ECO2  EDEW  EWIND ENVNAME
  1 {{{{ sdate }}}} A   0 A   0 A   0 A   0 A   0 {{% if eco2_override_active|default(false) %}}R{{{{ "%4d"|format(co2_ppm) }}}}{{% else %}}A   0{{% endif %}} A   0 A   0 ENV modify
 
-*SIMULATION CONTROLS
+{harvest_details}*SIMULATION CONTROLS
 @N GENERAL     NYERS NREPS START SDATE RSEED SNAME.................... SMODEL
  1 GE          {{{{ nyers }}}}     1     S {{{{ sdate }}}}  2150 Rainfed                   {smodel}
 @N OPTIONS     WATER NITRO SYMBI PHOSP POTAS DISES  CHEM  TILL   CO2
@@ -3163,7 +3176,7 @@ class PythiaTranslator(PythiaTranslatorBase):
 @N METHODS     WTHER INCON LIGHT EVAPO INFIL PHOTO HYDRO NSWIT MESOM MESEV MESOL
  1 ME              M     M     E     R     S     L     R     1     P     S     2
 @N MANAGEMENT  PLANT IRRIG FERTI RESID HARVS
- 1 MA              {{{{ plant_mode | default("R") }}}} {{{{ irrig }}}}     D     D     M
+ 1 MA              {{{{ plant_mode | default("R") }}}} {{{{ irrig }}}}     D     D     {harvs}
 @N OUTPUTS     FNAME OVVEW SUMRY FROPT GROUT CAOUT WAOUT NIOUT MIOUT DIOUT VBOSE CHOUT OPOUT FMOPT
  1 OU              N     N     Y    14     N     N     N     N     N     N     0     N     N     C
 

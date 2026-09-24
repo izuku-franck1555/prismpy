@@ -17,6 +17,7 @@ import jinja2
 import pytest
 
 from prismpy.config.schema import (
+    AceaConfig,
     BoundaryConfig,
     BoundarySource,
     CropCalendarConfig,
@@ -48,7 +49,8 @@ _RUNNER_DATE_FIELDS = ("sdate", "fdate", "pfrst", "plast", "pdate", "hdate", "hl
 
 def _cfg(out: Path, *, crop: str = "Potato", short: str = "pot", management=None,
          targets=(Platform.PYTHIA,), planting_doy: int = 166, maturity_doy: int = 285,
-         start_year: int = 2015, pythia: PythiaConfig | None = None) -> ProjectConfig:
+         start_year: int = 2015, pythia: PythiaConfig | None = None,
+         acea_enabled: bool = True) -> ProjectConfig:
     return ProjectConfig(
         project=ProjectInfo(name="potato_substor", description="potato SUBSTOR prep package"),
         region=RegionConfig(
@@ -65,7 +67,8 @@ def _cfg(out: Path, *, crop: str = "Potato", short: str = "pot", management=None
         temporal=TemporalConfig(start_year=start_year, end_year=start_year, spinup_years=0),
         management=management,
         targets=list(targets),
-        platform_config=PlatformConfigGroup(pythia=pythia or PythiaConfig()),
+        platform_config=PlatformConfigGroup(pythia=pythia or PythiaConfig(),
+                                            acea=AceaConfig(enabled=acea_enabled)),
         output=OutputConfig(base_dir=str(out), structure="by_platform"),
     )
 
@@ -90,31 +93,31 @@ def _pythia_json(out: Path, **kw) -> dict:
     return json.loads(Path(t._generate_pythia_json(_data())).read_text())
 
 
-def _snx_template(t: PythiaTranslator) -> str:
-    return t._build_snx_content(
-        exp_id="NYPT8001", region_name="Nyandarua", country="Kenya",
-        crop_name=t.config.crop.name, cultivar=t._map_generic_to_cultivar(),
-        fertilizer=t._map_generic_to_fertilizer(), config=t._map_generic_to_pythia_config(),
-    )
+def _emitted_template(t: PythiaTranslator) -> str:
+    return Path(t._generate_snx_template(_data())).read_text()
 
 
 def _runner_render(template: str, context: dict) -> str:
-    """Render like the prism-runner's PYTHIA path: jinja2 with trim/lstrip blocks, ISO date
-    fields converted to DSSAT YYDDD (``%y%j``), every other context value passed through."""
-    ctx = {
-        k: (datetime.strptime(v, "%Y-%m-%d").strftime("%y%j")
-            if k in _RUNNER_DATE_FIELDS and isinstance(v, str) and "::" not in v else v)
-        for k, v in context.items()
-    }
+    """Render like the prism-runner's PYTHIA path: jinja2 with trim/lstrip blocks; an ISO date
+    field becomes DSSAT YYDDD (``%y%j``) and an int ``hdate`` a right-justified width-5 field;
+    every other value passes through, as the runner passes the keys it does not register."""
+    def runner_value(key, value):
+        if key in _RUNNER_DATE_FIELDS and isinstance(value, str) and "::" not in value:
+            return datetime.strptime(value, "%Y-%m-%d").strftime("%y%j")
+        if key == "hdate" and isinstance(value, int) and not isinstance(value, bool):
+            return f"{value:>5d}"
+        return value
+
     env = jinja2.Environment(trim_blocks=True, lstrip_blocks=True)
-    return env.from_string(template).render(ctx)
+    return env.from_string(template).render({k: runner_value(k, v) for k, v in context.items()})
 
 
 def _rendered_package_snx(out: Path, **kw) -> str:
-    """The real template composed with the real default_setup of the same package."""
+    """The package's emitted SNX template rendered with its emitted first-run context — the
+    runner's ``{**default_setup, **run}``."""
     t = _translator(out, **kw)
-    default_setup = json.loads(Path(t._generate_pythia_json(_data())).read_text())["default_setup"]
-    return _runner_render(_snx_template(t), default_setup)
+    pythia = json.loads(Path(t._generate_pythia_json(_data())).read_text())
+    return _runner_render(_emitted_template(t), {**pythia["default_setup"], **pythia["runs"][0]})
 
 
 def _header_and_row(snx: str, header_prefix: str) -> tuple:
@@ -142,7 +145,14 @@ def _dssat_planting_row(row: str) -> dict:
         "PDATE": row[3:8], "PPOP": float(row[14:20]), "PPOE": float(row[20:26]),
         "PLME": row[31], "PLDS": row[37], "PLRS": float(row[39:44]), "PLDP": float(row[51:56]),
         "PLWT": float(row[57:62]), "SPRL": float(row[81:86]),
+        "PLWT_FIELD": row[56:62], "SPRL_FIELD": row[80:86],
     }
+
+
+def _dssat_treatment_mh(snx: str) -> int:
+    """The ``*TREATMENTS`` harvest level MH as DSSAT reads it (ipexp FORMAT
+    ``(I3,I1,2(1X,I1),1X,A25,14I3)``: MH is columns 68-70)."""
+    return int(_row_after(snx, "@N R O C TNAME")[67:70])
 
 
 def _cul_column_1(cul: Path) -> dict:
@@ -168,7 +178,9 @@ def test_potato_uses_the_substor_module_with_no_override(tmp_path):
 def test_rendered_potato_snx_runs_substor_with_the_desiree_cultivar(tmp_path):
     snx = _rendered_package_snx(tmp_path)
     assert _row_after(snx, "@N GENERAL").split()[-1] == "PTSUB"
-    assert _row_after(snx, "@C CR INGENO CNAME").split() == ["1", "PT", "IB0008", "DESIREE"]
+    level, crop_code, ingeno, cname = _row_after(snx, "@C CR INGENO CNAME").split()
+    assert (level, crop_code, ingeno) == ("1", "PT", "IB0008")
+    assert cname.startswith("DESIREE")
 
 
 def test_potato_is_not_a_nitrogen_fixing_legume_in_the_rendered_options(tmp_path):
@@ -184,9 +196,13 @@ def test_minimal_config_potato_emits_the_substor_cultivar(tmp_path):
 
 
 def test_managed_potato_emits_the_substor_cultivar(tmp_path):
-    ds = _pythia_json(tmp_path, management=ManagementConfig(planting_density=44000.0))
+    management = ManagementConfig(planting_density=44000.0)
+    ds = _pythia_json(tmp_path, management=management)
     assert (ds["default_setup"]["ingeno"], ds["default_setup"]["cname"]) == ("IB0008", "DESIREE")
     assert {r["ingeno"] for r in ds["runs"]} == {"IB0008"}
+    maturity_class = _translator(tmp_path, management=management)._map_generic_to_cultivar()[
+        "maturity_class"]
+    assert maturity_class not in {"early", "medium", "late"}
 
 
 _CROPS = {
@@ -242,12 +258,15 @@ def test_cultivar_raster_has_no_silent_maize_fallback(tmp_path, monkeypatch):
         t._generate_management_rasters({}, _build_grid_2x3())
 
 
-def test_manifest_records_the_emitted_cultivar(tmp_path):
+def test_manifest_and_readme_record_the_emitted_cultivar(tmp_path):
     t = _translator(tmp_path)
     data = _data()
     ingeno = json.loads(Path(t._generate_pythia_json(data)).read_text())["default_setup"]["ingeno"]
     manifest = json.loads(Path(t._generate_manifest(data)).read_text())
     assert manifest["crops"][0]["cultivar_id"] == ingeno == "IB0008"
+    readme = Path(t._generate_readme(data)).read_text()
+    assert "| Cultivar Code | IB0008 |" in readme
+    assert "| Cultivar Name | DESIREE |" in readme
 
 
 def test_desiree_is_a_real_column_1_cultivar_of_the_pinned_ptsub048(tmp_path):
@@ -267,13 +286,20 @@ def test_rendered_potato_planting_row_carries_the_seed_tuber_values(tmp_path, ma
     row = _dssat_planting_row(_row_after(_rendered_package_snx(tmp_path, management=management),
                                          "@P PDATE"))
     assert (row["PLWT"], row["SPRL"]) == (444.0, 0.1)
+    assert (row["PLWT_FIELD"], row["SPRL_FIELD"]) == ("   444", "   0.1")
     assert (row["PPOP"], row["PPOE"], row["PLME"], row["PLRS"], row["PLDP"]) == (
         4.4, 4.4, "S", 75.0, 10.0)
 
 
+def test_an_explicit_potato_density_beats_the_default(tmp_path):
+    snx = _rendered_package_snx(tmp_path, management=ManagementConfig(planting_density=30000.0))
+    row = _dssat_planting_row(_row_after(snx, "@P PDATE"))
+    assert (row["PPOP"], row["PPOE"], row["PLWT"], row["SPRL"]) == (3.0, 3.0, 444.0, 0.1)
+
+
 def test_potato_planting_fallback_is_never_the_dssat_fatal_minus_99(tmp_path):
-    row = _dssat_planting_row(_row_after(_runner_render(_snx_template(_translator(tmp_path)), {}),
-                                         "@P PDATE"))
+    row = _dssat_planting_row(_row_after(_runner_render(_emitted_template(_translator(tmp_path)),
+                                                        {}), "@P PDATE"))
     assert (row["PLWT"], row["SPRL"]) == (444.0, 0.1)
 
 
@@ -287,14 +313,26 @@ def test_other_crops_keep_no_seed_tuber_material(tmp_path, crop):
     assert (row["PLWT"], row["SPRL"]) == (-99.0, -99.0)
 
 
+@pytest.mark.parametrize("sowing,plant", [("opportunistic", "A"), ("fixed_date", "R")])
+@pytest.mark.parametrize("crop", sorted(set(_CROPS) - {"Potato"}))
+def test_other_crops_keep_their_planting_and_maturity_harvest(tmp_path, crop, sowing, plant):
+    short = _CROPS[crop][0]
+    snx = _rendered_package_snx(tmp_path, crop=crop, short=short, management=ManagementConfig(
+        planting_density=50000.0, sowing_mode=sowing))
+    management = _named_columns(snx, "@N MANAGEMENT")
+    assert (management["PLANT"], management["HARVS"]) == (plant, "M")
+    assert _dssat_treatment_mh(snx) == 0
+    assert "*HARVEST DETAILS" not in snx
+
+
 # ── crop x platform admission, before any translator is built ─────────────────
 
-def _pipeline(tmp_path, targets, monkeypatch):
+def _pipeline(tmp_path, targets, monkeypatch, **cfg):
     from prismpy.pipeline.executor import TranslationPipeline
     from prismpy.provenance.tracker import ProvenanceTracker
 
     pipeline = TranslationPipeline(
-        _cfg(tmp_path, targets=targets),
+        _cfg(tmp_path, targets=targets, **cfg),
         provenance=ProvenanceTracker(enabled=False, project_name="potato_admission"),
     )
     calls = []
@@ -322,15 +360,28 @@ def test_potato_on_an_unsupported_platform_is_refused_before_translation(
     with pytest.raises(UnsupportedCropError, match=platform.value):
         pipeline._execute_translate(_data())
     assert calls == []
+    assert not (tmp_path / platform.value).exists()
 
 
-def test_mixed_targets_are_refused_atomically_with_no_partial_output(tmp_path, monkeypatch):
+@pytest.mark.parametrize("targets", [[Platform.PYTHIA, Platform.ACEA],
+                                     [Platform.ACEA, Platform.PYTHIA]],
+                         ids=["pythia-first", "acea-first"])
+def test_mixed_targets_are_refused_atomically_with_no_partial_output(
+        tmp_path, monkeypatch, targets):
     from prismpy.packaging.manifest import UnsupportedCropError
 
-    pipeline, calls = _pipeline(tmp_path, [Platform.PYTHIA, Platform.ACEA], monkeypatch)
+    pipeline, calls = _pipeline(tmp_path, targets, monkeypatch)
     with pytest.raises(UnsupportedCropError, match="acea"):
         pipeline._execute_translate(_data())
     assert calls == []
+    assert not (tmp_path / "pythia").exists()
+
+
+def test_a_disabled_unsupported_target_does_not_block_potato(tmp_path, monkeypatch):
+    pipeline, calls = _pipeline(tmp_path, [Platform.PYTHIA, Platform.ACEA], monkeypatch,
+                                acea_enabled=False)
+    pipeline._execute_translate(_data())
+    assert calls == [Platform.PYTHIA]
 
 
 def test_crop_support_predicate_normalizes_platform_and_crop_spelling():
