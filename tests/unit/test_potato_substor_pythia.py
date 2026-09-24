@@ -178,9 +178,17 @@ def test_potato_uses_the_substor_module_with_no_override(tmp_path):
 def test_rendered_potato_snx_runs_substor_with_the_desiree_cultivar(tmp_path):
     snx = _rendered_package_snx(tmp_path)
     assert _row_after(snx, "@N GENERAL").split()[-1] == "PTSUB"
-    level, crop_code, ingeno, cname = _row_after(snx, "@C CR INGENO CNAME").split()
-    assert (level, crop_code, ingeno) == ("1", "PT", "IB0008")
-    assert cname.startswith("DESIREE")
+    # the first run labels its CNAME with the scenario; INGENO selects the coefficients
+    assert _row_after(snx, "@C CR INGENO CNAME").split() == [
+        "1", "PT", "IB0008", "DESIREE_BASELINE"]
+
+
+def test_a_padded_potato_name_prepares_the_same_substor_package(tmp_path):
+    snx = _rendered_package_snx(tmp_path, crop=" Potato ")
+    assert _row_after(snx, "@N GENERAL").split()[-1] == "PTSUB"
+    assert _row_after(snx, "@C CR INGENO CNAME").split()[1:3] == ["PT", "IB0008"]
+    row = _dssat_planting_row(_row_after(snx, "@P PDATE"))
+    assert (row["PLWT"], row["SPRL"], row["PPOP"]) == (444.0, 0.1, 4.4)
 
 
 def test_potato_is_not_a_nitrogen_fixing_legume_in_the_rendered_options(tmp_path):
@@ -192,7 +200,8 @@ def test_potato_is_not_a_nitrogen_fixing_legume_in_the_rendered_options(tmp_path
 def test_minimal_config_potato_emits_the_substor_cultivar(tmp_path):
     ds = _pythia_json(tmp_path)
     assert (ds["default_setup"]["ingeno"], ds["default_setup"]["cname"]) == ("IB0008", "DESIREE")
-    assert {r["ingeno"] for r in ds["runs"]} == {"IB0008"}
+    assert {(r["ingeno"], r["cname"]) for r in ds["runs"]} == {
+        ("IB0008", "DESIREE_BASELINE"), ("IB0008", "DESIREE_FERTILIZED")}
 
 
 def test_managed_potato_emits_the_substor_cultivar(tmp_path):

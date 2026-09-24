@@ -1323,9 +1323,13 @@ class PythiaTranslator(PythiaTranslatorBase):
         "potato": ("PTSUB", "IB0008", "DESIREE"),
     }
 
+    def _crop_key(self) -> str:
+        """The crop name as every per-crop lookup keys it (the crop-support predicate's rule)."""
+        return self.config.crop.name.strip().casefold()
+
     def _specialized_module_profile(self) -> Optional[Tuple[str, str, str]]:
         """The dedicated-module profile for this run's crop, or None for CERES/CROPGRO crops."""
-        return self._SPECIALIZED_MODULE_PROFILES.get(self.config.crop.name.lower().strip())
+        return self._SPECIALIZED_MODULE_PROFILES.get(self._crop_key())
 
     def _forced_harvest(self) -> Optional[Tuple[str, str]]:
         """(HARVS letter, rendered 5-wide HDATE field) that forces this crop's harvest, or None
@@ -1358,7 +1362,7 @@ class PythiaTranslator(PythiaTranslatorBase):
             return smodel
 
         # Priority 2: a dedicated DSSAT module for the crop
-        crop_name = self.config.crop.name.lower().strip()
+        crop_name = self._crop_key()
         profile = self._specialized_module_profile()
         if profile is not None:
             logger.info(f"Using the dedicated DSSAT module for '{crop_name}': SMODEL={profile[0]}")
@@ -1401,7 +1405,7 @@ class PythiaTranslator(PythiaTranslatorBase):
             )
 
         # Priority 2: auto-detect from crop name
-        crop_name = self.config.crop.name.lower().strip()
+        crop_name = self._crop_key()
         if crop_name in self._LEGUME_CROPS:
             return "Y"
         return "N"
@@ -1441,7 +1445,7 @@ class PythiaTranslator(PythiaTranslatorBase):
             }
 
         # Priority 2: CROPGRO legume default cultivar (V2-19 fix for TP-06)
-        crop_name = self.config.crop.name.lower().strip()
+        crop_name = self._crop_key()
         if crop_name in self._LEGUME_DEFAULT_CULTIVARS:
             ingeno, cname = self._LEGUME_DEFAULT_CULTIVARS[crop_name]
             logger.info(
@@ -1519,7 +1523,7 @@ class PythiaTranslator(PythiaTranslatorBase):
         )
 
         # Warn if using CERES cultivar codes for a non-CERES crop
-        crop_name = self.config.crop.name.lower().strip()
+        crop_name = self._crop_key()
         if crop_name in self._LEGUME_CROPS:
             logger.warning(
                 f"Crop '{crop_name}' is a legume but no dssat_cultivar_ingeno "
@@ -1650,7 +1654,7 @@ class PythiaTranslator(PythiaTranslatorBase):
     # Per-crop DSSAT @P planting defaults (West African smallholder rainfed) — the fallback used
     # ONLY when a real planting value is not recorded (a value the wizard supplies is threaded
     # instead). ppop = plants/m² (PPOP is DSSAT-native plants/m²); plrs/pldp = cm. Sourced from a
-    # crop-modeling review of published West-African DSSAT calibration; keyed on crop.name.lower().
+    # crop-modeling review of published West-African DSSAT calibration; keyed on _crop_key().
     PLANTING_DEFAULTS = {
         'maize':     {'ppop': 5.3, 'plrs': 75.0, 'pldp': 5.0},
         'corn':      {'ppop': 5.3, 'plrs': 75.0, 'pldp': 5.0},
@@ -1710,13 +1714,11 @@ class PythiaTranslator(PythiaTranslatorBase):
 
     def _get_dssat_crop_code(self) -> str:
         """Get 2-character DSSAT crop code for experiment filenames."""
-        crop_lower = self.config.crop.name.lower()
-        return self.DSSAT_CROP_CODES.get(crop_lower, self.config.crop.name_short[:2].upper())
+        return self.DSSAT_CROP_CODES.get(self._crop_key(), self.config.crop.name_short[:2].upper())
 
     def _crop_planting_default(self) -> Dict[str, float]:
         """The per-crop @P fallback for this run's crop (or the generic fallback)."""
-        return self.PLANTING_DEFAULTS.get(
-            self.config.crop.name.lower(), self.PLANTING_DEFAULT_FALLBACK)
+        return self.PLANTING_DEFAULTS.get(self._crop_key(), self.PLANTING_DEFAULT_FALLBACK)
 
     def _resolve_planting_params(self) -> Dict[str, float]:
         """The DSSAT @P planting values, converted ONCE — the single home of the plants/ha ->
@@ -2302,7 +2304,7 @@ class PythiaTranslator(PythiaTranslatorBase):
             return pythia_config.spam_crop_code
 
         # Auto-detect from crop name
-        crop_name = self.config.crop.name.lower()
+        crop_name = self._crop_key()
 
         # Mapping of crop names to SPAM codes
         crop_map = {
