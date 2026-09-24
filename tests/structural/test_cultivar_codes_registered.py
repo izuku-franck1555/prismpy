@@ -97,9 +97,8 @@ EXPECTED_LITERAL_PAIRS: FrozenSet[Tuple[str, str]] = frozenset({
     ("translators/pythia/translator.py", "990002"),  # MIDDLE VARIETY (CERES-Maize / CERES-Millet)
     ("translators/pythia/translator.py", "990003"),  # SOUTH VARIETY
     ("translators/pythia/translator.py", "IB0008"),  # potato DESIREE (SUBSTOR default)
-    # README generator: none. The CRAFT README reads the cultivar from the
-    # package's management/cultivar_data.txt and the PYTHIA README from the
-    # package's config/pythia_config.json, so it carries no cultivar literal.
+    # README generator: none. Its CRAFT and PYTHIA READMEs read the cultivar from the package's
+    # own management/cultivar_data.txt and config/pythia_config.json.
 })
 
 
