@@ -4,7 +4,8 @@ The README summary block (cultivar, experiment template, weather-station prefix,
 fertilizer, population, row spacing, water regime) is read from the package's
 ``config/pythia_config.json`` — the inputs the runner actually uses — for baseline packages and for
 the climate-projection packages cloned from them. A value the package does not record reads
-"not recorded"; the README never falls back to fabricated defaults.
+"not recorded"; the README never falls back to fabricated defaults. The planting row follows how
+the run plants: a reported-date run names its planting day, an automatic one its sowing window.
 """
 from __future__ import annotations
 
@@ -58,9 +59,10 @@ def _summary(readme: str) -> dict:
     return fields
 
 
-def _baseline(out: Path, crop: str, short: str) -> Path:
-    """A baseline PYTHIA package emitted by the real translator, with run values that differ
-    from every fabricated default (Oromia, Ethiopia · 50 cm rows · 30 kg N · irrigated)."""
+def _baseline(out: Path, crop: str, short: str, sowing: str = "opportunistic") -> Path:
+    """A baseline PYTHIA package (run config, template, README) emitted by the real translator,
+    with run values that differ from every fabricated default (Oromia, Ethiopia · 50 cm rows ·
+    30 kg N · irrigated)."""
     cfg = ProjectConfig(
         project=ProjectInfo(name=f"{crop}_oromia", description="projection README values"),
         region=RegionConfig(
@@ -72,7 +74,8 @@ def _baseline(out: Path, crop: str, short: str) -> Path:
                         calendar=CropCalendarConfig(planting_doy=74, maturity_doy=169)),
         temporal=TemporalConfig(start_year=2015, end_year=2015, spinup_years=0),
         management=ManagementConfig(planting_density=200000.0, row_spacing_cm=50.0,
-                                    irrigation=True, fertilizer_n_total=30.0),
+                                    irrigation=True, fertilizer_n_total=30.0,
+                                    sowing_mode=sowing),
         targets=[Platform.PYTHIA],
         output=OutputConfig(base_dir=str(out), structure="by_platform"),
     )
@@ -83,6 +86,7 @@ def _baseline(out: Path, crop: str, short: str) -> Path:
                        grid=_build_grid_2x3(), soil=_build_profiles())
     translator._generate_pythia_json(data)
     translator._generate_snx_template(data)
+    translator._generate_readme(data)
     return out
 
 
@@ -96,8 +100,15 @@ def _rewrite(projection: Path, platform: str, region: dict, crop: dict) -> str:
     return (projection / "README.md").read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("crop,short", [("Beans", "bns"), ("Potato", "pot")])
-def test_projection_readme_reports_the_packages_own_run_config(tmp_path, crop, short):
+_WINDOW = "2015-03-15 to 2015-04-14"      # DOY 74 plus the 30-day sowing window
+_REPORTED_DATE = "planted on DOY 74 (reported date)"
+
+
+@pytest.mark.parametrize("crop,short,planting", [
+    ("Beans", "bns", _WINDOW),
+    ("Potato", "pot", f"{_REPORTED_DATE}; DSSAT cannot plant Potato automatically"),
+])
+def test_projection_readme_reports_the_packages_own_run_config(tmp_path, crop, short, planting):
     baseline = _baseline(tmp_path / "baseline", crop, short)
     projection = tmp_path / "projection"
     shutil.copytree(baseline, projection)
@@ -113,13 +124,32 @@ def test_projection_readme_reports_the_packages_own_run_config(tmp_path, crop, s
         "Experiment template": setup["template"],
         "Cultivar Code": setup["ingeno"],
         "Cultivar Name": setup["cname"],
-        "Planting Window": f"{setup['pfrst']} to {setup['plast']}",
+        "Planting Window": planting,
         "Fertilizer N": f"{fertilized['fen_tot']} kg/ha",
         "Plant Population": f"{setup['ppop']} plants/m²",
         "Row Spacing": f"{setup['plrs']} cm",
         "Irrigation": "Enabled",
     }
     assert not {k for k, v in fields.items() if _FABRICATED[k] == v}
+
+
+@pytest.mark.parametrize("sowing,planting", [("fixed_date", _REPORTED_DATE),
+                                             ("opportunistic", _WINDOW)])
+def test_a_baseline_readme_reports_how_the_run_plants(tmp_path, sowing, planting):
+    baseline = _baseline(tmp_path / "baseline", "Maize", "mze", sowing=sowing)
+    assert _summary((baseline / "README.md").read_text(encoding="utf-8"))[
+        "Planting Window"] == planting
+
+
+@pytest.mark.parametrize("sowing,planting", [("fixed_date", _REPORTED_DATE),
+                                             ("opportunistic", _WINDOW)])
+def test_a_projection_readme_reports_how_the_run_plants(tmp_path, sowing, planting):
+    baseline = _baseline(tmp_path / "baseline", "Beans", "bns", sowing=sowing)
+    projection = tmp_path / "projection"
+    shutil.copytree(baseline, projection)
+    fields = _summary(_rewrite(projection, "pythia", {"name": "Oromia", "country": "Ethiopia"},
+                               {"name": "Beans", "planting_doy": 74, "maturity_doy": 169}))
+    assert fields["Planting Window"] == planting
 
 
 def test_the_real_cowpea_projection_readme_invents_nothing(tmp_path):

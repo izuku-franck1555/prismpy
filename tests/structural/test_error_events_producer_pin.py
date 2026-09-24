@@ -42,9 +42,9 @@ _EXECUTOR = _PRISMPY_ROOT / "src" / "prismpy" / "pipeline" / "executor.py"
 F_AG_GATE_SITES: Tuple[Tuple[str, int, str], ...] = (
     ("src/prismpy/translators/acea/translator.py", 519, "ClimateDownloadError"),
     # These sites shift as code is inserted above them; re-point them after auditing each raise.
-    ("src/prismpy/translators/pythia/translator.py", 1024, "ValueError"),
-    ("src/prismpy/translators/pythia/translator.py", 1928, "ValueError"),
-    ("src/prismpy/translators/pythia/translator.py", 2728, "BuildEghrSubstrateError"),
+    ("src/prismpy/translators/pythia/translator.py", 1041, "ValueError"),
+    ("src/prismpy/translators/pythia/translator.py", 1997, "ValueError"),
+    ("src/prismpy/translators/pythia/translator.py", 2813, "BuildEghrSubstrateError"),
     ("src/prismpy/translators/sarra_py/translator.py", 711, "ValueError"),
     ("src/prismpy/translators/sarra_py/translator.py", 1675, "ValueError"),
     # 1565 -> 1570 (translate-time data.grid guard) -> 1577 (§7 trials-copy wiring).

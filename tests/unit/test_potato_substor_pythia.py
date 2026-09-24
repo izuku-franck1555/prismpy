@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import jinja2
@@ -33,6 +33,8 @@ from prismpy.config.schema import (
     RegionConfig,
     TemporalConfig,
 )
+from prismpy.models.climate import ClimateRecord, ClimateTimeSeries
+from prismpy.models.crop import CropCalendar
 from prismpy.models.region import BoundingBox, Region
 from prismpy.translators.base import UnifiedData
 from prismpy.translators.pythia.translator import PythiaTranslator
@@ -49,7 +51,7 @@ _RUNNER_DATE_FIELDS = ("sdate", "fdate", "pfrst", "plast", "pdate", "hdate", "hl
 
 def _cfg(out: Path, *, crop: str = "Potato", short: str = "pot", management=None,
          targets=(Platform.PYTHIA,), planting_doy: int = 166, maturity_doy: int = 285,
-         start_year: int = 2015, pythia: PythiaConfig | None = None,
+         start_year: int = 2015, end_year: int | None = None, pythia: PythiaConfig | None = None,
          acea_enabled: bool = True) -> ProjectConfig:
     return ProjectConfig(
         project=ProjectInfo(name="potato_substor", description="potato SUBSTOR prep package"),
@@ -64,7 +66,9 @@ def _cfg(out: Path, *, crop: str = "Potato", short: str = "pot", management=None
             name=crop, name_short=short,
             calendar=CropCalendarConfig(planting_doy=planting_doy, maturity_doy=maturity_doy),
         ),
-        temporal=TemporalConfig(start_year=start_year, end_year=start_year, spinup_years=0),
+        temporal=TemporalConfig(start_year=start_year,
+                                end_year=start_year if end_year is None else end_year,
+                                spinup_years=0),
         management=management,
         targets=list(targets),
         platform_config=PlatformConfigGroup(pythia=pythia or PythiaConfig(),
@@ -99,13 +103,11 @@ def _emitted_template(t: PythiaTranslator) -> str:
 
 def _runner_render(template: str, context: dict) -> str:
     """Render like the prism-runner's PYTHIA path: jinja2 with trim/lstrip blocks; an ISO date
-    field becomes DSSAT YYDDD (``%y%j``) and an int ``hdate`` a right-justified width-5 field;
-    every other value passes through, as the runner passes the keys it does not register."""
+    field becomes DSSAT YYDDD (``%y%j``); every other value passes through, as the runner passes
+    the keys it does not register."""
     def runner_value(key, value):
         if key in _RUNNER_DATE_FIELDS and isinstance(value, str) and "::" not in value:
             return datetime.strptime(value, "%Y-%m-%d").strftime("%y%j")
-        if key == "hdate" and isinstance(value, int) and not isinstance(value, bool):
-            return f"{value:>5d}"
         return value
 
     env = jinja2.Environment(trim_blocks=True, lstrip_blocks=True)
@@ -167,6 +169,105 @@ def _cul_column_1(cul: Path) -> dict:
     return rows
 
 
+def _dssat_harvest_row(row: str) -> dict:
+    """Read a ``*HARVEST DETAILS`` data row with DSSAT's own layout (IPHAR FORMAT
+    ``(I3,I5,3(1X,A5),2(1X,F5.0))``: HDATE is columns 4-8, HPC columns 28-32)."""
+    return {"LEVEL": int(row[0:3]), "HDATE": row[3:8], "HSTG": row[9:14].strip(),
+            "HCOM": row[15:20].strip(), "HSIZE": row[21:26].strip(), "HPC": float(row[27:32]),
+            "HBPC": float(row[33:38])}
+
+
+# The prism-runner's UC3 guards, which read the RAW template before any render; verbatim from
+# prism-runner 73d9570 src/prism_runner/adapters/pythia.py:191-226 (docstrings dropped).
+def _planting_row_consumes_pdate(template_src: str) -> bool:
+    lines = template_src.splitlines()
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("@P") and "PDATE" in line:
+            # The data row is the next non-blank line.
+            for data_line in lines[i + 1:]:
+                if data_line.strip():
+                    return "{{" in data_line and "pdate" in data_line
+            return False
+    # No *PLANTING DETAILS @P header at all → cannot consume pdate.
+    return False
+
+
+def _management_row_consumes_plant_mode(template_src: str) -> bool:
+    lines = template_src.splitlines()
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("@N MANAGEMENT"):
+            for data_line in lines[i + 1:]:
+                if data_line.strip():
+                    return "{{" in data_line and "plant_mode" in data_line
+            return False
+    return False
+
+
+def _site_data(cfg: ProjectConfig, missing=()) -> UnifiedData:
+    """A 2x3 grid whose sites all carry a crop calendar and a year of primary climate, except the
+    ``missing`` sites, which translate() must fetch from NASA POWER."""
+    grid = _build_grid_2x3()
+    calendar = cfg.crop.calendar
+    first = date(cfg.temporal.start_year, 1, 1)
+    climate = {
+        cell.cell_id: ClimateTimeSeries(
+            location_id=cell.cell_id, lat=cell.lat, lon=cell.lon, source="station",
+            records=[ClimateRecord(date=first + timedelta(days=d), tmax=24.0, tmin=10.0,
+                                   precip=2.0, srad=18.0) for d in range(365)])
+        for cell in grid.cells if cell.cell_id not in missing
+    }
+    return UnifiedData(
+        region=_data().region, grid=grid, soil=_build_profiles(), climate=climate,
+        crop_calendar={cell.cell_id: CropCalendar(location_id=cell.cell_id,
+                                                  planting_doy=calendar.planting_doy,
+                                                  maturity_doy=calendar.maturity_doy)
+                       for cell in grid.cells},
+    )
+
+
+def _translate(out: Path, missing=(), **kw):
+    """The real ``translate()`` on ``_site_data``; weather fetches carry no delay."""
+    kw.setdefault("pythia", PythiaConfig(weather_download_delay=0.0))
+    cfg = _cfg(out, **kw)
+    return PythiaTranslator(config=cfg, output_dir=str(out)).translate(_site_data(cfg, missing))
+
+
+def _nasa_fetches(monkeypatch) -> list:
+    """Record every NASA POWER request instead of sending it."""
+    from prismpy.sources.climate.nasa_power import NASAPowerSource
+
+    fetches = []
+
+    def fetch(self, **request):
+        fetches.append(request)
+        raise ConnectionError("no NASA POWER request is expected")
+
+    monkeypatch.setattr(NASAPowerSource, "retrieve", fetch)
+    return fetches
+
+
+def _package_provenance(out: Path, **kw) -> dict:
+    """The ``provenance.json`` a user downloads with the package, built by the executor's own
+    TRANSLATE (with the ``output_pythia`` artifact active) and PACKAGE stages."""
+    from prismpy.pipeline.executor import TranslationPipeline
+    from prismpy.provenance.tracker import ProvenanceTracker
+
+    cfg = _cfg(out, pythia=PythiaConfig(weather_download_delay=0.0), **kw)
+    pipeline = TranslationPipeline(cfg, provenance=ProvenanceTracker(
+        enabled=True, output_dir=str(out / "provenance"), project_name="potato_substor"))
+    data = _site_data(cfg)
+    results = pipeline._execute_translate(data)
+    assert results["pythia"].success, results["pythia"].errors
+    pipeline._execute_package(data, results)
+    return json.loads((out / "pythia" / "provenance.json").read_text())
+
+
+def _translate_decisions(provenance: dict) -> list:
+    return [decision
+            for transformation in provenance["artifacts"]["output_pythia"]["transformations"]
+            for decision in transformation["decisions"]]
+
+
 # ── the SUBSTOR simulation module ─────────────────────────────────────────────
 
 def test_potato_uses_the_substor_module_with_no_override(tmp_path):
@@ -226,6 +327,14 @@ _CROPS = {
     "Potato": ("pot", "PTSUB", "IB0008"),
 }
 
+# The minimal config (no management block) and a managed config in each sowing mode, built fresh
+# per test so that a write-back to the shared config cannot leak between tests.
+_VARIANTS = {
+    "minimal-config": lambda: None,
+    "opportunistic": lambda: ManagementConfig(planting_density=50000.0, sowing_mode="opportunistic"),
+    "fixed_date": lambda: ManagementConfig(planting_density=50000.0, sowing_mode="fixed_date"),
+}
+
 
 @pytest.mark.parametrize("management", [None, ManagementConfig(planting_density=50000.0)],
                          ids=["minimal-config", "managed"])
@@ -278,6 +387,20 @@ def test_manifest_and_readme_record_the_emitted_cultivar(tmp_path):
     assert "| Cultivar Name | DESIREE |" in readme
 
 
+def test_package_time_surfaces_reuse_the_translate_time_cultivar(tmp_path, monkeypatch):
+    t = _translator(tmp_path)
+    data = _data()
+    t._generate_pythia_json(data)
+    monkeypatch.setattr(t, "_map_generic_to_cultivar", lambda: {
+        "ingeno": "XXXXXX", "cname": "SENTINEL", "maturity_class": "module_default",
+        "total_gdd": None})
+    manifest = Path(t._generate_manifest(data)).read_text()
+    readme = Path(t._generate_readme(data)).read_text()
+    assert json.loads(manifest)["crops"][0]["cultivar_id"] == "IB0008"
+    assert "| Cultivar Code | IB0008 |" in readme
+    assert "XXXXXX" not in manifest + readme
+
+
 def test_desiree_is_a_real_column_1_cultivar_of_the_pinned_ptsub048(tmp_path):
     assert hashlib.sha256(_PTSUB048_CUL.read_bytes()).hexdigest() == _PTSUB048_SHA256
     resolved = _translator(tmp_path)._map_generic_to_cultivar()
@@ -312,6 +435,22 @@ def test_potato_planting_fallback_is_never_the_dssat_fatal_minus_99(tmp_path):
     assert (row["PLWT"], row["SPRL"]) == (444.0, 0.1)
 
 
+def test_potato_seed_tuber_values_are_literals_of_the_raw_template(tmp_path):
+    raw_row = _row_after(_emitted_template(_translator(tmp_path)), "@P PDATE")
+    assert raw_row.endswith("   444   -99   -99   -99   0.1                        auto")
+
+
+@pytest.mark.parametrize("variant", sorted(_VARIANTS))
+@pytest.mark.parametrize("crop", sorted(_CROPS))
+def test_fixed_dssat_values_have_no_second_source_in_the_run_config(tmp_path, crop, variant):
+    t = _translator(tmp_path, crop=crop, short=_CROPS[crop][0], management=_VARIANTS[variant]())
+    pythia = json.loads(Path(t._generate_pythia_json(_data())).read_text())
+    raw = _emitted_template(t)
+    assert [token for token in ("plwt", "sprl", "hdate") if token in raw] == []
+    for block in (pythia["default_setup"], *pythia["runs"]):
+        assert not {"plwt", "sprl", "hdate"} & set(block)
+
+
 @pytest.mark.parametrize("crop", sorted(set(_CROPS) - {"Potato"}))
 def test_other_crops_keep_no_seed_tuber_material(tmp_path, crop):
     short = _CROPS[crop][0]
@@ -332,6 +471,150 @@ def test_other_crops_keep_their_planting_and_maturity_harvest(tmp_path, crop, so
     assert (management["PLANT"], management["HARVS"]) == (plant, "M")
     assert _dssat_treatment_mh(snx) == 0
     assert "*HARVEST DETAILS" not in snx
+
+
+@pytest.mark.parametrize("variant", sorted(_VARIANTS))
+@pytest.mark.parametrize("crop", sorted(_CROPS))
+def test_every_raw_template_keeps_the_runner_uc3_placeholders(tmp_path, crop, variant):
+    raw = _emitted_template(_translator(tmp_path, crop=crop, short=_CROPS[crop][0],
+                                        management=_VARIANTS[variant]()))
+    assert _planting_row_consumes_pdate(raw)
+    assert _management_row_consumes_plant_mode(raw)
+
+
+# ── potato plants on its reported date: DSSAT cannot plant it automatically ───
+
+@pytest.mark.parametrize("variant", ["minimal-config", "opportunistic", "fixed_date", "fixed"])
+def test_potato_plants_on_the_reported_date_in_every_run(tmp_path, variant):
+    management = (None if variant == "minimal-config"
+                  else ManagementConfig(planting_density=44000.0, sowing_mode=variant))
+    requested = management and management.sowing_mode
+    t = _translator(tmp_path, management=management)
+    pythia = json.loads(Path(t._generate_pythia_json(_data())).read_text())
+    template = _emitted_template(t)
+
+    assert pythia["default_setup"]["plant_mode"] == "R"
+    assert [run["plant_mode"] for run in pythia["runs"]] == ["R", "R"]
+    assert pythia["default_setup"]["pdate"] == "2015-06-15"
+    for run in pythia["runs"]:
+        snx = _runner_render(template, {**pythia["default_setup"], **run})
+        assert _named_columns(snx, "@N MANAGEMENT")["PLANT"] == "R"
+        assert _dssat_planting_row(_row_after(snx, "@P PDATE"))["PDATE"] == "15166"
+    # the shared config keeps the requested sowing mode; only the DSSAT emit substitutes
+    assert (t.config.management and t.config.management.sowing_mode) == requested
+
+
+def test_potato_management_row_is_a_value_substitution_under_the_runner_placeholder(tmp_path):
+    raw = _emitted_template(_translator(tmp_path))
+    assert _row_after(raw, "@N MANAGEMENT") == (
+        ' 1 MA              {{ plant_mode | default("R") }} {{ irrig }}     D     D     D')
+
+
+# ── potato is harvested the season length after its actual planting ──────────
+
+@pytest.mark.parametrize("planting,maturity,hdate", [(166, 285, "  119"), (330, 120, "  155")],
+                         ids=["same-year", "cross-year"])
+@pytest.mark.parametrize("variant", ["minimal-config", "opportunistic"])
+def test_potato_is_harvested_the_season_length_after_its_actual_planting(
+        tmp_path, variant, planting, maturity, hdate):
+    t = _translator(tmp_path, management=_VARIANTS[variant](), planting_doy=planting,
+                    maturity_doy=maturity)
+    pythia = json.loads(Path(t._generate_pythia_json(_data())).read_text())
+    template = _emitted_template(t)
+    for run in pythia["runs"]:
+        snx = _runner_render(template, {**pythia["default_setup"], **run})
+        assert _named_columns(snx, "@N MANAGEMENT")["HARVS"] == "D"
+        assert _dssat_treatment_mh(snx) == 1
+        assert _dssat_harvest_row(_row_after(snx, "@H HDATE")) == {
+            "LEVEL": 1, "HDATE": hdate, "HSTG": "-99", "HCOM": "-99", "HSIZE": "-99",
+            "HPC": 100.0, "HBPC": -99.0}
+
+
+# ── a season DSSAT would refuse or silently cut short fails before any write ──
+
+@pytest.mark.parametrize("planting,maturity,year", [(166, 166, 2015), (366, 1, 2016)],
+                         ids=["same-day", "dec-31-to-jan-1"])
+def test_a_potato_season_under_one_day_is_refused_at_translate(tmp_path, planting, maturity, year):
+    out = tmp_path / "pythia"
+    result = _translate(out, planting_doy=planting, maturity_doy=maturity, start_year=year)
+    assert not result.success
+    assert "growing season of 0 days" in result.errors[0]
+    assert list(out.iterdir()) == []
+
+
+@pytest.mark.parametrize("start,end,non_leap", [(2015, 2016, "2015"), (2016, 2017, "2017")])
+@pytest.mark.parametrize("crop,short", [("Potato", "pot"), ("Maize", "mze")])
+def test_planting_on_doy_366_is_refused_when_a_season_year_is_not_leap(
+        tmp_path, crop, short, start, end, non_leap):
+    out = tmp_path / "pythia"
+    result = _translate(out, crop=crop, short=short, planting_doy=366, maturity_doy=120,
+                        start_year=start, end_year=end)
+    assert not result.success
+    assert f"{crop} planting DOY 366" in result.errors[0] and non_leap in result.errors[0]
+    assert list(out.iterdir()) == []
+
+
+def test_potato_planting_on_doy_366_of_a_leap_season_is_its_last_day(tmp_path):
+    t = _translator(tmp_path, planting_doy=366, maturity_doy=120, start_year=2016)
+    t._check_season_dates()
+    pythia = json.loads(Path(t._generate_pythia_json(_data())).read_text())
+    assert pythia["default_setup"]["pdate"] == "2016-12-31"
+
+
+@pytest.mark.parametrize("missing", [(0,), ()], ids=["a-site-needs-nasa-power", "none-does"])
+def test_a_climate_end_before_the_last_potato_harvest_is_refused_before_any_download(
+        tmp_path, monkeypatch, missing):
+    fetches = _nasa_fetches(monkeypatch)
+    out = tmp_path / "pythia"
+    # 166 -> 285 over 2015-2016: the last harvest is 119 days after 2016-06-14, on 2016-10-11
+    result = _translate(out, missing=missing, start_year=2015, end_year=2016, pythia=PythiaConfig(
+        climate_end_date="2016-10-10", weather_download_delay=0.0))
+    assert not result.success
+    assert "2016-10-11" in result.errors[0] and "2016-10-10" in result.errors[0]
+    assert fetches == []
+    assert list(out.iterdir()) == []
+
+
+@pytest.mark.parametrize("planting,maturity,year,end", [
+    (166, 285, 2015, None),          # the default end, 2015-12-31, follows the 2015-10-12 harvest
+    (330, 120, 2015, None),          # non-leap planting year: the default end IS the harvest day
+    (330, 120, 2016, None),          # leap planting year: harvest 2017-04-29, default end 04-30
+    (166, 285, 2015, "2015-10-12"),  # an explicit end on the harvest day itself
+], ids=["same-year", "cross-year-non-leap", "cross-year-leap", "explicit-end"])
+def test_a_climate_end_on_or_after_the_last_potato_harvest_is_accepted(
+        tmp_path, planting, maturity, year, end):
+    t = _translator(tmp_path, planting_doy=planting, maturity_doy=maturity, start_year=year,
+                    pythia=PythiaConfig(climate_end_date=end))
+    t._check_season_dates()
+
+
+# ── the planting substitution is recorded once, in the package's provenance ──
+
+_SUBSTITUTION = ("Potato sowing: requested_sowing_mode=opportunistic, "
+                 "effective_sowing_mode=fixed_date")
+
+
+@pytest.mark.parametrize("variant", ["minimal-config", "opportunistic"])
+def test_an_opportunistic_potato_package_records_its_sowing_substitution_once(tmp_path, variant):
+    provenance = _package_provenance(tmp_path, management=_VARIANTS[variant]())
+    substitutions = [decision for decision in _translate_decisions(provenance)
+                     if decision["decision_type"] == "fallback_substitution"]
+    assert [(d["severity"], d["description"]) for d in substitutions] == [
+        ("warning", _SUBSTITUTION)]
+    assert substitutions[0]["rationale"].startswith(
+        "reason=dssat_substor_automatic_planting_unsupported; ")
+    assert not provenance.get("unattached_decisions")
+
+
+@pytest.mark.parametrize("crop,short,sowing", [("Potato", "pot", "fixed_date"),
+                                               ("Maize", "mze", "opportunistic")])
+def test_a_package_planted_as_requested_records_no_sowing_substitution(
+        tmp_path, crop, short, sowing):
+    provenance = _package_provenance(tmp_path, crop=crop, short=short, management=ManagementConfig(
+        planting_density=44000.0, sowing_mode=sowing))
+    assert [decision for decision in _translate_decisions(provenance)
+            if decision["decision_type"] == "fallback_substitution"] == []
+    assert not provenance.get("unattached_decisions")
 
 
 # ── crop x platform admission, before any translator is built ─────────────────

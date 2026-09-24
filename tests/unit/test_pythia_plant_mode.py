@@ -4,12 +4,12 @@ The SNX ``@N MANAGEMENT PLANT`` field is a Jinja placeholder PYTHIA fills at run
 from ``pythia_config.json``'s ``default_setup`` (and per-run dicts). This asserts at
 that WIRE (the generated JSON), not the intermediate ``_map_generic_to_pythia_config``
 dict: opportunistic -> "A" (automatic; DSSAT uses the PFRST/PLAST window), fixed_date
--> "R" (on PDATE). "F" is non-standard and never emitted; unknown modes raise. Covers
-the generic (management-driven) AND else/legacy branches, which both feed default_setup.
+-> "R" (on PDATE); prismpy does not emit DSSAT's "F" (automatic, forced on the window's
+last day); unknown modes raise. Covers the generic (management-driven) AND else/legacy
+branches, which both feed default_setup.
 """
 from __future__ import annotations
 
-import inspect
 import json
 from pathlib import Path
 
@@ -118,7 +118,18 @@ def test_helper_maps_and_raises_on_unknown():
         PythiaTranslator._plant_mode_from_sowing("planting_window")
 
 
-def test_snx_template_has_plant_mode_placeholder():
-    # the @N MANAGEMENT PLANT field must be a {{ plant_mode }} placeholder PYTHIA fills.
-    src = inspect.getsource(PythiaTranslator._build_snx_content)
-    assert "plant_mode" in src
+def test_snx_template_management_row_carries_the_plant_mode_placeholder(tmp_path):
+    # the runner's own guard reads the RAW template: the @N MANAGEMENT data row must carry it.
+    from tests.unit.test_potato_substor_pythia import _management_row_consumes_plant_mode
+
+    translator = PythiaTranslator(config=_cfg(tmp_path, None), output_dir=str(tmp_path))
+    data = UnifiedData(
+        region=Region(
+            name="Wami", country="Tanzania", country_iso3="TZA",
+            bounds=BoundingBox(minx=37.0, miny=-7.0, maxx=38.0, maxy=-6.0),
+        ),
+        grid=_build_grid_2x3(),
+        soil=_build_profiles(),
+    )
+    raw = Path(translator._generate_snx_template(data)).read_text()
+    assert _management_row_consumes_plant_mode(raw)

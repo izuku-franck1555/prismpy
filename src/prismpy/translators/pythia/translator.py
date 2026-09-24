@@ -63,6 +63,20 @@ from prismpy.utils.date_utils import date_to_yrdoy, doy_to_date
 
 logger = logging.getLogger(__name__)
 
+# The DSSAT rules a crop's package must follow, keyed on the crop code DSSAT checks (the *CULTIVARS
+# CR field); the one source the translator, the README and other callers read.
+DSSAT_CROP_CONSTRAINTS: Dict[str, Dict[str, str]] = {
+    # IPSIM error 5 forbids automatic planting; SUBSTOR's own maturity has no calendar bound.
+    "PT": {"sowing_mode": "fixed_date", "harvest_mode": "D",
+           "sowing_reason": "dssat_substor_automatic_planting_unsupported"},
+}
+
+
+def dssat_crop_constraints(crop_name: str) -> Dict[str, str]:
+    """DSSAT's input rules for a named crop; empty when its generic setup runs as-is."""
+    crop_code = PythiaTranslator.DSSAT_CROP_CODES.get(crop_name.strip().casefold())
+    return DSSAT_CROP_CONSTRAINTS.get(crop_code, {})
+
 
 class BuildEghrSubstrateError(RuntimeError):
     """Raised when the per-package eGHR substrate cannot be built.
@@ -205,11 +219,14 @@ class PythiaTranslator(PythiaTranslatorBase):
                 errors=input_errors,
             )
 
-        # Create output subdirectories
-        for subdir in self.OUTPUT_SUBDIRS:
-            (self.output_dir / subdir).mkdir(parents=True, exist_ok=True)
-
         try:
+            # First, so that a refused season leaves no partial package behind.
+            self._check_season_dates()
+
+            # Create output subdirectories
+            for subdir in self.OUTPUT_SUBDIRS:
+                (self.output_dir / subdir).mkdir(parents=True, exist_ok=True)
+
             # 1. Generate site shapefile
             if data.grid:
                 logger.info("Step 1/8: Generating sites shapefile...")
@@ -1156,8 +1173,9 @@ class PythiaTranslator(PythiaTranslatorBase):
     @staticmethod
     def _plant_mode_from_sowing(sowing_mode: str) -> str:
         """sowing_mode -> DSSAT SNX PLANT method: opportunistic -> "A" (reads the
-        PFRST/PLAST window), fixed_date -> "R" (on PDATE). "F" is non-standard/never
-        emitted; unknown raises. Schema normalizes the "fixed" alias to "fixed_date"."""
+        PFRST/PLAST window), fixed_date -> "R" (on PDATE); unknown raises. Packages from before
+        the plant_mode placeholder hard-code DSSAT's "F" (automatic, forced on the window's last
+        day), which prismpy no longer emits. Schema normalizes "fixed" to "fixed_date"."""
         mapping = {"opportunistic": "A", "fixed_date": "R"}
         if sowing_mode not in mapping:
             raise ValueError(
@@ -1165,6 +1183,14 @@ class PythiaTranslator(PythiaTranslatorBase):
                 f"{sorted(mapping)} (schema normalizes 'fixed'->'fixed_date')."
             )
         return mapping[sowing_mode]
+
+    def _effective_plant_mode(self) -> str:
+        """The DSSAT PLANT method every run uses: the crop's DSSAT-forced sowing mode, else the
+        requested one. ``management.sowing_mode`` keeps the requested value."""
+        requested = self._plant_mode_from_sowing(
+            getattr(self.config.management, "sowing_mode", "opportunistic"))
+        forced = self._dssat_crop_constraints().get("sowing_mode")
+        return self._plant_mode_from_sowing(forced) if forced else requested
 
     def _map_generic_to_pythia_config(self) -> Dict[str, Any]:
         """Map generic config to PYTHIA JSON default_setup parameters.
@@ -1266,8 +1292,8 @@ class PythiaTranslator(PythiaTranslatorBase):
         plast_doy = min(planting_doy + planting_window, 365)
         plast_date = self._doy_to_calendar_date(plast_doy, start_year)
 
-        # sowing_mode -> DSSAT PLANT method (shared helper); PDATE = window start.
-        plant_mode = self._plant_mode_from_sowing(getattr(mgmt, "sowing_mode", "opportunistic"))
+        # The effective DSSAT PLANT method (shared resolver); PDATE = window start.
+        plant_mode = self._effective_plant_mode()
 
         return {
             # Temporal settings
@@ -1335,10 +1361,60 @@ class PythiaTranslator(PythiaTranslatorBase):
         """The dedicated-module profile for this run's crop, or None for CERES/CROPGRO crops."""
         return self._SPECIALIZED_MODULE_PROFILES.get(self._crop_key())
 
+    def _dssat_crop_constraints(self) -> Dict[str, str]:
+        """DSSAT's input rules for the crop code this package emits; empty when none apply."""
+        return DSSAT_CROP_CONSTRAINTS.get(self._get_dssat_crop_code(), {})
+
     def _forced_harvest(self) -> Optional[Tuple[str, str]]:
         """(HARVS letter, rendered 5-wide HDATE field) that forces this crop's harvest, or None
-        to harvest at model maturity. PENDING the harvest-mode decision: no crop forces yet."""
-        return None
+        to harvest at model maturity. HARVS 'D' harvests growing_season_days after the actual
+        planting, so HDATE is a day count (I5), not a date."""
+        harvest_mode = self._dssat_crop_constraints().get("harvest_mode")
+        if harvest_mode is None:
+            return None
+        calendar = self.config.crop.calendar
+        days = calendar.growing_season_days
+        if days < 1:
+            raise ValueError(
+                f"{self.config.crop.name.strip()} is harvested growing_season_days after planting, "
+                f"but planting DOY {calendar.planting_doy} and maturity DOY {calendar.maturity_doy} "
+                f"give a growing season of {days} days; set a maturity day after the planting day."
+            )
+        return harvest_mode, f"{days:5d}"
+
+    def _check_season_dates(self) -> None:
+        """Refuse, before any output, a season DSSAT would date differently from this package:
+        planting DOY 366 in a non-leap season year (any crop), or a forced harvest after the last
+        day of weather (DSSAT cuts that season short without an error)."""
+        from calendar import isleap
+        from datetime import timedelta
+
+        calendar, temporal = self.config.crop.calendar, self.config.temporal
+        if calendar is None or temporal is None:
+            return
+        crop = self.config.crop.name.strip()
+        non_leap = [str(year) for year in range(temporal.start_year, temporal.end_year + 1)
+                    if not isleap(year)]
+        if calendar.planting_doy == 366 and non_leap:
+            raise ValueError(
+                f"{crop} planting DOY 366 does not exist in the non-leap season year(s) "
+                f"{', '.join(non_leap)}; set planting_doy to 365 or earlier."
+            )
+        if self._forced_harvest() is None:
+            return
+        last_harvest = date(temporal.end_year, 1, 1) + timedelta(
+            days=calendar.planting_doy - 1 + calendar.growing_season_days)
+        pythia_config = self._get_pythia_config()
+        override = pythia_config.climate_end_date if pythia_config else None
+        weather_end = (date.fromisoformat(override) if override
+                       else temporal.get_climate_end_date(calendar))
+        if weather_end < last_harvest:
+            source = "platform_config.pythia.climate_end_date" if override else "the study period"
+            raise ValueError(
+                f"The {crop} weather ends {weather_end.isoformat()} ({source}), before the last "
+                f"forced harvest on {last_harvest.isoformat()}: DSSAT would cut that season short. "
+                f"Set the climate end date to {last_harvest.isoformat()} or later."
+            )
 
     def _get_pythia_config(self):
         """Get PythiaConfig from platform_config, or None."""
@@ -1655,10 +1731,8 @@ class PythiaTranslator(PythiaTranslatorBase):
         'potato': 'PT', 'cassava': 'CS',
     }
 
-    # Per-crop DSSAT @P planting defaults (West African smallholder rainfed) — the fallback used
-    # ONLY when a real planting value is not recorded (a value the wizard supplies is threaded
-    # instead). ppop = plants/m² (PPOP is DSSAT-native plants/m²); plrs/pldp = cm. Sourced from a
-    # crop-modeling review of published West-African DSSAT calibration; keyed on _crop_key().
+    # Per-crop @P fallbacks when no planting value is recorded (ppop plants/m², plrs/pldp cm); cereal,
+    # cowpea and groundnut rows: West-African smallholder values from published DSSAT calibrations.
     PLANTING_DEFAULTS = {
         'maize':     {'ppop': 5.3, 'plrs': 75.0, 'pldp': 5.0},
         'corn':      {'ppop': 5.3, 'plrs': 75.0, 'pldp': 5.0},
@@ -1670,8 +1744,8 @@ class PythiaTranslator(PythiaTranslatorBase):
         'peanut':    {'ppop': 15.0, 'plrs': 50.0, 'pldp': 5.0},
         # common bean — East-African smallholder (50 cm rows x 10 cm within-row = 200,000/ha)
         'beans':     {'ppop': 20.0, 'plrs': 50.0, 'pldp': 5.0},
-        # potato seed tubers: plwt (kg dry matter/ha) + sprl (cm) are DSSAT's SUBSTOR reference
-        # experiment WABE0301 (Washington, USA); ppop/plrs/pldp are 75 cm ridges x ~30 cm.
+        # potato: plwt (kg dry matter/ha), sprl (cm) and PLME S are DSSAT's reference experiment
+        # WABE0301 (Washington, USA); ridge geometry and PLDS R are prismpy choices, not yet sourced.
         'potato':    {'ppop': 4.4, 'plrs': 75.0, 'pldp': 10.0, 'plwt': 444.0, 'sprl': 0.1},
     }
     # An unmapped crop falls back to the wizard-generic maize density (plants/m²) — never -99.
@@ -1731,9 +1805,7 @@ class PythiaTranslator(PythiaTranslatorBase):
         10000 here. ``plrs`` is ``management.row_spacing_cm`` (cm, direct). ``pldp`` has no PYTHIA
         config source, so it takes the per-crop default. Each falls back to the per-crop default
         when unrecorded — never -99. (A plants/m² ``plant_population`` override is a CRAFT-config
-        field handled in the CRAFT translator; the PYTHIA path carries no such override.)
-        Crops planted as seed tubers also carry ``plwt``/``sprl`` (per-crop defaults, no config
-        source); other crops omit them, so their @P PLWT/SPRL stay -99."""
+        field handled in the CRAFT translator; the PYTHIA path carries no such override.)"""
         mgmt = self.config.management
         crop_default = self._crop_planting_default()
 
@@ -1746,10 +1818,7 @@ class PythiaTranslator(PythiaTranslatorBase):
 
         pldp = float(crop_default['pldp'])              # no PYTHIA depth field -> per-crop default
 
-        planting = {'ppop': ppop, 'ppoe': ppop, 'plrs': plrs, 'pldp': pldp}
-        planting.update(
-            {k: float(crop_default[k]) for k in self._SEED_TUBER_FIELDS if k in crop_default})
-        return planting
+        return {'ppop': ppop, 'ppoe': ppop, 'plrs': plrs, 'pldp': pldp}
 
     def _get_template_filename(self) -> str:
         """Get the actual template filename based on region and crop.
@@ -1949,7 +2018,7 @@ class PythiaTranslator(PythiaTranslatorBase):
             # Get management settings
             mgmt = self.config.management
             irrig = "A" if mgmt and mgmt.irrigation else "N"
-            plant_mode = self._plant_mode_from_sowing(getattr(mgmt, "sowing_mode", "opportunistic"))
+            plant_mode = self._effective_plant_mode()
             pdate = pfrst
             fen_tot = mgmt.fertilizer_n_total if mgmt and hasattr(mgmt, 'fertilizer_n_total') else 60
 
@@ -1957,6 +2026,23 @@ class PythiaTranslator(PythiaTranslatorBase):
             ingeno = cultivar_params["ingeno"]
             cname = cultivar_params["cname"]
         self._emitted_cultivar = cultivar_params
+
+        # Recorded once, here at translate time: the shared mapping helper runs more than once.
+        requested_sowing = getattr(self.config.management, "sowing_mode", "opportunistic")
+        if self.provenance and plant_mode != self._plant_mode_from_sowing(requested_sowing):
+            forced = self._dssat_crop_constraints()
+            crop = self.config.crop.name.strip()
+            self.provenance.record_decision(
+                decision_type=DecisionType.FALLBACK_SUBSTITUTION,
+                description=(f"{crop} sowing: requested_sowing_mode={requested_sowing}, "
+                             f"effective_sowing_mode={forced['sowing_mode']}"),
+                rationale=(f"reason={forced['sowing_reason']}; DSSAT refuses automatic planting "
+                           f"for {crop} (IPSIM error 5), so every season is planted on its "
+                           f"reported date, DOY {self.config.crop.calendar.planting_doy}."),
+                reference="DSSAT-CSM v4.8.2.0 InputModule/IPSIM.for, error 5",
+                severity="warning",
+                label=f"{crop} planted on its reported date",
+            )
 
         # Get start year for runs
         start_year = int(sdate.split("-")[0])
@@ -2007,7 +2093,6 @@ class PythiaTranslator(PythiaTranslatorBase):
                 "ppoe": planting['ppoe'],
                 "plrs": planting['plrs'],
                 "pldp": planting['pldp'],
-                **{k: planting[k] for k in self._SEED_TUBER_FIELDS if k in planting},
                 "ingeno": ingeno,
                 "cname": cname,
             },
@@ -3109,11 +3194,10 @@ class PythiaTranslator(PythiaTranslatorBase):
         # per-crop literal for the absent/malformed edge (never -99). Preserve the 1-space DSSAT
         # separator + fixed width so the @P columns stay 6-wide.
         pdef = self._crop_planting_default()
-        # SUBSTOR stops on a seed-tuber mass or sprout length <= 0 (IPPLNT errors 16/17), so a
-        # tuber crop's fallback is its sourced value; other crops keep the -99 literals.
+        # SUBSTOR stops on a seed-tuber mass or sprout length <= 0 (IPPLNT errors 16/17): a tuber
+        # crop's values are fixed literals here (one source); every other crop keeps -99.
         plwt_cell, sprl_cell = (
-            (f'{{{{ "%5.0f"|format(plwt|default({pdef["plwt"]})) }}}}',
-             f'{{{{ "%5.1f"|format(sprl|default({pdef["sprl"]})) }}}}')
+            (f"{pdef['plwt']:5.0f}", f"{pdef['sprl']:5.1f}")
             if all(k in pdef for k in self._SEED_TUBER_FIELDS) else ("  -99", "  -99")
         )
         forced_harvest = self._forced_harvest()
@@ -3268,9 +3352,14 @@ class PythiaTranslator(PythiaTranslatorBase):
         from prismpy.packaging.manifest import (
             create_manifest, derive_boundary_label, save_manifest,
         )
+        from prismpy.packaging.readme_generator import read_pythia_run_config
         from prismpy.packaging.scenario_helpers import (
             build_baseline_scenario_block_for_period,
         )
+
+        # The cultivar the package's run config carries (written at translate time): reused,
+        # never re-resolved at package time.
+        emitted_setup = (read_pythia_run_config(self.output_dir) or {}).get("default_setup") or {}
 
         # Resolved-source discriminator: read the runtime boundary
         # source recorded on the Region (post-fallback at retrieve)
@@ -3301,7 +3390,7 @@ class PythiaTranslator(PythiaTranslatorBase):
             "country": data.region.country,
             "gadm_level": manifest_gadm_level,
             "crop_name": self.config.crop.name,
-            "cultivar_id": self._map_generic_to_cultivar()["ingeno"],
+            "cultivar_id": emitted_setup.get("ingeno", ""),
             "planting_doy": self.config.crop.calendar.planting_doy if self.config.crop.calendar else None,
             "maturity_doy": self.config.crop.calendar.maturity_doy if self.config.crop.calendar else None,
             "start_year": self.config.temporal.start_year if self.config.temporal else None,

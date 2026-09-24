@@ -169,11 +169,9 @@ def test_pythia_translator_generate_manifest_real_path(tmp_path, monkeypatch):
     # handful of attributes off ``self.config`` and ``data.region``.
     config = SimpleNamespace(
         project=SimpleNamespace(name="real-path-test"),
-        platform_config=None,
         crop=SimpleNamespace(
             name="sorghum",
             calendar=SimpleNamespace(planting_doy=175, maturity_doy=305),
-            phenology=None,
         ),
         temporal=SimpleNamespace(
             start_year=2018, end_year=2022, spinup_years=0,
@@ -191,12 +189,11 @@ def test_pythia_translator_generate_manifest_real_path(tmp_path, monkeypatch):
         ),
     )
 
-    # Bypass __init__ — _generate_manifest only touches self.config, self.output_dir and
-    # (through the cultivar resolver) self.provenance, so a manually-built instance suffices.
+    # Bypass __init__ — _generate_manifest only touches self.config +
+    # self.output_dir, so a manually-constructed instance suffices.
     translator = PythiaTranslator.__new__(PythiaTranslator)
     translator.config = config
     translator.output_dir = tmp_path
-    translator.provenance = None
 
     translator._generate_manifest(data)
 

@@ -1151,7 +1151,25 @@ def read_pythia_run_config(package_dir: Union[str, Path]) -> Optional[Dict[str, 
     return run_config if isinstance(run_config, dict) else None
 
 
-def pythia_package_summary(run_config: Optional[Dict[str, Any]]) -> Dict[str, str]:
+def _planting_summary(setup: Dict[str, Any], crop_name: str) -> str:
+    """How the run plants: its reported date under DSSAT PLANT 'R', else its sowing window."""
+    if setup.get("plant_mode") == "R":
+        from prismpy.translators.pythia.translator import dssat_crop_constraints
+
+        try:
+            doy = datetime.strptime(str(setup.get("pdate")), "%Y-%m-%d").timetuple().tm_yday
+        except ValueError:
+            return NOT_RECORDED
+        forced = dssat_crop_constraints(crop_name).get("sowing_mode")
+        note = f"; DSSAT cannot plant {crop_name.strip()} automatically" if forced else ""
+        return f"planted on DOY {doy} (reported date){note}"
+    if _coalesce(setup.get("pfrst")) is not None and _coalesce(setup.get("plast")) is not None:
+        return f"{setup['pfrst']} to {setup['plast']}"
+    return NOT_RECORDED
+
+
+def pythia_package_summary(run_config: Optional[Dict[str, Any]],
+                           crop_name: str = "") -> Dict[str, str]:
     """The PYTHIA README summary block, read from the package's own run config.
 
     A value the run config does not carry renders as ``NOT_RECORDED`` — never a default that
@@ -1176,11 +1194,7 @@ def pythia_package_summary(run_config: Optional[Dict[str, Any]]) -> Dict[str, st
         "template_name": recorded(setup.get("template")),
         "cultivar_code": recorded(setup.get("ingeno")),
         "cultivar_name": recorded(setup.get("cname")),
-        "planting_window": (
-            f"{setup['pfrst']} to {setup['plast']}"
-            if _coalesce(setup.get("pfrst")) is not None and _coalesce(setup.get("plast")) is not None
-            else NOT_RECORDED
-        ),
+        "planting_window": _planting_summary(setup, crop_name),
         "fertilizer_n": recorded(fertilized.get("fen_tot"), "{} kg/ha"),
         "plant_population": recorded(setup.get("ppop"), "{} plants/m²"),
         "row_spacing": recorded(setup.get("plrs"), "{} cm"),
@@ -1587,7 +1601,8 @@ def generate_readme(
             'n_years': _safe_get(config, 'n_years', default_n_years),
             'n_sol_files': _safe_get(config, 'n_sol_files', 0),
             # The README sits at the package root: the summary reads that package's run config.
-            **pythia_package_summary(read_pythia_run_config(Path(output_path).parent)),
+            **pythia_package_summary(read_pythia_run_config(Path(output_path).parent),
+                                     str(_safe_get(config, 'crop_name', ''))),
             'total_gdd': (f"{config['total_gdd']} °C-days"
                           if isinstance(config.get('total_gdd'), (int, float)) else 'N/A'),
             'climate_source': _safe_get(config, 'climate_source', 'NASA POWER'),
