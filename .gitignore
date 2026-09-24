@@ -126,3 +126,7 @@ uc2_kano_*_baseline.yaml
 *.log
 *.out
 /_*
+# Root-level configs, data tables and scripts are local experiment scratch (the package lives under src/)
+/*.yaml
+/*.csv
+/*.py
