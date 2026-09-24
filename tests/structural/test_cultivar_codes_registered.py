@@ -96,6 +96,7 @@ EXPECTED_LITERAL_PAIRS: FrozenSet[Tuple[str, str]] = frozenset({
     ("translators/pythia/translator.py", "990001"),  # NORTH VARIETY (CERES-Maize)
     ("translators/pythia/translator.py", "990002"),  # MIDDLE VARIETY (CERES-Maize / CERES-Millet)
     ("translators/pythia/translator.py", "990003"),  # SOUTH VARIETY
+    ("translators/pythia/translator.py", "IB0008"),  # potato DESIREE (SUBSTOR default)
     # README generator — package-config defaults. Per F-AF-v2:
     # the cultivar field now reads from the on-disk
     # ``management/cultivar_data.txt`` first and falls through
@@ -134,6 +135,8 @@ _CANDIDATE_CUL_FILES: Dict[str, FrozenSet[str]] = {
     "IB0149": frozenset({"MLCER048.CUL"}),
     # II0003 — IITA cowpea IT90K-277-2
     "II0003": frozenset({"CPGRO048.CUL"}),
+    # IB0008 — potato DESIREE (SUBSTOR)
+    "IB0008": frozenset({"PTSUB048.CUL"}),
 }
 
 

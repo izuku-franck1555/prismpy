@@ -2728,6 +2728,7 @@ class TranslationPipeline:
 
         results = {}
         enabled_platforms = self.config.get_enabled_platforms()
+        self._require_crop_supported_on(enabled_platforms)
 
         # Sprint E.3 fixup +15 (F-BN Boundary 2) — load the cockpit
         # override sidecar from the run's output directory once, then
@@ -2858,6 +2859,16 @@ class TranslationPipeline:
                 )
 
         return results
+
+    def _require_crop_supported_on(self, platforms: List[Platform]) -> None:
+        """Refuse the whole target set, before any translator is built, when the
+        crop cannot be modeled on one of its platforms — no partial package."""
+        from prismpy.packaging.manifest import UnsupportedCropError, is_crop_supported
+
+        crop_name = self.config.crop.name
+        unsupported = [p.value for p in platforms if not is_crop_supported(p, crop_name)]
+        if unsupported:
+            raise UnsupportedCropError(crop_name, unsupported)
 
     def _load_cockpit_override_sidecar(self):
         """Load the cockpit override sidecar from the run's output dir.

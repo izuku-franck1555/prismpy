@@ -1068,8 +1068,8 @@ class PythiaTranslator(PythiaTranslatorBase):
                 dst.update_tags(
                     units="zone_id",
                     description="Cultivar zone",
-                    cultivar_code=cultivar_params.get("ingeno", self._get_default_cultivar_ingeno()),
-                    cultivar_name=cultivar_params.get("cname", self._get_default_cultivar_cname()),
+                    cultivar_code=cultivar_params["ingeno"],
+                    cultivar_name=cultivar_params["cname"],
                 )
 
             output_files.append(cult_path)
@@ -1317,6 +1317,16 @@ class PythiaTranslator(PythiaTranslatorBase):
         "beans": ("IB0001", "MEDIUM_GRO"),
     }
 
+    # Crops DSSAT runs with a dedicated module, not CERES/CROPGRO: crop -> (SMODEL, INGENO, CNAME);
+    # each INGENO is a column-1 code of <SMODEL>048.CUL.
+    _SPECIALIZED_MODULE_PROFILES: Dict[str, Tuple[str, str, str]] = {
+        "potato": ("PTSUB", "IB0008", "DESIREE"),
+    }
+
+    def _specialized_module_profile(self) -> Optional[Tuple[str, str, str]]:
+        """The dedicated-module profile for this run's crop, or None for CERES/CROPGRO crops."""
+        return self._SPECIALIZED_MODULE_PROFILES.get(self.config.crop.name.lower().strip())
+
     def _get_pythia_config(self):
         """Get PythiaConfig from platform_config, or None."""
         if self.config.platform_config and hasattr(self.config.platform_config, 'pythia'):
@@ -1328,7 +1338,8 @@ class PythiaTranslator(PythiaTranslatorBase):
 
         Resolution order:
         1. Explicit override via PythiaConfig.dssat_smodel (e.g., 'CPGRO')
-        2. Auto-detect from crop name: legumes → 'CROPGRO', cereals → '{crop_code}CER'
+        2. A dedicated DSSAT module for the crop (e.g., potato → 'PTSUB')
+        3. Auto-detect from crop name: legumes → 'CROPGRO', cereals → '{crop_code}CER'
 
         Returns:
             6-character DSSAT SMODEL string (e.g., 'MZCER ', 'CROPGRO')
@@ -1341,8 +1352,14 @@ class PythiaTranslator(PythiaTranslatorBase):
             logger.info(f"Using explicit DSSAT SMODEL: {smodel}")
             return smodel
 
-        # Priority 2: auto-detect from crop name
+        # Priority 2: a dedicated DSSAT module for the crop
         crop_name = self.config.crop.name.lower().strip()
+        profile = self._specialized_module_profile()
+        if profile is not None:
+            logger.info(f"Using the dedicated DSSAT module for '{crop_name}': SMODEL={profile[0]}")
+            return profile[0]
+
+        # Priority 3: auto-detect from crop name
         crop_code = self._get_dssat_crop_code()
 
         if crop_name in self._LEGUME_CROPS:
@@ -1384,27 +1401,16 @@ class PythiaTranslator(PythiaTranslatorBase):
             return "Y"
         return "N"
 
-    def _get_default_cultivar_ingeno(self) -> str:
-        """Get default cultivar INGENO, checking config override first."""
-        pythia_cfg = self._get_pythia_config()
-        if pythia_cfg and pythia_cfg.dssat_cultivar_ingeno:
-            return pythia_cfg.dssat_cultivar_ingeno
-        return "990002"
-
-    def _get_default_cultivar_cname(self) -> str:
-        """Get default cultivar CNAME, checking config override first."""
-        pythia_cfg = self._get_pythia_config()
-        if pythia_cfg and pythia_cfg.dssat_cultivar_cname:
-            return pythia_cfg.dssat_cultivar_cname
-        return "MEDIUM_SEASON"
-
     def _map_generic_to_cultivar(self) -> Dict[str, Any]:
-        """Map generic phenology to DSSAT cultivar selection.
+        """Map generic phenology to DSSAT cultivar selection — the ONE cultivar resolver every
+        producer (pythia_config, SNX, cultivar raster, manifest, README) reads.
 
         Resolution order:
         1. Explicit cultivar override via PythiaConfig.dssat_cultivar_ingeno
            (for CROPGRO crops or when a specific cultivar is needed)
-        2. GDD-based maturity class mapping using CERES-Maize generic codes
+        2. CROPGRO legume default cultivar
+        3. The dedicated-module crop's default cultivar (e.g., potato → IB0008 DESIREE)
+        4. GDD-based maturity class mapping using CERES-Maize generic codes
            (990001/990002/990003) — only appropriate for CERES crops
 
         GDD thresholds are configurable via PythiaConfig.short_season_gdd_max
@@ -1444,7 +1450,22 @@ class PythiaTranslator(PythiaTranslatorBase):
                 "total_gdd": None,
             }
 
-        # Priority 3: GDD-based maturity class mapping (CERES crops only)
+        # Priority 3: the dedicated-module crop's default cultivar (never a CERES GDD code)
+        profile = self._specialized_module_profile()
+        if profile is not None:
+            smodel, ingeno, cname = profile
+            logger.info(
+                f"Using the {smodel} default cultivar for '{crop_name}': "
+                f"INGENO={ingeno}, CNAME={cname}"
+            )
+            return {
+                "ingeno": ingeno,
+                "cname": cname,
+                "maturity_class": "module_default",
+                "total_gdd": None,
+            }
+
+        # Priority 4: GDD-based maturity class mapping (CERES crops only)
         pheno = self.config.crop.phenology
 
         # Use defaults if not provided
@@ -1636,9 +1657,13 @@ class PythiaTranslator(PythiaTranslatorBase):
         'peanut':    {'ppop': 15.0, 'plrs': 50.0, 'pldp': 5.0},
         # common bean — East-African smallholder (50 cm rows x 10 cm within-row = 200,000/ha)
         'beans':     {'ppop': 20.0, 'plrs': 50.0, 'pldp': 5.0},
+        # potato (SUBSTOR seed tubers) — 75 cm ridges x ~30 cm; plwt (kg dry matter/ha) and sprl
+        # (sprout length, cm) are the DSSAT SUBSTOR reference experiment WABE0301 values.
+        'potato':    {'ppop': 4.4, 'plrs': 75.0, 'pldp': 10.0, 'plwt': 444.0, 'sprl': 0.1},
     }
     # An unmapped crop falls back to the wizard-generic maize density (plants/m²) — never -99.
     PLANTING_DEFAULT_FALLBACK = {'ppop': 6.25, 'plrs': 70.0, 'pldp': 5.0}
+    _SEED_TUBER_FIELDS = ('plwt', 'sprl')
 
     @staticmethod
     def _ascii_fold_for_dssat(value: str) -> str:
@@ -1695,7 +1720,9 @@ class PythiaTranslator(PythiaTranslatorBase):
         10000 here. ``plrs`` is ``management.row_spacing_cm`` (cm, direct). ``pldp`` has no PYTHIA
         config source, so it takes the per-crop default. Each falls back to the per-crop default
         when unrecorded — never -99. (A plants/m² ``plant_population`` override is a CRAFT-config
-        field handled in the CRAFT translator; the PYTHIA path carries no such override.)"""
+        field handled in the CRAFT translator; the PYTHIA path carries no such override.)
+        Crops planted as seed tubers also carry ``plwt``/``sprl`` (per-crop defaults, no config
+        source); other crops omit them, so their @P PLWT/SPRL stay -99."""
         mgmt = self.config.management
         crop_default = self._crop_planting_default()
 
@@ -1708,7 +1735,10 @@ class PythiaTranslator(PythiaTranslatorBase):
 
         pldp = float(crop_default['pldp'])              # no PYTHIA depth field -> per-crop default
 
-        return {'ppop': ppop, 'ppoe': ppop, 'plrs': plrs, 'pldp': pldp}
+        planting = {'ppop': ppop, 'ppoe': ppop, 'plrs': plrs, 'pldp': pldp}
+        planting.update(
+            {k: float(crop_default[k]) for k in self._SEED_TUBER_FIELDS if k in crop_default})
+        return planting
 
     def _get_template_filename(self) -> str:
         """Get the actual template filename based on region and crop.
@@ -1912,14 +1942,9 @@ class PythiaTranslator(PythiaTranslatorBase):
             pdate = pfrst
             fen_tot = mgmt.fertilizer_n_total if mgmt and hasattr(mgmt, 'fertilizer_n_total') else 60
 
-            # Use cultivar from config override or default mapping
-            pythia_cfg = self._get_pythia_config()
-            if pythia_cfg and pythia_cfg.dssat_cultivar_ingeno:
-                ingeno = pythia_cfg.dssat_cultivar_ingeno
-                cname = pythia_cfg.dssat_cultivar_cname or "USER_DEFINED"
-            else:
-                ingeno = "990002"
-                cname = "MEDIUM_SEASON"
+            cultivar_params = self._map_generic_to_cultivar()
+            ingeno = cultivar_params["ingeno"]
+            cname = cultivar_params["cname"]
 
         # Get start year for runs
         start_year = int(sdate.split("-")[0])
@@ -1970,6 +1995,7 @@ class PythiaTranslator(PythiaTranslatorBase):
                 "ppoe": planting['ppoe'],
                 "plrs": planting['plrs'],
                 "pldp": planting['pldp'],
+                **{k: planting[k] for k in self._SEED_TUBER_FIELDS if k in planting},
                 "ingeno": ingeno,
                 "cname": cname,
             },
@@ -3071,6 +3097,13 @@ class PythiaTranslator(PythiaTranslatorBase):
         # per-crop literal for the absent/malformed edge (never -99). Preserve the 1-space DSSAT
         # separator + fixed width so the @P columns stay 6-wide.
         pdef = self._crop_planting_default()
+        # SUBSTOR stops on a seed-tuber mass or sprout length <= 0 (IPPLNT errors 16/17), so a
+        # tuber crop's fallback is its sourced value; other crops keep the -99 literals.
+        plwt_cell, sprl_cell = (
+            (f'{{{{ "%5.0f"|format(plwt|default({pdef["plwt"]})) }}}}',
+             f'{{{{ "%5.1f"|format(sprl|default({pdef["sprl"]})) }}}}')
+            if all(k in pdef for k in self._SEED_TUBER_FIELDS) else ("  -99", "  -99")
+        )
 
         content = f"""*EXP.DETAILS: {exp_id}{crop_code} {country} {region_name}, {crop_name} management scenarios
 
@@ -3106,7 +3139,7 @@ class PythiaTranslator(PythiaTranslatorBase):
 
 *PLANTING DETAILS
 @P PDATE EDATE  PPOP  PPOE  PLME  PLDS  PLRS  PLRD  PLDP  PLWT  PAGE  PENV  PLPH  SPRL                        PLNAME
- 1 {{{{ pdate | default(-99) }}}}   -99 {{{{ "%5.1f"|format(ppop|default({pdef['ppop']})) }}}} {{{{ "%5.1f"|format(ppoe|default({pdef['ppop']})) }}}}     S     R {{{{ "%5.0f"|format(plrs|default({pdef['plrs']})) }}}}   -99 {{{{ "%5.0f"|format(pldp|default({pdef['pldp']})) }}}}   -99   -99   -99   -99   -99                        auto
+ 1 {{{{ pdate | default(-99) }}}}   -99 {{{{ "%5.1f"|format(ppop|default({pdef['ppop']})) }}}} {{{{ "%5.1f"|format(ppoe|default({pdef['ppop']})) }}}}     S     R {{{{ "%5.0f"|format(plrs|default({pdef['plrs']})) }}}}   -99 {{{{ "%5.0f"|format(pldp|default({pdef['pldp']})) }}}} {plwt_cell}   -99   -99   -99 {sprl_cell}                        auto
 
 *FERTILIZERS (INORGANIC)
 @F FDATE  FMCD  FACD  FDEP  FAMN  FAMP  FAMK  FAMC  FAMO  FOCD FERNAME
@@ -3248,6 +3281,7 @@ class PythiaTranslator(PythiaTranslatorBase):
             "country": data.region.country,
             "gadm_level": manifest_gadm_level,
             "crop_name": self.config.crop.name,
+            "cultivar_id": self._map_generic_to_cultivar()["ingeno"],
             "planting_doy": self.config.crop.calendar.planting_doy if self.config.crop.calendar else None,
             "maturity_doy": self.config.crop.calendar.maturity_doy if self.config.crop.calendar else None,
             "start_year": self.config.temporal.start_year if self.config.temporal else None,
@@ -3403,8 +3437,8 @@ class PythiaTranslator(PythiaTranslatorBase):
             'template_name': self._get_template_filename(),
 
             # Crop parameters
-            'cultivar_code': cultivar.get('ingeno', '990002'),
-            'cultivar_name': cultivar.get('cname', 'MEDIUM_SEASON'),
+            'cultivar_code': cultivar['ingeno'],
+            'cultivar_name': cultivar['cname'],
             'total_gdd': cultivar.get('total_gdd', 'N/A'),
             'pfrst': config_params.get('pfrst', 'N/A'),
             'plast': config_params.get('plast', 'N/A'),

@@ -41,14 +41,10 @@ _EXECUTOR = _PRISMPY_ROOT / "src" / "prismpy" / "pipeline" / "executor.py"
 # stay in production (they still fail loudly).
 F_AG_GATE_SITES: Tuple[Tuple[str, int, str], ...] = (
     ("src/prismpy/translators/acea/translator.py", 519, "ClimateDownloadError"),
-    # These sites shift down as code is inserted above them
-    # (1822 -> 1866 -> 1876 -> 1887; 2578 -> 2630 -> 2645 -> 2661 -> 2684 -> 2690; 1007 -> 1015 ->
-    # 1020; last shift: SPAM cropland-vintage (applied-vintage class attr + vintage-named mask
-    # JSON + fail-loud resolver + per-run vintage-state reset in _generate_crop_mask_raster, which
-    # sits above the BuildEghrSubstrateError site → 2684 -> 2690).
+    # These sites shift as code is inserted above them; re-point them after auditing each raise.
     ("src/prismpy/translators/pythia/translator.py", 1020, "ValueError"),
-    ("src/prismpy/translators/pythia/translator.py", 1887, "ValueError"),
-    ("src/prismpy/translators/pythia/translator.py", 2690, "BuildEghrSubstrateError"),
+    ("src/prismpy/translators/pythia/translator.py", 1917, "ValueError"),
+    ("src/prismpy/translators/pythia/translator.py", 2716, "BuildEghrSubstrateError"),
     ("src/prismpy/translators/sarra_py/translator.py", 711, "ValueError"),
     ("src/prismpy/translators/sarra_py/translator.py", 1675, "ValueError"),
     # 1565 -> 1570 (translate-time data.grid guard) -> 1577 (§7 trials-copy wiring).
