@@ -86,6 +86,13 @@ PYTHIA_EXPECTED_LEGUME_DEFAULTS: Tuple[Tuple[str, str, str], ...] = (
 )
 
 
+# PYTHIA's _SPECIALIZED_MODULE_PROFILES: crops DSSAT runs with a dedicated
+# module; each profile's SMODEL names the .CUL file its cultivar lives in.
+PYTHIA_EXPECTED_MODULE_DEFAULTS: Tuple[Tuple[str, str, str], ...] = (
+    ("potato",    "IB0008", "PTSUB048.CUL"),  # DESIREE (SUBSTOR-Potato)
+)
+
+
 def _resolve_dssat_install() -> Path | None:
     """Locate the DSSAT install directory, returning the
     ``Genotype/`` subdirectory when available.
@@ -229,6 +236,9 @@ class TestCultivarDefaultsAgainstRegistry(unittest.TestCase):
         cls.pythia_dict = _extract_dict_assignment(
             _PYTHIA_TRANSLATOR, "_LEGUME_DEFAULT_CULTIVARS",
         )
+        cls.pythia_module_dict = _extract_dict_assignment(
+            _PYTHIA_TRANSLATOR, "_SPECIALIZED_MODULE_PROFILES",
+        )
         cls.dssat_genotype = _resolve_dssat_install()
 
     def test_craft_defaults_match_expected_pin(self):
@@ -267,6 +277,23 @@ class TestCultivarDefaultsAgainstRegistry(unittest.TestCase):
             "pair must match PYTHIA_EXPECTED_LEGUME_DEFAULTS.",
         )
 
+    def test_pythia_module_defaults_match_expected_pin(self):
+        """PYTHIA's ``_SPECIALIZED_MODULE_PROFILES`` declares (SMODEL,
+        cultivar, label); the cultivar must match the pin, and the SMODEL
+        must name the .CUL file the cultivar is registered in."""
+        actual = {crop: profile[1] for crop, profile in self.pythia_module_dict.items()}
+        expected = {
+            crop: code for crop, code, _cul in PYTHIA_EXPECTED_MODULE_DEFAULTS
+        }
+        self.assertEqual(
+            actual, expected,
+            "PYTHIA _SPECIALIZED_MODULE_PROFILES drift: each (crop, code) "
+            "pair must match PYTHIA_EXPECTED_MODULE_DEFAULTS.",
+        )
+        for crop, _code, cul_filename in PYTHIA_EXPECTED_MODULE_DEFAULTS:
+            smodel = self.pythia_module_dict[crop][0]
+            self.assertEqual(f"{smodel}048.CUL", cul_filename)
+
     def test_every_default_is_in_dssat_registry(self):
         """When the DSSAT install is reachable, assert every
         (crop, code, cul_file) tuple has the code in column 1 of
@@ -284,6 +311,7 @@ class TestCultivarDefaultsAgainstRegistry(unittest.TestCase):
         for crop, code, cul_filename in (
             *CRAFT_EXPECTED_DEFAULTS,
             *PYTHIA_EXPECTED_LEGUME_DEFAULTS,
+            *PYTHIA_EXPECTED_MODULE_DEFAULTS,
         ):
             cul_path = self.dssat_genotype / cul_filename
             if not cul_path.is_file():

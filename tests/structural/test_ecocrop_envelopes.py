@@ -78,7 +78,16 @@ class TestECOCROPEnvelopesShape(unittest.TestCase):
             cls.payload = json.load(fp)
 
     def test_default_path_loads(self):
-        self.assertGreaterEqual(len(self.envelopes), 6)
+        self.assertGreaterEqual(len(self.envelopes), 8)
+
+    def test_crop_count_matches_the_license_footer(self):
+        # The footer's fact count is 4 per crop; a crop added without a footer update fails here.
+        self.assertEqual(len(self.payload["crops"]), 8)
+        self.assertIn(
+            f"{4 * len(self.payload['crops'])} numeric facts "
+            f"({len(self.payload['crops'])} crops × 4 fields)",
+            self.payload["license"],
+        )
 
     def test_each_crop_has_4_required_envelope_fields(self):
         for crop, env in self.envelopes.items():
@@ -157,21 +166,24 @@ class TestECOCROPEnvelopesShape(unittest.TestCase):
         self.assertEqual(env["RMIN"], 300.0)
         self.assertEqual(env["RMAX"], 4300.0)
 
-    def test_version_pinned(self):
-        # Sprint F AC-F-0 bumps the substrate version to v2 to
-        # signal that the cache key composed in
-        # ``Project.stage_1_verdicts`` (per AC-F-5) recomputes for
-        # any project whose cached verdicts reference v1 — a
-        # 4-crop expansion is a substrate change even if the two
-        # original entries are unchanged.
-        self.assertEqual(self.payload["version"], "ecocrop_v3_2026-09-12")
+    def test_potato_verbatim_envelope(self):
+        # Potato (Solanum tuberosum, FAO ECOCROP id=1971): the ABSOLUTE tolerance range, never the
+        # SUBSTOR cultivar tuber-initiation temperature (TC), which is a cultivar trait.
+        env = self.envelopes["potato"]
+        self.assertEqual(env["TMIN"], 7.0)
+        self.assertEqual(env["TMAX"], 30.0)
+        self.assertEqual(env["RMIN"], 250.0)
+        self.assertEqual(env["RMAX"], 2000.0)
 
-    def test_license_footer_reflects_seven_crops(self):
-        # Pin the license footer reframe. A future crop-coverage
-        # expansion must update both the JSON and this pin in the
-        # same commit so the test catches an unsynchronized footer.
+    def test_version_pinned(self):
+        # Every crop-coverage change bumps the version so cached Stage-1 verdicts (keyed on it)
+        # recompute, even when the existing entries are unchanged.
+        self.assertEqual(self.payload["version"], "ecocrop_v4_2026-09-24")
+
+    def test_license_footer_reflects_eight_crops(self):
+        # A crop-coverage change updates the JSON footer and this pin in the same commit.
         self.assertIn(
-            "28 numeric facts (7 crops × 4 fields)",
+            "32 numeric facts (8 crops × 4 fields)",
             self.payload["license"],
         )
 
@@ -259,6 +271,12 @@ class TestECOCROPProvenanceF28(unittest.TestCase):
         self.assertEqual(
             self.envelopes["groundnut"]["verbatim_source_url"],
             "https://ecocrop.apps.fao.org/ecocrop/srv/en/dataSheet?id=2199",
+        )
+
+    def test_potato_provenance_url(self):
+        self.assertEqual(
+            self.envelopes["potato"]["verbatim_source_url"],
+            "https://ecocrop.apps.fao.org/ecocrop/srv/en/dataSheet?id=1971",
         )
 
 

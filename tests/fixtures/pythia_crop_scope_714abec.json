@@ -1,0 +1,31 @@
+{
+  "emitted_by": "prismpy 714abec through tests/unit/test_pythia_crop_scope_goldens.py _emit",
+  "cultivar_resolved_since": {
+    "Beans/minimal-config": {"cname": ["MEDIUM_SEASON", "MEDIUM_GRO"], "ingeno": ["990002", "IB0001"]},
+    "Cowpea/minimal-config": {"cname": ["MEDIUM_SEASON", "IT90K-277-2"], "ingeno": ["990002", "II0003"]},
+    "Groundnut/minimal-config": {"cname": ["MEDIUM_SEASON", "FLEUR_11"], "ingeno": ["990002", "IB0001"]}
+  },
+  "sha256": {
+    "Beans/fixed_date": {"config": "710e9293817e66137df49af3e3701a9314bc26e7ed6f77c6c4ade2b0a51ee633", "template": "a4825fe7257b02d8a61024f5ddd0c936ff7b5fe650fb3a22a9d6376fcf387687"},
+    "Beans/minimal-config": {"config": "22299fbeb0a307be14b4642cff8b1af7a150cf293c2fba1e66e982fa99ca8b07", "template": "a4825fe7257b02d8a61024f5ddd0c936ff7b5fe650fb3a22a9d6376fcf387687"},
+    "Beans/opportunistic": {"config": "c1716cef0aae86b15bf3c88e97815b92541fce0e2df5e13f845a817dc210942d", "template": "a4825fe7257b02d8a61024f5ddd0c936ff7b5fe650fb3a22a9d6376fcf387687"},
+    "Cowpea/fixed_date": {"config": "0c84cc634e5c3259ad52e2aeb5b4b433d71aa64ddb1209704d4970dfabadd705", "template": "88cf7a68af2ce5e4b2e3c94ba2805618580b1814d0ac1bbc28f4bcc033ace4fb"},
+    "Cowpea/minimal-config": {"config": "72904ed5be5407b3a353399512bc1093cc822ab5d56e7df48f047cbae1d6bb6b", "template": "88cf7a68af2ce5e4b2e3c94ba2805618580b1814d0ac1bbc28f4bcc033ace4fb"},
+    "Cowpea/opportunistic": {"config": "4e69657e3f0c6d961091c15da0dc6a2607f83d02c5eb63061d4991198f213c44", "template": "88cf7a68af2ce5e4b2e3c94ba2805618580b1814d0ac1bbc28f4bcc033ace4fb"},
+    "Groundnut/fixed_date": {"config": "f53d5fb96e56b55f04e03d52f6f7677c7d133554f50689563f2fbaaf07bfeb06", "template": "a39c9a3bfe633cf53112fc0e40e87cdc2428aff92818d5c45b4d0e76c8efb7b1"},
+    "Groundnut/minimal-config": {"config": "691e1d7dfa2efaf1717c56d14fd59a1073a0cfe0f4b6cfcefc0a7d14507618e4", "template": "a39c9a3bfe633cf53112fc0e40e87cdc2428aff92818d5c45b4d0e76c8efb7b1"},
+    "Groundnut/opportunistic": {"config": "3382bc577b0afc8b4b417729d70f60f470abc3efa7704436a81f4bba536b93d3", "template": "a39c9a3bfe633cf53112fc0e40e87cdc2428aff92818d5c45b4d0e76c8efb7b1"},
+    "Maize/fixed_date": {"config": "050b151a9765267e099ee340799059d28d76a086a1df2b88babef7b27454cb7c", "template": "c76ff05df8ba82c6e324e212546c97a6c54b359ac60866b8452eedd65482a2ab"},
+    "Maize/minimal-config": {"config": "7bc245fe10f4e1c6591764a7e85c00f89aaefa9beb694ec268d8f1c1284ea9f9", "template": "c76ff05df8ba82c6e324e212546c97a6c54b359ac60866b8452eedd65482a2ab"},
+    "Maize/opportunistic": {"config": "e907df525198512c37bfecaeb72430a242ddac009aa3d9897f97c42c786d0d6d", "template": "c76ff05df8ba82c6e324e212546c97a6c54b359ac60866b8452eedd65482a2ab"},
+    "Millet/fixed_date": {"config": "71256960d9fde11a5b72adcd6ea63ab00dbb551a64a7e89beb32218a0da2566c", "template": "88215aa0f34880eb794c4608fc181741c6a6b425bcae443572cb9d9afe69174e"},
+    "Millet/minimal-config": {"config": "3ef807fd68dd7a32f36cb5cf34a929aff7ab8cd9353377ca925f7b37a25a7460", "template": "88215aa0f34880eb794c4608fc181741c6a6b425bcae443572cb9d9afe69174e"},
+    "Millet/opportunistic": {"config": "107ffba078d6bf45fa78516be838aa94ddfc3bfe77af179bb72149416f8a2c3a", "template": "88215aa0f34880eb794c4608fc181741c6a6b425bcae443572cb9d9afe69174e"},
+    "Rice/fixed_date": {"config": "53a632c32ca3baede8281e40952ed3083a7cbe2bc3e8d986b8f65947b22c483a", "template": "244368bbe0accee7fb7e0f39942f9b9b88a6082a092950cb8e7ef2fc32580dd3"},
+    "Rice/minimal-config": {"config": "da62b6d1f5ad9fcd8388500c6a1101534a45076691cda3b2cb4fc843b350d811", "template": "244368bbe0accee7fb7e0f39942f9b9b88a6082a092950cb8e7ef2fc32580dd3"},
+    "Rice/opportunistic": {"config": "0ba59f405360c9125ee0235179b692e351531a47db13367d57d70fae0f133e52", "template": "244368bbe0accee7fb7e0f39942f9b9b88a6082a092950cb8e7ef2fc32580dd3"},
+    "Sorghum/fixed_date": {"config": "ded3c884c19d8c9840cb9f501e2acd81d9dbea2dda1224b8b8a30c22b2e932fa", "template": "042f062fa8f32ff252733208cb7c97211924fa6b6693878843f1cb59ae08cc63"},
+    "Sorghum/minimal-config": {"config": "383c9cb242f4763f2971f0948a4d769227a3b3760f6ba5107a3f2662ab08499d", "template": "042f062fa8f32ff252733208cb7c97211924fa6b6693878843f1cb59ae08cc63"},
+    "Sorghum/opportunistic": {"config": "1675788f7c6f615da249ee82d6c65b213c295b36837ca6f00f47aea9a9b4f1c8", "template": "042f062fa8f32ff252733208cb7c97211924fa6b6693878843f1cb59ae08cc63"}
+  }
+}

@@ -1,6 +1,6 @@
 {
-  "version": "ecocrop_v3_2026-09-12",
-  "license": "FAO ECOCROP fair-use derivative; 28 numeric facts (7 crops × 4 fields); each fact carries verbatim_source_url + verbatim_retrieval_date provenance.",
+  "version": "ecocrop_v4_2026-09-24",
+  "license": "FAO ECOCROP fair-use derivative; 32 numeric facts (8 crops × 4 fields); each fact carries verbatim_source_url + verbatim_retrieval_date provenance.",
   "stage_1_scope_note": "Per AC-Q3-A-a/b/c, only TMIN/TMAX/RMIN/RMAX used for Stage 1; ALTMX/pH/photoperiod/GMIN/GMAX/latitude excluded per probe-1-A scope clarity. CLIZ field also excluded per AC-Q3-A-d (data-completeness gaps).",
   "fields": {
     "TMIN": "Absolute minimum annual temperature tolerated by the crop (°C)",
@@ -64,6 +64,14 @@
       "RMAX": 4300,
       "verbatim_source_url": "https://ecocrop.apps.fao.org/ecocrop/srv/en/dataSheet?id=1668",
       "verbatim_retrieval_date": "2026-09-11"
+    },
+    "potato": {
+      "TMIN": 7,
+      "TMAX": 30,
+      "RMIN": 250,
+      "RMAX": 2000,
+      "verbatim_source_url": "https://ecocrop.apps.fao.org/ecocrop/srv/en/dataSheet?id=1971",
+      "verbatim_retrieval_date": "2026-09-24"
     }
   }
 }

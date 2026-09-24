@@ -451,7 +451,8 @@ class TestCarveOutRegression:
         # Then 2835 -> 2842 after the empty-grid guard (+7) in _retrieve_hwsd_for_grid.
         # Then 2842 -> 2831 after routing soil resolution through data_sources.soil
         # (the per-platform fallback read removed, net ~-11).
-        ("src/prismpy/pipeline/executor.py", 2831),
+        # Then 2831 -> 2832 after the crop-support preflight call (+1).
+        ("src/prismpy/pipeline/executor.py", 2832),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed

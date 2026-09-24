@@ -139,6 +139,8 @@ dev = [
     # touching the live API. Locally installed transitively in some
     # dev envs but not declared by manifest, so CI couldn't find it.
     "responses>=0.26.0",
+    # Tests render the PYTHIA SNX template with the engine the prism-runner uses.
+    "jinja2>=3.0",
 ]
 viz = [
     "matplotlib>=3.7.0",

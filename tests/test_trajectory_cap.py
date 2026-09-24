@@ -62,7 +62,8 @@ _LOWER = 815
 #   §7 nrisk generator (feat/nrisk-uc7-generator): tests/phase3/* are NOW
 #     COMMITTED (the §7 structural-emission probes, previously untracked scratch)
 #     → n_collected ≈ 3052 → ceil((3052 + 200) / 50) * 50 = 3300.
-_UPPER = 3300
+#   Potato SUBSTOR support: n_collected ≈ 3382 → ceil((3382 + 200) / 50) * 50 = 3600.
+_UPPER = 3600
 
 
 class TestTrajectoryCap(TestCase):

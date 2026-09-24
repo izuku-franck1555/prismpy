@@ -498,9 +498,10 @@ _PLATFORM_SUPPORTED_CROPS: Dict[str, FrozenSet[str]] = {
         "Maize", "Sorghum", "Millet", "Cowpea", "Rice", "Groundnut",
     }),
     "pythia": frozenset({
-        "maize", "sorghum", "millet", "cowpea", "rice", "groundnut", "beans",
-        "Maize", "Sorghum", "Millet", "Cowpea", "Rice", "Groundnut", "Beans",
+        "maize", "sorghum", "millet", "cowpea", "rice", "groundnut", "beans", "potato",
+        "Maize", "Sorghum", "Millet", "Cowpea", "Rice", "Groundnut", "Beans", "Potato",
     }),
+    # potato stays off ACEA until the runner stages its GAEZ crop data (its init loads it)
     "acea": frozenset({
         "maize", "wheat", "rice", "sorghum", "millet",
         "Maize", "Wheat", "Rice", "Sorghum", "Millet",
@@ -512,6 +513,35 @@ _PLATFORM_SUPPORTED_CROPS: Dict[str, FrozenSet[str]] = {
 }
 
 
+def is_crop_supported(platform: Any, crop_name: Optional[str]) -> bool:
+    """Whether ``platform`` can run ``crop_name`` per :data:`_PLATFORM_SUPPORTED_CROPS`.
+
+    The one crop x platform predicate: the prep-time admission gate and the manifest's
+    ``crop_supported_per_platform`` readiness gate both read it. ``platform`` may be a
+    ``Platform`` enum or its string value; both names are compared case- and
+    whitespace-insensitively. An unknown platform or an empty crop is unsupported.
+    """
+    platform_key = str(getattr(platform, "value", platform)).strip().casefold()
+    supported = _PLATFORM_SUPPORTED_CROPS.get(platform_key)
+    if not supported or not isinstance(crop_name, str) or not crop_name.strip():
+        return False
+    return crop_name.strip().casefold() in {crop.casefold() for crop in supported}
+
+
+class UnsupportedCropError(ValueError):
+    """The crop cannot be modeled on one or more of the target platforms
+    (per :func:`is_crop_supported`). Not recoverable by retrying."""
+
+    recoverable = False
+
+    def __init__(self, crop_name: str, platforms: List[str]):
+        self.crop_name = crop_name
+        self.platforms = list(platforms)
+        which = "that platform" if len(self.platforms) == 1 else "those platforms"
+        super().__init__(
+            f"{crop_name} cannot be modeled on {', '.join(self.platforms)}. "
+            f"Remove {which} from the targets or choose a crop they support."
+        )
 
 
 def derive_boundary_label(
@@ -777,9 +807,6 @@ def _eval_gate_scenario_packages_temporal_aligned(
 def _eval_gate_crop_supported_per_platform(
     manifest_so_far: Dict[str, Any], platform: str,
 ) -> bool:
-    supported = _PLATFORM_SUPPORTED_CROPS.get(platform)
-    if supported is None:
-        return False
     crop_name = manifest_so_far.get("crop", {}).get("name") if isinstance(
         manifest_so_far.get("crop"), dict,
     ) else None
@@ -787,9 +814,7 @@ def _eval_gate_crop_supported_per_platform(
         crops_list = manifest_so_far.get("crops") or []
         if crops_list and isinstance(crops_list[0], dict):
             crop_name = crops_list[0].get("crop_name") or crops_list[0].get("name")
-    if not crop_name:
-        return False
-    return crop_name in supported
+    return is_crop_supported(platform, crop_name)
 
 
 def _eval_gate_manifest_adapter_capability_sowing_rule_default_present(
