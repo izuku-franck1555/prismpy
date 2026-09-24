@@ -116,6 +116,10 @@ class PythiaTranslator(PythiaTranslatorBase):
     # manifest label + structured crop_mask_vintage field). None when no crop mask was applied.
     _applied_vintage = None
 
+    # The cultivar resolution written into pythia_config.json at translate time; package-time
+    # surfaces reuse it rather than re-resolving (which would record duplicate decisions).
+    _emitted_cultivar: Optional[Dict[str, Any]] = None
+
     def __init__(
         self,
         config: ProjectConfig,
@@ -1952,6 +1956,7 @@ class PythiaTranslator(PythiaTranslatorBase):
             cultivar_params = self._map_generic_to_cultivar()
             ingeno = cultivar_params["ingeno"]
             cname = cultivar_params["cname"]
+        self._emitted_cultivar = cultivar_params
 
         # Get start year for runs
         start_year = int(sdate.split("-")[0])
@@ -3416,20 +3421,8 @@ class PythiaTranslator(PythiaTranslatorBase):
         sol_count = len(list((self.output_dir / "eGHR").glob("*.SOL"))) if (self.output_dir / "eGHR").exists() else 0
         n_sites = len(data.grid.cells) if data.grid else 0
 
-        # Get parameters
-        cultivar = self._map_generic_to_cultivar()
-        fertilizer = self._map_generic_to_fertilizer()
-        config_params = self._map_generic_to_pythia_config()
-
-        # Get management config
-        mgmt = self.config.management
-        # Planting values via the single resolver (the one ha->m² conversion + per-crop fallback),
-        # so the README reports the same ppop/plrs the SNX + pythia_config carry (no 2nd conversion).
-        _planting = self._resolve_planting_params()
-        plant_pop = _planting['ppop']
-        row_spacing = _planting['plrs']
-
-        # Build config dictionary for template
+        # The cultivar, template, planting and management rows are read from the package's own
+        # pythia_config.json by generate_readme; only the translate-time GDD total is passed.
         readme_config = {
             # Project info
             'project_name': self.config.project.name,
@@ -3448,21 +3441,7 @@ class PythiaTranslator(PythiaTranslatorBase):
             'n_sites': n_sites,
             'n_weather_files': weather_count,
             'n_sol_files': sol_count,
-            'wsta_prefix': self._get_wsta_prefix(),
-            'template_name': self._get_template_filename(),
-
-            # Crop parameters
-            'cultivar_code': cultivar['ingeno'],
-            'cultivar_name': cultivar['cname'],
-            'total_gdd': cultivar.get('total_gdd', 'N/A'),
-            'pfrst': config_params.get('pfrst', 'N/A'),
-            'plast': config_params.get('plast', 'N/A'),
-
-            # Management settings
-            'fen_tot': fertilizer.get('fen_tot', 60),
-            'plant_pop': plant_pop,
-            'row_spacing': row_spacing,
-            'irrigation': 'Enabled' if mgmt and mgmt.irrigation else 'Rainfed',
+            'total_gdd': (self._emitted_cultivar or {}).get('total_gdd'),
 
             # Data sources
             'data_sources': {

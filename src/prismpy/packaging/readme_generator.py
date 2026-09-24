@@ -4,6 +4,7 @@ README Generation for prismpy packages.
 Provides template-based README generation for platform-specific packages.
 """
 
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
@@ -877,16 +878,16 @@ pythia --all config/pythia_config.json
 | Crop | {crop_name} |
 | Cultivar Code | {cultivar_code} |
 | Cultivar Name | {cultivar_name} |
-| Total GDD | {total_gdd} °C-days |
-| Planting Window | {pfrst} to {plast} |
+| Total GDD | {total_gdd} |
+| Planting Window | {planting_window} |
 
 ### Management Settings
 
 | Parameter | Value |
 |-----------|-------|
-| Fertilizer N | {fen_tot} kg/ha |
-| Plant Population | {plant_pop} plants/m² |
-| Row Spacing | {row_spacing} cm |
+| Fertilizer N | {fertilizer_n} |
+| Plant Population | {plant_population} |
+| Row Spacing | {row_spacing} |
 | Irrigation | {irrigation} |
 
 ---
@@ -1134,6 +1135,57 @@ def _safe_get(config: Dict[str, Any], key: str, default: Any) -> Any:
     README template formats is a real fallback.
     """
     return _coalesce(config.get(key), default=default)
+
+
+NOT_RECORDED = "not recorded"
+
+
+def read_pythia_run_config(package_dir: Union[str, Path]) -> Optional[Dict[str, Any]]:
+    """The package's ``config/pythia_config.json`` (the run inputs the runner uses), or None
+    when the package carries none (e.g. a CRAFT package)."""
+    path = Path(package_dir) / "config" / "pythia_config.json"
+    try:
+        run_config = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return run_config if isinstance(run_config, dict) else None
+
+
+def pythia_package_summary(run_config: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """The PYTHIA README summary block, read from the package's own run config.
+
+    A value the run config does not carry renders as ``NOT_RECORDED`` — never a default that
+    would describe some other package.
+    """
+    run_config = run_config or {}
+    setup = run_config.get("default_setup") if isinstance(run_config.get("default_setup"), dict) else {}
+    runs = run_config.get("runs") if isinstance(run_config.get("runs"), list) else []
+    fertilized = next((run for run in runs if isinstance(run, dict)
+                       and str(run.get("name", "")).endswith("_fertilized")), {})
+
+    def recorded(value: Any, template: str = "{}") -> str:
+        return NOT_RECORDED if _coalesce(value) is None else template.format(value)
+
+    wsta = setup.get("wsta")
+    if isinstance(wsta, str) and wsta.startswith("lookup_wth::"):
+        wsta = wsta.split("::")[1]
+    irrig = setup.get("irrig")
+    irrigation = None if _coalesce(irrig) is None else ("Rainfed" if irrig == "N" else "Enabled")
+    return {
+        "wsta_prefix": recorded(wsta),
+        "template_name": recorded(setup.get("template")),
+        "cultivar_code": recorded(setup.get("ingeno")),
+        "cultivar_name": recorded(setup.get("cname")),
+        "planting_window": (
+            f"{setup['pfrst']} to {setup['plast']}"
+            if _coalesce(setup.get("pfrst")) is not None and _coalesce(setup.get("plast")) is not None
+            else NOT_RECORDED
+        ),
+        "fertilizer_n": recorded(fertilized.get("fen_tot"), "{} kg/ha"),
+        "plant_population": recorded(setup.get("ppop"), "{} plants/m²"),
+        "row_spacing": recorded(setup.get("plrs"), "{} cm"),
+        "irrigation": recorded(irrigation),
+    }
 
 
 def _resolve_cultivar_from_disk(package_dir: Optional[Path]) -> Optional[str]:
@@ -1534,21 +1586,10 @@ def generate_readme(
             'n_weather_files': _safe_get(config, 'n_weather_files', 0),
             'n_years': _safe_get(config, 'n_years', default_n_years),
             'n_sol_files': _safe_get(config, 'n_sol_files', 0),
-            'wsta_prefix': _safe_get(config, 'wsta_prefix', 'MLKO'),
-            'template_name': _safe_get(config, 'template_name', 'KOMZ8001.SNX'),
-
-            # Crop parameters
-            'cultivar_code': _safe_get(config, 'cultivar_code', '990002'),
-            'cultivar_name': _safe_get(config, 'cultivar_name', 'MEDIUM_SEASON'),
-            'total_gdd': _safe_get(config, 'total_gdd', 'N/A'),
-            'pfrst': _safe_get(config, 'pfrst', 'N/A'),
-            'plast': _safe_get(config, 'plast', 'N/A'),
-
-            # Management settings
-            'fen_tot': _safe_get(config, 'fen_tot', 60),
-            'plant_pop': _safe_get(config, 'plant_pop', 5.0),
-            'row_spacing': _safe_get(config, 'row_spacing', 70),
-            'irrigation': _safe_get(config, 'irrigation', 'Rainfed'),
+            # The README sits at the package root: the summary reads that package's run config.
+            **pythia_package_summary(read_pythia_run_config(Path(output_path).parent)),
+            'total_gdd': (f"{config['total_gdd']} °C-days"
+                          if isinstance(config.get('total_gdd'), (int, float)) else 'N/A'),
             'climate_source': _safe_get(config, 'climate_source', 'NASA POWER'),
             'climate_citation': _safe_get(
                 config, 'climate_citation',

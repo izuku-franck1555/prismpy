@@ -1,0 +1,65 @@
+{
+  "cells": [
+    1,
+    2
+  ],
+  "crop": {
+    "maturity_doy": 260,
+    "name": "Cowpea",
+    "planting_doy": 182
+  },
+  "data_sources": {
+    "climate": "ISIMIP3b gfdl-esm4 ssp245 (ISIMIP3BASD bias-corrected)"
+  },
+  "files": [
+    {
+      "path": "README.md",
+      "sha256": "39690f42cc0978c606d0ddb25aab16ea6c80b6ef6dbd9581be09287e7b7bfa54",
+      "size_bytes": 7434
+    },
+    {
+      "path": "config/pythia_config.json",
+      "sha256": "cbf82b2f18ea1dd1df209ec64d5cf31440116036533f679f561d642f9a6ffe08",
+      "size_bytes": 127
+    },
+    {
+      "path": "weather/1.WTH",
+      "sha256": "c8dfb45aefade362fa903263c812def4694802af912b7cea260b910e8eae7def",
+      "size_bytes": 356
+    },
+    {
+      "path": "weather/2.WTH",
+      "sha256": "af092008aa0e036acc312253f2b9fd433b892595712d9918567770b67bf4b39b",
+      "size_bytes": 356
+    }
+  ],
+  "platform": "pythia",
+  "project_name": "Kano_Cowpea",
+  "region": {
+    "country": "Nigeria",
+    "gadm_level": 1,
+    "name": "Kano"
+  },
+  "scenario": {
+    "baseline_reference_label": "OBSERVED_KANO_COWPEA_2000-2020",
+    "bias_correction_method": "quantile_mapping",
+    "co2_ppm": 478.0,
+    "co2_ppm_provenance": "AR6 WG1 Annex III + RCMIP, mid-year-of-period convention",
+    "gcm_source": "gfdl-esm4",
+    "rcp_or_ssp": "ssp245",
+    "scenario_bias_correction_provenance": "ISIMIP3BASD v2.5.0 quantile-mapping against W5E5 v2.0",
+    "scenario_label": "PROJECTION_KANO_COWPEA_gfdl-esm4_ssp245_2046-2065",
+    "scenario_role": "projection",
+    "time_slice_end": 2065,
+    "time_slice_start": 2046
+  },
+  "summary": {
+    "total_files": 4,
+    "total_size_bytes": 8273,
+    "total_size_mb": 0.01
+  },
+  "temporal": {
+    "end_year": 2065,
+    "start_year": 2046
+  }
+}

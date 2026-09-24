@@ -1,0 +1,11 @@
+{
+  "default_setup": {
+    "sdate": "2046-01-01"
+  },
+  "runs": [
+    {
+      "startYear": 2046,
+      "nyers": 20
+    }
+  ]
+}
