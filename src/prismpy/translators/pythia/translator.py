@@ -3194,8 +3194,7 @@ class PythiaTranslator(PythiaTranslatorBase):
         # per-crop literal for the absent/malformed edge (never -99). Preserve the 1-space DSSAT
         # separator + fixed width so the @P columns stay 6-wide.
         pdef = self._crop_planting_default()
-        # SUBSTOR stops on a seed-tuber mass or sprout length <= 0 (IPPLNT errors 16/17): a tuber
-        # crop's values are fixed literals here (one source); every other crop keeps -99.
+        # SUBSTOR stops on seed-tuber mass or sprout length <= 0 (IPPLNT errors 16/17); others: -99.
         plwt_cell, sprl_cell = (
             (f"{pdef['plwt']:5.0f}", f"{pdef['sprl']:5.1f}")
             if all(k in pdef for k in self._SEED_TUBER_FIELDS) else ("  -99", "  -99")
@@ -3357,8 +3356,7 @@ class PythiaTranslator(PythiaTranslatorBase):
             build_baseline_scenario_block_for_period,
         )
 
-        # The cultivar the package's run config carries (written at translate time): reused,
-        # never re-resolved at package time.
+        # The cultivar written at translate time; resolving it again here would repeat decisions.
         emitted_setup = (read_pythia_run_config(self.output_dir) or {}).get("default_setup") or {}
 
         # Resolved-source discriminator: read the runtime boundary
