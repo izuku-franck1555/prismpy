@@ -18,9 +18,11 @@ Reference: PYTHIA/07-JSON-CONFIG-ASSEMBLY/assemble_config.py
 Reference: PYTHIA/utils/wth_utils.py
 """
 
+import csv
 import json
 import logging
 import math
+import os
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -101,6 +103,77 @@ class CellGridMismatchError(ValueError):
 
 class CropMaskExtentError(RuntimeError):
     """The clipped crop mask does not cover every grid cell's footprint."""
+
+
+class RegionGeometryError(ValueError):
+    """The region has no usable polygon to decide which crop lies inside it."""
+
+
+#: The per-cell crop-area file's columns, in order (``data/masks/<crop>_harvested_area.csv``).
+CROP_AREA_COLUMNS = (
+    "lat", "lon", "crop_area_ha", "crop_area_full_cell_ha", "cell_area_ha", "h_j",
+    "irrigated_share", "technology", "spam_crop_code", "spam_version", "spam_release",
+    "crop_area_rule",
+)
+
+_EARTH_RADIUS_M = 6_371_008.8
+
+
+def _region_geometry(region):
+    """The region polygon and the rule it gives, failing closed: a missing polygon is only
+    replaced by the bounds box when the region IS a manual box."""
+    from shapely import wkt
+    from shapely.errors import ShapelyError
+    from shapely.geometry import box
+
+    name = getattr(region, "name", None)
+    geometry_wkt = getattr(region, "geometry_wkt", None)
+    if geometry_wkt:
+        try:
+            geometry = wkt.loads(geometry_wkt)
+        except (ShapelyError, ValueError, TypeError) as exc:
+            raise RegionGeometryError(f"region {name!r}: its polygon cannot be read ({exc})") from exc
+        if geometry.is_empty:
+            raise RegionGeometryError(f"region {name!r}: its polygon is empty")
+        return geometry, "pixel_centre_in_region_polygon"
+    source = getattr(region, "boundary_source", None)
+    if source == "manual":
+        b = region.bounds
+        return box(b.minx, b.miny, b.maxx, b.maxy), "pixel_centre_in_region_bounds"
+    raise RegionGeometryError(
+        f"region {name!r} has no polygon and its boundary source is {source!r}, not a manual box"
+    )
+
+
+def _cell_block_sums(raster_path: Path, cells, half: float, geometry) -> List[Tuple[float, float]]:
+    """Per cell ``(in_region, full_footprint)`` sums of the raster over the cell's footprint; a
+    pixel is in the region when its centre is. Nodata, non-finite and negative pixels count 0."""
+    import rasterio
+    from rasterio.features import geometry_mask
+    from rasterio.windows import Window, from_bounds
+
+    sums = []
+    with rasterio.open(raster_path) as src:
+        for cell in cells:
+            window = from_bounds(cell.lon - half, cell.lat - half, cell.lon + half,
+                                 cell.lat + half, src.transform)
+            window = Window(round(window.col_off), round(window.row_off),
+                            round(window.width), round(window.height))
+            values = src.read(1, window=window, boundless=True, fill_value=0).astype("float64")
+            valid = np.isfinite(values) & (values >= 0)
+            if src.nodata is not None:
+                valid &= values != src.nodata
+            values = np.where(valid, values, 0.0)
+            inside = ~geometry_mask([geometry], out_shape=values.shape,
+                                    transform=src.window_transform(window), all_touched=False)
+            sums.append((float(values[inside].sum()), float(values.sum())))
+    return sums
+
+
+def _spherical_cell_area_ha(lat: float, half: float) -> float:
+    """The area of a ``2·half``-degree cell centred at ``lat`` on the sphere, in ha."""
+    south, north = math.radians(lat - half), math.radians(lat + half)
+    return _EARTH_RADIUS_M ** 2 * math.radians(2 * half) * (math.sin(north) - math.sin(south)) / 1e4
 
 
 def _check_cell_lattice(cells, increment: float) -> None:
@@ -2334,6 +2407,8 @@ class PythiaTranslator(PythiaTranslatorBase):
         # every early return (no dir, etc.) therefore leaves it None. Pairs with `_mask_present`,
         # which the caller resets at the crop-mask step.
         self._applied_vintage = None
+        # A reused output directory must not keep a mask or a per-cell file from an earlier build.
+        self._remove_crop_area_outputs()
 
         # Get SPAM raster directory from config
         pythia_config = None
@@ -2398,16 +2473,41 @@ class PythiaTranslator(PythiaTranslatorBase):
                         "unmasked run under a mask request."
                     )
 
+        # The per-cell crop areas, from the same vintage's GLOBAL layers, before anything is written.
+        rows = self._write_cell_crop_area(data, spam_dir, spam_version, spam_release, crop_code)
+
         # Output path — vintage-named so the emitted mask filename independently verifies the
         # applied (year, release), not a generic harvest_area.tif.
         mask_filename = f"harvest_area_{spam_version}_{spam_release}.tif"
         output_path = self.output_dir / "raster" / mask_filename
+        crop_norm = self.config.crop.name.lower().strip().replace(" ", "_")
+        csv_path = self.output_dir / "data" / "masks" / f"{crop_norm}_harvested_area.csv"
 
-        # Masking was requested AND the vintage resolved — let a clip failure propagate (fail
-        # loud) rather than silently shipping a whole-grid run under a "no mask" label.
-        mask_path = self._clip_global_raster(spam_path, output_path, bounds)
-        if cells:
-            _check_mask_covers_cells(mask_path, cells, half)
+        # Both files are staged, then published mask first and file second; a failed second
+        # publish removes the first, so a package holds both or neither.
+        staged_mask = output_path.with_name(output_path.name + ".partial")
+        staged_csv = csv_path.with_name(csv_path.name + ".partial")
+        try:
+            # Masking was requested AND the vintage resolved — let a clip failure propagate (fail
+            # loud) rather than silently shipping a whole-grid run under a "no mask" label.
+            self._clip_global_raster(spam_path, staged_mask, bounds)
+            if cells:
+                _check_mask_covers_cells(staged_mask, cells, half)
+            staged_csv.parent.mkdir(parents=True, exist_ok=True)
+            with open(staged_csv, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=CROP_AREA_COLUMNS, lineterminator="\n")
+                writer.writeheader()
+                writer.writerows(rows)
+            os.replace(staged_mask, output_path)
+            try:
+                os.replace(staged_csv, csv_path)
+            except BaseException:
+                output_path.unlink(missing_ok=True)
+                raise
+        finally:
+            staged_mask.unlink(missing_ok=True)
+            staged_csv.unlink(missing_ok=True)
+        mask_path = output_path
 
         # Produce the single canonical applied-vintage state ONCE, after a successful clip.
         self._applied_vintage = AppliedVintage(
@@ -2433,6 +2533,80 @@ class PythiaTranslator(PythiaTranslatorBase):
             west, north = src.transform * (math.floor(west_col), math.floor(north_row))
             east, south = src.transform * (math.ceil(east_col), math.ceil(south_row))
         return west, south, east, north
+
+    def _remove_crop_area_outputs(self) -> None:
+        """Remove the crop mask and the per-cell crop-area file an earlier build left here."""
+        for pattern in ("raster/harvest_area_*.tif", "data/masks/*_harvested_area.csv"):
+            for path in self.output_dir.glob(pattern):
+                path.unlink()
+
+    def _write_cell_crop_area(
+        self, data: UnifiedData, spam_dir: Path, spam_version: str, spam_release: str,
+        crop_code: str,
+    ) -> List[Dict[str, Any]]:
+        """The per-cell crop-area rows (``CROP_AREA_COLUMNS``), one per grid cell in grid order.
+
+        ``crop_area_ha`` is the SPAM harvested area over the pixels of the cell's footprint whose
+        centre lies inside the region; ``h_j`` is that area over the cell's area (never clamped:
+        a cell harvested more than once a year can exceed 1). The rainfed or irrigated layer
+        replaces all technologies only where irrigation is material in the region."""
+        from prismpy.sources.crop_areas.spam_vintage import (
+            StratumNotInVintageError,
+            VintageRasterAbsentError,
+            resolve_spam_raster,
+        )
+
+        cells = list(data.grid.cells) if data.grid and data.grid.cells else []
+        if not cells:
+            return []
+        geometry, rule = _region_geometry(data.region)
+        half = data.grid.increment_deg / 2
+
+        layers = {"A": resolve_spam_raster(spam_dir, spam_version, spam_release, crop_code, tech="A")}
+        for tech in ("I", "R"):
+            try:
+                layers[tech] = resolve_spam_raster(
+                    spam_dir, spam_version, spam_release, crop_code, tech=tech)
+            except (StratumNotInVintageError, VintageRasterAbsentError):
+                pass
+        sums = {tech: _cell_block_sums(path, cells, half, geometry) for tech, path in layers.items()}
+
+        in_region = {tech: [inside for inside, _ in cell_sums] for tech, cell_sums in sums.items()}
+        total_a = sum(in_region["A"])
+        technology = "A"
+        if total_a <= 0:
+            logger.warning(f"No grid cell holds {crop_code} crop inside the region in SPAM "
+                           f"{spam_version} {spam_release}")
+        elif "I" in sums and "R" in sums:
+            total_i = sum(in_region["I"])
+            a_where_i_exceeds_r = sum(
+                a for a, i, r in zip(in_region["A"], in_region["I"], in_region["R"]) if i > r)
+            if 10 * total_i >= total_a or 100 * a_where_i_exceeds_r >= total_a:
+                mgmt = self.config.management
+                technology = "I" if bool(mgmt and mgmt.irrigation) else "R"
+
+        rows = []
+        for index, cell in enumerate(cells):
+            crop_area, full_cell = sums[technology][index]
+            cell_area = _spherical_cell_area_ha(cell.lat, half)
+            irrigated = ""
+            if "I" in sums and in_region["A"][index] > 0:
+                irrigated = in_region["I"][index] / in_region["A"][index]
+            rows.append({
+                "lat": f"{cell.lat:.6f}",
+                "lon": f"{cell.lon:.6f}",
+                "crop_area_ha": crop_area,
+                "crop_area_full_cell_ha": full_cell,
+                "cell_area_ha": cell_area,
+                "h_j": crop_area / cell_area,
+                "irrigated_share": irrigated,
+                "technology": technology,
+                "spam_crop_code": crop_code,
+                "spam_version": spam_version,
+                "spam_release": spam_release,
+                "crop_area_rule": rule,
+            })
+        return rows
 
     def _get_spam_crop_code(self) -> str:
         """Get SPAM crop code from config or auto-detect from crop name.
