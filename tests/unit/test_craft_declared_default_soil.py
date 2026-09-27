@@ -7,6 +7,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import struct
 import subprocess
 import sys
 from datetime import date, timedelta
@@ -28,6 +29,7 @@ from prismpy.translators.craft import translator as craft
 
 sys.path.insert(0, str(Path(__file__).parent))
 from test_craft_spam_vintage_honesty import _cfg  # noqa: E402
+from test_hwsd_layered_profile import _unit  # noqa: E402
 
 REGION = Region(name="Koutiala", country="Mali", country_iso3="MLI",
                 bounds=BoundingBox(minx=-6.0, miny=11.0, maxx=-4.0, maxy=13.0))
@@ -151,7 +153,6 @@ def test_a_cell_without_hwsd_soil_runs_on_the_declared_default(tmp_path, fake_hw
 
 def test_layered_hwsd_profile_is_written_to_100_cm(tmp_path, monkeypatch):
     """The translator's own HWSD query, end to end from the unit's layer rows."""
-    from test_hwsd_layered_profile import _unit
     monkeypatch.setattr(craft.HWSDSource, "_sample_bil_raster", lambda self, coords: [1469])
     monkeypatch.setattr(craft.HWSDSource, "_export_mdb_table",
                         lambda self: pd.DataFrame(_unit(1469)))
@@ -202,6 +203,47 @@ def test_an_unreadable_hwsd_is_no_answer_and_keeps_the_next_branch(tmp_path):
     assert set(placeholder.mask.values()) == {"ML90000001"}
     default = _run(_translator(tmp_path / "4", paths=True), _grid([101]), None, None)
     assert default.mask == {101: "ML00000000"}
+
+
+_BIL_HEADER = "".join(f"{line}\n" for line in (
+    "BYTEORDER I", "LAYOUT BIL", "NROWS 24", "NCOLS 24", "NBANDS 1", "NBITS 16", "BANDROWBYTES 48",
+    "TOTALROWBYTES 48", "PIXELTYPE UNSIGNEDINT", "ULXMAP -5.9791667", "ULYMAP 12.9791667",
+    "XDIM 0.0416667", "YDIM 0.0416667", "NODATA 0"))
+
+
+@pytest.mark.parametrize("damage", ["truncated_bil", "garbage_mdb", "bil_without_hdr"])
+def test_corrupt_hwsd_files_are_no_answer_and_the_build_runs_on_the_default(
+        tmp_path, monkeypatch, damage):
+    """The prismweb regime (iSDA served, HWSD paths configured) on damaged HWSD files."""
+    raster = struct.pack("<576H", *([1469] * 576))
+    (tmp_path / "HWSD2.bil").write_bytes(raster[:100] if damage == "truncated_bil" else raster)
+    if damage != "bil_without_hdr":
+        (tmp_path / "HWSD2.hdr").write_text(_BIL_HEADER)
+    (tmp_path / "HWSD2.mdb").write_bytes(b"not a database")
+    if damage != "garbage_mdb":
+        monkeypatch.setattr(craft.HWSDSource, "_export_mdb_table",
+                            lambda self: pd.DataFrame(_unit(1469)))
+    out = _run(_translator(tmp_path, paths=True), _grid([101]), None,
+               _state(HwsdOutcome.NOT_QUERIED, isda=True))
+    assert out.mask == {101: "ML00000000"} and out.record["default_cause"] == "no_soil_source:1"
+
+
+@pytest.mark.parametrize("paths, existing, state, profile", [
+    (False, True, HwsdOutcome.NO_ANSWER, "ML90000001"),
+    (False, False, None, "ML00000000"),
+    (True, False, HwsdOutcome.NOT_QUERIED, "ML00000000"),
+])
+def test_an_empty_grid_still_writes_its_generic_profile_that_no_cell_uses(
+        tmp_path, fake_hwsd, paths, existing, state, profile):
+    fake_hwsd.plan = {0: _hwsd(1469)}
+    out = _run(_translator(tmp_path, paths=paths), _grid([]),
+               {0: _placeholder()} if existing else None, _state(state) if state else None)
+    assert out.mask == {} and list(out.blocks) == [profile] and fake_hwsd.calls == 0
+    assert {k: out.record[k] for k in ("cells", "default_cells", "default_cause",
+                                       "default_profile")} == {
+        "cells": "0", "default_cells": "0", "default_cause": "-", "default_profile": "-"}
+    if profile == "ML00000000":
+        assert out.blocks[profile] == _default_block(tmp_path)
 
 
 # ── branch 1: HWSD served at harmonize ─────────────────────────────────────
@@ -391,6 +433,7 @@ def _package_cell_ids(tmp_path, grid, existing, state):
                                             source="nasa_power", records=records)
                for c in grid.cells}
     tr = _translator(tmp_path)
+    tr.get_platform_config().organic_fertilizer_enabled = True
     data = UnifiedData(region=REGION, grid=grid, climate=climate, soil=existing,
                        soil_cascade=state)
     result = tr.translate(data)
@@ -419,7 +462,7 @@ def test_every_craft_file_keeps_every_grid_cell(tmp_path):
     existing = {101: _hwsd(1469), 102: _hwsd(1470, sand=60.0), 104: _hwsd(1469)}
     ids = _package_cell_ids(tmp_path, _grid([101, 102, 103, 104]), existing,
                             _state(HwsdOutcome.SERVED))
-    assert len(ids) == 12
+    assert len(ids) == 13
     for name, cells in ids.items():
         assert cells == {101, 102, 103, 104}, name
 

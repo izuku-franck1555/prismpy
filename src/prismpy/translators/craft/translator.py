@@ -1927,7 +1927,7 @@ class CraftTranslator(CraftTranslatorBase):
         if hwsd == HwsdOutcome.SERVED:
             hwsd_cells = dict(existing_soil_data or {})
             logger.info(f"Using {len(hwsd_cells)} HWSD profiles from the harmonize stage")
-        elif hwsd_bil_path and hwsd_mdb_path:
+        elif hwsd_bil_path and hwsd_mdb_path and cell_ids:
             logger.info(f"Querying HWSD for {len(filtered_cells)} cells...")
             try:
                 hwsd_source = HWSDSource(
@@ -1986,6 +1986,13 @@ class CraftTranslator(CraftTranslatorBase):
                 cell_to_key[cell_id] = _DEFAULT_PROFILE_KEY
         if _DEFAULT_PROFILE_KEY in cell_to_key.values():
             profiles_by_key[_DEFAULT_PROFILE_KEY] = _default_soil_profile(region, country_code)
+        if not cell_ids:
+            # The one generic profile no cell uses: an empty grid still writes its branch's, as base did.
+            placeholders = [p for p in (existing_soil_data or {}).values() if p.source == "placeholder"]
+            if hwsd_cells is None and len(placeholders) == 1:
+                profiles_by_key[_RETRIEVED_PROFILE_KEY_BASE] = placeholders[0]
+            else:
+                profiles_by_key[_DEFAULT_PROFILE_KEY] = _default_soil_profile(region, country_code)
 
         # =========================================================================
         # Generate the .SOL file with the unique profiles and the record line

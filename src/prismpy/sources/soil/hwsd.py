@@ -446,6 +446,11 @@ class HWSDSource(DataSource):
             return []
 
         with rasterio.open(self.config.bil_path) as src:
+            # A raw raster shorter than its header reads as nodata past its end, not as an error.
+            if src.driver == "EHdr":
+                size = src.width * src.height * src.count * np.dtype(src.dtypes[0]).itemsize
+                if Path(self.config.bil_path).stat().st_size < size:
+                    raise RuntimeError(f"{self.config.bil_path} is shorter than its header declares")
             # Convert (lat, lon) to (lon, lat) for rasterio
             xy_coords = [(lon, lat) for lat, lon in coords]
             values = list(src.sample(xy_coords))
