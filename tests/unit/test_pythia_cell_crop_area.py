@@ -2,7 +2,6 @@
 vintage's own pixel grid, and the grid cells must sit on the canonical lattice."""
 from __future__ import annotations
 
-import ast
 import hashlib
 import inspect
 import json
@@ -165,14 +164,15 @@ def test_the_build_refuses_an_off_lattice_grid(tmp_path):
 
 # ── unchanged surfaces ─────────────────────────────────────────────────────
 
-# The AST of _clip_global_raster at prismpy 74af733 (the legacy soil clip shares it).
-CLIP_AST_SHA256 = "1e93f9c802edf2d6d62216198a4ccdaef3f753bb398c03a8814dcd40f9015d94"
+# The source of _clip_global_raster at prismpy 74af733 (the legacy soil clip shares it),
+# line endings and trailing spaces normalised, so the digest is the same on every Python.
+CLIP_SOURCE_SHA256 = "5861f82d0b8e271cba14057e74ca2d80966512ab9b81f4173b22ae1307ed8adc"
 
 
 def test_the_shared_clip_is_unchanged():
     source = textwrap.dedent(inspect.getsource(pythia.PythiaTranslator._clip_global_raster))
-    digest = hashlib.sha256(ast.dump(ast.parse(source)).encode()).hexdigest()
-    assert digest == CLIP_AST_SHA256
+    text = "\n".join(line.rstrip() for line in source.splitlines())
+    assert hashlib.sha256(text.encode()).hexdigest() == CLIP_SOURCE_SHA256
 
 
 def test_the_applied_vintage_is_unchanged(tmp_path):
