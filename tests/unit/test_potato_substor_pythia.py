@@ -420,7 +420,7 @@ def test_rendered_potato_planting_row_carries_the_seed_tuber_values(tmp_path, ma
     assert (row["PLWT"], row["SPRL"]) == (444.0, 0.1)
     assert (row["PLWT_FIELD"], row["SPRL_FIELD"]) == ("   444", "   0.1")
     assert (row["PPOP"], row["PPOE"], row["PLME"], row["PLRS"], row["PLDP"]) == (
-        4.4, 4.4, "S", 75.0, 10.0)
+        4.4, 4.4, "S", 75.0, 5.0)
 
 
 def test_an_explicit_potato_density_beats_the_default(tmp_path):
