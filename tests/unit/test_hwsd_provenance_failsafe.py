@@ -36,6 +36,7 @@ def _mdb_frame() -> pd.DataFrame:
         "HWSD2_SMU_ID": [10298],
         "LAYER": ["D1"],
         "SEQUENCE": [1],
+        "SHARE": [60], "TOPDEP": [0], "BOTDEP": [20],
         "SAND": [40.0], "CLAY": [30.0], "SILT": [30.0],
         "OC": [1.0], "PH": [6.5], "BULK_DENSITY": [1.4],
     })

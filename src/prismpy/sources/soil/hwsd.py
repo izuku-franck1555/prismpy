@@ -10,6 +10,7 @@ Reference: ACEA/03-SOIL-PREPARATION/ implementation patterns.
 """
 
 import logging
+import math
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,14 +44,25 @@ HWSD_VARIABLES = {
     "gravel": ["T_GRAVEL"],                # Top-soil gravel %
 }
 
-# Physically-plausible ranges for extracted chemistry. A value outside
-# these bounds is far more likely a mis-scaled or wrong-column read than
-# a real measurement, so the reader rejects it (falls back to absent).
+# Physical bounds for extracted chemistry. A value outside them is a
+# sentinel or a mis-scaled read, so the reader treats it as absent; a
+# value inside is kept, including organic and andic extremes (flagged).
 _CHEM_RANGES = {
-    "soc": (0.0, 40.0),  # organic carbon %
-    "ph": (3.0, 10.0),   # pH in water
-    "bd": (0.8, 2.0),    # bulk density g/cm³
+    "soc": (0.0, 60.0),   # organic carbon %
+    "ph": (2.5, 11.0),    # pH in water
+    "bd": (0.05, 2.2),    # bulk density g/cm³
 }
+
+#: The HWSD2 depth layers a profile is built from: 0-100 cm in 20 cm steps.
+HWSD_LAYER_CODES: Tuple[str, ...] = ("D1", "D2", "D3", "D4", "D5")
+
+# Layers outside the usual pedotransfer-function domain are flagged, not
+# dropped: organic (OC >= 20 %) and andic (BD < 0.9 g/cm³ with OC < 20 %).
+_ORGANIC_MIN_OC = 20.0
+_ANDIC_MAX_BD = 0.9
+
+# Chemistry field -> the name the .SOL writer uses for its default.
+_CHEM_WRITER_FIELD = {"bd": "bulk_density", "soc": "organic_carbon", "ph": "ph"}
 
 # Default soil values (typical Sahel)
 DEFAULT_SOIL = {
@@ -71,7 +83,15 @@ class HWSDConfig:
     mdb_path: Optional[Path] = None  # HWSD2.mdb database
     nc_path: Optional[Path] = None   # HWSD2.nc or .nc4
     use_defaults: bool = True        # Use defaults for missing data
-    layer: str = "D1"                # D1=topsoil, D2=subsoil
+    layers: Tuple[str, ...] = HWSD_LAYER_CODES  # profile layers, top first
+    layer: Optional[str] = None      # superseded by ``layers``; only "D1" is accepted
+
+    def __post_init__(self):
+        if self.layer is not None and self.layer != "D1":
+            raise ValueError(
+                f"HWSDConfig.layer={self.layer!r} is no longer supported: a profile is "
+                f"built from the layers {self.layers} starting at D1."
+            )
 
 
 @dataclass
@@ -162,7 +182,7 @@ class HWSDSource(DataSource):
         metadata = {
             "source": self.NAME,
             "version": self.VERSION,
-            "layer": self.config.layer,
+            "layers": list(self.config.layers),
         }
 
         profiles = {}
@@ -205,11 +225,13 @@ class HWSDSource(DataSource):
                 "No HWSD data found; cells flagged data_availability='unavailable'"
             )
             if cell_coords:
+                recorded = {entry["cell_id"] for entry in self.unavailable_cells}
                 for i, _ in enumerate(cell_coords):
-                    self._record_unavailable(
-                        i,
-                        cause=WarningCategory.SOIL_NO_HWSD_COVERAGE.value,
-                    )
+                    if i not in recorded:
+                        self._record_unavailable(
+                            i,
+                            cause=WarningCategory.SOIL_NO_HWSD_COVERAGE.value,
+                        )
             source_type = "no_coverage"
 
         if not profiles:
@@ -315,7 +337,7 @@ class HWSDSource(DataSource):
         # Step 3: Create lookup and build profiles
         if layers_df is not None and smu_ids:
             # Validate required columns exist (HWSD v2.0 format)
-            required_cols = ["LAYER", "SEQUENCE"]
+            required_cols = ["LAYER", "SEQUENCE", "SHARE", "TOPDEP", "BOTDEP"]
             missing_cols = [c for c in required_cols if c not in layers_df.columns]
             if missing_cols:
                 logger.error(f"HWSD MDB missing required columns: {missing_cols}")
@@ -329,23 +351,27 @@ class HWSDSource(DataSource):
                     )
                 return profiles
 
-            # Filter to selected layer and sequence
-            layer_filter = (layers_df["LAYER"] == self.config.layer) & (layers_df["SEQUENCE"] == 1)
-            layers_df = layers_df[layer_filter]
-
-            # Create lookup by SMU ID
             # Note: HWSD2 uses HWSD2_SMU_ID as the key, not 'ID'
             smu_col = "HWSD2_SMU_ID" if "HWSD2_SMU_ID" in layers_df.columns else "ID"
-            soil_lookup = layers_df.set_index(smu_col).to_dict("index")
+            sampled = {s for s in smu_ids if s is not None}
+            layers_df = layers_df[
+                layers_df[smu_col].isin(sampled)
+                & layers_df["LAYER"].isin(self.config.layers)
+            ]
+            component_rows = self._dominant_component_rows(layers_df, smu_col)
 
             for i, (lat, lon) in enumerate(cell_coords or []):
                 smu_id = smu_ids[i] if i < len(smu_ids) else None
-
-                if smu_id and smu_id in soil_lookup:
-                    props = soil_lookup[smu_id]
-                    profiles[i] = self._create_profile_from_hwsd(
-                        cell_id=i, lat=lat, lon=lon, props=props, region=region
+                rows = component_rows.get(smu_id) if smu_id is not None else None
+                profile = (
+                    self._create_profile_from_hwsd(
+                        cell_id=i, lat=lat, lon=lon, smu_id=smu_id, rows=rows,
+                        region=region,
                     )
+                    if rows else None
+                )
+                if profile is not None:
+                    profiles[i] = profile
                 elif self.config.use_defaults:
                     self._record_unavailable(
                         i,
@@ -543,59 +569,133 @@ class HWSDSource(DataSource):
             return None
         return value
 
+    @staticmethod
+    def _dominant_component_rows(
+        layers_df: pd.DataFrame, smu_col: str
+    ) -> Dict[int, List[Dict[str, Any]]]:
+        """Each mapping unit's dominant component: the largest ``SHARE``, ties
+        going to the lowest ``SEQUENCE``. Returns that component's layer rows."""
+        rows_by_smu: Dict[int, List[Dict[str, Any]]] = {}
+        for smu_id, unit in layers_df.groupby(smu_col, sort=False):
+            shares = pd.to_numeric(unit["SHARE"], errors="coerce").fillna(-1.0)
+            share_by_sequence = shares.groupby(unit["SEQUENCE"]).max()
+            sequence = min(
+                share_by_sequence.index,
+                key=lambda seq: (-share_by_sequence[seq], seq),
+            )
+            rows_by_smu[int(smu_id)] = unit[unit["SEQUENCE"] == sequence].to_dict("records")
+        return rows_by_smu
+
+    @staticmethod
+    def _finite(value: Any) -> Optional[float]:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+
+    def _valid_texture(self, row: Dict[str, Any]) -> Optional[Tuple[float, float, float]]:
+        """``(sand, silt, clay)`` when each is in [0, 100] and they sum to 100 ± 2
+        (a missing silt is derived and must not be negative), else ``None``."""
+        def first(field: str) -> Optional[float]:
+            for name in self.VARIABLES[field]:
+                value = self._finite(row.get(name))
+                if value is not None:
+                    return value
+            return None
+
+        sand, silt, clay = first("sand"), first("silt"), first("clay")
+        if sand is None or clay is None:
+            return None
+        if silt is None:
+            silt = 100.0 - sand - clay
+        if not all(0.0 <= v <= 100.0 for v in (sand, silt, clay)):
+            return None
+        if abs(sand + silt + clay - 100.0) > 2.0:
+            return None
+        return sand, silt, clay
+
     def _create_profile_from_hwsd(
         self,
         cell_id: int,
         lat: float,
         lon: float,
-        props: Dict[str, Any],
+        smu_id: int,
+        rows: List[Dict[str, Any]],
         region: Region,
-    ) -> SoilProfile:
-        """Create SoilProfile from HWSD database row."""
-        # Extract values with None handling. Chemistry (soc/ph/bd) routes
-        # through the candidate-list reader so HWSD v2.0 columns resolve;
-        # texture keeps its historical v1-or-bare fallback.
-        sand = props.get("T_SAND") or props.get("SAND")
-        clay = props.get("T_CLAY") or props.get("CLAY")
-        silt = props.get("T_SILT") or props.get("SILT")
-        soc = self._read_chem(props, "soc")
-        ph = self._read_chem(props, "ph")
-        bd = self._read_chem(props, "bd")
+    ) -> Optional[SoilProfile]:
+        """Build the profile from the dominant component's layers D1, D2, ... as a
+        contiguous prefix: each layer starts where the previous one ended (D1 at
+        0 cm), appears once, and has a valid texture. The prefix stops before the
+        first layer that fails; with no valid D1 there is no profile."""
+        by_code: Dict[str, List[Dict[str, Any]]] = {}
+        for row in rows:
+            by_code.setdefault(row.get("LAYER"), []).append(row)
 
-        # Calculate silt if missing
-        if silt is None and sand is not None and clay is not None:
-            silt = max(0, 100 - sand - clay)
+        layers: List[SoilLayer] = []
+        flags: Dict[int, str] = {}
+        chem_defaulted: Dict[int, List[str]] = {}
+        previous_bottom_cm = 0.0
+        for code in self.config.layers:
+            candidates = by_code.get(code, [])
+            if len(candidates) != 1:
+                break
+            row = candidates[0]
+            top_cm = self._finite(row.get("TOPDEP"))
+            bottom_cm = self._finite(row.get("BOTDEP"))
+            if top_cm is None or bottom_cm is None or bottom_cm <= top_cm:
+                break
+            if top_cm != previous_bottom_cm:
+                break
+            texture = self._valid_texture(row)
+            if texture is None:
+                break
+            sand, silt, clay = texture
+            chem = {field: self._read_chem(row, field) for field in ("soc", "ph", "bd")}
+            index = len(layers)
+            missing = [_CHEM_WRITER_FIELD[f] for f in ("bd", "soc", "ph") if chem[f] is None]
+            if missing:
+                chem_defaulted[index] = missing
+            if chem["soc"] is not None and chem["soc"] >= _ORGANIC_MIN_OC:
+                flags[index] = "organic"
+            elif chem["bd"] is not None and chem["bd"] < _ANDIC_MAX_BD:
+                flags[index] = "andic"
+            previous_bottom_cm = bottom_cm
+            layers.append(SoilLayer(
+                depth_top=top_cm / 100.0,
+                depth_bottom=bottom_cm / 100.0,
+                sand=sand,
+                clay=clay,
+                silt=silt,
+                organic_carbon=chem["soc"],
+                bulk_density=chem["bd"],
+                ph=chem["ph"],
+            ))
 
-        layer = SoilLayer(
-            depth_top=0.0,
-            depth_bottom=0.2,  # D1 = 0-20cm
-            sand=sand,
-            clay=clay,
-            silt=silt,
-            organic_carbon=soc,
-            bulk_density=bd,
-            ph=ph,
-        )
+        if not layers:
+            return None
 
+        metadata: Dict[str, Any] = {
+            "hwsd_smu_id": int(smu_id),
+            # Cascade provenance: rank 1 = this loader produced the profile; the
+            # executor raises it to 2 when HWSD ran as the iSDA fallback.
+            "source": "HWSD",
+            "version": "v2.0",
+            "cascade_rank": 1,
+            "fallback_attempts": [],
+        }
+        if flags:
+            metadata["ptf_domain_flags"] = flags
+        if chem_defaulted:
+            metadata["chem_defaulted"] = chem_defaulted
         return SoilProfile(
             profile_id=f"HWSD_{region.country_iso3}_{cell_id:06d}",
             lat=lat,
             lon=lon,
             source=self.NAME,
-            layers=[layer],
-            total_depth=0.2,
-            metadata={
-                "hwsd_smu_id": props.get("HWSD2_SMU_ID") or props.get("ID"),
-                # V2-22c-PRE.1.10 (D37) — cascade-provenance defaults.
-                # Loader-side cascade_rank=1 means "this loader
-                # produced the profile"; the cascade orchestrator at
-                # executor.py overrides to rank=2 + fallback_attempts
-                # when HWSD ran as the iSDA fallback path.
-                "source": "HWSD",
-                "version": "v2.0",
-                "cascade_rank": 1,
-                "fallback_attempts": [],
-            },
+            layers=layers,
+            total_depth=previous_bottom_cm / 100.0,
+            metadata=metadata,
         )
 
     def _create_profile_from_dict(
