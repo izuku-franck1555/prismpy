@@ -179,3 +179,15 @@ def test_pythia_substrate_writes_every_layer_and_no_record(tmp_path):
     assert not any(ln.startswith("!") for ln in sol)
     depths = [int(ln.split()[0]) for ln in sol if re.match(r"^\s+\d+\s+-9", ln)]
     assert depths == [20, 40, 60, 80, 100]
+
+
+def test_the_header_depth_is_the_last_written_layer(tmp_path):
+    """One quantization: header == last SLB == the declared depth, even with a stale total."""
+    stale = _default(bottom=0.806)
+    stale.total_depth = 1.0
+    for profile in (_default(bottom=0.806), stale):
+        lines = _write(tmp_path, {0: profile}, {0: 1}, {"no_soil_source": 1})
+        header = next(ln for ln in lines if ln.startswith("*ML00000000"))
+        slbs = [int(ln.split()[0]) for ln in lines if re.match(r"^\s+\d+\s+-9", ln)]
+        assert int(header[31:36]) == slbs[-1] == 80
+        assert _record(lines)["default_depth_cm"] == "0-80"

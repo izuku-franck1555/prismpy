@@ -64,6 +64,30 @@ _ANDIC_MAX_BD = 0.9
 # Chemistry field -> the name the .SOL writer uses for its default.
 _CHEM_WRITER_FIELD = {"bd": "bulk_density", "soc": "organic_carbon", "ph": "ph"}
 
+
+def _raw_raster_is_short(bil_path: Path) -> bool:
+    """True when a raw BIL raster is shorter than its ``.hdr`` declares. Only an unpadded,
+    byte-aligned BIL layout is sized; any other layout infers nothing (GDAL's read applies)."""
+    header = bil_path.with_suffix(".hdr")
+    try:
+        keys = {}
+        for line in header.read_text(errors="replace").splitlines():
+            parts = line.split()
+            if len(parts) >= 2:
+                keys[parts[0].upper()] = parts[1]
+        rows, cols = int(keys["NROWS"]), int(keys["NCOLS"])
+        bands, bits = int(keys.get("NBANDS", 1)), int(keys.get("NBITS", 8))
+        skip, gap = int(keys.get("SKIPBYTES", 0)), int(keys.get("BANDGAPBYTES", 0))
+        band_row = cols * bits // 8
+        band_row_bytes = int(keys.get("BANDROWBYTES", band_row))
+        total_row_bytes = int(keys.get("TOTALROWBYTES", band_row * bands))
+    except (OSError, KeyError, ValueError):
+        return False
+    if (keys.get("LAYOUT", "BIL").upper() != "BIL" or bits % 8 or gap
+            or band_row_bytes != band_row or total_row_bytes != band_row * bands):
+        return False
+    return bil_path.stat().st_size < skip + rows * bands * band_row
+
 # Default soil values (typical Sahel)
 DEFAULT_SOIL = {
     "sand": 60.0,
@@ -197,7 +221,7 @@ class HWSDSource(DataSource):
                     cell_coords=cell_coords,
                 )
                 source_type = "bil_mdb"
-                answered = True
+                answered = bool(cell_coords)  # an answer about cells needs cells sampled
                 self.logger.info(f"Extracted {len(profiles)} profiles from BIL+MDB")
             except Exception as e:
                 warnings.append(f"BIL+MDB extraction failed: {e}")
@@ -447,10 +471,8 @@ class HWSDSource(DataSource):
 
         with rasterio.open(self.config.bil_path) as src:
             # A raw raster shorter than its header reads as nodata past its end, not as an error.
-            if src.driver == "EHdr":
-                size = src.width * src.height * src.count * np.dtype(src.dtypes[0]).itemsize
-                if Path(self.config.bil_path).stat().st_size < size:
-                    raise RuntimeError(f"{self.config.bil_path} is shorter than its header declares")
+            if src.driver == "EHdr" and _raw_raster_is_short(Path(self.config.bil_path)):
+                raise RuntimeError(f"{self.config.bil_path} is shorter than its header declares")
             # Convert (lat, lon) to (lon, lat) for rasterio
             xy_coords = [(lon, lat) for lat, lon in coords]
             values = list(src.sample(xy_coords))

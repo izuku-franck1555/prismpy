@@ -403,6 +403,9 @@ def test_depth_and_water_are_derived_in_the_record_and_the_warning(
     out = _run(_translator(tmp_path), _grid([101, 102]), None, None)
     assert (out.record["default_depth_cm"], out.record["default_paw_mm"]) == (depth, paw)
     assert f"({depth} cm, about {paw} mm plant-available water)" in out.warnings[0]
+    header = next(ln for ln in out.lines if ln.startswith("*ML00000000"))
+    last_slb = [ln.split()[0] for ln in out.blocks["ML00000000"] if ln[:6].strip().isdigit()][-1]
+    assert int(header[31:36]) == int(last_slb) == int(depth.split("-")[1])
 
 
 # ── every branch keeps every cell ──────────────────────────────────────────

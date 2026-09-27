@@ -197,3 +197,36 @@ def test_texture_sum_tolerance_is_two_percent():
     derived = _unit(3, D2=dict(sand=70.0, silt=None, clay=40.0))
     profiles, _ = _extract(derived, [3])
     assert len(profiles[0].layers) == 1
+
+
+def _ehdr(tmp_path, size, **header):
+    """A 24x24 raw BIL raster of ``size`` bytes with its .hdr (16-bit, unpadded by default)."""
+    keys = dict(BYTEORDER="I", LAYOUT="BIL", NROWS=24, NCOLS=24, NBANDS=1, NBITS=16,
+                PIXELTYPE="UNSIGNEDINT", ULXMAP=-5.9791667, ULYMAP=12.9791667,
+                XDIM=0.0416667, YDIM=0.0416667, NODATA=0)
+    keys.update(header)
+    (tmp_path / "HWSD2.hdr").write_text("".join(f"{k} {v}\n" for k, v in keys.items()))
+    path = tmp_path / "HWSD2.bil"
+    path.write_bytes((b"\xbd\x05" * size)[:size])  # unit 1469, little-endian
+    return path
+
+
+@pytest.mark.parametrize("size, header, short", [
+    (1152, {}, False),                                       # the complete raster
+    (1151, {}, True),                                        # one byte short
+    (72, {"NBITS": 1}, False),                               # packed bits: not sized
+    (1000, {"BANDROWBYTES": 64, "TOTALROWBYTES": 64}, False),  # padded rows: not sized
+])
+def test_the_short_raster_check_sizes_only_layouts_it_computes(tmp_path, size, header, short):
+    from prismpy.sources.soil import hwsd
+    assert hwsd._raw_raster_is_short(_ehdr(tmp_path, size, **header)) is short
+
+
+def test_a_complete_raster_is_read_and_a_query_without_cells_is_no_answer(tmp_path):
+    bil = _ehdr(tmp_path, 1152)
+    source = HWSDSource(HWSDConfig(bil_path=bil, mdb_path=tmp_path / "HWSD2.mdb"))
+    with patch.object(source, "_export_mdb_table", return_value=pd.DataFrame(_unit(1469))):
+        served = source.retrieve(region=_region(), cell_coords=[(12.5, -5.5)])
+        no_cells = source.retrieve(region=_region(), cell_coords=None)
+    assert served.success and served.data.profiles[0].metadata["hwsd_smu_id"] == 1469
+    assert no_cells.success is False and no_cells.metadata["read_error"] is True

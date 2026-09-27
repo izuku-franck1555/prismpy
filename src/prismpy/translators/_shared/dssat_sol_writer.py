@@ -322,7 +322,9 @@ def write_dssat_sol(
         # A50 SLDESC (country is also encoded in the PEDON id). Both are
         # DSSAT-descriptive (not parsed for logic).
         sltx_code = _dssat_sltx_code(profile.surface_texture)
-        depth_cm = int((profile.total_depth or 0.2) * 100)
+        # The one metre-to-centimetre step: each layer's SLB, and the header's depth is the last.
+        slbs = [int(layer.depth_bottom * 100) for layer in profile.layers]
+        depth_cm = slbs[-1] if slbs else int((profile.total_depth or 0.2) * 100)
         source_desc = source_label_for_id(smu_id)
         slsour = (source_desc.split() or ["-99"])[0][:11]
         sldesc = f"{source_desc} ({region.country_iso3 or 'XXX'})"
@@ -368,11 +370,10 @@ def write_dssat_sol(
         )
 
         # Layer data
-        for layer in profile.layers:
+        for layer, slb in zip(profile.layers, slbs):
             if layer.wilting_point is None:
                 layer.estimate_hydraulic_properties()
 
-            slb = int(layer.depth_bottom * 100)
             slll = layer.wilting_point or 0.10
             sdul = layer.field_capacity or 0.25
             ssat = layer.saturated_wc or 0.45

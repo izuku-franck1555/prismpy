@@ -169,3 +169,58 @@ def test_isda_served_leaves_hwsd_unqueried(tmp_path):
     data = _harmonize(pipe, _source("raise"), isda=isda)
     assert data.soil_cascade.isda_served and data.soil_cascade.hwsd == HwsdOutcome.NOT_QUERIED
     assert data.region.name == region.name
+
+
+def _hwsd_files(tmp_path, damage):
+    """HWSD files as prismweb lays them out: a 24x24 16-bit EHdr raster of unit 1469."""
+    import struct
+    from test_craft_declared_default_soil import _BIL_HEADER
+    folder = tmp_path / "hwsd"
+    folder.mkdir()
+    raster = struct.pack("<576H", *([1469] * 576))
+    (folder / "HWSD2.bil").write_bytes(raster[:100] if damage == "truncated_bil" else raster)
+    if damage != "bil_without_hdr":
+        (folder / "HWSD2.hdr").write_text(_BIL_HEADER)
+    (folder / "HWSD2.mdb").write_bytes(b"not a database")
+    return folder / "HWSD2.bil", folder / "HWSD2.mdb"
+
+
+_TABLES = {
+    "soil": [_row(1469, "D1", 0, 20)],
+    "non_soil": [_row(1469, "D1", 0, 20, sand=-9.0, silt=-9.0, clay=-9.0)],
+    "no_columns": [{k: v for k, v in _row(1469, "D1", 0, 20).items() if k != "SHARE"}],
+}
+
+
+@pytest.mark.parametrize("damage, table, outcome", [
+    ("bil_without_hdr", "soil", HwsdOutcome.NO_ANSWER),     # the raster cannot be opened
+    ("truncated_bil", "soil", HwsdOutcome.NO_ANSWER),       # shorter than its header
+    ("sampling_fails", "soil", HwsdOutcome.NO_ANSWER),      # sampling the raster raises
+    ("none", None, HwsdOutcome.NO_ANSWER),                   # the .mdb cannot be exported
+    ("none", "no_columns", HwsdOutcome.NO_ANSWER),          # the layers table lacks a column
+    ("none", "non_soil", HwsdOutcome.ANSWERED_NONE),        # a clean read, no soil
+    ("none", "soil", HwsdOutcome.SERVED),
+])
+def test_every_hwsd_read_path_at_both_query_sites(tmp_path, monkeypatch, damage, table, outcome):
+    from test_craft_declared_default_soil import REGION, _grid, _state
+    bil, mdb = _hwsd_files(tmp_path, damage)
+    if table:
+        monkeypatch.setattr(HWSDSource, "_export_mdb_table", lambda self: pd.DataFrame(_TABLES[table]))
+    if damage == "sampling_fails":
+        def fail(self, coords):
+            raise RuntimeError("raster read failed")
+        monkeypatch.setattr(HWSDSource, "_sample_bil_raster", fail)
+    # the harmonize stage's query
+    pipe = _make_pipeline_with_paths(bil, mdb)
+    grid = _FakeGrid([_FakeCell(101, 12.5, -5.5)])
+    assert _outcome(pipe, grid, HWSDSource)[2] == outcome
+    # CRAFT's own query, in the prismweb regime (iSDA served, HWSD paths configured)
+    tr = _translator(tmp_path / "craft")
+    tr.config.data_sources.soil.hwsd_bil_path, tr.config.data_sources.soil.hwsd_mdb_path = str(bil), str(mdb)
+    args = (_grid([101]), REGION, None, _state(HwsdOutcome.NOT_QUERIED, isda=True), [])
+    if outcome == HwsdOutcome.ANSWERED_NONE:
+        with pytest.raises(craft.CraftSoilUnavailableError):
+            tr._generate_soil_package(*args)
+    else:
+        expected = "ML00001469" if outcome == HwsdOutcome.SERVED else "ML00000000"
+        assert tr._generate_soil_package(*args)[1] == {101: expected}
