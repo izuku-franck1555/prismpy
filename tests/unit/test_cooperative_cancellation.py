@@ -380,7 +380,8 @@ class TestCarveOutRegression:
         # ``StageResult``.
         # Then 526 -> 528 after the CRAFT 5-arcmin guard call in __init__ (+2).
         # Then 528 -> 529 after a module-level `import os` (+1).
-        ("src/prismpy/pipeline/executor.py", 529),
+        # Then 529 -> 531 after importing the soil-cascade types (+2).
+        ("src/prismpy/pipeline/executor.py", 531),
         # Provenance-flush inside the translator-dispatch except handler
         # in _execute_translate: writes decision records, cancel-inert.
         # Line shifted from 2338 → 2346 (PRE.3.3 thread-through)
@@ -452,7 +453,8 @@ class TestCarveOutRegression:
         # Then 2842 -> 2831 after routing soil resolution through data_sources.soil
         # (the per-platform fallback read removed, net ~-11).
         # Then 2831 -> 2832 after the crop-support preflight call (+1).
-        ("src/prismpy/pipeline/executor.py", 2832),
+        # Then 2832 -> 2852 after the HWSD outcome and the soil-cascade state (+20).
+        ("src/prismpy/pipeline/executor.py", 2852),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed

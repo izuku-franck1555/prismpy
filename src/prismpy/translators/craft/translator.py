@@ -39,7 +39,7 @@ from prismpy.sources.crop_areas.spam_vintage import (
     VintageRasterAbsentError,
     identify_vintage,
 )
-from prismpy.translators._shared.dssat_sol_writer import write_dssat_sol
+from prismpy.translators._shared.dssat_sol_writer import DefaultDeclaration, write_dssat_sol
 # Sprint E.3 AC-E3-9 — cockpit override dispatch helper. The
 # climate / soil / management per-cell write sites in this
 # translator route raw values through ``apply_override`` before
@@ -50,6 +50,8 @@ from prismpy.translators._shared.cockpit_overrides import apply_override
 from prismpy.translators.base import (
     BaseTranslator,
     CraftTranslatorBase,
+    HwsdOutcome,
+    SoilCascadeState,
     TranslationResult,
     UnifiedData,
 )
@@ -68,6 +70,80 @@ logger = logging.getLogger(__name__)
 
 # Type alias for soil mapping
 SoilMapping = Dict[int, str]  # cell_id -> profile_name
+
+# Soil-profile keys: HWSD profiles use their mapping-unit id (>= 1); other
+# retrieved profiles are numbered from here; 0 is the declared default.
+_RETRIEVED_PROFILE_KEY_BASE = 90_000_001
+_DEFAULT_PROFILE_KEY = 0
+
+
+class CraftSoilUnavailableError(RuntimeError):
+    """HWSD answered but gave no grid cell a soil, so the build stops rather
+    than run every cell on an invented one."""
+
+
+def _default_soil_profile(region: Region, country_code: str) -> SoilProfile:
+    """The declared generic soil for cells without their own: two layers to
+    100 cm (about 158 mm of plant-available water), at the region centre."""
+    return SoilProfile(
+        profile_id=f"{country_code}_DEFAULT",
+        lat=(region.bounds.miny + region.bounds.maxy) / 2,
+        lon=(region.bounds.minx + region.bounds.maxx) / 2,
+        source="default",
+        layers=[
+            SoilLayer(
+                depth_top=0.0,
+                depth_bottom=0.2,
+                sand=60.0,
+                clay=18.0,
+                silt=22.0,
+                organic_carbon=0.5,
+                bulk_density=1.4,
+                ph=6.5,
+                field_capacity=0.25,
+                wilting_point=0.10,
+            ),
+            SoilLayer(
+                depth_top=0.2,
+                depth_bottom=1.0,
+                sand=55.0,
+                clay=22.0,
+                silt=23.0,
+                organic_carbon=0.3,
+                bulk_density=1.5,
+                ph=6.3,
+                field_capacity=0.28,
+                wilting_point=0.12,
+            ),
+        ],
+    )
+
+
+def _profile_content_key(profile: SoilProfile) -> tuple:
+    """Everything the .SOL writes for a profile, so identical profiles share a key."""
+    return (
+        profile.source, profile.lat, profile.lon, profile.total_depth,
+        tuple(
+            (layer.depth_top, layer.depth_bottom, layer.sand, layer.clay, layer.silt,
+             layer.organic_carbon, layer.bulk_density, layer.ph,
+             layer.field_capacity, layer.wilting_point, layer.saturated_wc)
+            for layer in profile.layers
+        ),
+    )
+
+
+def _default_soil_warning(declaration: DefaultDeclaration) -> str:
+    """The warning for more than 5 % of the grid cells on a generic soil."""
+    kind = ("placeholder" if any(cause == "retrieve_stage_placeholder"
+                                 for cause, _ in declaration.causes) else "default")
+    return (
+        f"{declaration.default_cells} of {declaration.cells} grid cells "
+        f"({declaration.fraction * 100:.1f}%) run on a generic {kind} soil profile "
+        f"({declaration.depth_cm} cm, about {declaration.paw_mm} mm plant-available "
+        f"water); the {kind} soil holds more water but less organic matter than most "
+        f"local soils, so these cells' yields may be overstated where water limits "
+        f"growth and understated where soil nitrogen does"
+    )
 
 
 class CraftTranslator(CraftTranslatorBase):
@@ -279,6 +355,8 @@ class CraftTranslator(CraftTranslatorBase):
                     grid=data.grid,
                     region=data.region,
                     existing_soil_data=data.soil,
+                    soil_cascade=data.soil_cascade,
+                    warnings=warnings,
                 )
                 output_files.append(soil_file)
 
@@ -1791,62 +1869,64 @@ class CraftTranslator(CraftTranslatorBase):
         grid: SpatialGrid,
         region: Region,
         existing_soil_data: Optional[Dict[int, SoilProfile]] = None,
+        soil_cascade: Optional[SoilCascadeState] = None,
+        warnings: Optional[List[str]] = None,
     ) -> Tuple[Path, SoilMapping]:
         """Generate CRAFT soil package: .SOL file + cell-to-profile mapping.
 
-        This implements Option B: Per-Soil-Type Profiles
-        - Queries HWSD to get SMU (Soil Mapping Unit) ID for each cell
-        - Groups cells by SMU ID to identify unique soil types
-        - Generates one profile per unique SMU
-        - Returns mapping for soil_mask.txt generation
+        Every grid cell maps to one profile: its own HWSD mapping unit, its own
+        retrieved profile, the package's retrieval placeholder, or the DECLARED
+        default profile (key 0, ``{CC}00000000``) when it has none. The .SOL
+        record line counts the cells on a generic soil and their causes, and a
+        warning is appended to ``warnings`` when they exceed 5 %.
 
-        The result is a self-contained soil package where:
-        - .SOL contains unique soil profiles (fewer than cells)
-        - soil_mask.txt maps each CellID to its profile
+        The soil branch follows ``soil_cascade``: HWSD served at harmonize ->
+        those profiles; HWSD answered but served no cell -> fail
+        (``CraftSoilUnavailableError``); otherwise this translator's own HWSD
+        query when paths are configured, else the retrieved soil, else the
+        default for every cell.
 
         Args:
             grid: SpatialGrid with cells
             region: Region for metadata
             existing_soil_data: Optional pre-loaded soil profiles
+            soil_cascade: The harmonize stage's soil-source outcome
+            warnings: Receives the generic-soil warning, when it applies
 
         Returns:
             Tuple of (path to .SOL file, dict mapping cell_id -> profile_name)
         """
-        platform_config = self.get_platform_config()
         country_code = self._get_country_code(region)
-
-        # Get HWSD configuration from the canonical data_sources.soil
         soil_cfg = self.config.data_sources.soil
         hwsd_bil_path = soil_cfg.hwsd_bil_path
         hwsd_mdb_path = soil_cfg.hwsd_mdb_path
 
         # Get filtered cells (GADM boundary if available)
         filtered_cells = self._get_filtered_cells(grid)
-
-        # Prepare cell coordinates for HWSD query
         cell_coords = [(cell.lat, cell.lon) for cell in filtered_cells]
         cell_ids = [cell.cell_id for cell in filtered_cells]
-
-        # =========================================================================
-        # STEP 1: Query HWSD for soil data (if paths configured)
-        # =========================================================================
-        smu_to_profile: Dict[int, SoilProfile] = {}  # SMU ID -> profile
-        cell_to_smu: Dict[int, int] = {}  # cell_id -> SMU ID
-
-        # Skip BIL/MDB query if executor already provided per-cell HWSD profiles
-        executor_has_soil = (
-            existing_soil_data
-            and len(existing_soil_data) > 1
-            and any(
-                p.source == "hwsd" for p in existing_soil_data.values()
-                if hasattr(p, 'source')
-            )
+        no_hwsd_soil = CraftSoilUnavailableError(
+            f"no grid cell in {region.name} has an HWSD soil (non-soil units or HWSD "
+            "gaps); refusing to invent a default soil"
         )
-        if executor_has_soil:
-            logger.info(
-                f"Using {len(existing_soil_data)} HWSD profiles from executor "
-                f"(skipping redundant BIL/MDB query)"
-            )
+
+        hwsd = soil_cascade.hwsd if soil_cascade is not None else None
+        if hwsd == HwsdOutcome.ANSWERED_NONE:
+            raise no_hwsd_soil
+
+        profiles_by_key: Dict[int, SoilProfile] = {}
+        cell_to_key: Dict[int, int] = {}
+        default_cause: Dict[int, str] = {}  # cell_id -> cause, for generic-soil cells
+
+        def add_hwsd(cell_id: int, profile: SoilProfile) -> None:
+            smu_id = int(profile.metadata["hwsd_smu_id"])
+            profiles_by_key.setdefault(smu_id, profile)
+            cell_to_key[cell_id] = smu_id
+
+        hwsd_cells: Optional[Dict[int, SoilProfile]] = None
+        if hwsd == HwsdOutcome.SERVED:
+            hwsd_cells = dict(existing_soil_data or {})
+            logger.info(f"Using {len(hwsd_cells)} HWSD profiles from the harmonize stage")
         elif hwsd_bil_path and hwsd_mdb_path:
             logger.info(f"Querying HWSD for {len(filtered_cells)} cells...")
             try:
@@ -1857,122 +1937,87 @@ class CraftTranslator(CraftTranslatorBase):
                         use_defaults=True,
                     )
                 )
-
-                result = hwsd_source.retrieve(
-                    region=region,
-                    cell_coords=cell_coords,
-                )
-
-                if result.success and result.data:
-                    hwsd_profiles = result.data.profiles
-
-                    # Build SMU-based mapping
-                    for i, cell_id in enumerate(cell_ids):
-                        if i in hwsd_profiles:
-                            profile = hwsd_profiles[i]
-                            # Get SMU ID from profile metadata
-                            smu_id = profile.metadata.get('hwsd_smu_id', i)
-                            if smu_id is None:
-                                smu_id = i  # Fallback to cell index
-
-                            cell_to_smu[cell_id] = smu_id
-
-                            # Store unique profiles by SMU
-                            if smu_id not in smu_to_profile:
-                                smu_to_profile[smu_id] = profile
-
-                    logger.info(f"HWSD: {len(smu_to_profile)} unique soil types for {len(cell_to_smu)} cells")
-                else:
-                    logger.warning(f"HWSD query failed: {result.errors}")
-
+                result = hwsd_source.retrieve(region=region, cell_coords=cell_coords)
             except Exception as e:
                 logger.warning(f"HWSD query error: {e}")
+            else:
+                raw = result.data.profiles if (result.success and result.data) else {}
+                hwsd_cells = {cell_ids[i]: p for i, p in raw.items() if i < len(cell_ids)}
+                if not hwsd_cells:
+                    raise no_hwsd_soil
 
-        # =========================================================================
-        # STEP 2: Use existing soil data if available (from pipeline)
-        # =========================================================================
-        if not smu_to_profile and existing_soil_data:
-            logger.info("Using existing soil data from pipeline")
-            for cell_id, profile in existing_soil_data.items():
-                smu_id = hash(f"{profile.lat:.4f}_{profile.lon:.4f}") % 100000
-                smu_to_profile[smu_id] = profile
-                # Map all cells to this profile if only one exists
-                if len(existing_soil_data) == 1:
-                    for cid in cell_ids:
-                        cell_to_smu[cid] = smu_id
-                else:
-                    cell_to_smu[cell_id] = smu_id
-
-        # =========================================================================
-        # STEP 3: Create default profile if no soil data available
-        # =========================================================================
-        if not smu_to_profile:
-            logger.warning("No HWSD data available - creating default soil profile")
-            logger.warning("For accurate soil data, configure hwsd_bil_path and hwsd_mdb_path")
-
-            # Create a single default profile
-            center_lat = (region.bounds.miny + region.bounds.maxy) / 2
-            center_lon = (region.bounds.minx + region.bounds.maxx) / 2
-
-            default_layers = [
-                SoilLayer(
-                    depth_top=0.0,
-                    depth_bottom=0.2,
-                    sand=60.0,
-                    clay=18.0,
-                    silt=22.0,
-                    organic_carbon=0.5,
-                    bulk_density=1.4,
-                    ph=6.5,
-                    field_capacity=0.25,
-                    wilting_point=0.10,
-                ),
-                SoilLayer(
-                    depth_top=0.2,
-                    depth_bottom=1.0,
-                    sand=55.0,
-                    clay=22.0,
-                    silt=23.0,
-                    organic_carbon=0.3,
-                    bulk_density=1.5,
-                    ph=6.3,
-                    field_capacity=0.28,
-                    wilting_point=0.12,
-                ),
-            ]
-
-            default_smu_id = 0
-            smu_to_profile[default_smu_id] = SoilProfile(
-                profile_id=f"{country_code}_DEFAULT",
-                lat=center_lat,
-                lon=center_lon,
-                source="default",
-                layers=default_layers,
-            )
-
-            # All cells map to default profile
+        if hwsd_cells is not None:
             for cell_id in cell_ids:
-                cell_to_smu[cell_id] = default_smu_id
+                profile = hwsd_cells.get(cell_id)
+                if profile is not None:
+                    add_hwsd(cell_id, profile)
+                else:
+                    default_cause[cell_id] = "no_hwsd_soil_at_cell_centre"
+        elif existing_soil_data:
+            # A profile keyed by a grid cell is that cell's only; a lone retrieval
+            # placeholder covers every cell; any other cell gets the default.
+            placeholders = [p for p in existing_soil_data.values() if p.source == "placeholder"]
+            placeholder = placeholders[0] if len(placeholders) == 1 else None
+            key_by_content: Dict[tuple, int] = {}
+            for cell_id in sorted(cell_ids):
+                own = existing_soil_data.get(cell_id)
+                profile = own if own is not None and own.source != "placeholder" else placeholder
+                if profile is None:
+                    default_cause[cell_id] = "no_retrieved_soil_at_cell"
+                    continue
+                content = _profile_content_key(profile)
+                if content not in key_by_content:
+                    key_by_content[content] = _RETRIEVED_PROFILE_KEY_BASE + len(key_by_content)
+                    profiles_by_key[key_by_content[content]] = profile
+                cell_to_key[cell_id] = key_by_content[content]
+                if profile is placeholder:
+                    default_cause[cell_id] = "retrieve_stage_placeholder"
+        else:
+            logger.warning("No soil data available - every cell runs on the declared default soil")
+            for cell_id in cell_ids:
+                default_cause[cell_id] = "no_soil_source"
+
+        for cell_id in cell_ids:
+            if cell_id not in cell_to_key:
+                cell_to_key[cell_id] = _DEFAULT_PROFILE_KEY
+        if _DEFAULT_PROFILE_KEY in cell_to_key.values():
+            profiles_by_key[_DEFAULT_PROFILE_KEY] = _default_soil_profile(region, country_code)
 
         # =========================================================================
-        # STEP 4: Generate .SOL file with unique profiles
+        # Generate the .SOL file with the unique profiles and the record line
         # =========================================================================
         soil_filename = f"{country_code}.SOL"
         soil_path = self.output_dir / "soil" / soil_filename
 
         # Delegate the DSSAT v4.8 .SOL byte-level layout to the shared writer.
-        # The HWSD orchestration above (steps 1-3) lives in the CRAFT
-        # translator because it is CRAFT-specific; the file format itself
-        # is shared with PYTHIA's eGHR substrate builder, so a single
-        # implementation prevents drift between the two emitters.
+        # The soil orchestration above lives in the CRAFT translator because it
+        # is CRAFT-specific; the file format itself is shared with PYTHIA's eGHR
+        # substrate builder, so a single implementation prevents drift.
+        profile_cell_counts: Dict[int, int] = {}
+        for key in cell_to_key.values():
+            profile_cell_counts[key] = profile_cell_counts.get(key, 0) + 1
+        causes: Dict[str, int] = {}
+        for cause in default_cause.values():
+            causes[cause] = causes.get(cause, 0) + 1
         chem_defaults: List[Dict[str, Any]] = []
+        declarations: List[DefaultDeclaration] = []
         smu_to_profile_name: Dict[int, str] = write_dssat_sol(
             soil_path=soil_path,
-            profiles_by_id=smu_to_profile,
+            profiles_by_id=profiles_by_key,
             country_code=country_code,
             region=region,
             chem_default_log=chem_defaults,
+            soil_record=True,
+            profile_cell_counts=profile_cell_counts,
+            default_causes=causes,
+            default_declaration_out=declarations,
         )
+        declaration = declarations[0]
+        if declaration.warning:
+            message = _default_soil_warning(declaration)
+            logger.warning(message)
+            if warnings is not None:
+                warnings.append(message)
         if chem_defaults and self.provenance:
             # Provenance recording is bookkeeping - a tracker failure (a missing
             # import, a ProvenanceStateError) must NEVER discard the .SOL file
@@ -2002,14 +2047,14 @@ class CraftTranslator(CraftTranslatorBase):
                     "preserving the generated .SOL: %s", prov_err,
                 )
 
-        logger.info(f"Generated CRAFT soil file: {soil_path} ({len(smu_to_profile)} unique profiles)")
+        logger.info(f"Generated CRAFT soil file: {soil_path} ({len(profiles_by_key)} unique profiles)")
 
         # =========================================================================
-        # STEP 5: Build cell_id -> profile_name mapping for soil_mask.txt
+        # Build cell_id -> profile_name mapping for soil_mask.txt
         # =========================================================================
         cell_to_profile_name: SoilMapping = {}
         for cell_id in cell_ids:
-            smu_id = cell_to_smu.get(cell_id, 0)
+            smu_id = cell_to_key.get(cell_id, 0)
             profile_name = smu_to_profile_name.get(smu_id, f"{country_code}00000000")
             cell_to_profile_name[cell_id] = profile_name
 

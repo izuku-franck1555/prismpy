@@ -29,6 +29,8 @@ from prismpy.models.provenance import DecisionType, OperationType
 from prismpy.provenance.tracker import ProvenanceTracker
 from prismpy.translators.base import (
     BaseTranslator,
+    HwsdOutcome,
+    SoilCascadeState,
     UnifiedData,
     TranslationResult,
 )
@@ -1903,7 +1905,7 @@ class TranslationPipeline:
 
     def _retrieve_hwsd_for_grid(
         self, grid, region: Region
-    ) -> Tuple[Optional[Dict[int, SoilProfile]], List[Dict[str, Any]]]:
+    ) -> Tuple[Optional[Dict[int, SoilProfile]], List[Dict[str, Any]], HwsdOutcome]:
         """Retrieve per-cell HWSD soil data for ACEA/CRAFT platforms.
 
         NOTE: This retrieval runs in the HARMONIZE stage because it needs
@@ -1928,7 +1930,10 @@ class TranslationPipeline:
             region: Region for metadata
 
         Returns:
-            Tuple of ``(profiles, unavailable_cells)``. ``profiles`` is a
+            Tuple of ``(profiles, unavailable_cells, outcome)``. ``outcome`` is
+            ``SERVED`` when at least one grid cell got a profile,
+            ``ANSWERED_NONE`` when HWSD was queried and served no cell, and
+            ``NO_ANSWER`` when it was not run, not found, or raised. ``profiles`` is a
             dict of cell_id -> SoilProfile when extraction succeeded, or
             None when HWSD was not run (no enabled platform / paths not
             found / exception). ``unavailable_cells`` is a list of
@@ -1946,7 +1951,7 @@ class TranslationPipeline:
         enabled = self.config.get_enabled_platforms()
         hwsd_platforms = {Platform.ACEA, Platform.CRAFT, Platform.SARRA_PY, Platform.PYTHIA}
         if not hwsd_platforms.intersection(set(enabled)):
-            return None, []
+            return None, [], HwsdOutcome.NO_ANSWER
 
         # Resolve HWSD paths: the canonical data_sources.soil, else auto-discovery
         bil_path = None
@@ -1980,7 +1985,7 @@ class TranslationPipeline:
 
         if not (bil_path and mdb_path and bil_path.exists() and mdb_path.exists()):
             self.logger.debug("HWSD paths not configured or not found, skipping per-cell retrieval")
-            return None, []
+            return None, [], HwsdOutcome.NO_ANSWER
 
         # Build cell coordinates from grid
         cell_coords = [(cell.lat, cell.lon) for cell in grid.cells]
@@ -1991,7 +1996,7 @@ class TranslationPipeline:
         # non-existent cell set (mirrors the iSDA path's empty-cells guard).
         if not cell_coords:
             self.logger.debug("HWSD: empty grid, no cells to retrieve")
-            return None, []
+            return None, [], HwsdOutcome.NO_ANSWER
 
         self.logger.info(
             f"Retrieving HWSD soil data for {len(cell_coords)} grid cells..."
@@ -2138,19 +2143,21 @@ class TranslationPipeline:
                         artifact_id="soil",
                     )
 
-                return profiles, unavailable_cells
+                if not profiles:
+                    return None, unavailable_cells, HwsdOutcome.ANSWERED_NONE
+                return profiles, unavailable_cells, HwsdOutcome.SERVED
             else:
                 self.logger.warning(f"HWSD retrieval failed: {result.errors}")
                 # Sprint D.1 AC-4 — surface unavailable cells even
                 # on the all-miss failure path so the harmonize
                 # helper still routes the contract-named no-HWSD-
                 # coverage class to ``data_availability='unavailable'``.
-                return None, unavailable_cells
+                return None, unavailable_cells, HwsdOutcome.ANSWERED_NONE
 
         except Exception as e:
             self.logger.warning(f"HWSD retrieval error: {e}")
 
-        return None, []
+        return None, [], HwsdOutcome.NO_ANSWER
 
     def _load_crop_params(self) -> Optional[CropParameters]:
         """Load crop parameters from templates or config.
@@ -2506,6 +2513,7 @@ class TranslationPipeline:
             # Retrieve per-cell soil data: try iSDA API first (Africa, 30m),
             # then HWSD fallback (global, 1km)
             soil_data = retrieved_data.get("soil")
+            soil_cascade: Optional[SoilCascadeState] = None
             if grid and region:
                 # V2-19b-fix: deleted symptom-suppression hack that manually
                 # set `self.provenance._current_artifact_id = "soil"`. All
@@ -2518,6 +2526,9 @@ class TranslationPipeline:
                 isda_soil = self._retrieve_isda_api_for_grid(grid, region)
                 if isda_soil:
                     soil_data = isda_soil
+                    soil_cascade = SoilCascadeState(
+                        isda_served=True, hwsd=HwsdOutcome.NOT_QUERIED
+                    )
                     # V2-19 site #4: SOURCE_SELECTION for soil cascade
                     if self.provenance.enabled:
                         self.provenance.record_decision(
@@ -2535,8 +2546,16 @@ class TranslationPipeline:
                             artifact_id="soil",
                         )
                 else:
-                    hwsd_soil, hwsd_unavailable = (
+                    hwsd_soil, hwsd_unavailable, hwsd_outcome = (
                         self._retrieve_hwsd_for_grid(grid, region)
+                    )
+                    soil_cascade = SoilCascadeState(
+                        isda_served=False,
+                        hwsd=hwsd_outcome,
+                        n_hwsd_served=len(hwsd_soil or {}),
+                        hwsd_unavailable_cell_ids=tuple(
+                            entry["cell_id"] for entry in hwsd_unavailable
+                        ),
                     )
                     # Sprint D.1 AC-4 — surface the loader-level
                     # unavailable list to the harmonize stage via
@@ -2675,6 +2694,7 @@ class TranslationPipeline:
                 soil=soil_data,
                 crop_params=retrieved_data.get("crop_params"),
                 crop_calendar=retrieved_data.get("crop_calendar"),
+                soil_cascade=soil_cascade,
                 metadata={
                     "harmonized_at": datetime.now().isoformat(),
                     "config_version": self.config.project.version,

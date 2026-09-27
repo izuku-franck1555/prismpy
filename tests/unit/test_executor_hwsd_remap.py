@@ -230,7 +230,7 @@ class TestRetrieveHWSDIndexToGridCellIdRemap(TestCase):
             _FakeCell(202, 11.95, -5.00),
             _FakeCell(303, 12.00, -5.05),
         ]
-        profiles, unavailable = self._run_remap(
+        profiles, unavailable, outcome = self._run_remap(
             tmp_path,
             recorded_indices=[0, 1, 2],
             grid_cells=cells,
@@ -241,6 +241,8 @@ class TestRetrieveHWSDIndexToGridCellIdRemap(TestCase):
             "Fake source returned success=False; profiles must be "
             "None on the all-miss path.",
         )
+        from prismpy.translators.base import HwsdOutcome
+        self.assertEqual(outcome, HwsdOutcome.ANSWERED_NONE)
         recorded_ids = sorted(e["cell_id"] for e in unavailable)
         self.assertEqual(
             recorded_ids, [101, 202, 303],
@@ -265,7 +267,7 @@ class TestRetrieveHWSDIndexToGridCellIdRemap(TestCase):
 
     def _assert_cause_preserved(self, tmp_path):
         cells = [_FakeCell(500, 11.95, -5.05)]
-        _, unavailable = self._run_remap(
+        _, unavailable, _ = self._run_remap(
             tmp_path, recorded_indices=[0], grid_cells=cells,
         )
         self.assertEqual(len(unavailable), 1)
@@ -294,7 +296,7 @@ class TestRetrieveHWSDIndexToGridCellIdRemap(TestCase):
         ]
         # Source records indices [0, 99] — index 99 is out of
         # range (only 2 cells in the grid).
-        _, unavailable = self._run_remap(
+        _, unavailable, _ = self._run_remap(
             tmp_path,
             recorded_indices=[0, 99],
             grid_cells=cells,
