@@ -20,6 +20,7 @@ Reference: PYTHIA/utils/wth_utils.py
 
 import json
 import logging
+import math
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -92,6 +93,42 @@ class BuildEghrSubstrateError(RuntimeError):
     matches the project's honest-signal contract for substrate
     failures.
     """
+
+
+class CellGridMismatchError(ValueError):
+    """A grid cell centre is not on the canonical lattice of the grid's increment."""
+
+
+class CropMaskExtentError(RuntimeError):
+    """The clipped crop mask does not cover every grid cell's footprint."""
+
+
+def _check_cell_lattice(cells, increment: float) -> None:
+    """Every centre sits at ``lon = -180 + (col + 0.5)·inc`` and ``lat = 90 - (row + 0.5)·inc``
+    for whole ``col``/``row``; gaps between cells are allowed, a shifted or off-lattice centre is not."""
+    for cell in cells:
+        for axis, index in (("lon", (cell.lon + 180.0) / increment - 0.5),
+                            ("lat", (90.0 - cell.lat) / increment - 0.5)):
+            if abs(index - round(index)) > 1e-9:
+                raise CellGridMismatchError(
+                    f"grid cell centre ({cell.lat}, {cell.lon}) is off the {increment}° lattice "
+                    f"on {axis}: its {axis} is not a cell centre of that grid"
+                )
+
+
+def _check_mask_covers_cells(mask_path: Path, cells, half: float) -> None:
+    """The written mask's bounds contain every cell's full footprint."""
+    import rasterio
+
+    with rasterio.open(mask_path) as mask:
+        left, bottom, right, top = mask.bounds
+    for cell in cells:
+        if (cell.lon - half < left - 1e-9 or cell.lon + half > right + 1e-9
+                or cell.lat - half < bottom - 1e-9 or cell.lat + half > top + 1e-9):
+            raise CropMaskExtentError(
+                f"the crop mask {mask_path.name} ({left}, {bottom}, {right}, {top}) does not "
+                f"cover the footprint of the grid cell at ({cell.lat}, {cell.lon})"
+            )
 
 
 class PythiaTranslator(PythiaTranslatorBase):
@@ -2336,11 +2373,16 @@ class PythiaTranslator(PythiaTranslatorBase):
             spam_dir, spam_version, spam_release, crop_code, tech="A"
         )
 
-        # Calculate bounds from grid
-        if data.grid and data.grid.cells:
-            lats = [cell.lat for cell in data.grid.cells]
-            lons = [cell.lon for cell in data.grid.cells]
-            bounds = (min(lons), min(lats), max(lons), max(lats))
+        # The mask covers every cell's full footprint: the footprint union, snapped outward to
+        # the resolved raster's own pixel grid.
+        cells = list(data.grid.cells) if data.grid and data.grid.cells else []
+        half = data.grid.increment_deg / 2 if cells else 0.0
+        if cells:
+            _check_cell_lattice(cells, data.grid.increment_deg)
+            bounds = self._snap_bounds_outward(spam_path, (
+                min(cell.lon for cell in cells) - half, min(cell.lat for cell in cells) - half,
+                max(cell.lon for cell in cells) + half, max(cell.lat for cell in cells) + half,
+            ))
         else:
             logger.warning("No grid data, using region bounds")
             if hasattr(data.region.bounds, 'to_gis_format'):
@@ -2364,6 +2406,8 @@ class PythiaTranslator(PythiaTranslatorBase):
         # Masking was requested AND the vintage resolved — let a clip failure propagate (fail
         # loud) rather than silently shipping a whole-grid run under a "no mask" label.
         mask_path = self._clip_global_raster(spam_path, output_path, bounds)
+        if cells:
+            _check_mask_covers_cells(mask_path, cells, half)
 
         # Produce the single canonical applied-vintage state ONCE, after a successful clip.
         self._applied_vintage = AppliedVintage(
@@ -2373,6 +2417,22 @@ class PythiaTranslator(PythiaTranslatorBase):
             mask_filename=mask_filename,
         )
         return mask_path
+
+    @staticmethod
+    def _snap_bounds_outward(
+        raster_path: Path, bounds: Tuple[float, float, float, float]
+    ) -> Tuple[float, float, float, float]:
+        """``(minx, miny, maxx, maxy)`` widened to the raster's own pixel edges (its pixels need
+        not be an exact fraction of a degree, so geographic bounds alone can fall short)."""
+        import rasterio
+
+        with rasterio.open(raster_path) as src:
+            inverse = ~src.transform
+            west_col, north_row = inverse * (bounds[0], bounds[3])
+            east_col, south_row = inverse * (bounds[2], bounds[1])
+            west, north = src.transform * (math.floor(west_col), math.floor(north_row))
+            east, south = src.transform * (math.ceil(east_col), math.ceil(south_row))
+        return west, south, east, north
 
     def _get_spam_crop_code(self) -> str:
         """Get SPAM crop code from config or auto-detect from crop name.
