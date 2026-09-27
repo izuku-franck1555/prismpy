@@ -78,7 +78,9 @@ def test_missing_duplicate_or_gapped_layer_stops_the_prefix():
     missing_d2 = [r for r in _unit(1469) if r["LAYER"] != "D2"]
     duplicate_d2 = _unit(1469) + [_row(1469, "D2", 20, 40, sand=50.0, silt=25.0, clay=25.0)]
     gapped_d2 = [dict(r, TOPDEP=25) if r["LAYER"] == "D2" else r for r in _unit(1469)]
-    for rows in (missing_d2, duplicate_d2, gapped_d2):
+    d3_in_its_place = [dict(r, TOPDEP=20, BOTDEP=40) if r["LAYER"] == "D3" else r
+                       for r in missing_d2]
+    for rows in (missing_d2, duplicate_d2, gapped_d2, d3_in_its_place):
         profiles, _ = _extract(rows, [1469])
         assert len(profiles[0].layers) == 1 and profiles[0].total_depth == 0.2
     d1_not_at_surface = [dict(r, TOPDEP=5) if r["LAYER"] == "D1" else r for r in _unit(1469)]
@@ -88,8 +90,10 @@ def test_missing_duplicate_or_gapped_layer_stops_the_prefix():
 
 def test_invalid_middle_layer_drops_every_layer_below_it():
     rows = _unit(1469, D3=dict(sand=-9.0, silt=-9.0, clay=-9.0))
-    profiles, _ = _extract(rows, [1469])
-    assert [layer.depth_bottom for layer in profiles[0].layers] == [0.2, 0.4]
+    d4_in_its_place = [dict(r, TOPDEP=40, BOTDEP=60) if r["LAYER"] == "D4" else r for r in rows]
+    for unit in (rows, d4_in_its_place):
+        profiles, _ = _extract(unit, [1469])
+        assert [layer.depth_bottom for layer in profiles[0].layers] == [0.2, 0.4]
 
 
 @pytest.mark.parametrize("sentinel", [-9.0, -4.0, -7.0])

@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from prismpy.models.region import BoundingBox, Region
@@ -144,8 +145,12 @@ def test_a_cell_without_hwsd_soil_runs_on_the_declared_default(tmp_path, fake_hw
     assert len(out.warnings) == 1 and out.warnings[0].startswith("1 of 2 grid cells (50.0%)")
 
 
-def test_layered_hwsd_profile_is_written_to_100_cm(tmp_path, fake_hwsd):
-    fake_hwsd.plan = {0: _hwsd(1469)}
+def test_layered_hwsd_profile_is_written_to_100_cm(tmp_path, monkeypatch):
+    """The translator's own HWSD query, end to end from the unit's layer rows."""
+    from test_hwsd_layered_profile import _unit
+    monkeypatch.setattr(craft.HWSDSource, "_sample_bil_raster", lambda self, coords: [1469])
+    monkeypatch.setattr(craft.HWSDSource, "_export_mdb_table",
+                        lambda self: pd.DataFrame(_unit(1469)))
     out = _run(_translator(tmp_path, paths=True), _grid([101]))
     header = next(ln for ln in out.lines if ln.startswith("*ML00001469"))
     assert int(header[31:36]) == 100
