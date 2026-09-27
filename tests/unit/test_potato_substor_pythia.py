@@ -705,6 +705,39 @@ def test_supported_crop_map_keeps_both_spellings_for_exact_match_readers():
         assert not {"potato", "Potato"} & _PLATFORM_SUPPORTED_CROPS[platform]
 
 
+def test_sarra_py_declares_exactly_the_cereals_it_models():
+    from prismpy.packaging.manifest import _PLATFORM_SUPPORTED_CROPS
+
+    assert _PLATFORM_SUPPORTED_CROPS["sarra_py"] == frozenset(
+        {"maize", "sorghum", "millet", "Maize", "Sorghum", "Millet"})
+
+
+def test_every_declared_sarra_py_crop_has_a_calibrated_variety_file_in_the_repository():
+    # Repository presence only: the installed wheel does not ship data/sarra_py_varieties/.
+    from prismpy.packaging.manifest import _PLATFORM_SUPPORTED_CROPS
+
+    varieties = Path(__file__).resolve().parents[2] / "data" / "sarra_py_varieties"
+    crops = {crop.casefold() for crop in _PLATFORM_SUPPORTED_CROPS["sarra_py"]}
+    assert crops
+    assert sorted(crop for crop in crops if not (varieties / f"{crop}.yaml").is_file()) == []
+
+
+@pytest.mark.parametrize("crop,short,refused", [("Cowpea", "cpe", True), ("Rice", "ric", True),
+                                                ("Groundnut", "gnt", True), ("Sorghum", "sor", False)])
+def test_a_crop_sarra_py_does_not_model_is_refused_before_translation(
+        tmp_path, monkeypatch, crop, short, refused):
+    from prismpy.packaging.manifest import UnsupportedCropError
+
+    pipeline, calls = _pipeline(tmp_path, [Platform.SARRA_PY], monkeypatch, crop=crop, short=short)
+    if refused:
+        with pytest.raises(UnsupportedCropError, match="sarra_py"):
+            pipeline._execute_translate(_data())
+        assert calls == []
+    else:
+        pipeline._execute_translate(_data())
+        assert calls == [Platform.SARRA_PY]
+
+
 # ── ECOCROP climate envelope ──────────────────────────────────────────────────
 
 def test_potato_ecocrop_envelope_is_the_fao_absolute_tolerance():
