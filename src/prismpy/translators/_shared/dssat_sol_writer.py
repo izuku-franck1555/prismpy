@@ -59,10 +59,10 @@ def _default_declaration(
     cells: int,
     default_causes: Mapping[str, int],
     profile_name: Optional[str],
-    written_layers: Sequence[Tuple[float, float, float, float]],
+    written_layers: Sequence[Tuple[int, int, float, float]],
 ) -> DefaultDeclaration:
     """Compute the declaration from the cell counts and the generic profile's
-    WRITTEN layers ``(top_m, bottom_m, SLLL, SDUL)``. The warning is the exact
+    layers AS WRITTEN ``(top_cm, bottom_cm, SLLL, SDUL)``. The warning is the exact
     ``default_cells / cells > 5 %`` test in integers; ``fraction`` is for display."""
     causes = tuple(
         (cause, default_causes[cause]) for cause in DEFAULT_CAUSES
@@ -71,9 +71,9 @@ def _default_declaration(
     default_cells = sum(count for _, count in causes)
     if default_cells == 0:
         return DefaultDeclaration(cells, 0, (), 0.0, False, None, None, None)
-    depth_cm = f"{round(written_layers[0][0] * 100)}-{round(written_layers[-1][1] * 100)}"
+    depth_cm = f"{written_layers[0][0]}-{written_layers[-1][1]}"
     paw_mm = round(sum(
-        (sdul - slll) * (bottom - top) * 1000.0
+        (sdul - slll) * (bottom - top) * 10.0
         for top, bottom, slll, sdul in written_layers
     ))
     return DefaultDeclaration(
@@ -168,7 +168,7 @@ def _resolve_chem_default(
 def _soil_record_line(
     profiles_by_id: Mapping[int, SoilProfile],
     names: Mapping[int, str],
-    written_layers: Mapping[int, List[Tuple[float, float, float, float]]],
+    written_layers: Mapping[int, List[Tuple[int, int, float, float]]],
     substitutions: List[Dict[str, Any]],
     profile_cell_counts: Mapping[int, int],
     default_causes: Mapping[str, int],
@@ -298,8 +298,9 @@ def write_dssat_sol(
     if soil_record and profile_cell_counts is None:
         raise ValueError("soil_record needs profile_cell_counts (grid cells per profile)")
     first_new_default = len(chem_defaults)
-    # The layers as written (top, bottom, SLLL, SDUL), per profile key.
-    written_layers: Dict[int, List[Tuple[float, float, float, float]]] = {}
+    # The layers as written (top cm, bottom cm, SLLL, SDUL), per profile key; a
+    # layer's top is the previous written bottom, the first starting at 0 as DSSAT reads it.
+    written_layers: Dict[int, List[Tuple[int, int, float, float]]] = {}
 
     # Profiles are rendered first so the record line, which describes what was
     # written, can precede them; the file bytes are otherwise unchanged.
@@ -417,8 +418,9 @@ def write_dssat_sol(
                 f"{-99.0:6.1f}"
                 "\n"
             )
-            written_layers.setdefault(smu_id, []).append((
-                layer.depth_top, layer.depth_bottom,
+            written = written_layers.setdefault(smu_id, [])
+            written.append((
+                written[-1][1] if written else 0, slb,
                 float(f"{slll:6.3f}"), float(f"{sdul:6.3f}"),
             ))
 

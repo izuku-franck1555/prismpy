@@ -5,18 +5,23 @@ soil-cascade state; no soil at all after HWSD answered fails the build."""
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import subprocess
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
+from prismpy.models.climate import ClimateRecord, ClimateTimeSeries
 from prismpy.models.region import BoundingBox, Region
 from prismpy.models.soil import SoilLayer, SoilProfile
 from prismpy.models.spatial import GridCell, SpatialGrid
+from prismpy.packaging.manifest import create_manifest
+from prismpy.pipeline.executor import TranslationPipeline
 from prismpy.translators._shared import dssat_sol_writer
 from prismpy.translators.base import HwsdOutcome, SoilCascadeState, UnifiedData
 from prismpy.translators.craft import translator as craft
@@ -58,7 +63,6 @@ def _isda(cid, sand=50.0):
 
 
 def _placeholder():
-    from prismpy.pipeline.executor import TranslationPipeline
     return next(iter(TranslationPipeline._create_placeholder_soil(None, REGION).values()))
 
 
@@ -73,7 +77,7 @@ class _FakeHWSD:
     def retrieve(self, region, cell_coords):
         type(self).calls += 1
         profiles = dict(type(self).plan)
-        return SimpleNamespace(success=bool(profiles), errors=[],
+        return SimpleNamespace(success=bool(profiles), errors=[], metadata={},
                                data=SimpleNamespace(profiles=profiles) if profiles else None)
 
 
@@ -188,6 +192,16 @@ def test_branch_follows_the_state_not_the_shape(tmp_path, fake_hwsd):
         _run(_translator(tmp_path / "c", paths=True), _grid([101]), {0: _placeholder()},
              _state(HwsdOutcome.ANSWERED_NONE))
     assert fake_hwsd.calls == 1
+
+
+def test_an_unreadable_hwsd_is_no_answer_and_keeps_the_next_branch(tmp_path):
+    """The translator's own query cannot read the configured HWSD files: the build
+    does not fail; the next soil branch runs."""
+    placeholder = _run(_translator(tmp_path / "3", paths=True), _grid([101, 102]),
+                       {0: _placeholder()}, _state(HwsdOutcome.NO_ANSWER))
+    assert set(placeholder.mask.values()) == {"ML90000001"}
+    default = _run(_translator(tmp_path / "4", paths=True), _grid([101]), None, None)
+    assert default.mask == {101: "ML00000000"}
 
 
 # ── branch 1: HWSD served at harmonize ─────────────────────────────────────
@@ -331,6 +345,7 @@ def test_record_and_warning_follow_the_one_declaration(tmp_path, monkeypatch):
     (0.28, 1.0, "0-100", "158"),
     (0.24, 1.0, "0-100", "126"),
     (0.28, 0.8, "0-80", "126"),
+    (0.28, 0.806, "0-80", "126"),
 ])
 def test_depth_and_water_are_derived_in_the_record_and_the_warning(
         tmp_path, monkeypatch, lower_fc, bottom, depth, paw):
@@ -367,14 +382,46 @@ def test_no_branch_loses_a_cell(tmp_path, fake_hwsd):
         assert set(out.mask.values()) <= set(out.blocks)
 
 
-def test_the_soil_mask_and_other_craft_files_keep_the_grid_cells(tmp_path):
+def _package_cell_ids(tmp_path, grid, existing, state):
+    """Build the whole CRAFT package as the pipeline's package stage does, then
+    read the CellIDs of every file."""
+    records = [ClimateRecord(date=date(2015, 1, 1) + timedelta(days=d), tmax=32.0, tmin=21.0,
+                             precip=2.0, srad=20.0) for d in range(6 * 365)]
+    climate = {c.cell_id: ClimateTimeSeries(location_id=c.cell_id, lat=c.lat, lon=c.lon,
+                                            source="nasa_power", records=records)
+               for c in grid.cells}
     tr = _translator(tmp_path)
-    grid = _grid([101, 102, 103])
-    _, mapping = tr._generate_soil_package(grid, REGION, {101: _isda(101)},
-                                           _state(HwsdOutcome.NOT_QUERIED, isda=True), [])
-    mask_file = tr._generate_soil_mask(grid=grid, region=REGION, cell_to_profile=mapping)
-    first = [ln.split()[0] for ln in Path(mask_file).read_text().splitlines() if ln.strip()]
-    assert sorted(int(f) for f in first if f.isdigit()) == [101, 102, 103]
+    data = UnifiedData(region=REGION, grid=grid, climate=climate, soil=existing,
+                       soil_cascade=state)
+    result = tr.translate(data)
+    assert result.success, result.errors
+    tr.generate_package(data, result.output_files)
+    out = tr.output_dir
+    summary = TranslationPipeline(tr.config)._build_cell_summary(data)
+    (out / "cell_summary.json").write_text(json.dumps(summary))
+    package_dir, config, platform, extra = tr._deferred_manifest
+    manifest = create_manifest(package_dir, config, platform=platform, additional_metadata=extra)
+
+    def first_column(path, sep="\t"):
+        return {int(ln.split(sep)[0]) for ln in path.read_text().splitlines()[1:] if ln.strip()}
+
+    tables = [*out.glob("schema/**/*.txt"), out / "crop_mask/mask.txt",
+              out / "soil/soil_mask.txt", *out.glob("management/*.txt")]
+    ids = {str(p.relative_to(out)): first_column(p) for p in tables}
+    ids["weather/input.csv"] = first_column(out / "weather/input.csv", ",")
+    ids["weather/<cell>.txt"] = {int(p.stem) for p in out.glob("weather/*.txt")}
+    ids["cell_summary.json"] = {c["id"] for c in summary["cells"]}
+    ids["manifest.json"] = set(manifest["cells"])
+    return ids
+
+
+def test_every_craft_file_keeps_every_grid_cell(tmp_path):
+    existing = {101: _hwsd(1469), 102: _hwsd(1470, sand=60.0), 104: _hwsd(1469)}
+    ids = _package_cell_ids(tmp_path, _grid([101, 102, 103, 104]), existing,
+                            _state(HwsdOutcome.SERVED))
+    assert len(ids) == 12
+    for name, cells in ids.items():
+        assert cells == {101, 102, 103, 104}, name
 
 
 # ── stable keys ────────────────────────────────────────────────────────────

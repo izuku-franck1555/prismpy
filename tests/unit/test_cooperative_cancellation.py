@@ -453,8 +453,8 @@ class TestCarveOutRegression:
         # Then 2842 -> 2831 after routing soil resolution through data_sources.soil
         # (the per-platform fallback read removed, net ~-11).
         # Then 2831 -> 2832 after the crop-support preflight call (+1).
-        # Then 2832 -> 2852 after the HWSD outcome and the soil-cascade state (+20).
-        ("src/prismpy/pipeline/executor.py", 2852),
+        # Then 2832 -> 2854 after the HWSD outcome and the soil-cascade state (+22).
+        ("src/prismpy/pipeline/executor.py", 2854),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed

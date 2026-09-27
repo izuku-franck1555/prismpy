@@ -122,13 +122,15 @@ def test_extreme_but_plausible_chemistry_is_kept_and_flagged():
     assert "ptf_domain_flags" not in mineral.metadata
 
 
-def test_flag_boundaries_are_organic_at_20_percent_and_andic_below_0_9():
+def test_flag_boundaries_are_organic_at_20_percent_and_andic_below_0_9_with_known_oc():
     rows = [_row(1, "D1", 0, 20, oc=20.0, bd=1.2), _row(2, "D1", 0, 20, oc=1.0, bd=0.9),
-            _row(3, "D1", 0, 20, oc=19.99, bd=0.89)]
-    profiles, _ = _extract(rows, [1, 2, 3])
+            _row(3, "D1", 0, 20, oc=19.99, bd=0.89), _row(4, "D1", 0, 20, oc=float("nan"), bd=0.76)]
+    profiles, _ = _extract(rows, [1, 2, 3, 4])
     assert profiles[0].metadata["ptf_domain_flags"] == {0: "organic"}
     assert "ptf_domain_flags" not in profiles[1].metadata
     assert profiles[2].metadata["ptf_domain_flags"] == {0: "andic"}
+    assert "ptf_domain_flags" not in profiles[3].metadata
+    assert profiles[3].metadata["chem_defaulted"] == {0: ["organic_carbon"]}
 
 
 def test_absent_or_out_of_bounds_chemistry_is_left_to_the_writer_default():
@@ -153,8 +155,25 @@ def test_a_non_soil_or_absent_unit_has_no_profile_and_is_recorded_once():
     with patch.object(all_miss, "_sample_bil_raster", return_value=[7001, 999999]), \
             patch.object(all_miss, "_export_mdb_table", return_value=pd.DataFrame(non_soil)):
         result = all_miss.retrieve(region=_region(), cell_coords=[(12.25, -5.5), (12.35, -5.4)])
-    assert result.success is False
+    assert result.success is False and result.metadata["read_error"] is False
     assert sorted(e["cell_id"] for e in all_miss.unavailable_cells) == [0, 1]
+
+
+def test_an_unreadable_hwsd_is_a_read_error_not_an_answer(tmp_path):
+    """No configured source could be read (raster, table or its columns)."""
+    bil, mdb = tmp_path / "HWSD2.bil", tmp_path / "HWSD2.mdb"
+    bil.write_bytes(b"not a raster")
+    mdb.write_bytes(b"not a database")
+    coords = [(12.25, -5.5)]
+    result = HWSDSource(HWSDConfig(bil_path=bil, mdb_path=mdb)).retrieve(
+        region=_region(), cell_coords=coords)
+    assert result.success is False and result.metadata["read_error"] is True
+    for table in (None, pd.DataFrame(_unit(1469)).drop(columns=["SHARE"])):
+        source = HWSDSource(HWSDConfig(bil_path=bil, mdb_path=mdb))
+        with patch.object(source, "_sample_bil_raster", return_value=[1469]), \
+                patch.object(source, "_export_mdb_table", return_value=table):
+            result = source.retrieve(region=_region(), cell_coords=coords)
+        assert result.success is False and result.metadata["read_error"] is True
 
 
 def test_the_profile_carries_the_real_mapping_unit_id():

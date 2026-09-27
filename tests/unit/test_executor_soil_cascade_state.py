@@ -9,14 +9,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pandas as pd
 import pytest
 
 from prismpy.models.soil import SoilLayer, SoilProfile
+from prismpy.sources.soil.hwsd import HWSDSource
 from prismpy.translators.base import HwsdOutcome
 from prismpy.translators.craft import translator as craft
 
 sys.path.insert(0, str(Path(__file__).parent))
 from test_craft_declared_default_soil import _translator  # noqa: E402
+from test_hwsd_layered_profile import _row  # noqa: E402
 from test_executor_hwsd_remap import (  # noqa: E402
     _FakeCell,
     _FakeGrid,
@@ -48,7 +51,7 @@ def _source(mode, served=None):
             for i in range(len(cell_coords)):
                 if i not in profiles:
                     self.unavailable_cells.append({"cell_id": i, "cause": "soil_no_hwsd_coverage"})
-            return SimpleNamespace(success=bool(profiles), errors=["no HWSD soil"],
+            return SimpleNamespace(success=bool(profiles), errors=["no HWSD soil"], metadata={},
                                    data=SimpleNamespace(profiles=profiles) if profiles else None)
 
     return _Source
@@ -81,6 +84,18 @@ def test_each_return_point_reports_its_outcome(tmp_path):
     assert _outcome(unfound, grid, _source("served", {0: _hwsd(1)}))[2] == HwsdOutcome.NO_ANSWER
     with patch.object(type(pipe.config), "get_enabled_platforms", return_value=[]):
         assert _outcome(pipe, grid, _source("served", {0: _hwsd(1)}))[2] == HwsdOutcome.NO_ANSWER
+
+    # The real source: files it cannot read are no answer; a read table with no soil is one.
+    assert _outcome(pipe, grid, HWSDSource)[2] == HwsdOutcome.NO_ANSWER
+    with _non_soil_hwsd():
+        assert _outcome(pipe, grid, HWSDSource)[2] == HwsdOutcome.ANSWERED_NONE
+
+
+def _non_soil_hwsd():
+    """The real HWSDSource reading a table where every sampled unit is not a soil."""
+    rows = pd.DataFrame([_row(7001, "D1", 0, 20, sand=-9.0, silt=-9.0, clay=-9.0)])
+    return patch.multiple(HWSDSource, _sample_bil_raster=lambda self, coords: [7001] * len(coords),
+                          _export_mdb_table=lambda self: rows)
 
 
 def _harmonize(pipe, source, placeholder=True, isda=None):
@@ -125,7 +140,8 @@ def test_hwsd_auto_discovered_but_every_unit_missing_fails_the_craft_build(tmp_p
     _paths(data_dir / "hwsd")
     monkeypatch.setenv("PRISM_DATA_DIR", str(data_dir))
     pipe = _make_pipeline_with_paths(None, None)
-    data = _harmonize(pipe, _source("miss"))
+    with _non_soil_hwsd():
+        data = _harmonize(pipe, HWSDSource)
     assert data.soil_cascade.hwsd == HwsdOutcome.ANSWERED_NONE
     assert next(iter(data.soil.values())).source == "placeholder"
     with pytest.raises(craft.CraftSoilUnavailableError, match="refusing to invent a default soil"):
@@ -133,9 +149,9 @@ def test_hwsd_auto_discovered_but_every_unit_missing_fails_the_craft_build(tmp_p
             data.grid, data.region, data.soil, data.soil_cascade, [])
 
 
-def test_no_answer_keeps_the_placeholder_path(tmp_path):
+def test_an_unreadable_hwsd_keeps_the_placeholder_path(tmp_path):
     pipe = _make_pipeline_with_paths(*_paths(tmp_path))
-    data = _harmonize(pipe, _source("raise"))
+    data = _harmonize(pipe, HWSDSource)
     assert data.soil_cascade.hwsd == HwsdOutcome.NO_ANSWER
     warnings: list = []
     _, mask = _translator(tmp_path / "craft")._generate_soil_package(

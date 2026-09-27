@@ -1941,10 +1941,14 @@ class CraftTranslator(CraftTranslatorBase):
             except Exception as e:
                 logger.warning(f"HWSD query error: {e}")
             else:
-                raw = result.data.profiles if (result.success and result.data) else {}
-                hwsd_cells = {cell_ids[i]: p for i, p in raw.items() if i < len(cell_ids)}
-                if not hwsd_cells:
-                    raise no_hwsd_soil
+                if result.metadata.get("read_error"):
+                    # HWSD could not be read, which is no answer: the next branch, as for an error.
+                    logger.warning(f"HWSD could not be read: {result.warnings}")
+                else:
+                    raw = result.data.profiles if (result.success and result.data) else {}
+                    hwsd_cells = {cell_ids[i]: p for i, p in raw.items() if i < len(cell_ids)}
+                    if not hwsd_cells:
+                        raise no_hwsd_soil
 
         if hwsd_cells is not None:
             for cell_id in cell_ids:

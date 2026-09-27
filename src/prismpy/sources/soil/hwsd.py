@@ -187,6 +187,7 @@ class HWSDSource(DataSource):
 
         profiles = {}
         source_type = None
+        answered = False  # a configured source was read without error
 
         # Try BIL + MDB method first
         if self.config.bil_path and self.config.mdb_path:
@@ -196,6 +197,7 @@ class HWSDSource(DataSource):
                     cell_coords=cell_coords,
                 )
                 source_type = "bil_mdb"
+                answered = True
                 self.logger.info(f"Extracted {len(profiles)} profiles from BIL+MDB")
             except Exception as e:
                 warnings.append(f"BIL+MDB extraction failed: {e}")
@@ -208,6 +210,7 @@ class HWSDSource(DataSource):
                     cell_coords=cell_coords,
                 )
                 source_type = "netcdf"
+                answered = True
                 self.logger.info(f"Extracted {len(profiles)} profiles from NetCDF")
             except Exception as e:
                 warnings.append(f"NetCDF extraction failed: {e}")
@@ -235,6 +238,8 @@ class HWSDSource(DataSource):
             source_type = "no_coverage"
 
         if not profiles:
+            # read_error: HWSD could not be read, so this is no answer about the cells.
+            metadata["read_error"] = not answered
             return self.create_result(
                 success=False,
                 errors=["Failed to extract HWSD data from any source"],
@@ -333,9 +338,11 @@ class HWSDSource(DataSource):
 
         # Step 2: Export HWSD2_LAYERS table from MDB
         layers_df = self._export_mdb_table()
+        if layers_df is None:
+            raise RuntimeError(f"HWSD2_LAYERS could not be read from {self.config.mdb_path}")
 
         # Step 3: Create lookup and build profiles
-        if layers_df is not None and smu_ids:
+        if smu_ids:
             # Validate required columns exist (HWSD v2.0 format)
             required_cols = ["LAYER", "SEQUENCE", "SHARE", "TOPDEP", "BOTDEP"]
             missing_cols = [c for c in required_cols if c not in layers_df.columns]
@@ -349,7 +356,7 @@ class HWSDSource(DataSource):
                         i,
                         cause=WarningCategory.SOIL_NO_HWSD_COVERAGE.value,
                     )
-                return profiles
+                raise RuntimeError(f"HWSD2_LAYERS lacks the columns {missing_cols}")
 
             # Note: HWSD2 uses HWSD2_SMU_ID as the key, not 'ID'
             smu_col = "HWSD2_SMU_ID" if "HWSD2_SMU_ID" in layers_df.columns else "ID"
@@ -658,7 +665,8 @@ class HWSDSource(DataSource):
                 chem_defaulted[index] = missing
             if chem["soc"] is not None and chem["soc"] >= _ORGANIC_MIN_OC:
                 flags[index] = "organic"
-            elif chem["bd"] is not None and chem["bd"] < _ANDIC_MAX_BD:
+            elif (chem["soc"] is not None and chem["bd"] is not None
+                  and chem["bd"] < _ANDIC_MAX_BD):
                 flags[index] = "andic"
             previous_bottom_cm = bottom_cm
             layers.append(SoilLayer(

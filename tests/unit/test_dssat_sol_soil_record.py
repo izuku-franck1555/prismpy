@@ -107,6 +107,7 @@ def test_warning_is_the_exact_ratio_not_the_rounded_one(tmp_path, k0, n, fractio
     (0.28, 1.0, "0-100", "158"),
     (0.24, 1.0, "0-100", "126"),
     (0.28, 0.8, "0-80", "126"),
+    (0.28, 0.806, "0-80", "126"),
 ])
 def test_default_depth_and_water_are_derived_from_the_written_layers(
         tmp_path, lower_fc, bottom, depth, paw):

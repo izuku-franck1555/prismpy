@@ -1933,7 +1933,7 @@ class TranslationPipeline:
             Tuple of ``(profiles, unavailable_cells, outcome)``. ``outcome`` is
             ``SERVED`` when at least one grid cell got a profile,
             ``ANSWERED_NONE`` when HWSD was queried and served no cell, and
-            ``NO_ANSWER`` when it was not run, not found, or raised. ``profiles`` is a
+            ``NO_ANSWER`` when it was not run, not found, could not be read, or raised. ``profiles`` is a
             dict of cell_id -> SoilProfile when extraction succeeded, or
             None when HWSD was not run (no enabled platform / paths not
             found / exception). ``unavailable_cells`` is a list of
@@ -2152,7 +2152,9 @@ class TranslationPipeline:
                 # on the all-miss failure path so the harmonize
                 # helper still routes the contract-named no-HWSD-
                 # coverage class to ``data_availability='unavailable'``.
-                return None, unavailable_cells, HwsdOutcome.ANSWERED_NONE
+                outcome = (HwsdOutcome.NO_ANSWER if result.metadata.get("read_error")
+                           else HwsdOutcome.ANSWERED_NONE)
+                return None, unavailable_cells, outcome
 
         except Exception as e:
             self.logger.warning(f"HWSD retrieval error: {e}")

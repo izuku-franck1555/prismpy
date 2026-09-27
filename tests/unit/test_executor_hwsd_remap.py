@@ -68,12 +68,13 @@ class _FakeGrid:
 
 class _FakeRetrievalResult:
     """Minimal duck-type for the ``RetrievalResult`` shape that
-    ``_retrieve_hwsd_for_grid`` reads (success, data, errors)."""
+    ``_retrieve_hwsd_for_grid`` reads (success, data, errors, metadata)."""
 
     def __init__(self, success: bool, data=None, errors=None):
         self.success = success
         self.data = data
         self.errors = errors or []
+        self.metadata = {}
 
 
 def _make_fake_hwsd_source_class(
