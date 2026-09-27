@@ -138,7 +138,7 @@ class TestHWSDUnavailableEndToEndPropagation(TestCase):
             lambda grid, region: None
         )
 
-        # Stub HWSD to return the contract shape: a tuple of
+        # Stub HWSD to return its real shape: a tuple of
         # (profiles_or_None, unavailable_cells_list, outcome).
         def _stub_hwsd(grid, region):
             from prismpy.translators.base import HwsdOutcome
