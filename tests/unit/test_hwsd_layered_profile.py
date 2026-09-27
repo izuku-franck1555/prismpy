@@ -94,7 +94,8 @@ def test_invalid_middle_layer_drops_every_layer_below_it():
 
 @pytest.mark.parametrize("sentinel", [-9.0, -4.0, -7.0])
 def test_texture_sentinel_truncates_before_the_layer(sentinel):
-    rows = _unit(1469, D3=dict(sand=sentinel, silt=sentinel, clay=sentinel))
+    """The other two fractions make the sum 100, so only the range test rejects it."""
+    rows = _unit(1469, D3=dict(sand=sentinel, silt=50.0 - sentinel, clay=50.0))
     profiles, _ = _extract(rows, [1469])
     assert len(profiles[0].layers) == 2
 

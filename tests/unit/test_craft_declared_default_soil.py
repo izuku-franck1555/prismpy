@@ -264,9 +264,16 @@ def test_no_answer_with_configured_paths_queries_hwsd(tmp_path, fake_hwsd):
 def test_no_soil_source_is_the_base_default_plus_its_record(tmp_path):
     out = _run(_translator(tmp_path), _grid([101, 102]), None, None)
     assert set(out.mask.values()) == {"ML00000000"}
+    base_default = SoilProfile(
+        profile_id="ML_DEFAULT", lat=12.0, lon=-5.0, source="default",
+        layers=[SoilLayer(depth_top=0.0, depth_bottom=0.2, sand=60.0, clay=18.0, silt=22.0,
+                          organic_carbon=0.5, bulk_density=1.4, ph=6.5,
+                          field_capacity=0.25, wilting_point=0.10),
+                SoilLayer(depth_top=0.2, depth_bottom=1.0, sand=55.0, clay=22.0, silt=23.0,
+                          organic_carbon=0.3, bulk_density=1.5, ph=6.3,
+                          field_capacity=0.28, wilting_point=0.12)])
     reference = tmp_path / "base.SOL"
-    dssat_sol_writer.write_dssat_sol(reference, {0: craft._default_soil_profile(REGION, "ML")},
-                                     "ML", REGION)
+    dssat_sol_writer.write_dssat_sol(reference, {0: base_default}, "ML", REGION)
     assert [ln for ln in out.lines if not ln.startswith("! prismpy soil record:")] == \
         reference.read_text().splitlines()
     assert {k: out.record[k] for k in ("default_cells", "default_cause", "default_fraction",
