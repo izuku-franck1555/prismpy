@@ -183,6 +183,10 @@ def assign_cell_to_profile_id(
             new_id = len(profile_id_by_dedup_key) + 1  # 1-based; 0 == nodata
             profile_id_by_dedup_key[key] = new_id
             profiles_by_id[new_id] = profile
+        else:
+            # A layer whose water limits were estimated in ANY merged cell counts as estimated.
+            for kept, merged in zip(profiles_by_id[profile_id_by_dedup_key[key]].layers, profile.layers):
+                kept.hydraulics_estimated = kept.hydraulics_estimated or merged.hydraulics_estimated
         cell_to_profile_id[cell.cell_id] = profile_id_by_dedup_key[key]
 
     return cell_to_profile_id, profiles_by_id

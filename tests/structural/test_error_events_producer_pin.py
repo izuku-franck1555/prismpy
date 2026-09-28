@@ -51,8 +51,8 @@ F_AG_GATE_SITES: Tuple[Tuple[str, int, str], ...] = (
     # (the SPAM cropland-vintage import block added to the top of craft/translator.py shifted +6)
     # -> 1661 (the module-level declared-default soil helpers, +78).
     ("src/prismpy/translators/craft/translator.py", 1661, "ValueError"),
-    ("src/prismpy/translators/_shared/eghr_substrate.py", 461, "ValueError"),
-    ("src/prismpy/translators/_shared/eghr_substrate.py", 466, "ValueError"),
+    ("src/prismpy/translators/_shared/eghr_substrate.py", 465, "ValueError"),
+    ("src/prismpy/translators/_shared/eghr_substrate.py", 470, "ValueError"),
 )
 
 
