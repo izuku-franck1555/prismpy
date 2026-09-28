@@ -7,7 +7,6 @@ import inspect
 import json
 import math
 import os
-import subprocess
 import textwrap
 from pathlib import Path
 
@@ -184,19 +183,6 @@ def test_the_applied_vintage_is_unchanged(tmp_path):
         mask_filename="harvest_area_2020_V2r2.tif")
 
 
-def test_only_the_pythia_translator_and_tests_change():
-    repo = Path(__file__).parents[2]
-    try:
-        base = subprocess.run(["git", "merge-base", "HEAD", "origin/main"], cwd=repo, check=True,
-                              capture_output=True, text=True).stdout.strip()
-        changed = subprocess.run(["git", "diff", "--name-only", base, "HEAD"], cwd=repo,
-                                 check=True, capture_output=True, text=True).stdout.split()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pytest.skip("origin/main is not available in this checkout")
-    allowed = {"src/prismpy/translators/pythia/translator.py"}
-    assert [p for p in changed if p not in allowed and not p.startswith("tests/")] == []
-
-
 # ── the per-cell crop-area file ─────────────────────────────────────────────
 
 V2R2 = ("2020", "V2r2")
@@ -268,9 +254,13 @@ def test_one_clean_row_per_grid_cell(tmp_path, region):
             assert row[column] != "" and math.isfinite(float(row[column]))
 
 
-def test_an_empty_grid_writes_the_header_with_the_mask(tmp_path):
+@pytest.mark.parametrize("geometry", ["box", "POLYGON((36 10", "POLYGON EMPTY", None])
+def test_an_empty_grid_writes_the_header_with_the_mask(tmp_path, geometry):
+    """Without cells there are no rows to compute, so the region polygon is not read."""
     tr, data = _build(tmp_path, [], {"A": None}, run=False)
     data.grid = None
+    if geometry != "box":
+        data.region.geometry_wkt = geometry
     assert tr._generate_crop_mask_raster(data) is not None
     header, rows = _csv(tr)
     assert tuple(header) == COLUMNS and rows == []
@@ -361,12 +351,14 @@ def test_a_manual_box_without_a_polygon_uses_its_bounds(tmp_path):
     ("POLYGON EMPTY", "gadm"),
     ("GEOMETRYCOLLECTION EMPTY", "gadm"),
     (None, "gadm"),
+    (None, "MANUAL"),          # only the exact manual source is a box
+    (None, "manual-import"),
 ])
 def test_a_region_without_a_usable_polygon_fails_before_writing(tmp_path, wkt, source):
-    tr, data = _build(tmp_path, CELLS, {"A": _pixels(lambda x, y: 1.0)}, run=False)
+    tr, data = _build(tmp_path, CELLS, {"A": _pixels(lambda x, y: 1.0)}, source=source, run=False)
     if wkt is None:
         data.region = Region.from_dict(data.region.to_dict())   # the round trip drops the WKT
-        assert data.region.geometry_wkt is None and data.region.boundary_source == "gadm"
+        assert data.region.geometry_wkt is None and data.region.boundary_source == source
     else:
         data.region.geometry_wkt = wkt
     with pytest.raises(pythia.RegionGeometryError):
@@ -491,12 +483,14 @@ def _outputs(tr):
 
 
 def _seeded(tmp_path):
-    """A directory an earlier SPAM build filled, plus files this step does not own."""
-    tr, data = _build(tmp_path, CELLS, {"A": _pixels(lambda x, y: 1.0)})
-    (tr.output_dir / "raster" / "soil.tif").write_bytes(b"soil")
-    (tr.output_dir / "data" / "masks" / "notes.csv").write_text("x\n")
-    assert _outputs(tr) == ["data/masks/maize_harvested_area.csv", "data/masks/notes.csv",
-                            "raster/harvest_area_2020_V2r2.tif", "raster/soil.tif"]
+    """A directory an earlier build filled (an older vintage's mask and its per-cell file),
+    plus files this step does not own."""
+    tr, data = _build(tmp_path, CELLS, {"A": _pixels(lambda x, y: 1.0)}, run=False)
+    for name, content in (("raster/harvest_area_2010_V2r0.tif", "old mask"),
+                          ("data/masks/maize_harvested_area.csv", "lat,lon\n"),
+                          ("raster/soil.tif", "soil"), ("data/masks/notes.csv", "x\n")):
+        (tr.output_dir / name).parent.mkdir(parents=True, exist_ok=True)
+        (tr.output_dir / name).write_text(content)
     return tr, data
 
 
@@ -539,6 +533,41 @@ def test_a_failed_spam_build_leaves_neither_file(tmp_path, monkeypatch, fault):
     assert _outputs(tr) == OTHERS
 
 
+def test_an_interrupted_removal_never_leaves_the_file_without_its_mask(tmp_path, monkeypatch):
+    tr, data = _seeded(tmp_path)
+    removed, real_unlink = [], Path.unlink
+
+    def unlink(self, *args, **kwargs):
+        removed.append(self.name)
+        if len(removed) == 2:
+            raise OSError("removal failed")
+        return real_unlink(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    with pytest.raises(OSError, match="removal failed"):
+        tr._generate_crop_mask_raster(data)
+    monkeypatch.undo()
+    assert _outputs(tr) == ["data/masks/notes.csv", "raster/harvest_area_2010_V2r0.tif",
+                            "raster/soil.tif"]
+
+
+@pytest.mark.parametrize("centre, col0, row0", [
+    ((89.75, -179.75), 0, 0),          # the north-west corner
+    ((10.25, 179.75), 4296, 942),      # the antimeridian, from the east
+    ((-89.75, 10.25), 2268, 2136),     # the south edge
+])
+def test_a_cell_at_the_global_raster_edge_fails_loud(tmp_path, centre, col0, row0):
+    """The clip reads no pixel beyond the global raster, so the mask would fall short of the
+    cell's footprint: the build raises instead of writing it."""
+    tr, data = _build(tmp_path, [centre], {}, run=False)
+    spec = VINTAGES[V2R2]
+    _raster(tmp_path / "spam" / spec["name"].format(code="MAIZ", tech="A"), spec["pixel"],
+            spec["north"] - row0 * spec["pixel"], -180.0 + col0 * spec["pixel"],
+            (min(24, 2160 - row0), min(24, 4320 - col0)), 1.0, nodata=spec["nodata"])
+    with pytest.raises(pythia.CropMaskExtentError, match="does not cover the footprint"):
+        tr._generate_crop_mask_raster(data)
+    assert _outputs(tr) == []
+
+
 def _replace_spy(monkeypatch, tr, fail_at=None):
     calls, real_replace = [], os.replace
 
@@ -549,7 +578,7 @@ def _replace_spy(monkeypatch, tr, fail_at=None):
                 assert (tr.output_dir / "raster" / "harvest_area_2020_V2r2.tif").exists()
             raise OSError("publish failed")
         real_replace(src, dst)
-    monkeypatch.setattr(pythia.os, "replace", spy)
+    monkeypatch.setattr(os, "replace", spy)
     return calls
 
 

@@ -2535,8 +2535,9 @@ class PythiaTranslator(PythiaTranslatorBase):
         return west, south, east, north
 
     def _remove_crop_area_outputs(self) -> None:
-        """Remove the crop mask and the per-cell crop-area file an earlier build left here."""
-        for pattern in ("raster/harvest_area_*.tif", "data/masks/*_harvested_area.csv"):
+        """Remove the crop mask and the per-cell crop-area file an earlier build left here: the
+        file first, so an interrupted removal leaves at most a mask, never a file without one."""
+        for pattern in ("data/masks/*_harvested_area.csv", "raster/harvest_area_*.tif"):
             for path in self.output_dir.glob(pattern):
                 path.unlink()
 
@@ -2558,7 +2559,7 @@ class PythiaTranslator(PythiaTranslatorBase):
 
         cells = list(data.grid.cells) if data.grid and data.grid.cells else []
         if not cells:
-            return []
+            return []  # the region geometry only serves the rows, so no cells never read it
         geometry, rule = _region_geometry(data.region)
         half = data.grid.increment_deg / 2
 
