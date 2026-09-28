@@ -176,6 +176,56 @@ def test_an_unreadable_hwsd_is_a_read_error_not_an_answer(tmp_path):
         assert result.success is False and result.metadata["read_error"] is True
 
 
+def _retrieve_one(table):
+    source = HWSDSource(HWSDConfig(bil_path=Path("x.bil"), mdb_path=Path("x.mdb")))
+    with patch.object(source, "_sample_bil_raster", return_value=[1469]), \
+            patch.object(source, "_export_mdb_table", return_value=table):
+        return source.retrieve(region=_region(), cell_coords=[(12.25, -5.5)])
+
+
+@pytest.mark.parametrize("names", [
+    ("HWSD2_SMU_ID",), ("LAYER",), ("SEQUENCE",), ("SHARE",), ("TOPDEP",), ("BOTDEP",),
+    ("SAND", "T_SAND"), ("CLAY", "T_CLAY"),
+], ids="/".join)
+def test_a_layers_table_without_a_required_column_is_a_read_error(names):
+    """The profile builder cannot do without these (for sand and clay, without every name):
+    the schema check names them, before any read of the table can fail on its own."""
+    table = pd.DataFrame(_unit(1469)).drop(columns=list(names), errors="ignore")
+    result = _retrieve_one(table)
+    assert result.success is False and result.metadata["read_error"] is True
+    assert any("lacks the columns" in warning and all(name in warning for name in names)
+               for warning in result.warnings)
+
+
+@pytest.mark.parametrize("column, defaulted", [
+    ("SILT", None), ("ORG_CARBON", "organic_carbon"), ("PH_WATER", "ph"), ("BULK", "bulk_density"),
+])
+def test_a_layers_table_without_an_optional_column_still_builds_the_profile(column, defaulted):
+    """Silt is derived from sand and clay; soc/ph/bd go to the writer's declared defaults.
+    The table, like the real one, has no gravel column: gravel is not read from it."""
+    profile = _retrieve_one(pd.DataFrame(_unit(1469)).drop(columns=[column])).data.profiles[0]
+    assert len(profile.layers) == 5
+    if defaulted is None:
+        assert [layer.silt for layer in profile.layers] == [30.0] * 5
+    else:
+        assert profile.metadata["chem_defaulted"] == {i: [defaulted] for i in range(5)}
+
+
+def test_either_name_of_a_required_group_is_enough():
+    table = pd.DataFrame(_unit(1469)).rename(columns={"SAND": "T_SAND", "CLAY": "T_CLAY"})
+    profile = _retrieve_one(table).data.profiles[0]
+    assert [(layer.sand, layer.clay) for layer in profile.layers] == [
+        (40.0 + i, 30.0 - i) for i in range(5)]
+
+
+def test_the_row_number_is_never_the_mapping_unit_key():
+    """``ID`` numbers the table's rows: here row 1469 belongs to unit 9999, so a table
+    without HWSD2_SMU_ID cannot say which rows are unit 1469's."""
+    table = pd.DataFrame(_unit(9999, D1=dict(sand=85.0, silt=10.0, clay=5.0))).assign(ID=1469)
+    result = _retrieve_one(table.drop(columns=["HWSD2_SMU_ID"]))
+    assert result.success is False and result.metadata["read_error"] is True
+
+
 def test_the_profile_carries_the_real_mapping_unit_id():
     profiles, _ = _extract(_unit(1469), [1469])
     assert profiles[0].metadata["hwsd_smu_id"] == 1469
@@ -214,6 +264,8 @@ def _ehdr(tmp_path, size, **header):
 @pytest.mark.parametrize("size, header, short", [
     (1152, {}, False),                                       # the complete raster
     (1151, {}, True),                                        # one byte short
+    (1252, {"SKIPBYTES": 100}, False),                       # a skipped prefix, complete
+    (1251, {"SKIPBYTES": 100}, True),                        # a skipped prefix, one byte short
     (72, {"NBITS": 1}, False),                               # packed bits: not sized
     (1000, {"BANDROWBYTES": 64, "TOTALROWBYTES": 64}, False),  # padded rows: not sized
 ])

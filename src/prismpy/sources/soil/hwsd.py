@@ -64,6 +64,15 @@ _ANDIC_MAX_BD = 0.9
 # Chemistry field -> the name the .SOL writer uses for its default.
 _CHEM_WRITER_FIELD = {"bd": "bulk_density", "soc": "organic_carbon", "ph": "ph"}
 
+#: The mapping-unit key the raster holds; the table's ``ID`` is only a row number.
+_SMU_KEY = "HWSD2_SMU_ID"
+#: The HWSD2_LAYERS columns every profile is built from.
+_LAYER_TABLE_COLUMNS = (_SMU_KEY, "LAYER", "SEQUENCE", "SHARE", "TOPDEP", "BOTDEP")
+#: ``HWSD_VARIABLES`` groups a profile can do without: silt is derived from sand and
+#: clay, soc/ph/bd fall back to the writer's defaults, gravel is not read from the table.
+#: Every other group is required.
+_OPTIONAL_FIELDS = frozenset({"silt", "soc", "ph", "bd", "gravel"})
+
 
 def _raw_raster_is_short(bil_path: Path) -> bool:
     """True when a raw BIL raster is shorter than its ``.hdr`` declares. Only an unpadded,
@@ -367,9 +376,12 @@ class HWSDSource(DataSource):
 
         # Step 3: Create lookup and build profiles
         if smu_ids:
-            # Validate required columns exist (HWSD v2.0 format)
-            required_cols = ["LAYER", "SEQUENCE", "SHARE", "TOPDEP", "BOTDEP"]
-            missing_cols = [c for c in required_cols if c not in layers_df.columns]
+            # Validate required columns exist (HWSD v2.0 format): one name of each group
+            required = [(name,) for name in _LAYER_TABLE_COLUMNS] + [
+                tuple(names) for field, names in self.VARIABLES.items()
+                if field not in _OPTIONAL_FIELDS]
+            missing_cols = ["/".join(names) for names in required
+                            if not any(name in layers_df.columns for name in names)]
             if missing_cols:
                 logger.error(f"HWSD MDB missing required columns: {missing_cols}")
                 logger.error("Expected HWSD v2.0 format with LAYER, SEQUENCE columns.")
@@ -382,14 +394,12 @@ class HWSDSource(DataSource):
                     )
                 raise RuntimeError(f"HWSD2_LAYERS lacks the columns {missing_cols}")
 
-            # Note: HWSD2 uses HWSD2_SMU_ID as the key, not 'ID'
-            smu_col = "HWSD2_SMU_ID" if "HWSD2_SMU_ID" in layers_df.columns else "ID"
             sampled = {s for s in smu_ids if s is not None}
             layers_df = layers_df[
-                layers_df[smu_col].isin(sampled)
+                layers_df[_SMU_KEY].isin(sampled)
                 & layers_df["LAYER"].isin(self.config.layers)
             ]
-            component_rows = self._dominant_component_rows(layers_df, smu_col)
+            component_rows = self._dominant_component_rows(layers_df, _SMU_KEY)
 
             for i, (lat, lon) in enumerate(cell_coords or []):
                 smu_id = smu_ids[i] if i < len(smu_ids) else None

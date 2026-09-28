@@ -189,6 +189,10 @@ _TABLES = {
     "soil": [_row(1469, "D1", 0, 20)],
     "non_soil": [_row(1469, "D1", 0, 20, sand=-9.0, silt=-9.0, clay=-9.0)],
     "no_columns": [{k: v for k, v in _row(1469, "D1", 0, 20).items() if k != "SHARE"}],
+    "no_sand": [{k: v for k, v in _row(1469, "D1", 0, 20).items() if k != "SAND"}],
+    "no_clay": [{k: v for k, v in _row(1469, "D1", 0, 20).items() if k != "CLAY"}],
+    "no_unit_key": [{k: v for k, v in _row(1469, "D1", 0, 20).items() if k != "HWSD2_SMU_ID"}
+                    | {"ID": 1469}],
 }
 
 
@@ -198,6 +202,9 @@ _TABLES = {
     ("sampling_fails", "soil", HwsdOutcome.NO_ANSWER),      # sampling the raster raises
     ("none", None, HwsdOutcome.NO_ANSWER),                   # the .mdb cannot be exported
     ("none", "no_columns", HwsdOutcome.NO_ANSWER),          # the layers table lacks a column
+    ("none", "no_sand", HwsdOutcome.NO_ANSWER),             # no name of the sand group
+    ("none", "no_clay", HwsdOutcome.NO_ANSWER),             # no name of the clay group
+    ("none", "no_unit_key", HwsdOutcome.NO_ANSWER),         # a row number but no unit key
     ("none", "non_soil", HwsdOutcome.ANSWERED_NONE),        # a clean read, no soil
     ("none", "soil", HwsdOutcome.SERVED),
 ])
