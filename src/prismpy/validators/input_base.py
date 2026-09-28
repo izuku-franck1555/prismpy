@@ -38,12 +38,20 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Dict, FrozenSet, List
+from typing import Any, ClassVar, Dict, FrozenSet, List, Literal, Mapping, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from prismpy.validators.base import ValidationIssue
 from prismpy.warnings.categories import WarningCategory
+
+
+# How Stage 1 reads a single thermal kill; the envelope loader, CropEnvelope and the verdict share this vocabulary.
+ThermalScreen = Literal["annual", "seasonal"]
+THERMAL_SCREENS: tuple[str, ...] = get_args(ThermalScreen)
+
+# The loaded ECOCROP entry's source keys, which are not model fields; from_ecocrop drops exactly these.
+_ECOCROP_SOURCE_KEYS = frozenset({"verbatim_source_url", "verbatim_retrieval_date", "thermal_screen_source"})
 
 
 class CropEnvelope(BaseModel):
@@ -74,6 +82,21 @@ class CropEnvelope(BaseModel):
         ..., ge=0,
         description="Maximum tolerable annual rainfall (mm).",
     )
+    thermal_screen: ThermalScreen = Field(
+        default="annual",
+        description=(
+            "How a single thermal kill reads: 'annual' = incompatible; 'seasonal' = marginal, "
+            "because the crop is planted in the season that avoids it."
+        ),
+    )
+
+    @classmethod
+    def from_ecocrop(cls, envelope: Mapping[str, Any]) -> "CropEnvelope":
+        """Build the model from one entry of :func:`prismpy.koppen.envelopes.load_ecocrop_envelopes`.
+
+        Drops exactly the entry's source keys, so any other key the model does not know still fails loudly.
+        """
+        return cls(**{key: value for key, value in envelope.items() if key not in _ECOCROP_SOURCE_KEYS})
 
     @model_validator(mode="after")
     def _validate_ordering(self) -> "CropEnvelope":

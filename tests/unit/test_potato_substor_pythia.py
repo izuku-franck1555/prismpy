@@ -767,3 +767,4 @@ def test_built_wheel_ships_a_loadable_potato_envelope(tmp_path):
         shipped.write_bytes(zf.read("prismpy/koppen/ecocrop_envelopes.json"))
     env = load_ecocrop_envelopes(shipped)["potato"]
     assert (env["TMIN"], env["TMAX"], env["RMIN"], env["RMAX"]) == (7.0, 30.0, 250.0, 2000.0)
+    assert env["thermal_screen"] == "seasonal"

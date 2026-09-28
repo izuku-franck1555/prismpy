@@ -10,10 +10,10 @@ and emits one of four verdicts per (zone × variable):
   the IQR straddles RMIN or RMAX
 * ``MARGINAL_THERMAL_SEASONAL`` — both cold-kill (P10
   extreme tmin < crop TMIN) AND heat-kill (P90 extreme tmax
-  > crop TMAX); seasonal-window refinement deferred to
-  Sprint F per AC-Q3-A-c
+  > crop TMAX), or either alone for a crop whose envelope
+  declares a seasonal thermal screen
 * ``INCOMPATIBLE`` — precip P50 outside envelope, OR
-  cold-kill alone, OR heat-kill alone
+  cold-kill alone, OR heat-kill alone (annual screen)
 
 Stage 1 scope per AC-Q3-A-d + probe-1-A: precip + tmin +
 tmax only. ALTMX, pH, photoperiod, GMIN/GMAX, latitude are
@@ -45,6 +45,8 @@ from typing import Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
 
+from prismpy.validators.input_base import THERMAL_SCREENS
+
 
 class CompatibilityVerdict(str, Enum):
     """Stage 1 wizard-time crop-region compatibility verdict.
@@ -62,7 +64,7 @@ class CompatibilityVerdict(str, Enum):
 # Worst-case-wins ordering for verdict aggregation across
 # variables (precip + thermal). INCOMPATIBLE overrides any
 # marginal; MARGINAL_THERMAL_SEASONAL is a stronger marginal
-# than MARGINAL_HETEROGENEOUS because it implies both extremes
+# than MARGINAL_HETEROGENEOUS because it implies one or both extremes
 # fire (just maybe rehabilitated by seasonal window).
 _VERDICT_RANK: Dict[CompatibilityVerdict, int] = {
     CompatibilityVerdict.COMPATIBLE: 0,
@@ -143,6 +145,7 @@ def compare_thermal_extremes(
     zone_p90_extreme_tmax: float,
     crop_tmin: float,
     crop_tmax: float,
+    thermal_screen: str = "annual",
 ) -> CompatibilityVerdict:
     """Extremes-aware thermal verdict per AC-Q3-A-c.
 
@@ -163,17 +166,22 @@ def compare_thermal_extremes(
         zone_p90_extreme_tmax: zone P90 of per-cell maximum-
             of-daily-tmax across 30 years (°C).
         crop_tmin, crop_tmax: ECOCROP TMIN/TMAX envelope (°C).
+        thermal_screen: the crop envelope's screen, ``"annual"``
+            or ``"seasonal"``.
 
     Returns:
         :class:`CompatibilityVerdict.COMPATIBLE` when no
         kill; ``MARGINAL_THERMAL_SEASONAL`` when both cold-
         kill AND heat-kill (Sprint F refines via crop's
         seasonal window); ``INCOMPATIBLE`` when either cold-
-        kill or heat-kill alone fires.
+        kill or heat-kill alone fires. Under a ``"seasonal"``
+        screen (a crop planted in the season that avoids the
+        kill) a single kill is ``MARGINAL_THERMAL_SEASONAL`` too.
 
     Raises:
-        ValueError: if any input is non-finite, or if envelope
-            ordering breaks (TMIN >= TMAX).
+        ValueError: if any input is non-finite, if envelope
+            ordering breaks (TMIN >= TMAX), or if the screen is
+            unknown.
     """
     _check_finite("zone_p10_extreme_tmin", zone_p10_extreme_tmin)
     _check_finite("zone_p90_extreme_tmax", zone_p90_extreme_tmax)
@@ -202,6 +210,11 @@ def compare_thermal_extremes(
             f"silent COMPATIBLE on this input would mask the "
             f"upstream bug."
         )
+    if thermal_screen not in THERMAL_SCREENS:
+        raise ValueError(
+            f"Unknown thermal screen {thermal_screen!r}; "
+            f"expected one of {THERMAL_SCREENS}."
+        )
     cold_kill = zone_p10_extreme_tmin < crop_tmin
     heat_kill = zone_p90_extreme_tmax > crop_tmax
     if cold_kill and heat_kill:
@@ -211,6 +224,8 @@ def compare_thermal_extremes(
         # moderate sub-season (e.g., Sahel maize JJAS only).
         # Stage 1 surfaces marginal_thermal_seasonal; Sprint
         # F resolves to compatible / incompatible.
+        return CompatibilityVerdict.MARGINAL_THERMAL_SEASONAL
+    if (cold_kill or heat_kill) and thermal_screen == "seasonal":
         return CompatibilityVerdict.MARGINAL_THERMAL_SEASONAL
     if cold_kill or heat_kill:
         return CompatibilityVerdict.INCOMPATIBLE
@@ -752,6 +767,7 @@ class ClimateEnvelopeValidator(InputValidator):
                 zone_p90_extreme_tmax=aggs.p90_extreme_tmax,
                 crop_tmin=crop_tmin,
                 crop_tmax=crop_tmax,
+                thermal_screen=crop_envelope.thermal_screen,
             )
             per_zone_verdicts[zone] = {
                 "precip": precip_verdict.value,

@@ -42,6 +42,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Dict
 
+from prismpy.validators.input_base import THERMAL_SCREENS
+
 
 # Path to the bundled ECOCROP envelope JSON substrate.
 # Co-located with the Köppen-Geiger classifier so the wizard-
@@ -112,11 +114,12 @@ def load_ecocrop_envelopes(
     """Load + validate the ECOCROP envelope substrate.
 
     Returns a ``{crop_name: {TMIN, TMAX, RMIN, RMAX,
-    verbatim_source_url, verbatim_retrieval_date}}`` dict
-    keyed by crop name (e.g. ``"maize"``). Each inner dict
-    contains the four numeric envelope fields as floats plus
-    the two provenance fields as strings (URL + ISO 8601
-    date).
+    verbatim_source_url, verbatim_retrieval_date,
+    thermal_screen}}`` dict keyed by crop name (e.g.
+    ``"maize"``), plus ``thermal_screen_source`` when the crop
+    names one. Each inner dict contains the four numeric
+    envelope fields as floats plus the provenance fields and
+    the thermal screen as strings.
 
     Validation per AC-Q3-A-NaN + F28:
 
@@ -127,6 +130,7 @@ def load_ecocrop_envelopes(
     * Every required provenance field (``verbatim_source_url`` + ``verbatim_retrieval_date``) present per crop (F28).
     * ``verbatim_source_url`` is an HTTPS URL.
     * ``verbatim_retrieval_date`` parses as ISO 8601 calendar date.
+    * ``thermal_screen`` is ``annual`` (the default when absent) or ``seasonal``; a seasonal crop names a non-empty ``thermal_screen_source``.
 
     Any breach raises :class:`EnvelopeValidationError` with
     the crop name + violating field. The exception is fatal
@@ -252,5 +256,23 @@ def _validate_one_envelope(
             f"(month/day overflow). F28 requires a valid "
             f"YYYY-MM-DD calendar value."
         ) from exc
+
+    screen = envelope.get("thermal_screen", "annual")
+    if screen not in THERMAL_SCREENS:
+        raise EnvelopeValidationError(
+            f"Envelope for crop {crop_name!r} field "
+            f"'thermal_screen' = {screen!r} is not one of "
+            f"{THERMAL_SCREENS}."
+        )
+    coerced["thermal_screen"] = screen
+    source = envelope.get("thermal_screen_source")
+    if screen == "seasonal" or source is not None:
+        if not isinstance(source, str) or not source.strip():
+            raise EnvelopeValidationError(
+                f"Envelope for crop {crop_name!r} field "
+                f"'thermal_screen_source' = {source!r} must be a "
+                f"non-empty string; a seasonal screen requires it."
+            )
+        coerced["thermal_screen_source"] = source
 
     return coerced

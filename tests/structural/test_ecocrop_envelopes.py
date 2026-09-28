@@ -174,11 +174,17 @@ class TestECOCROPEnvelopesShape(unittest.TestCase):
         self.assertEqual(env["TMAX"], 30.0)
         self.assertEqual(env["RMIN"], 250.0)
         self.assertEqual(env["RMAX"], 2000.0)
+        self.assertEqual(env["thermal_screen"], "seasonal")
+        # The quoted source keeps the guide's typographic apostrophe (U+2019) byte for byte.
+        self.assertEqual(env["thermal_screen_source"], (
+            "RECA Niger, Guide pratique de la culture de la pomme de terre en Afrique de l’Ouest, "
+            "§3.2: 'En dessous de 700 m d’altitude, il est dès lors impératif de planter la pomme "
+            "de terre durant la saison fraîche sèche', retrieved 2026-09-27; "
+            "FAO ECOCROP 1971 optimum 15-25 °C, retrieved 2026-09-24"))
 
     def test_version_pinned(self):
-        # Every crop-coverage change bumps the version so cached Stage-1 verdicts (keyed on it)
-        # recompute, even when the existing entries are unchanged.
-        self.assertEqual(self.payload["version"], "ecocrop_v4_2026-09-24")
+        # Every change that can move a Stage-1 verdict bumps the version so cached verdicts (keyed on it) recompute.
+        self.assertEqual(self.payload["version"], "ecocrop_v5_2026-09-27")
 
     def test_license_footer_reflects_eight_crops(self):
         # A crop-coverage change updates the JSON footer and this pin in the same commit.

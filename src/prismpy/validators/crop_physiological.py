@@ -151,6 +151,7 @@ class CropPhysiologicalValidator(InputValidator):
                 zone_p90_extreme_tmax=aggs.p90_extreme_tmax,
                 crop_tmin=crop_tmin,
                 crop_tmax=crop_tmax,
+                thermal_screen=crop_envelope.thermal_screen,
             )
             per_zone_verdicts[zone] = {
                 "precip": precip_verdict.value,
