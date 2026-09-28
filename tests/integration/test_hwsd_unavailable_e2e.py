@@ -26,7 +26,7 @@ the contract-named cause.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from unittest import TestCase
 
 from prismpy.config.schema import (
@@ -138,12 +138,12 @@ class TestHWSDUnavailableEndToEndPropagation(TestCase):
             lambda grid, region: None
         )
 
-        # Stub HWSD to return the AC-4 contract shape: a tuple of
-        # (profiles_or_None, unavailable_cells_list).
-        def _stub_hwsd(
-            grid, region,
-        ) -> Tuple[Optional[Dict[int, SoilProfile]], List[Dict[str, Any]]]:
-            return hwsd_profiles, list(hwsd_unavailable)
+        # Stub HWSD to return its real shape: a tuple of
+        # (profiles_or_None, unavailable_cells_list, outcome).
+        def _stub_hwsd(grid, region):
+            from prismpy.translators.base import HwsdOutcome
+            outcome = HwsdOutcome.SERVED if hwsd_profiles else HwsdOutcome.ANSWERED_NONE
+            return hwsd_profiles, list(hwsd_unavailable), outcome
 
         pipe._retrieve_hwsd_for_grid = _stub_hwsd  # type: ignore[assignment]
 

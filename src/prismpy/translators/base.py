@@ -7,8 +7,9 @@ ensuring consistent behavior across SARRA-Py, CRAFT, PYTHIA, and ACEA.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 import logging
 import shutil
 import os
@@ -22,6 +23,26 @@ from prismpy.models.climate import ClimateTimeSeries
 from prismpy.models.soil import SoilProfile
 from prismpy.models.crop import CropParameters, CropCalendar
 from prismpy.provenance.tracker import ProvenanceTracker
+
+
+class HwsdOutcome(str, Enum):
+    """What the harmonize stage's per-cell HWSD query returned."""
+
+    NOT_QUERIED = "not_queried"      # another source (iSDA) served the soil
+    SERVED = "served"                # at least one grid cell got an HWSD profile
+    ANSWERED_NONE = "answered_none"  # HWSD was queried and served no cell
+    NO_ANSWER = "no_answer"          # HWSD was not run, not found, or failed
+
+
+@dataclass(frozen=True)
+class SoilCascadeState:
+    """The soil sources' outcome at harmonize, so a translator chooses its soil
+    branch from what happened rather than from the shape of the soil data."""
+
+    isda_served: bool
+    hwsd: HwsdOutcome
+    n_hwsd_served: int = 0
+    hwsd_unavailable_cell_ids: Tuple[int, ...] = ()
 
 
 @dataclass
@@ -41,6 +62,8 @@ class UnifiedData:
         crop_params: Crop parameters
         crop_calendar: Crop calendar for each location
         metadata: Additional metadata
+        soil_cascade: The harmonize stage's soil-source outcome (None when
+            the stage did not run the soil cascade)
     """
     region: Region
     grid: Optional[SpatialGrid] = None
@@ -49,6 +72,7 @@ class UnifiedData:
     crop_params: Optional[CropParameters] = None
     crop_calendar: Optional[Dict[int, CropCalendar]] = None
     metadata: Optional[Dict[str, Any]] = None
+    soil_cascade: Optional[SoilCascadeState] = None
 
 
 @dataclass

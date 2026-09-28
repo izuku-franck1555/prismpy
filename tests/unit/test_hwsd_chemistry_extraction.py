@@ -115,8 +115,8 @@ class ChemistryExtractionPins(TestCase):
         for legacy in ('props.get("T_OC")', 'props.get("T_PH_H2O")',
                        'props.get("T_BULK_DENSITY")'):
             self.assertNotIn(legacy, src)
-        for chem in ("soc", "ph", "bd"):
-            self.assertIn(f'_read_chem(props, "{chem}")', src)
+        self.assertIn("self._read_chem(row, field)", src)
+        self.assertIn('for field in ("soc", "ph", "bd")', src)
 
     def test_p_hwsd_scoped_read_chem_not_shared(self):
         """P-HWSD-SCOPED: _read_chem is on the HWSD source and iSDA neither
