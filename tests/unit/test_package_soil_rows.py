@@ -112,7 +112,7 @@ def test_readers_see_short_fields_and_the_record_before_any_profile(tmp_path):
             assert len(line[13:24].strip()) <= 11 and len(line[37:]) <= 50
 
 
-@pytest.mark.parametrize(("key", "source", "header"), [
+@pytest.mark.parametrize("key, source, header", [
     (7001, "hwsd", "*ML00007001  hwsd        SL      100 HWSD v2 SMU 7001 (MLI)"),
     (0, "default", "*ML00000000  default     SL      100 Default profile (MLI)"),
     # "placeholder" fills SLSOUR's 11 columns exactly, one space before SLTX
