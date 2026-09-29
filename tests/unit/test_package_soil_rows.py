@@ -292,3 +292,22 @@ def test_a_package_on_the_retrieval_placeholder_passes(tmp_path):
     rows = (pkg / "soil/soil_mask.txt").read_text().splitlines()[1:]
     assert {row.split("\t")[1] for row in rows} == {"ML90000001"}
     assert _sol_rows(pkg / "soil/ML.SOL", "ML90000001")
+
+
+def test_a_package_built_without_the_soil_mask_declares_its_soil(tmp_path, monkeypatch):
+    """include_soil_mask: false writes no mask, so none is bound or expected."""
+    real_cfg = craft_t._cfg
+
+    def without_mask(where):
+        cfg = real_cfg(where)
+        cfg.platform_config.craft.include_soil_mask = False
+        return cfg
+
+    monkeypatch.setattr(craft_t, "_cfg", without_mask)
+    pkg = _craft(tmp_path, craft_t._grid([101, 102]), {101: craft_t._hwsd(1469), 102: craft_t._hwsd(1469)},
+                 craft_t._state(HwsdOutcome.SERVED))
+    assert not (pkg / "soil/soil_mask.txt").exists()
+    decl = sd.declared_soil(pkg, "craft")
+    assert decl.record["profile_sources"] == {"hwsd": 2}
+    assert json.loads((pkg / "manifest.json").read_text())["data_sources"]["soil"] == decl.label
+    assert sd.final_package_problem(pkg, "craft") is None

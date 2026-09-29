@@ -299,25 +299,29 @@ def _craft(package_dir: Path) -> SoilDeclaration:
     sols = sorted((package_dir / "soil").glob("*.SOL"))
     if len(sols) != 1:
         raise SoilDeclarationError(f"a CRAFT package holds one soil/*.SOL, found {len(sols)}")
-    sol_rel = f"soil/{sols[0].name}"
-    check_binding(package_dir, "soil", [sol_rel, "soil/soil_mask.txt", f"soil/{DETAIL_FILE}"])
+    sol_rel, mask = f"soil/{sols[0].name}", package_dir / "soil" / "soil_mask.txt"
+    written = [sol_rel, f"soil/{DETAIL_FILE}"] + (["soil/soil_mask.txt"] if mask.is_file() else [])
+    check_binding(package_dir, "soil", written)
     sol = read_sol(sols[0])
     if sol.record is None:
         raise SoilDeclarationError(f"{sol_rel} carries no prismpy soil record")
     record = _typed(sol.record, SOL_RECORD_KEYS)
     if record["source"] not in ("profiles", "default_profile"):
         raise SoilDeclarationError(f"a CRAFT soil record cannot say source={record['source']}")
-    rows = []
-    for line in (package_dir / "soil" / "soil_mask.txt").read_text().splitlines()[1:]:
-        if line.strip():
-            profile = line.split("\t")[1]
-            if profile not in sol.profiles:
-                raise SoilDeclarationError(f"soil_mask.txt names {profile}, which {sol_rel} lacks")
-            rows.append(profile)
-    derived = Counter(_token(sol, profile) for profile in rows)
-    if dict(derived) != record["profile_sources"]:
-        raise SoilDeclarationError(
-            f"the mask gives {dict(derived)} cells per source, the record {record['profile_sources']}")
+    rows: Optional[List[str]] = None       # built without a soil mask, no file maps cells to profiles
+    derived = Counter(record["profile_sources"])
+    if mask.is_file():
+        rows = []
+        for line in mask.read_text().splitlines()[1:]:
+            if line.strip():
+                profile = line.split("\t")[1]
+                if profile not in sol.profiles:
+                    raise SoilDeclarationError(f"soil_mask.txt names {profile}, which {sol_rel} lacks")
+                rows.append(profile)
+        derived = Counter(_token(sol, profile) for profile in rows)
+        if dict(derived) != record["profile_sources"]:
+            raise SoilDeclarationError(
+                f"the mask gives {dict(derived)} cells per source, the record {record['profile_sources']}")
     _check_generic_cells(record, rows, derived)
     detail = _read_detail(package_dir / "soil" / DETAIL_FILE)
     return SoilDeclaration(record["source"], _label("craft", record, detail), _with_hydraulics(record))
@@ -330,7 +334,7 @@ def _token(sol: SolFile, profile: str) -> str:
     return token
 
 
-def _check_generic_cells(record: Dict[str, Any], rows: List[str], derived: Counter) -> None:
+def _check_generic_cells(record: Dict[str, Any], rows: Optional[List[str]], derived: Counter) -> None:
     """The record's generic-soil fields agree with the mask; its numbers are consumed, not re-derived."""
     n_default, n_cells = record["default_cells"], record["cells"]
     if record["default_warning"] != int(20 * n_default > n_cells):
@@ -340,7 +344,7 @@ def _check_generic_cells(record: Dict[str, Any], rows: List[str], derived: Count
         if len(record["default_cause"]) != 1 or sum(record["default_cause"].values()) != n_default:
             raise SoilDeclarationError(
                 f"default_cause {record['default_cause']} does not give one cause for {n_default} cells")
-        named = sum(1 for profile in rows if profile == record["default_profile"])
+        named = n_default if rows is None else sum(1 for profile in rows if profile == record["default_profile"])
         if not named == n_default == generic:
             raise SoilDeclarationError(
                 f"default_cells={n_default}, but {named} mask rows name {record['default_profile']} "
