@@ -109,6 +109,25 @@ def test_the_real_translation_records_the_engine_readback(tmp_path, monkeypatch,
     assert readbacks[platform.value]["id_digest"] == _final_digest(platform, record)
 
 
+def test_a_row_the_real_craft_translation_loses_shows_in_its_readback(tmp_path, monkeypatch):
+    from prismpy.translators.craft.translator import CraftTranslator
+
+    translate = CraftTranslator.translate
+
+    def losing_a_row(self, data):
+        result = translate(self, data)
+        mask = self.output_dir / "soil" / "soil_mask.txt"
+        mask.write_text("".join(mask.read_text().splitlines(keepends=True)[:-1]))
+        return result
+
+    monkeypatch.setattr(CraftTranslator, "translate", losing_a_row)
+    pipe, record, grid, region = _restricted_run(tmp_path, monkeypatch, Platform.CRAFT)
+    pipe._execute_translate(_harmonized(pipe, grid, region))
+    readback = pipe.provenance.record.boundary["crop_presence"]["roster_readback"]["craft"]
+    assert readback["n"] == record["n5_final"] - 1
+    assert readback["id_digest"] != record["n5_final_digest"]
+
+
 def _tamper(platform, path, fault):
     if fault == "missing":
         for sibling in path.parent.glob(path.stem + ".*"):
