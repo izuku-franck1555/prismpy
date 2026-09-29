@@ -2755,6 +2755,24 @@ class TranslationPipeline:
             error_events=error_events,
         )
 
+    def _record_roster_readback(self, platform: Platform) -> None:
+        """When the crop-presence rule ran, read back the roster this platform's translator wrote and
+        record its id digest (or why it could not be read) in the rule's record."""
+        rule = (self.provenance.record.boundary or {}).get("crop_presence") if self.provenance.enabled else None
+        if not isinstance(rule, dict):
+            return
+        from prismpy.packaging.roster_readback import ROSTER_FILES, read_back_roster
+        if platform.value not in ROSTER_FILES:
+            return
+        try:
+            readback = read_back_roster(platform.value, Path(self.config.output.base_dir) / platform.value)
+            entry = {"file": readback.file, "field": readback.field, "grid": readback.grid,
+                     "n": len(readback.ids), "id_digest": readback.id_digest}
+        except Exception as exc:  # noqa: BLE001 — an unreadable roster is recorded, never fatal here
+            file, field, grid = ROSTER_FILES[platform.value]
+            entry = {"file": file, "field": field, "grid": grid, "error": f"{type(exc).__name__}: {exc}"}
+        self.provenance.set_crop_presence_readback(platform.value, entry)
+
     def _execute_translate(
         self,
         unified_data: UnifiedData,
@@ -2831,6 +2849,8 @@ class TranslationPipeline:
                 try:
                     result = translator.translate(unified_data)
                     results[platform.value] = result
+                    if getattr(result, "success", False):
+                        self._record_roster_readback(platform)
 
                     # V2-19: explicit TRANSLATE transformation flushes pending
                     # decisions (including the translator's FORMAT_CHOICE call)

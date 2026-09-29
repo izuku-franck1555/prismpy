@@ -455,7 +455,8 @@ class TestCarveOutRegression:
         # Then 2831 -> 2832 after the crop-support preflight call (+1).
         # Then 2832 -> 2854 after the HWSD outcome and the soil-cascade state (+22).
         # Then 2854 -> 2877 after the crop-presence rule and its classified errors in harmonize (+23).
-        ("src/prismpy/pipeline/executor.py", 2877),
+        # Then 2877 -> 2897 after the roster read-back recorder before translate (+20).
+        ("src/prismpy/pipeline/executor.py", 2897),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed
