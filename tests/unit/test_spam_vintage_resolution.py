@@ -188,22 +188,19 @@ def test_boundary_resolver_wired_into_pythia_only():
 
 
 def test_boundary_files_byte_identical_to_base():
-    """Stronger boundary guard: the ACEA translator, the ACEA-only ``SPAMSource`` module
-    (spam.py), and the provenance model + tracker must be BYTE-IDENTICAL to the merge-base with
-    ``origin/main``. This change intentionally touches CRAFT (its basename-derived honest label +
-    the silent-uniform fail-loud), so craft/translator.py is NO LONGER in this frozen set — but
-    ACEA and the provenance layer (attestation is a separate change) stay untouched, so no ACEA
-    behavior and no provenance schema can shift. Skips where git history / ``origin/main`` is
-    unavailable (the grep guard above still runs everywhere).
+    """Stronger boundary guard: the ACEA-only ``SPAMSource`` module (spam.py) and the provenance
+    model must be BYTE-IDENTICAL to the merge-base with ``origin/main``. The SPAM vintage change
+    touched CRAFT, so craft/translator.py left this frozen set; the crop-presence rule then exposed
+    ACEA's harvested-area file choice (same pick) and added an optional record to the tracker's
+    boundary block, so acea/translator.py and provenance/tracker.py left it too. Skips where git
+    history / ``origin/main`` is unavailable (the grep guard above still runs everywhere).
     """
     import subprocess
 
     repo = Path(__file__).resolve().parents[2]
     boundary = (
-        "src/prismpy/translators/acea/translator.py",
         "src/prismpy/sources/crop_areas/spam.py",
         "src/prismpy/models/provenance.py",
-        "src/prismpy/provenance/tracker.py",
     )
 
     def _git(*args):
@@ -220,5 +217,5 @@ def test_boundary_files_byte_identical_to_base():
     ]
     assert not breached, (
         "Boundary breached — these files must be byte-identical to the base "
-        f"(this change touches only CRAFT + spam_vintage.py, not ACEA/provenance): {breached}"
+        f"(the SPAMSource module and the provenance model stay untouched): {breached}"
     )
