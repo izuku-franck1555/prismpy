@@ -203,25 +203,19 @@ def test_honest_label_2010_v2r0(tmp_path):
 # RED on parent 714abec: it returned {} on rasterio-missing and let the         #
 # truncating zip drop cells.                                                    #
 # --------------------------------------------------------------------------- #
-class _FakeShortSrc:
-    """rasterio-dataset stand-in whose .sample() returns FEWER values than coords."""
+def _short_reader(keep):
+    """A stand-in for the one SPAM reader that returns FEWER cells than requested."""
+    from prismpy.sources.crop_areas.presence import CellPresence, RasterIdentity
 
-    height = 10
-    width = 10
-    res = (0.0833, 0.0833)
+    def _read(cells, path, **kwargs):
+        cells = list(cells)
+        return CellPresence(
+            areas={c.cell_id: 1.0 for c in cells[:keep]},
+            observed=RasterIdentity("0" * 64, "EPSG:4326", (5 / 60, 0.0, -180.0, 0.0, -5 / 60, 90.0),
+                                    1, 10, 10, None),
+            window=(0, 0, 10, 10), covered=True)
 
-    def __init__(self, keep):
-        self._keep = keep
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-    def sample(self, coords):
-        coords = list(coords)
-        return [np.array([1.0], dtype=float) for _ in coords[: self._keep]]
+    return _read
 
 
 def test_rasterio_missing_fails_loud(tmp_path, monkeypatch):
@@ -233,18 +227,18 @@ def test_rasterio_missing_fails_loud(tmp_path, monkeypatch):
 
 
 def test_partial_extraction_fails_loud(tmp_path, monkeypatch):
-    import rasterio
-    cells = list(_grid().cells)  # 2 cells; sample returns 1 -> partial
-    monkeypatch.setattr(rasterio, "open", lambda *a, **k: _FakeShortSrc(keep=len(cells) - 1))
+    from prismpy.sources.crop_areas import presence
+    cells = list(_grid().cells)  # 2 cells; the read returns 1 -> partial
+    monkeypatch.setattr(presence, "cell_presence", _short_reader(keep=len(cells) - 1))
     tr = CraftTranslator(_cfg(tmp_path, spam_raster_path=tmp_path / V2R2_NAME))
     with pytest.raises(SpamVintageError, match="partially"):
         tr._extract_crop_mask_from_spam(cells, tmp_path / V2R2_NAME)
 
 
 def test_empty_extraction_fails_loud(tmp_path, monkeypatch):
-    import rasterio
-    cells = list(_grid().cells)  # sample returns 0 -> empty
-    monkeypatch.setattr(rasterio, "open", lambda *a, **k: _FakeShortSrc(keep=0))
+    from prismpy.sources.crop_areas import presence
+    cells = list(_grid().cells)  # the read returns 0 -> empty
+    monkeypatch.setattr(presence, "cell_presence", _short_reader(keep=0))
     tr = CraftTranslator(_cfg(tmp_path, spam_raster_path=tmp_path / V2R2_NAME))
     with pytest.raises(SpamVintageError, match="partially"):
         tr._extract_crop_mask_from_spam(cells, tmp_path / V2R2_NAME)
