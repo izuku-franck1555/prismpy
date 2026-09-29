@@ -41,22 +41,17 @@ def _strict_ids(values, source: str) -> List[int]:
 
 
 def _pythia(package: Path) -> RosterReadback:
-    shp, csv_path = package / "shapes" / "sites.shp", package / "shapes" / "sites.csv"
-    if shp.is_file():
-        import pyogrio
+    """The sites shapefile only, the file the runner reads: a sites.csv is never a roster."""
+    shp = package / "shapes" / "sites.shp"
+    if not shp.is_file():
+        raise ValueError("shapes/sites.shp is missing")
+    import pyogrio
 
-        frame = pyogrio.read_dataframe(shp, read_geometry=False)
-        if "CellID" not in frame.columns:
-            raise ValueError("shapes/sites.shp has no CellID field")
-        return RosterReadback(_strict_ids(frame["CellID"].tolist(), "shapes/sites.shp"),
-                              "shapes/sites.shp", "CellID", "5arcmin")
-    if csv_path.is_file():  # the translator's fallback when geopandas is absent
-        rows = list(csv.DictReader(csv_path.read_text(encoding="utf-8").splitlines()))
-        if not rows or "CellID" not in rows[0]:
-            raise ValueError("shapes/sites.csv has no CellID column")
-        return RosterReadback(_strict_ids([_int(r["CellID"], "shapes/sites.csv") for r in rows],
-                                          "shapes/sites.csv"), "shapes/sites.csv", "CellID", "5arcmin")
-    raise ValueError("shapes/sites.shp is missing")
+    frame = pyogrio.read_dataframe(shp, read_geometry=False)
+    if "CellID" not in frame.columns:
+        raise ValueError("shapes/sites.shp has no CellID field")
+    return RosterReadback(_strict_ids(frame["CellID"].tolist(), "shapes/sites.shp"),
+                          "shapes/sites.shp", "CellID", "5arcmin")
 
 
 def _int(text: str, source: str) -> int:
