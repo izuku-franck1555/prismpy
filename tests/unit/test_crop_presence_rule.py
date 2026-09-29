@@ -14,13 +14,19 @@ from pydantic import ValidationError
 from prismpy.cells.admission import cell_id_5arcmin_to_30arcmin_parent as parent
 from prismpy.pipeline.executor import TranslationPipeline
 from tests.unit._crop_presence_fixtures import (
-    COAST_BOX, COAST_MAIZ, INLAND_BOX, INLAND_POTA, StopAfterGrid, box_cells, identity_of, make_config,
-    mapped, region_of, run_grid_stages,
+    COAST_BOX, COAST_MAIZ, INLAND_BOX, INLAND_POTA, StopAfterGrid, box_cells, harmonize_output_digest,
+    identity_of, make_config, mapped, region_of, run_grid_stages,
 )
 
 # The whole-grid config's hash input and YAML dump at the pre-rule base 4e763a1.
 _BASE_DUMP_SHA256 = "1e43bdfeb6607a60cd2c18b9f013959cf0d5b32880136ce2cafe216a295d40e9"
 _BASE_YAML_SHA256 = "f20f32d312296408692960ed0dc7c6db114271c6efa529d43e54877ee9106aef"
+# What harmonize hands on with the rule unset, per config, at the pre-rule base 6b4eca1.
+_BASE_HARMONIZE = {
+    "30arcmin": "1c144ba94e66444fef1e58ed7da8b4b9bfd39cb5d718ce9e2d3ce1147ff8a1c4",
+    "user exclusions": "4d9712ee7f57d9bf2be7eeec9bf4b59e344682f8bf58532e0324b608260a11dc",
+    "whole grid": "f2ad5c50f1ac8763208150d44845f18fd6f4a63c90d45cb26b961b686d397b9a",
+}
 _LEGACY_BOUNDARY_KEYS = {
     "source", "version", "inclusion_rule", "min_share_percent", "n_cells_full_extent",
     "n_cells_excluded_by_inclusion_rule", "n_cells_excluded_by_min_share_percent", "n_cells_admitted",
@@ -118,6 +124,20 @@ def test_the_identity_enters_the_hash_and_the_rule_stays_out_of_the_cache_key(tm
     assert boundary["crop_presence"]["sha256"] == identity_of(COAST_MAIZ)["sha256"]
     assert region_cache_key_from_config(restricted.region) == region_cache_key_from_config(
         make_config(tmp_path).region)
+
+
+def _unset_rule_config(tmp_path, case):
+    if case == "user exclusions":
+        return make_config(tmp_path, exclude_cells=[c.cell_id for c in box_cells(COAST_BOX)[:2]])
+    if case == "30arcmin":
+        return make_config(tmp_path, grid_resolution="30arcmin", targets=("pythia",))
+    return make_config(tmp_path, targets=("pythia", "craft", "acea", "sarra_py"))
+
+
+@pytest.mark.parametrize("case", sorted(_BASE_HARMONIZE))
+def test_harmonize_hands_on_the_base_output_with_the_rule_unset(tmp_path, monkeypatch, case):
+    digest = harmonize_output_digest(_unset_rule_config(tmp_path, case), monkeypatch)
+    assert digest == _BASE_HARMONIZE[case]
 
 
 # --- the harmonize-stage cut and its record ---------------------------------------------------- #

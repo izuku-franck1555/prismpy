@@ -10,6 +10,7 @@ that needs the new API fails on its own rather than at collection.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from pathlib import Path
 
@@ -157,3 +158,23 @@ def run_grid_stages(config, monkeypatch):
                                                                     project_name="crop_presence"))
     result = pipe._execute_harmonize({"region": region_of(config)})
     return result, dict(pipe.provenance.record.boundary or {}), final.get("ids"), pipe
+
+
+# Differ run to run: the clock, the session, and the config hash over the tmp output path.
+VOLATILE_FIELDS = frozenset({"created_at", "session_id", "timestamp", "config_hash"})
+
+
+def _scrub(value):
+    if isinstance(value, dict):
+        return {key: _scrub(item) for key, item in value.items() if key not in VOLATILE_FIELDS}
+    return [_scrub(item) for item in value] if isinstance(value, list) else value
+
+
+def harmonize_output_digest(config, monkeypatch):
+    """sha256 over what harmonize hands on for ``config``: the kept cell ids, the boundary record,
+    the stage's errors, warnings and events, and the provenance record less its VOLATILE_FIELDS."""
+    result, boundary, ids, pipe = run_grid_stages(config, monkeypatch)
+    payload = {"ids": sorted(ids), "boundary": boundary, "errors": result.errors,
+               "warnings": result.warnings, "events": getattr(result, "error_events", None),
+               "provenance": _scrub(pipe.provenance.record.to_dict())}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()

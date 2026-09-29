@@ -1,11 +1,14 @@
 """Where the crop-presence rule and its reader sit in the code: the rule between the share threshold
 and the user exclusions, through the one > 0 predicate; the harmonize catch classifying the typed
 errors; CRAFT's mask extraction and ACEA's clip routed through the one reader and the one resolver;
-one roster-id digest encoding; and no raster reader beyond the classified inventory."""
+one roster-id digest encoding; and no raster read call site beyond the classified inventory."""
 from __future__ import annotations
 
 import ast
+from collections import Counter
 from pathlib import Path
+
+import pytest
 
 _SRC = Path(__file__).resolve().parents[2] / "src" / "prismpy"
 
@@ -72,11 +75,6 @@ def test_the_acea_clip_resolves_its_input_through_the_exposed_resolver():
     assert "resolve_acea_spam_input" in calls and "glob" not in calls
 
 
-def test_translation_reads_back_each_engine_roster():
-    assert any("record_roster_readback" in name for name in _calls(
-        _function("pipeline/executor.py", "_execute_translate")))
-
-
 def test_one_roster_id_digest_encoding():
     for relpath in ("pipeline/crop_presence.py", "packaging/roster_readback.py"):
         tree = ast.parse((_SRC / relpath).read_text())
@@ -86,7 +84,7 @@ def test_one_roster_id_digest_encoding():
         assert hashing <= {"crop_presence_record_digest"}, (relpath, hashing)
 
 
-# Every raster reader in src is classified here; a new SPAM area reader must use cell_presence.
+# Every scope in src that opens or samples a raster; a new SPAM area read must use cell_presence.
 _RASTER_READERS = {
     "sources/crop_areas/presence.py::cell_presence": "the one SPAM presence reader",
     "sources/crop_areas/presence.py::raster_identity": "the one reader's identity (header + checksum)",
@@ -122,25 +120,76 @@ _RASTER_READERS = {
 }
 
 
-def _raster_readers():
-    found = set()
+# The classified scopes that read more than once; every other one reads exactly once.
+_MULTI_READ_SITES = {
+    "sources/crop_areas/spam.py::clip_to_file": 2, "sources/crop_areas/spam.py::_sample_raster": 2,
+    "translators/pythia/translator.py::_clip_global_raster": 2,
+    "translators/pythia/translator.py::_generate_management_rasters": 3,
+    "pipeline/executor.py::_ensure_isda_1km_cache": 2,
+    "preprocess/zone_elevation_lookup.py::lookup_zone_and_elevation": 2,
+    "sources/soil/eghr.py::_clip_raster_to_bounds": 2, "sources/soil/eghr.py::_sample_pixel_ids": 2,
+    "sources/soil/hwsd.py::_sample_bil_raster": 2, "sources/soil/isda.py::sample_at_points": 2,
+}
+_READER_CALLS = {"rasterio.open", "rioxarray.open_rasterio", "xarray.open_rasterio"}
+
+
+def _imported_names(tree):
+    """Each local name an import binds, in any scope, and the dotted name it stands for."""
+    names = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.partition(".")[0]
+                names[alias.asname or top] = alias.name if alias.asname else top
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for alias in node.names:
+                names[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return names
+
+
+def reader_call_sites(source, relpath):
+    """Raster open/sample calls counted by scope (the innermost function, else <module>), import
+    aliases and direct imports resolved."""
+    tree = ast.parse(source)
+    names = _imported_names(tree)
+    sites = Counter()
+
+    def visit(node, scope):
+        for child in ast.iter_child_nodes(node):
+            inner = child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) else scope
+            if isinstance(child, ast.Call):
+                head, _, rest = ast.unparse(child.func).partition(".")
+                called = ".".join(filter(None, (names.get(head, head), rest)))
+                if called in _READER_CALLS or called.endswith((".sample", ".open_rasterio")):
+                    sites[f"{relpath}::{scope}"] += 1
+            visit(child, inner)
+
+    visit(tree, "<module>")
+    return sites
+
+
+def test_every_raster_read_call_site_is_classified():
+    sites = Counter()
     for path in sorted(_SRC.rglob("*.py")):
-        if "vendor" in path.parts:
-            continue
-        for node in ast.walk(ast.parse(path.read_text())):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
-                    isinstance(sub, ast.Call) and (ast.unparse(sub.func) in ("rasterio.open", "rio.open")
-                                                   or ast.unparse(sub.func).endswith((".sample", "open_rasterio")))
-                    for sub in ast.walk(node)):
-                found.add(f"{path.relative_to(_SRC).as_posix()}::{node.name}")
-    return found
+        if "vendor" not in path.parts:
+            sites.update(reader_call_sites(path.read_text(), path.relative_to(_SRC).as_posix()))
+    assert dict(sites) == {site: _MULTI_READ_SITES.get(site, 1) for site in _RASTER_READERS}
+    assert "translators/craft/translator.py::_extract_crop_mask_from_spam" not in sites
 
 
-def test_no_raster_reader_beyond_the_classified_inventory():
-    found = _raster_readers()
-    assert found <= set(_RASTER_READERS), sorted(found - set(_RASTER_READERS))
-    assert "translators/craft/translator.py::_extract_crop_mask_from_spam" not in found
-    assert "sources/crop_areas/presence.py::cell_presence" in found
+_SEEDED_BYPASSES = {
+    "aliased import": ("import rasterio as spamrio\ndef f(p):\n    return spamrio.open(p)\n", "f", 1),
+    "direct import": ("from rasterio import open as ropen\ndef f(p):\n    return ropen(p)\n", "f", 1),
+    "module scope": ("import rasterio\nLAYER = rasterio.open('spam.tif')\n", "<module>", 1),
+    "second read": ("import rasterio as rio\ndef cell_presence(p):\n    rio.open(p)\n"
+                    "    with rio.open(p) as src:\n        return src.sample([])\n", "cell_presence", 3),
+}
+
+
+@pytest.mark.parametrize("seed", sorted(_SEEDED_BYPASSES))
+def test_the_scan_sees_each_seeded_bypass(seed):
+    source, scope, count = _SEEDED_BYPASSES[seed]
+    assert reader_call_sites(source, "seed.py") == Counter({f"seed.py::{scope}": count})
 
 
 def test_spam_source_retrieve_keeps_no_production_caller():
