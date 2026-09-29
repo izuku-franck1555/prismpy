@@ -1,0 +1,5 @@
+# Window crops of the real SPAM 2020 layers (no resampling: the source's window transform, dtype, nodata, CRS).
+# fixture | source basename | source sha256 | window (col_off, row_off, width, height) | fixture sha256
+coast_maiz_v2r2 | spam2020_V2r2_global_H_MAIZ_A.tif | f59ae1d95086f72e05ea753ecc06a2d5dce4488503b669d82981bf37ba713d71 | (2202, 990, 24, 24) | 1483701a6d12ec3e192ce0a3cb3140d40becb66e2023c1ec52dea0f04174518e
+coast_maiz_v2r0 | spam2020_V2r0_global_H_MAIZ_A.tif | 548a3c4220eb4c555225d710b67353d0732f956d01d2db3a04a3dd6a65a38c95 | (2202, 990, 24, 24) | 7111f20a43f18b995f88308b7c96709556ed7dba77fc83883e3dd22b9acf04f7
+inland_pota_v2r2 | spam2020_V2r2_global_H_POTA_A.tif | c524978f4043428d6b953c937eeffaa3aeed8580739f0d0fd4c9211843fe082b | (2196, 972, 12, 12) | fd166ec2d0b97d7259413dedb402a31d8f6fe07a44b0345789a2ddb3adfbd77b

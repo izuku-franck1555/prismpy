@@ -1,5 +1,6 @@
 """The resolver ACEA's harvested-area clip uses, exposed unchanged: the same patterns in the same
-order, the same pick, plus every match so a caller can see an ambiguous wildcard."""
+order, the same pick (the first match of the first matching pattern, in glob order, never sorted),
+plus every match of that pattern so a caller can see an ambiguous layer."""
 from __future__ import annotations
 
 import pytest
@@ -20,40 +21,45 @@ def _touch(directory, *names):
         (directory / name).write_bytes(b"layer")
 
 
+def _resolve(directory, tech="A", crop="Maize"):
+    from prismpy.translators.acea.translator import resolve_acea_spam_input
+
+    return resolve_acea_spam_input(directory, crop, tech)
+
+
 def test_the_pattern_list_is_unchanged():
     from prismpy.translators.acea.translator import acea_spam_input_patterns
 
     assert acea_spam_input_patterns("MAIZ", 56, "A") == _BASE_PATTERNS
 
 
-def test_the_pick_and_its_matches(tmp_path):
-    from prismpy.translators.acea.translator import resolve_acea_spam_input
-
-    _touch(tmp_path, "spam2020_V2r0_global_H_MAIZ_A.tif", "spam2020_maize.tif")
-    got = resolve_acea_spam_input(tmp_path, "Maize", "A")
-    assert got.pick == tmp_path / "spam2020_V2r0_global_H_MAIZ_A.tif" and got.matches == [got.pick]
+def test_the_staged_v2r0_set_resolves_one_file_per_technology(tmp_path):
+    _touch(tmp_path, *(f"spam2020_V2r0_global_H_MAIZ_{t}.tif" for t in "RIA"), "spam2020_maize.tif")
+    for tech in "RIA":
+        got = _resolve(tmp_path, tech)
+        assert got.pick == tmp_path / f"spam2020_V2r0_global_H_MAIZ_{tech}.tif" and got.matches == [got.pick]
 
 
 def test_the_first_matching_pattern_wins(tmp_path):
-    from prismpy.translators.acea.translator import resolve_acea_spam_input
-
     _touch(tmp_path, "spam2020_V2r0_global_H_MAIZ_A.tif", "spam2020V2r0_global_H_MAIZ_A.tif")
-    got = resolve_acea_spam_input(tmp_path, "Maize", "A")
+    got = _resolve(tmp_path)
     assert got.pick.name == "spam2020V2r0_global_H_MAIZ_A.tif" and len(got.matches) == 1
 
 
-def test_an_ambiguous_wildcard_is_visible(tmp_path):
-    from prismpy.translators.acea.translator import resolve_acea_spam_input
-
-    _touch(tmp_path, "a_MAIZ_1_A.tif", "b_MAIZ_2_A.tif")
-    got = resolve_acea_spam_input(tmp_path, "Maize", "A")
-    assert len(got.matches) == 2 and got.pick in got.matches
+def test_a_2010_v1r0_file_alone_is_picked(tmp_path):
+    _touch(tmp_path, "spam2010V1r0_global_H_MAIZ_A.tif")
+    assert _resolve(tmp_path).pick.name == "spam2010V1r0_global_H_MAIZ_A.tif"
 
 
-@pytest.mark.parametrize("crop", ["Teff", ""])
-def test_a_crop_without_a_spam_code_resolves_nothing(tmp_path, crop):
-    from prismpy.translators.acea.translator import resolve_acea_spam_input
+def test_two_files_for_one_pattern_are_both_listed_in_glob_order(tmp_path):
+    _touch(tmp_path, "b_MAIZ_2_A.tif", "a_MAIZ_1_A.tif")
+    got = _resolve(tmp_path)
+    assert got.matches == list(tmp_path.glob("*MAIZ*_A.tif")) and got.pick == got.matches[0]
+    assert len(got.matches) == 2
 
-    _touch(tmp_path, "spam2020_V2r0_global_H_MAIZ_A.tif")
-    got = resolve_acea_spam_input(tmp_path, crop, "A")
+
+@pytest.mark.parametrize("crop,names", [("Maize", ()), ("Teff", ("spam2020_V2r0_global_H_MAIZ_A.tif",))])
+def test_nothing_resolves_without_a_matching_file_or_a_spam_code(tmp_path, crop, names):
+    _touch(tmp_path, *names)
+    got = _resolve(tmp_path, crop=crop)
     assert got.pick is None and got.matches == []

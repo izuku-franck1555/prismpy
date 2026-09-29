@@ -1,105 +1,156 @@
 """Where the crop-presence rule and its reader sit in the code: the rule between the share threshold
-and the user exclusions; the harmonize catch classifying the typed errors; CRAFT's mask extraction
-and ACEA's clip routed through the one reader and the one resolver; no independent SPAM sampler."""
+and the user exclusions, through the one > 0 predicate; the harmonize catch classifying the typed
+errors; CRAFT's mask extraction and ACEA's clip routed through the one reader and the one resolver;
+one roster-id digest encoding; and no raster reader beyond the classified inventory."""
 from __future__ import annotations
 
 import ast
-import re
 from pathlib import Path
 
 _SRC = Path(__file__).resolve().parents[2] / "src" / "prismpy"
 
 
 def _function(relpath, name):
-    text = (_SRC / relpath).read_text()
-    for node in ast.walk(ast.parse(text)):
+    for node in ast.walk(ast.parse((_SRC / relpath).read_text())):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-            return node, text
+            return node
     raise AssertionError(f"{relpath}::{name} not found")
 
 
 def _calls(node):
-    names = set()
-    for sub in ast.walk(node):
-        if isinstance(sub, ast.Call):
-            func = sub.func
-            names.add(func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", ""))
-    return names
+    return {ast.unparse(sub.func).rsplit(".", 1)[-1] for sub in ast.walk(node) if isinstance(sub, ast.Call)}
 
 
-def _line_of(node, predicate):
+def _first_line(node, predicate):
     lines = [sub.lineno for sub in ast.walk(node) if predicate(sub)]
     assert lines, "expected statement not found"
     return min(lines)
 
 
 def test_the_rule_runs_after_the_share_threshold_and_before_user_exclusions():
-    harmonize, _ = _function("pipeline/executor.py", "_execute_harmonize")
-
-    def assigns(target_text):
-        return lambda n: isinstance(n, ast.Assign) and any(
-            ast.unparse(t) == target_text for t in n.targets)
-
-    threshold = _line_of(harmonize, lambda n: isinstance(n, ast.Assign) and any(
+    harmonize = _function("pipeline/executor.py", "_execute_harmonize")
+    threshold = _first_line(harmonize, lambda n: isinstance(n, ast.Assign) and any(
         ast.unparse(t) == "grid.cells" for t in n.targets) and "cells_post_threshold" in ast.unparse(n.value))
-    rule = _line_of(harmonize, lambda n: isinstance(n, ast.Call)
-                    and ast.unparse(n.func).endswith("apply_crop_presence_rule"))
-    user_skip = _line_of(harmonize, assigns("user_excluded"))
+    rule = _first_line(harmonize, lambda n: isinstance(n, ast.Call)
+                       and ast.unparse(n.func).endswith("apply_crop_presence_rule"))
+    user_skip = _first_line(harmonize, lambda n: isinstance(n, ast.Assign) and any(
+        ast.unparse(t) == "user_excluded" for t in n.targets))
     assert threshold < rule < user_skip
 
 
+def test_the_rule_judges_presence_through_the_one_predicate():
+    rule = _function("pipeline/crop_presence.py", "apply_crop_presence_rule")
+    assert "crop_area_present" in _calls(rule)
+    inline = [ast.unparse(n) for n in ast.walk(rule) if isinstance(n, ast.Compare)
+              and any(isinstance(op, (ast.Gt, ast.GtE)) for op in n.ops)
+              and any(isinstance(c, ast.Constant) and c.value == 0 for c in n.comparators)]
+    assert inline == []
+
+
 def test_the_harmonize_catch_classifies_the_typed_errors():
-    harmonize, _ = _function("pipeline/executor.py", "_execute_harmonize")
+    harmonize = _function("pipeline/executor.py", "_execute_harmonize")
     handlers = [n for n in ast.walk(harmonize) if isinstance(n, ast.ExceptHandler)
                 and ast.unparse(n.type) == "Exception"]
     body = "\n".join(ast.unparse(h) for h in handlers)
     assert "classify_to_event_dict" in body and "CropPresenceEmptyError" in body
-    stage_results = [n for n in ast.walk(harmonize) if isinstance(n, ast.Call)
-                     and ast.unparse(n.func) == "StageResult"]
-    assert stage_results and all(any(k.arg == "error_events" for k in c.keywords) for c in stage_results)
+    assert "CropPresenceIdentityError" in body
+    results = [n for n in ast.walk(harmonize) if isinstance(n, ast.Call) and ast.unparse(n.func) == "StageResult"]
+    assert results and all(any(k.arg == "error_events" for k in c.keywords) for c in results)
 
 
-def test_craft_mask_extraction_reads_through_the_one_reader():
-    extract, _ = _function("translators/craft/translator.py", "_extract_crop_mask_from_spam")
+def test_craft_mask_extraction_reads_through_the_one_reader_and_keeps_its_own_checks():
+    extract = _function("translators/craft/translator.py", "_extract_crop_mask_from_spam")
+    source = ast.unparse(extract)
     calls = _calls(extract)
-    assert "cell_presence" in calls and "sample" not in calls
+    assert "cell_presence" in calls and not {"open", "sample"} & calls
+    assert "cap_at_100" in source and "SpamVintageError" in source
 
 
 def test_the_acea_clip_resolves_its_input_through_the_exposed_resolver():
-    clip, _ = _function("translators/acea/translator.py", "_clip_spam_data")
+    clip = _function("translators/acea/translator.py", "_clip_spam_data")
     calls = _calls(clip)
     assert "resolve_acea_spam_input" in calls and "glob" not in calls
 
 
-def test_translation_reads_back_each_engine_roster_when_the_rule_ran():
-    translate, _ = _function("pipeline/executor.py", "_execute_translate")
-    assert any("record_roster_readback" in name for name in _calls(translate))
+def test_translation_reads_back_each_engine_roster():
+    assert any("record_roster_readback" in name for name in _calls(
+        _function("pipeline/executor.py", "_execute_translate")))
 
 
-# Functions that open a raster, read or sample it, and name SPAM / harvested / crop-area data. Each
-# is a translator clip, the legacy SPAM source, the one reader, or a comment-only mention; a new
-# independent SPAM sampler must read through ``cell_presence`` instead.
-_ALLOWED_SPAM_READERS = {
-    "sources/crop_areas/presence.py::cell_presence",
-    "sources/crop_areas/spam.py::clip_to_file",
-    "sources/crop_areas/spam.py::_sample_raster",
-    "pipeline/executor.py::_ensure_isda_1km_cache",
+def test_one_roster_id_digest_encoding():
+    for relpath in ("pipeline/crop_presence.py", "packaging/roster_readback.py"):
+        tree = ast.parse((_SRC / relpath).read_text())
+        assert "roster_id_digest" in _calls(tree), relpath
+        hashing = {f.name for f in ast.walk(tree) if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
+                   and "sha256" in _calls(f)}
+        assert hashing <= {"crop_presence_record_digest"}, (relpath, hashing)
+
+
+# Every function in src that opens or samples a raster, classified. A new reader must be classified
+# here; an independent SPAM presence/area sampler must read through ``cell_presence`` instead.
+_RASTER_READERS = {
+    "sources/crop_areas/presence.py::cell_presence": "the one SPAM presence reader",
+    "sources/crop_areas/spam.py::clip_to_file": "ACEA's harvested-area clip",
+    "sources/crop_areas/spam.py::_sample_raster": "legacy SPAMSource.retrieve (no production caller)",
+    "sources/crop_areas/spam.py::_extract_from_bounds": "legacy SPAMSource.retrieve (no production caller)",
+    "translators/acea/translator.py::_generate_dummy_spam_files": "ACEA's placeholder SPAM writer",
+    "translators/pythia/translator.py::_cell_block_sums": "PYTHIA's per-cell crop area (M1 unification: Face 2)",
+    "translators/pythia/translator.py::_check_mask_covers_cells": "PYTHIA's mask extent check",
+    "translators/pythia/translator.py::_clip_global_raster": "PYTHIA's raster clips",
+    "translators/pythia/translator.py::_snap_bounds_outward": "PYTHIA's clip extent",
+    "translators/pythia/translator.py::_generate_management_rasters": "not SPAM: management writers",
+    "translators/pythia/translator.py::_enumerate_countries_from_local_substrate": "not SPAM: soil",
+    "translators/acea/translator.py::_generate_acea_soil_netcdf": "not SPAM: soil",
+    "translators/sarra_py/translator.py::_generate_projection_climate_geotiffs": "not SPAM: climate",
+    "translators/_shared/eghr_substrate.py::_write_soil_raster": "not SPAM: soil",
+    "pipeline/executor.py::_ensure_isda_1km_cache": "not SPAM: soil",
+    "pipeline/executor.py::_retrieve_isda_api_for_grid": "not SPAM: soil",
+    "preprocess/zone_elevation_lookup.py::lookup_zone_and_elevation": "not SPAM: soil",
+    "sources/climate/agera5.py::load_variable": "not SPAM: climate",
+    "sources/climate/tamsat.py::load_daily_rainfall": "not SPAM: climate",
+    "sources/soil/eghr.py::_clip_raster_to_bounds": "not SPAM: soil",
+    "sources/soil/eghr.py::_sample_pixel_ids": "not SPAM: soil",
+    "sources/soil/hwsd.py::_sample_bil_raster": "not SPAM: soil",
+    "sources/soil/isda.py::load_variable": "not SPAM: soil",
+    "sources/soil/isda.py::sample_at_points": "not SPAM: soil",
+    "koppen/kg_classifier.py::__init__": "not SPAM: climate zones",
+    "koppen/kg_classifier.py::_sample_one": "not SPAM: climate zones",
+    "koppen/kg_classifier.py::classify_batch": "not SPAM: climate zones",
+    "validators/post_translate.py::_validate_sarra_py_geotiffs": "not SPAM: climate",
+    "validators/post_translate.py::sample_sarra_py_per_cell": "not SPAM: climate",
+    "validators/post_translate.py::sarra_py_climate_rasters_readable": "not SPAM: climate",
 }
-_SPAM_TOKENS = re.compile(r"spam|harvest|crop_area|crop_mask", re.IGNORECASE)
 
 
-def test_no_independent_spam_sampler():
+def _raster_readers():
     found = set()
     for path in sorted(_SRC.rglob("*.py")):
         if "vendor" in path.parts:
             continue
-        text = path.read_text()
-        for node in ast.walk(ast.parse(text)):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            source = ast.get_source_segment(text, node) or ""
-            if ("rasterio.open(" in source and (".sample(" in source or ".read(" in source)
-                    and _SPAM_TOKENS.search(source)):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+                    isinstance(sub, ast.Call) and (ast.unparse(sub.func) in ("rasterio.open", "rio.open")
+                                                   or ast.unparse(sub.func).endswith((".sample", "open_rasterio")))
+                    for sub in ast.walk(node)):
                 found.add(f"{path.relative_to(_SRC).as_posix()}::{node.name}")
-    assert found <= _ALLOWED_SPAM_READERS, sorted(found - _ALLOWED_SPAM_READERS)
+    return found
+
+
+def test_no_raster_reader_beyond_the_classified_inventory():
+    found = _raster_readers()
+    assert found <= set(_RASTER_READERS), sorted(found - set(_RASTER_READERS))
+    assert "translators/craft/translator.py::_extract_crop_mask_from_spam" not in found
     assert "sources/crop_areas/presence.py::cell_presence" in found
+
+
+def test_spam_source_retrieve_keeps_no_production_caller():
+    for path in sorted(_SRC.rglob("*.py")):
+        if path.name == "spam.py" or "vendor" in path.parts:
+            continue
+        tree = ast.parse(path.read_text())
+        instances = {ast.unparse(t) for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                     and isinstance(n.value, ast.Call) and ast.unparse(n.value.func) == "SPAMSource"
+                     for t in n.targets}
+        used = {n.func.attr for n in ast.walk(tree) if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute) and ast.unparse(n.func.value) in instances}
+        assert used <= {"clip_to_file"}, (path, used)

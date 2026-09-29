@@ -1,42 +1,60 @@
-"""The one crop-presence reader: the exact input keyset with nodata-safe zeros, the layer identity
-verified before any cut, agreement with the footprint sums at 5', and the one roster-id digest."""
+"""The one crop-presence reader on real SPAM 2020 crops: the exact input keyset with nodata-safe zeros,
+one windowed read, the layer identity verified before any cut (no false reject on the real 5' pixel),
+agreement with #116's footprint sums at 5', and the one roster-id digest encoding."""
 from __future__ import annotations
 
 import hashlib
+import math
+import shutil
 
 import numpy as np
 import pytest
 
-from prismpy.models.spatial import GridCell, SpatialGrid
-from tests.unit._crop_presence_fixtures import INC, NORTH, V2R2_NODATA, WEST, identity_of, write_layer
+from tests.unit._crop_presence_fixtures import (
+    COAST_BOX, COAST_MAIZ, COAST_MAIZ_V2R0, INC, INLAND_BOX, INLAND_POTA, NORTH, V2R2_NODATA, WEST,
+    box_cells, cell, identity_of, pixel_value, write_layer,
+)
 
 
-def _centre(row, col):
-    """(lat, lon) of the fixture pixel centre (row, col)."""
-    return NORTH - (row + 0.5) * INC, WEST + (col + 0.5) * INC
+def _pixel_cells(row, cols):
+    """Grid cells at the synthetic layer's pixel centres (row, col) for each col."""
+    from prismpy.models.spatial import SpatialGrid
+
+    cells = []
+    for col in cols:
+        r, c = SpatialGrid.rowcol_from_latlon_5arcmin(NORTH - (row + 0.5) * INC, WEST + (col + 0.5) * INC)
+        cells.append(cell(SpatialGrid.compute_cell_id_5arcmin(r, c)))
+    return cells
 
 
-def _cells(latlons):
-    out = []
-    for lat, lon in latlons:
-        row, col = SpatialGrid.rowcol_from_latlon_5arcmin(lat, lon)
-        out.append(GridCell(cell_id=SpatialGrid.compute_cell_id_5arcmin(row, col),
-                            lat=lat, lon=lon, row=row, col=col))
-    return out
+def _expected_area(path, c):
+    value, nodata = pixel_value(path, c.lat, c.lon)
+    valid = math.isfinite(value) and (nodata is None or math.isnan(nodata) or value != nodata)
+    return value if valid and value > 0 else 0.0
 
 
-def test_exact_keyset_with_nodata_safe_zeros(tmp_path):
+@pytest.mark.parametrize("path,box", [(COAST_MAIZ, COAST_BOX), (COAST_MAIZ_V2R0, COAST_BOX),
+                                      (INLAND_POTA, INLAND_BOX)])
+def test_exact_keyset_with_nodata_safe_zeros_on_real_layers(path, box):
+    from prismpy.sources.crop_areas.presence import cell_presence
+
+    cells = box_cells(box)
+    got = cell_presence(cells, path, expected=identity_of(path))
+    assert set(got.areas) == {c.cell_id for c in cells} and len(got.areas) == len(cells)
+    assert [got.areas[c.cell_id] for c in cells] == pytest.approx([_expected_area(path, c) for c in cells])
+    assert got.observed.crs == "EPSG:4326" and got.covered is True
+    assert got.window[2] > 0 and got.window[3] > 0
+
+
+def test_every_no_area_value_reads_as_zero(tmp_path):
     from prismpy.sources.crop_areas.presence import cell_presence
 
     values = [5.0, 0.0, np.nan, V2R2_NODATA, -1.0, np.inf, -np.inf, 0.25]
     arr = np.zeros((18, 18), dtype="float32")
     arr[2, 2:2 + len(values)] = values
-    path = write_layer(tmp_path / "spam2020_V2r2_global_H_MAIZ_A.tif", arr)
-    cells = _cells([_centre(2, 2 + k) for k in range(len(values))])
-
+    path = write_layer(tmp_path / "layer.tif", arr)
+    cells = _pixel_cells(2, range(2, 2 + len(values)))
     got = cell_presence(cells, path)
-
-    assert set(got.areas) == {c.cell_id for c in cells} and len(got.areas) == len(cells)
     assert [got.areas[c.cell_id] for c in cells] == pytest.approx([5.0, 0, 0, 0, 0, 0, 0, 0.25])
 
 
@@ -50,13 +68,12 @@ def test_the_presence_predicate(area, present):
     assert crop_area_present(area) is present
 
 
-def test_one_windowed_read_for_all_cells(tmp_path, monkeypatch):
+def test_one_open_and_one_windowed_read(monkeypatch):
     import rasterio
 
     from prismpy.sources.crop_areas.presence import cell_presence
 
-    path = write_layer(tmp_path / "layer.tif")
-    reads = []
+    opens, reads = [], []
     real_open = rasterio.open
 
     class Counting:
@@ -77,80 +94,80 @@ def test_one_windowed_read_for_all_cells(tmp_path, monkeypatch):
         def __getattr__(self, name):
             return getattr(self._ds, name)
 
-    monkeypatch.setattr(rasterio, "open", lambda *a, **k: Counting(real_open(*a, **k)))
-    cell_presence(_cells([_centre(r, c) for r in range(3, 9) for c in range(3, 9)]), path)
-    assert len(reads) == 1 and reads[0] is not None
+    monkeypatch.setattr(rasterio, "open", lambda *a, **k: (opens.append(a), Counting(real_open(*a, **k)))[1])
+    cell_presence(box_cells(COAST_BOX), COAST_MAIZ, expected=identity_of(COAST_MAIZ))
+    assert len(opens) == 1 and len(reads) == 1 and reads[0] is not None
 
 
-def test_identity_is_verified_and_reported(tmp_path):
+def test_the_real_layers_pass_their_own_identity():
     from prismpy.sources.crop_areas.presence import cell_presence
 
-    path = write_layer(tmp_path / "layer.tif")
+    for path, box in ((COAST_MAIZ, COAST_BOX), (INLAND_POTA, INLAND_BOX)):
+        expected = identity_of(path)
+        assert expected["transform"][0] != 5 / 60  # the real pixel is 0.0833333332727273 deg
+        observed = cell_presence(box_cells(box), path, expected=expected).observed.as_dict()
+        assert observed == {key: expected[key] for key in observed}
+        assert set(observed) == {"sha256", "crs", "transform", "band", "width", "height", "nodata"}
+
+
+def _drift(path, field):
     expected = identity_of(path)
-    observed = cell_presence(_cells([_centre(3, 3)]), path, expected=expected).observed.as_dict()
-    assert observed == {key: expected[key] for key in observed}
-    assert set(observed) == {"sha256", "crs", "transform", "band", "width", "height", "nodata"}
+    if field == "transform":
+        expected["transform"] = [*expected["transform"][:2], expected["transform"][2] + INC,
+                                 *expected["transform"][3:]]
+    else:
+        expected[field] = {"sha256": "0" * 64, "crs": "EPSG:3857", "width": 25, "height": 23,
+                           "nodata": "nan", "band": 2}[field]
+    return expected
 
 
-@pytest.mark.parametrize("field,value", [
-    ("sha256", "0" * 64), ("crs", "EPSG:3857"), ("width", 19), ("height", 17),
-    ("nodata", "nan"), ("band", 2), ("transform", "shifted"),
-])
-def test_identity_drift_is_refused_before_any_cut(tmp_path, field, value):
+@pytest.mark.parametrize("field", ["sha256", "crs", "width", "height", "nodata", "band", "transform"])
+def test_identity_drift_is_refused_before_any_cut(field):
     from prismpy.sources.crop_areas.presence import CropPresenceIdentityError, cell_presence
 
-    path = write_layer(tmp_path / "layer.tif")
-    expected = identity_of(path)
-    if value == "shifted":
-        value = [*expected["transform"][:2], expected["transform"][2] + INC, *expected["transform"][3:]]
-    expected[field] = value
     with pytest.raises(CropPresenceIdentityError):
-        cell_presence(_cells([_centre(3, 3)]), path, expected=expected)
+        cell_presence(box_cells(COAST_BOX), COAST_MAIZ, expected=_drift(COAST_MAIZ, field))
 
 
 def test_an_in_place_swap_is_refused(tmp_path):
     from prismpy.sources.crop_areas.presence import CropPresenceIdentityError, cell_presence
 
-    path = write_layer(tmp_path / "layer.tif")
+    path = tmp_path / COAST_MAIZ.name
+    shutil.copyfile(COAST_MAIZ, path)
     expected = identity_of(path)
-    swapped = np.zeros((18, 18), dtype="float32")
-    swapped[3, 3] = 7.0
-    write_layer(path, swapped)
+    shutil.copyfile(COAST_MAIZ_V2R0, path)
     with pytest.raises(CropPresenceIdentityError):
-        cell_presence(_cells([_centre(3, 3)]), path, expected=expected)
+        cell_presence(box_cells(COAST_BOX), path, expected=expected)
 
 
-def test_a_layer_off_the_canonical_lattice_is_refused(tmp_path):
+@pytest.mark.parametrize("west,crs", [(WEST + INC / 2, "EPSG:4326"), (WEST, "EPSG:3857")])
+def test_a_layer_off_the_5_arcmin_geographic_lattice_is_refused(tmp_path, west, crs):
     from prismpy.sources.crop_areas.presence import CropPresenceIdentityError, cell_presence
 
-    path = write_layer(tmp_path / "layer.tif", west=WEST + INC / 2)
+    path = write_layer(tmp_path / "layer.tif", west=west, crs=crs)
+    cells = _pixel_cells(3, range(3, 6))
     with pytest.raises(CropPresenceIdentityError):
-        cell_presence(_cells([_centre(3, 3)]), path, expected=identity_of(path))
+        cell_presence(cells, path, expected=identity_of(path))
 
 
-def test_partial_coverage_is_refused(tmp_path):
+def test_partial_coverage_is_refused_never_silent_zeros():
     from prismpy.sources.crop_areas.presence import CropPresenceIdentityError, cell_presence
 
-    path = write_layer(tmp_path / "layer.tif")
+    minx, miny, maxx, maxy = COAST_BOX
     with pytest.raises(CropPresenceIdentityError):
-        cell_presence(_cells([_centre(3, 3), (NORTH + INC / 2, WEST + INC / 2)]), path)
+        cell_presence(box_cells((minx - 1.0, miny, maxx, maxy)), COAST_MAIZ, expected=identity_of(COAST_MAIZ))
 
 
-def test_agrees_with_the_footprint_sums_at_5_arcmin(tmp_path):
+def test_agrees_with_the_footprint_sums_at_5_arcmin():
     from shapely.geometry import box
 
     from prismpy.sources.crop_areas.presence import cell_presence
     from prismpy.translators.pythia.translator import _cell_block_sums
 
-    rng = np.random.default_rng(7)
-    arr = rng.choice([0.0, 0.0, 3.5, np.nan, V2R2_NODATA, -2.0], size=(18, 18)).astype("float32")
-    path = write_layer(tmp_path / "layer.tif", arr)
-    cells = _cells([_centre(r, c) for r in range(1, 17) for c in range(1, 17)])
-
-    got = cell_presence(cells, path)
-    sums = _cell_block_sums(path, cells, INC / 2, box(WEST, NORTH - 18 * INC, WEST + 18 * INC, NORTH))
-    for cell, (_in_region, full) in zip(cells, sums):
-        assert got.areas[cell.cell_id] == pytest.approx(full)
+    cells = box_cells(COAST_BOX)
+    got = cell_presence(cells, COAST_MAIZ)
+    for c, (_in_region, full) in zip(cells, _cell_block_sums(COAST_MAIZ, cells, INC / 2, box(*COAST_BOX))):
+        assert got.areas[c.cell_id] == pytest.approx(full)
 
 
 def test_the_one_roster_id_digest_encoding():
