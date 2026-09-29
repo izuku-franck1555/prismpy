@@ -29,6 +29,7 @@ from prismpy.data_sources.gadm import GADMDataSource
 from prismpy.models.climate import ClimateTimeSeries, ClimateRecord
 from prismpy.models.crop import CropParameters, CropCalendar
 from prismpy.models.region import Region
+from prismpy.models import soil as soil_model
 from prismpy.models.soil import SoilProfile, SoilLayer
 from prismpy.models.spatial import SpatialGrid
 from prismpy.provenance.tracker import DecisionType, ProvenanceTracker
@@ -136,13 +137,12 @@ def _default_soil_warning(declaration: DefaultDeclaration) -> str:
     """The warning for more than 5 % of the grid cells on a generic soil."""
     kind = ("placeholder" if any(cause == "retrieve_stage_placeholder"
                                  for cause, _ in declaration.causes) else "default")
+    verb = "runs" if declaration.default_cells == 1 else "run"
     return (
         f"{declaration.default_cells} of {declaration.cells} grid cells "
-        f"({declaration.fraction * 100:.1f}%) run on a generic {kind} soil profile "
+        f"({declaration.fraction * 100:.1f}%) {verb} on a generic {kind} soil profile "
         f"({declaration.depth_cm} cm, about {declaration.paw_mm} mm plant-available "
-        f"water); the {kind} soil holds more water but less organic matter than most "
-        f"local soils, so these cells' yields may be overstated where water limits "
-        f"growth and understated where soil nitrogen does"
+        f"water); {soil_model.generic_soil_direction(kind)}."
     )
 
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -17,6 +18,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from prismpy.models import soil as soil_model
 from prismpy.models.climate import ClimateRecord, ClimateTimeSeries
 from prismpy.models.region import BoundingBox, Region
 from prismpy.models.soil import SoilLayer, SoilProfile
@@ -33,8 +35,11 @@ from test_hwsd_layered_profile import _unit  # noqa: E402
 
 REGION = Region(name="Koutiala", country="Mali", country_iso3="MLI",
                 bounds=BoundingBox(minx=-6.0, miny=11.0, maxx=-4.0, maxy=13.0))
-DIRECTION = ("may be overstated where water limits growth and understated where soil "
-             "nitrogen does")
+DIRECTION = "may be over- or understated"
+DEFAULT_DIRECTION = ("; the default soil may hold more or less water, and more or less organic matter, "
+                     "than the local soil, so the yields simulated on it may be over- or understated.")
+OLD_DIRECTION_PHRASES = ("most local soils", "holds more water", "but less organic matter",
+                         "higher or lower than theirs", "where soil nitrogen does", "these cells' yields")
 
 
 def _state(outcome, isda=False):
@@ -309,6 +314,8 @@ def test_the_placeholder_covers_every_cell_and_is_declared(tmp_path):
         "default_fraction": "1.0000", "default_warning": "1", "default_depth_cm": "0-100",
         "default_paw_mm": "158"}
     assert "generic placeholder soil profile (0-100 cm, about 158 mm" in out.warnings[0]
+    assert out.warnings[0].endswith("; " + soil_model.generic_soil_direction("placeholder") + ".")
+    assert not out.warnings[0].endswith("..")
     _integrity(tmp_path, out, key0_expected=False)
 
 
@@ -359,11 +366,38 @@ def test_the_warning_states_the_direction_and_does_not_fail(tmp_path):
     out = _mixed(tmp_path / "a", 20, 2)
     assert out.record["default_warning"] == "1" and len(out.warnings) == 1
     warning = out.warnings[0]
-    for part in ("2 of 20", "10.0%", "0-100 cm", "about 158 mm", DIRECTION):
+    for part in ("2 of 20", "10.0%", "0-100 cm", "about 158 mm", DIRECTION, DEFAULT_DIRECTION):
         assert part in warning
-    assert "likely overstated" not in warning and ".;" not in warning
+    for old in ("likely overstated", *OLD_DIRECTION_PHRASES):
+        assert old not in warning
+    assert ".;" not in warning
+    assert warning == ("2 of 20 grid cells (10.0%) run on a generic default soil profile (0-100 cm, about 158 mm "
+                       "plant-available water); " + soil_model.generic_soil_direction("default") + ".")
     quiet = _mixed(tmp_path / "b", 20, 1)
     assert quiet.record["default_warning"] == "0" and quiet.warnings == []
+
+
+def test_one_cell_on_the_default_takes_a_singular_verb(tmp_path):
+    assert _mixed(tmp_path, 10, 1).warnings == [
+        "1 of 10 grid cells (10.0%) runs on a generic default soil profile (0-100 cm, about 158 mm "
+        "plant-available water)" + DEFAULT_DIRECTION]
+
+
+@pytest.mark.parametrize("plant_available, organic_carbon", [(0.30, 2.0), (0.30, 0.2), (0.06, 2.0), (0.06, 0.2)])
+def test_the_warning_compares_nothing_with_the_packages_own_soils(tmp_path, plant_available, organic_carbon):
+    """18 retrieved profiles holding 300 or 60 mm, rich or poor in organic matter: one warning text."""
+    def retrieved(cid):
+        return SoilProfile(profile_id=f"r{cid}", lat=12.0, lon=-5.0, source="isda", total_depth=1.0, layers=[
+            SoilLayer(depth_top=i / 5, depth_bottom=(i + 1) / 5, sand=40.0, clay=25.0, silt=35.0,
+                      organic_carbon=organic_carbon, bulk_density=1.4, ph=6.5, wilting_point=0.10,
+                      field_capacity=0.10 + plant_available, saturated_wc=0.45) for i in range(5)])
+
+    cells = list(range(1, 21))
+    out = _run(_translator(tmp_path), _grid(cells), {cid: retrieved(cid) for cid in cells[2:]},
+               _state(HwsdOutcome.NO_ANSWER))
+    assert out.record["default_cause"] == "no_retrieved_soil_at_cell:2"
+    assert out.warnings == ["2 of 20 grid cells (10.0%) run on a generic default soil profile (0-100 cm, about "
+                            "158 mm plant-available water)" + DEFAULT_DIRECTION]
 
 
 def test_the_warning_uses_the_exact_ratio(tmp_path):
@@ -406,6 +440,50 @@ def test_depth_and_water_are_derived_in_the_record_and_the_warning(
     header = next(ln for ln in out.lines if ln.startswith("*ML00000000"))
     last_slb = [ln.split()[0] for ln in out.blocks["ML00000000"] if ln[:6].strip().isdigit()][-1]
     assert int(header[31:36]) == int(last_slb) == int(depth.split("-")[1])
+
+
+# ── the direction clause: one home, one wording ──────────────────────────────
+
+
+def test_the_direction_clause_has_one_exact_wording():
+    for kind in ("default", "placeholder"):
+        assert soil_model.generic_soil_direction(kind) == (
+            f"the {kind} soil may hold more or less water, and more or less organic matter, than the local "
+            "soil, so the yields simulated on it may be over- or understated")
+    with pytest.raises(ValueError):
+        soil_model.generic_soil_direction("other")
+
+
+@pytest.mark.parametrize("cause", ["no_soil_source", "retrieve_stage_placeholder"])
+def test_the_warning_takes_its_clause_from_the_one_home(monkeypatch, cause):
+    monkeypatch.setattr(soil_model, "generic_soil_direction", lambda kind: f"SENTINEL-{kind}")
+    kind = "placeholder" if cause == "retrieve_stage_placeholder" else "default"
+    for k in (1, 2):
+        warning = _warning_for(cause, k)
+        assert warning.endswith(f"water); SENTINEL-{kind}.") and "may hold" not in warning
+
+
+def _warning_for(cause, k):
+    return craft._default_soil_warning(dssat_sol_writer.DefaultDeclaration(
+        cells=10, default_cells=k, causes=((cause, k),), fraction=k / 10, warning=True,
+        profile="ML00000000", depth_cm="0-100", paw_mm=158))
+
+
+def _joined(text):
+    """Source text with string literals continued across lines joined, and all whitespace collapsed."""
+    text = re.sub(r"""(["'])[ \t]*\n\s*[rRbBuUfF]{0,2}\1""", "", text)
+    return " ".join(re.sub(r"\n\s*#", " ", text).split())
+
+
+def test_no_older_direction_wording_survives_anywhere_in_the_source():
+    src = Path(__file__).resolve().parents[2] / "src/prismpy"
+    texts = {path.relative_to(src).as_posix(): _joined(path.read_text(encoding="utf-8"))
+             for path in src.rglob("*.py")}
+    assert [name for name, text in texts.items() if "may hold more or less water" in text] == ["models/soil.py"]
+    assert [(name, old) for name, text in texts.items() for old in OLD_DIRECTION_PHRASES if old in text] == []
+    evaluated = [soil_model.generic_soil_direction(kind) for kind in ("default", "placeholder")] + [
+        _warning_for(cause, k) for cause in ("no_soil_source", "retrieve_stage_placeholder") for k in (1, 2)]
+    assert [(text, old) for text in evaluated for old in OLD_DIRECTION_PHRASES if old in text] == []
 
 
 # ── every branch keeps every cell ──────────────────────────────────────────
