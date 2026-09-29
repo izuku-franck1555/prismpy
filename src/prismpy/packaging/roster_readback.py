@@ -66,15 +66,37 @@ def _int(text: str, source: str) -> int:
     return int(text)
 
 
+def _tsv_value(token: str):
+    """A soil-mask cell as the runner coerces it: an int, else a float, else the stripped text."""
+    text = token.strip()
+    for kind in (int, float):
+        try:
+            return kind(text)
+        except ValueError:
+            pass
+    return text
+
+
 def _craft(package: Path) -> RosterReadback:
-    path = package / "soil" / "soil_mask.txt"
+    """The soil mask read with the runner's row semantics: the header's three columns on every row,
+    a text SoilProfile and a numeric SharePCT; blank rows are skipped, as the runner skips them."""
+    path, source = package / "soil" / "soil_mask.txt", "soil/soil_mask.txt"
     if not path.is_file():
-        raise ValueError("soil/soil_mask.txt is missing")
-    lines = path.read_text(encoding="ascii").splitlines()
-    if not lines or lines[0] != _SOIL_MASK_HEADER:
-        raise ValueError("soil/soil_mask.txt does not start with its CellID header")
-    ids = [_int(line.split("\t", 1)[0], "soil/soil_mask.txt") for line in lines[1:] if line]
-    return RosterReadback(_strict_ids(ids, "soil/soil_mask.txt"), "soil/soil_mask.txt", "CellID", "5arcmin")
+        raise ValueError(f"{source} is missing")
+    rows = list(csv.reader(path.read_text(encoding="ascii").splitlines(), delimiter="\t"))
+    if not rows or "\t".join(rows[0]) != _SOIL_MASK_HEADER:
+        raise ValueError(f"{source} does not start with its CellID header")
+    ids = []
+    for number, row in enumerate(rows[1:], start=2):
+        if all(not cell.strip() for cell in row):
+            continue
+        if len(row) != 3:
+            raise ValueError(f"{source} line {number}: {len(row)} columns where the header has 3")
+        _, profile, share = (_tsv_value(cell) for cell in row)
+        if not isinstance(profile, str) or isinstance(share, str):
+            raise ValueError(f"{source} line {number}: SoilProfile must be text, SharePCT a number")
+        ids.append(_int(row[0], source))
+    return RosterReadback(_strict_ids(ids, source), source, "CellID", "5arcmin")
 
 
 def _acea(package: Path) -> RosterReadback:
