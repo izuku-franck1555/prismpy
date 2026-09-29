@@ -46,7 +46,8 @@ def apply_crop_presence_rule(cells, rule, raster_path, *, crop_name: str, acea_t
     """The cells with harvested area > 0 ha in the rule's layer, and the rule's record.
 
     Refuses (typed) a grid other than 5', a layer not resolved for this run or one that does not
-    match the frozen identity; raises CropPresenceEmptyError when no cell keeps any area."""
+    match the frozen identity; raises CropPresenceEmptyError when the rule leaves no cell of a
+    non-empty grid."""
     if grid_resolution != "5arcmin":
         raise CropPresenceIdentityError(
             f"the crop-presence rule judges SPAM's 5-arcmin cells, not a {grid_resolution} grid")
@@ -56,7 +57,7 @@ def apply_crop_presence_rule(cells, rule, raster_path, *, crop_name: str, acea_t
     expected = rule.model_dump(mode="json")
     presence = cell_presence(cells, raster_path, expected=expected)
     kept = [c for c in cells if crop_area_present(presence.areas[c.cell_id])]
-    if not kept:
+    if cells and not kept:  # a grid that arrives empty was emptied upstream, never by the layer
         raise CropPresenceEmptyError(
             f"no cell of this region has {crop_name} harvested area > 0 in {rule.layer_label}")
     record: Dict[str, Any] = {
