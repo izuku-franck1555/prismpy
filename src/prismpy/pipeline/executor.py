@@ -486,21 +486,30 @@ class TranslationPipeline:
                     provenance=self.provenance,
                 )
 
+                import re
+
+                boundary_config = self.config.region.boundary
+                # A GID names one GADM 4.1 unit at its own level: never a name lookup, never a box.
+                gid_level = re.fullmatch(r"GID_([0-5])", boundary_config.gadm_filter_field or "")
+                gid_config = gid_level is not None
                 gadm_level = self.config.region.boundary.gadm_level or 2
+                if gid_config:
+                    gadm_level = int(gid_level.group(1))
+                    if boundary_config.gadm_level not in (None, gadm_level):
+                        raise ValueError(f"{gid_level.group(0)} names a GADM level-{gadm_level} unit, "
+                                         f"not one at gadm_level {boundary_config.gadm_level}")
                 filter_field = self.config.region.boundary.gadm_filter_field or f"NAME_{gadm_level}"
                 filter_value = self.config.region.boundary.gadm_filter_value
                 country_iso3 = self.config.region.country_iso3
 
                 self.logger.info(f"Loading GADM boundary: {filter_field}='{filter_value}'")
 
-                # A GID names exactly one GADM 4.1 unit: never a name lookup, never a box fallback.
-                gid_config = filter_field == f"GID_{gadm_level}"
                 if gid_config:
-                    import re
                     version = str(self.config.data_sources.gadm.version)
                     if version != "4.1":
                         raise ValueError(f"a region identified by its GID needs GADM 4.1, not GADM {version}")
-                    shape = rf"{re.escape(country_iso3.upper())}(\.\d+){{{gadm_level}}}_\d+"
+                    iso3 = re.escape(country_iso3.upper())
+                    shape = iso3 if gadm_level == 0 else rf"{iso3}(\.\d+){{{gadm_level}}}_\d+"
                     if not re.fullmatch(shape, filter_value or ""):
                         raise ValueError(f"GID {filter_value!r} is not a GADM 4.1 level-{gadm_level} unit "
                                          f"of {country_iso3}")
