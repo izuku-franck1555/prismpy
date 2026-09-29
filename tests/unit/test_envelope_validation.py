@@ -289,5 +289,43 @@ class TestEnvelopeValidationF28(_LoaderTestBase):
         )
 
 
+class TestEnvelopeThermalScreen(_LoaderTestBase):
+    """The per-crop thermal screen: absent reads as annual; a seasonal crop must name its source."""
+
+    def test_absent_screen_loads_as_annual(self):
+        maize = self._load(_valid_payload())["maize"]
+        self.assertEqual(maize["thermal_screen"], "annual")
+        self.assertNotIn("thermal_screen_source", maize)
+
+    def test_both_screens_are_carried_with_their_source(self):
+        for screen in ("annual", "seasonal"):
+            with self.subTest(screen=screen):
+                m = _valid_maize()
+                m.update(thermal_screen=screen, thermal_screen_source="A cited planting guide")
+                maize = self._load(_valid_payload(m))["maize"]
+                self.assertEqual(maize["thermal_screen"], screen)
+                self.assertEqual(maize["thermal_screen_source"], "A cited planting guide")
+
+    def test_unknown_screen_rejected(self):
+        for screen in ("monthly", "Seasonal", None):
+            with self.subTest(screen=screen):
+                m = _valid_maize()
+                m["thermal_screen"] = screen
+                with self.assertRaises(EnvelopeValidationError) as ctx:
+                    self._load(_valid_payload(m))
+                self.assertIn("thermal_screen", str(ctx.exception))
+
+    def test_seasonal_screen_without_a_source_rejected(self):
+        for source in (None, "", "  ", 7):
+            with self.subTest(source=source):
+                m = _valid_maize()
+                m["thermal_screen"] = "seasonal"
+                if source is not None:
+                    m["thermal_screen_source"] = source
+                with self.assertRaises(EnvelopeValidationError) as ctx:
+                    self._load(_valid_payload(m))
+                self.assertIn("thermal_screen_source", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

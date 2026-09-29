@@ -1744,9 +1744,9 @@ class PythiaTranslator(PythiaTranslatorBase):
         'peanut':    {'ppop': 15.0, 'plrs': 50.0, 'pldp': 5.0},
         # common bean — East-African smallholder (50 cm rows x 10 cm within-row = 200,000/ha)
         'beans':     {'ppop': 20.0, 'plrs': 50.0, 'pldp': 5.0},
-        # potato: plwt (kg dry matter/ha), sprl (cm) and PLME S are DSSAT's reference experiment
-        # WABE0301 (Washington, USA); ridge geometry and PLDS R are prismpy choices, not yet sourced.
-        'potato':    {'ppop': 4.4, 'plrs': 75.0, 'pldp': 10.0, 'plwt': 444.0, 'sprl': 0.1},
+        # potato: plwt/sprl/PLME S from DSSAT's WABE0301 (v4.8.2.0 Potato/WABE0301.PTX); pldp 5 cm = RECA West-Africa guide §4.6.2 (5-10 cm below the ridge top, lower bound), also WABE0301's value
+        # potato: ridge geometry (plrs 75) and PLDS R are prismpy choices, not yet sourced
+        'potato':    {'ppop': 4.4, 'plrs': 75.0, 'pldp': 5.0, 'plwt': 444.0, 'sprl': 0.1},
     }
     # An unmapped crop falls back to the wizard-generic maize density (plants/m²) — never -99.
     PLANTING_DEFAULT_FALLBACK = {'ppop': 6.25, 'plrs': 70.0, 'pldp': 5.0}

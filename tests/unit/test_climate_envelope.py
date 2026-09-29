@@ -329,6 +329,39 @@ class TestCompareThermalExtremes(unittest.TestCase):
         self.assertIn("P90_extreme_tmax", str(ctx.exception))
 
 
+class TestThermalScreen(unittest.TestCase):
+    """A seasonal screen reads a single thermal kill as marginal; the annual screen keeps it incompatible."""
+
+    def test_truth_table(self):
+        seasonal = CompatibilityVerdict.MARGINAL_THERMAL_SEASONAL
+        incompatible = CompatibilityVerdict.INCOMPATIBLE
+        compatible = CompatibilityVerdict.COMPATIBLE
+        # (P10 extreme tmin, P90 extreme tmax) against maize TMIN 10 / TMAX 47 -> (annual, seasonal) verdicts.
+        cases = {
+            "cold only": ((-2.0, 25.0), (incompatible, seasonal)),
+            "heat only": ((15.0, 50.0), (incompatible, seasonal)),
+            "both": ((5.0, 50.0), (seasonal, seasonal)),
+            "none": ((15.0, 40.0), (compatible, compatible)),
+        }
+        for case, ((p10, p90), verdicts) in cases.items():
+            for screen, verdict in zip(("annual", "seasonal"), verdicts):
+                with self.subTest(case=case, screen=screen):
+                    self.assertIs(compare_thermal_extremes(
+                        zone_p10_extreme_tmin=p10, zone_p90_extreme_tmax=p90,
+                        crop_tmin=_MAIZE_TMIN, crop_tmax=_MAIZE_TMAX,
+                        thermal_screen=screen,
+                    ), verdict)
+
+    def test_unknown_screen_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            compare_thermal_extremes(
+                zone_p10_extreme_tmin=15.0, zone_p90_extreme_tmax=50.0,
+                crop_tmin=_MAIZE_TMIN, crop_tmax=_MAIZE_TMAX,
+                thermal_screen="monthly",
+            )
+        self.assertIn("monthly", str(ctx.exception))
+
+
 class TestComputeZonePrecipIQR(unittest.TestCase):
     """Per AC-Q3-A-a aggregation: zone P25/P50/P75 of per-cell
     annual mean precip across cells."""

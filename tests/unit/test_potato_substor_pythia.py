@@ -420,7 +420,7 @@ def test_rendered_potato_planting_row_carries_the_seed_tuber_values(tmp_path, ma
     assert (row["PLWT"], row["SPRL"]) == (444.0, 0.1)
     assert (row["PLWT_FIELD"], row["SPRL_FIELD"]) == ("   444", "   0.1")
     assert (row["PPOP"], row["PPOE"], row["PLME"], row["PLRS"], row["PLDP"]) == (
-        4.4, 4.4, "S", 75.0, 10.0)
+        4.4, 4.4, "S", 75.0, 5.0)
 
 
 def test_an_explicit_potato_density_beats_the_default(tmp_path):
@@ -705,6 +705,39 @@ def test_supported_crop_map_keeps_both_spellings_for_exact_match_readers():
         assert not {"potato", "Potato"} & _PLATFORM_SUPPORTED_CROPS[platform]
 
 
+def test_sarra_py_declares_exactly_the_cereals_it_models():
+    from prismpy.packaging.manifest import _PLATFORM_SUPPORTED_CROPS
+
+    assert _PLATFORM_SUPPORTED_CROPS["sarra_py"] == frozenset(
+        {"maize", "sorghum", "millet", "Maize", "Sorghum", "Millet"})
+
+
+def test_every_declared_sarra_py_crop_has_a_calibrated_variety_file_in_the_repository():
+    # Repository presence only: the installed wheel does not ship data/sarra_py_varieties/.
+    from prismpy.packaging.manifest import _PLATFORM_SUPPORTED_CROPS
+
+    varieties = Path(__file__).resolve().parents[2] / "data" / "sarra_py_varieties"
+    crops = {crop.casefold() for crop in _PLATFORM_SUPPORTED_CROPS["sarra_py"]}
+    assert crops
+    assert sorted(crop for crop in crops if not (varieties / f"{crop}.yaml").is_file()) == []
+
+
+@pytest.mark.parametrize("crop,short,refused", [("Cowpea", "cpe", True), ("Rice", "ric", True),
+                                                ("Groundnut", "gnt", True), ("Sorghum", "sor", False)])
+def test_a_crop_sarra_py_does_not_model_is_refused_before_translation(
+        tmp_path, monkeypatch, crop, short, refused):
+    from prismpy.packaging.manifest import UnsupportedCropError
+
+    pipeline, calls = _pipeline(tmp_path, [Platform.SARRA_PY], monkeypatch, crop=crop, short=short)
+    if refused:
+        with pytest.raises(UnsupportedCropError, match="sarra_py"):
+            pipeline._execute_translate(_data())
+        assert calls == []
+    else:
+        pipeline._execute_translate(_data())
+        assert calls == [Platform.SARRA_PY]
+
+
 # ── ECOCROP climate envelope ──────────────────────────────────────────────────
 
 def test_potato_ecocrop_envelope_is_the_fao_absolute_tolerance():
@@ -734,3 +767,4 @@ def test_built_wheel_ships_a_loadable_potato_envelope(tmp_path):
         shipped.write_bytes(zf.read("prismpy/koppen/ecocrop_envelopes.json"))
     env = load_ecocrop_envelopes(shipped)["potato"]
     assert (env["TMIN"], env["TMAX"], env["RMIN"], env["RMAX"]) == (7.0, 30.0, 250.0, 2000.0)
+    assert env["thermal_screen"] == "seasonal"

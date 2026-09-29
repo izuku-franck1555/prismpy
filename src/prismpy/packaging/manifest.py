@@ -493,9 +493,10 @@ def _sarra_py_maize_at_deep_sahel(
 
 
 _PLATFORM_SUPPORTED_CROPS: Dict[str, FrozenSet[str]] = {
+    # SARRA-H models only Sudano-Sahelian C4 cereals
     "sarra_py": frozenset({
-        "maize", "sorghum", "millet", "cowpea", "rice", "groundnut",
-        "Maize", "Sorghum", "Millet", "Cowpea", "Rice", "Groundnut",
+        "maize", "sorghum", "millet",
+        "Maize", "Sorghum", "Millet",
     }),
     "pythia": frozenset({
         "maize", "sorghum", "millet", "cowpea", "rice", "groundnut", "beans", "potato",
