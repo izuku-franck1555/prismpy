@@ -381,7 +381,8 @@ class TestCarveOutRegression:
         # Then 526 -> 528 after the CRAFT 5-arcmin guard call in __init__ (+2).
         # Then 528 -> 529 after a module-level `import os` (+1).
         # Then 529 -> 531 after importing the soil-cascade types (+2).
-        ("src/prismpy/pipeline/executor.py", 531),
+        # Then 531 -> 545 after the GID identity check ahead of both GADM backends (+14).
+        ("src/prismpy/pipeline/executor.py", 545),
         # Provenance-flush inside the translator-dispatch except handler
         # in _execute_translate: writes decision records, cancel-inert.
         # Line shifted from 2338 → 2346 (PRE.3.3 thread-through)
@@ -456,7 +457,8 @@ class TestCarveOutRegression:
         # Then 2832 -> 2854 after the HWSD outcome and the soil-cascade state (+22).
         # Then 2854 -> 2877 after the crop-presence rule and its classified errors in harmonize (+23).
         # Then 2877 -> 2897 after the roster read-back recorder before translate (+20).
-        ("src/prismpy/pipeline/executor.py", 2897),
+        # Then 2897 -> 2919 after the GID identity branches in _execute_retrieve (+22).
+        ("src/prismpy/pipeline/executor.py", 2919),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed

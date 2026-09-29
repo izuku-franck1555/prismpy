@@ -493,6 +493,18 @@ class TranslationPipeline:
 
                 self.logger.info(f"Loading GADM boundary: {filter_field}='{filter_value}'")
 
+                # A GID names exactly one GADM 4.1 unit: never a name lookup, never a box fallback.
+                gid_config = filter_field == f"GID_{gadm_level}"
+                if gid_config:
+                    import re
+                    version = str(self.config.data_sources.gadm.version)
+                    if version != "4.1":
+                        raise ValueError(f"a region identified by its GID needs GADM 4.1, not GADM {version}")
+                    shape = rf"{re.escape(country_iso3.upper())}(\.\d+){{{gadm_level}}}_\d+"
+                    if not re.fullmatch(shape, filter_value or ""):
+                        raise ValueError(f"GID {filter_value!r} is not a GADM 4.1 level-{gadm_level} unit "
+                                         f"of {country_iso3}")
+
                 # Try direct shapefile path first (for non-standard directory structures)
                 # Standard GADM: base_path/MLI/gadm41_MLI_2.shp
                 # Direct: base_path/gadm41_MLI_2.shp
@@ -522,6 +534,8 @@ class TranslationPipeline:
 
                 if result.success and result.data:
                     region = result.data
+                    if gid_config:
+                        region.name = self.config.region.name
                     self.logger.info(f"Loaded GADM bounds: {region.bounds.to_gis_format()}")
                 else:
                     # GADM loading failed — try pygadm (downloads from web, caches locally)
@@ -536,15 +550,18 @@ class TranslationPipeline:
                             f"filter='{filter_value}'"
                         )
 
-                        names_df = pygadm.Names(
-                            admin=country_iso3, content_level=gadm_level
-                        )
-                        name_col = f"NAME_{gadm_level}"
-                        gid_col = f"GID_{gadm_level}"
+                        if gid_config:
+                            gid = filter_value
+                        else:
+                            names_df = pygadm.Names(
+                                admin=country_iso3, content_level=gadm_level
+                            )
+                            name_col = f"NAME_{gadm_level}"
+                            gid_col = f"GID_{gadm_level}"
 
-                        match = names_df[names_df[name_col] == filter_value]
-                        if len(match) > 0:
-                            gid = match.iloc[0][gid_col]
+                            match = names_df[names_df[name_col] == filter_value]
+                            gid = match.iloc[0][gid_col] if len(match) > 0 else None
+                        if gid is not None:
                             gdf = pygadm.Items(admin=gid)
 
                             if gdf is not None and len(gdf) > 0:
@@ -621,6 +638,11 @@ class TranslationPipeline:
 
                     # If pygadm also failed, fall back to manual bounds
                     if region is None:
+                        if gid_config:
+                            raise ValueError(
+                                f"GADM 4.1 unit {filter_value} was not found; a region identified by "
+                                f"its GID never falls back to a name or a box: {result.errors}"
+                            )
                         if self.config.region.boundary.manual_bounds:
                             mb = self.config.region.boundary.manual_bounds
                             bounds = BoundingBox(minx=mb.minx, miny=mb.miny, maxx=mb.maxx, maxy=mb.maxy)
