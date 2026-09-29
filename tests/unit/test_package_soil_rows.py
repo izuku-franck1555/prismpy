@@ -311,3 +311,23 @@ def test_a_package_built_without_the_soil_mask_declares_its_soil(tmp_path, monke
     assert decl.record["profile_sources"] == {"hwsd": 2}
     assert json.loads((pkg / "manifest.json").read_text())["data_sources"]["soil"] == decl.label
     assert sd.final_package_problem(pkg, "craft") is None
+    # a mask added after the binding is present but unbound
+    (pkg / "soil/soil_mask.txt").write_text("CellID\tSoilProfile\tSharePCT\n101\tML00001469\t1\n")
+    with pytest.raises(sd.SoilDeclarationError, match="binds"):
+        sd.declared_soil(pkg, "craft")
+
+
+def test_a_default_build_keeps_its_mask_bound_and_checked(tmp_path):
+    def build(where):              # cell 102 has no HWSD soil, so it runs on the default profile
+        return _craft(where, craft_t._grid([101, 102]), {101: craft_t._hwsd(1469)}, craft_t._state(HwsdOutcome.SERVED))
+
+    deleted = build(tmp_path / "deleted")
+    (deleted / "soil/soil_mask.txt").unlink()
+    with pytest.raises(sd.SoilDeclarationError, match="binds"):
+        sd.declared_soil(deleted, "craft")
+    repointed = build(tmp_path / "repointed")
+    mask = repointed / "soil/soil_mask.txt"
+    mask.write_text(mask.read_text().replace("ML00000000", "ML00001469"))
+    sd.write_binding(repointed, "soil", [repointed / "soil/ML.SOL", repointed / "soil" / sd.DETAIL_FILE, mask])
+    with pytest.raises(sd.SoilDeclarationError, match="cells per source"):
+        sd.declared_soil(repointed, "craft")

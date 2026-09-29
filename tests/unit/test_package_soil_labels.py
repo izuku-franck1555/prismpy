@@ -19,7 +19,7 @@ from prismpy.packaging import soil_declaration as sd
 from prismpy.packaging.manifest import create_manifest
 from prismpy.translators._shared.dssat_sol_writer import DefaultDeclaration, write_dssat_sol
 from prismpy.translators._shared.eghr_substrate import build_eghr_substrate
-from prismpy.translators.base import HwsdOutcome
+from prismpy.translators.base import HwsdOutcome, UnifiedData
 from tests.package_soil import REGION
 from tests.unit import test_craft_declared_default_soil as craft_t
 from tests.unit import test_package_soil_check as check
@@ -274,6 +274,11 @@ def _soils_line(where, source, tokens):
 
 def _built(row, where, engine="craft"):
     """What the built component emits for inventory ``row``'s axis values."""
+    if row == "base-zero-cells":            # routed first, so a zero-cell record with source none takes it too
+        texts = {sd._label(platform, record) for platform, record in (
+            ("craft", _record(cells=0, profile_sources={})), ("craft", {"source": "none", "cells": 0}),
+            ("pythia", {"source": "none", "cells": 0, "no_profile_cells": 0}))}
+        return texts.pop() if len(texts) == 1 else repr(sorted(texts))
     family, _, rest = row.partition("-")
     parts = rest.split("-")
     if family == "hdr":
@@ -421,3 +426,24 @@ def test_a_pythia_package_with_unmapped_cells_names_the_cells_it_covers(tmp_path
     build_eghr_substrate(grid, {i: values._isda_s3(i) for i in range(1, 8)}, "ML", REGION, tmp_path)
     label = sd.declared_soil(tmp_path, "pythia").label
     assert label.startswith(INVENTORY["base-pythia-profiles-covered7of10"]) and INVENTORY["noprof-3of10"] in label
+
+
+
+@pytest.mark.parametrize("existing, state", [("placeholder", HwsdOutcome.NO_ANSWER), (None, None),
+                                             ("paths", HwsdOutcome.NOT_QUERIED)])
+def test_a_package_with_no_grid_cells_says_so(tmp_path, monkeypatch, existing, state):
+    """An empty roster, whether the grid is empty or harmonize's boundary filter removed every cell."""
+    craft_t._FakeHWSD.plan = {}
+    monkeypatch.setattr(craft_t.craft, "HWSDSource", craft_t._FakeHWSD)
+    tr, grid = craft_t._translator(tmp_path, paths=existing == "paths"), SpatialGrid(resolution="5arcmin", cells=[])
+    soil, cascade = ({0: craft_t._placeholder()} if existing == "placeholder" else None), (
+        craft_t._state(state) if state else None)
+    sol, mapping = tr._generate_soil_package(grid, craft_t.REGION, soil, cascade, [])
+    mask = tr._generate_soil_mask(grid=grid, region=craft_t.REGION, cell_to_profile=mapping)
+    sd.write_binding(tr.output_dir, "soil", [sol, sol.parent / sd.DETAIL_FILE, mask])
+    tr._generate_package_metadata(UnifiedData(region=craft_t.REGION, grid=grid, soil=soil, soil_cascade=cascade), [])
+    manifest = json.loads((tr.output_dir / "manifest.json").read_text())
+    readme = (tr.output_dir / "README.md").read_text().splitlines()
+    soil_row = next(line for line in readme if line.startswith(("| **Soil** |", "| Soil |"))).split("|")[2].strip()
+    assert manifest["data_sources"]["soil"] == manifest["inputs_used"]["soil"]["label"] == soil_row == (
+        INVENTORY["base-zero-cells"])

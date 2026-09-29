@@ -45,6 +45,7 @@
  "base-pythia-profiles-covered1of10": "iSDA Africa soil properties, 0–50 cm, read at each cell centre, one profile for 1 of 10 grid cells, stored in the eGHR file format and looked up at each simulated site",
  "base-pythia-eghr_database": "eGHR global soil profiles from the database configured for PYTHIA, looked up at each simulated site",
  "base-pythia-none": "No soil profile is available for any cell in this package",
+ "base-zero-cells": "This package has no grid cells, so no soil profile is used",
  "base-acea-hwsd_upper_layer_texture": "HWSD v2.0 upper-layer (0–20 or 20–40 cm) texture (sand, clay) of one soil component, not necessarily the dominant one, read from the ~1 km pixel at each 0.5° cell centre and applied to the whole profile",
  "base-acea-list-isda_s3": "iSDA Africa soil properties, top-layer sand and clay only (applied to the whole profile), read at each cell centre, one per 0.5° cell, assigned by list order, not by location, so a cell's soil can come from elsewhere in the region",
  "base-acea-list-isda": "iSDA Africa topsoil properties, top-layer sand and clay only (applied to the whole profile), read at each cell centre, one per 0.5° cell, assigned by list order, not by location, so a cell's soil can come from elsewhere in the region",

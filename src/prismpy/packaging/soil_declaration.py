@@ -452,6 +452,7 @@ ACEA_DESCRIPTIONS = {
     "placeholder": SOURCE_DESCRIPTIONS["placeholder"],
 }
 NO_PROFILE = "No soil profile is available for any cell in this package"
+NO_CELLS = "This package has no grid cells, so no soil profile is used"
 BASE = {
     ("acea", "hwsd_upper_layer_texture"): (
         "HWSD v2.0 upper-layer (0–20 or 20–40 cm) texture (sand, clay) of one soil component, not "
@@ -609,6 +610,8 @@ def _warning(record: Mapping[str, Any]) -> str:
 
 
 def _label(platform: str, record: Mapping[str, Any], detail: Optional[Mapping[str, Any]] = None) -> str:
+    if record.get("cells") == 0:          # before the none check: at zero cells "no profile" misleads
+        return NO_CELLS
     if record["source"] == "none":
         return NO_PROFILE
     depths = profile_depths_cm(detail) if detail is not None else {}
