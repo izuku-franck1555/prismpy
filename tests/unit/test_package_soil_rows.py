@@ -112,6 +112,23 @@ def test_readers_see_short_fields_and_the_record_before_any_profile(tmp_path):
             assert len(line[13:24].strip()) <= 11 and len(line[37:]) <= 50
 
 
+@pytest.mark.parametrize(("key", "source", "header"), [
+    (7001, "hwsd", "*ML00007001  hwsd        SL      100 HWSD v2 SMU 7001 (MLI)"),
+    (0, "default", "*ML00000000  default     SL      100 Default profile (MLI)"),
+    # "placeholder" fills SLSOUR's 11 columns exactly, one space before SLTX
+    (5, "placeholder", "*ML00000005  placeholder SL      100 Placeholder 5 (MLI)"),
+    (12, "iSDA S3 (30m)", "*ML00000012  isda_s3     SL      100 iSDA S3 (30m) profile 12 (MLI)"),
+], ids=["hwsd", "default", "placeholder", "isda_s3"])
+def test_each_profile_header_names_the_profiles_source(tmp_path, key, source, header):
+    profiles = {key: SoilProfile(profile_id=f"p{key}", lat=12.5, lon=-5.5, source=source, layers=[
+        SoilLayer(depth_top=0.0, depth_bottom=1.0, sand=65.0, clay=10.0)])}
+    write_dssat_sol(tmp_path / "ML.SOL", profiles, "ML", REGION, stamp=sd.SoilStamp("profiles"),
+                    source_label_for_id=lambda k: craft_t.craft._profile_description(k, profiles[k]),
+                    profile_cell_counts={key: 1})
+    lines = (tmp_path / "ML.SOL").read_text().splitlines()
+    assert [ln for ln in lines if ln.startswith("*ML")] == [header]
+
+
 @pytest.mark.parametrize("platform", ["craft", "pythia", "acea", "sarra_py"])
 def test_a_caller_cannot_state_the_soil(tmp_path, platform):
     stamp_package_soil(tmp_path, platform)
