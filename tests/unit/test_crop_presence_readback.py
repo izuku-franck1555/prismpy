@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 import csv
 import dataclasses
+import sys
 from datetime import date, timedelta
 
 import geopandas as gpd
@@ -217,3 +218,24 @@ def test_the_acea_readback_needs_exactly_one_config(tmp_path):
         (tmp_path / "config" / name).write_text("class project_conf:\n    gridcells = [59081]\n")
     with pytest.raises(ValueError):
         read_back_roster("acea", tmp_path)
+
+
+def test_the_acea_readback_needs_gridcells_assigned_once(tmp_path):
+    from prismpy.packaging.roster_readback import read_back_roster
+
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "a_config.py").write_text(
+        "class project_conf:\n    gridcells = [59081]\n    gridcells = [59801]\n")
+    with pytest.raises(ValueError, match="exactly once"):
+        read_back_roster("acea", tmp_path)
+
+
+def test_a_csv_only_pythia_package_is_never_read_back(tmp_path, monkeypatch):
+    pipe, _, grid, region = _restricted_run(tmp_path, monkeypatch, Platform.PYTHIA)
+    monkeypatch.setitem(sys.modules, "geopandas", None)  # the writer's ImportError path: sites.csv
+    shapes = _write(pipe, Platform.PYTHIA, grid, region).parent
+    assert (shapes / "sites.csv").is_file() and not (shapes / "sites.shp").exists()
+    pipe._record_roster_readback(Platform.PYTHIA)
+
+    readback = pipe.provenance.record.boundary["crop_presence"]["roster_readback"]["pythia"]
+    assert readback.get("id_digest") is None and readback["error"]

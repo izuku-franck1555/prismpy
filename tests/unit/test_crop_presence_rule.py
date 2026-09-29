@@ -14,18 +14,21 @@ from pydantic import ValidationError
 from prismpy.cells.admission import cell_id_5arcmin_to_30arcmin_parent as parent
 from prismpy.pipeline.executor import TranslationPipeline
 from tests.unit._crop_presence_fixtures import (
-    COAST_BOX, COAST_MAIZ, INLAND_BOX, INLAND_POTA, StopAfterGrid, box_cells, harmonize_output_digest,
-    identity_of, make_config, mapped, region_of, run_grid_stages,
+    COAST_BOX, COAST_MAIZ, INC, INLAND_BOX, INLAND_POTA, StopAfterGrid, box_cells,
+    harmonize_output_digest, identity_of, make_config, mapped, region_of, run_grid_stages,
 )
 
 # The whole-grid config's hash input and YAML dump at the pre-rule base 4e763a1.
 _BASE_DUMP_SHA256 = "1e43bdfeb6607a60cd2c18b9f013959cf0d5b32880136ce2cafe216a295d40e9"
 _BASE_YAML_SHA256 = "f20f32d312296408692960ed0dc7c6db114271c6efa529d43e54877ee9106aef"
-# What harmonize hands on with the rule unset, per config, at the pre-rule base 6b4eca1.
+# What harmonize hands on with the rule unset, per engine and config, at the pre-rule base 6b4eca1.
 _BASE_HARMONIZE = {
-    "30arcmin": "1c144ba94e66444fef1e58ed7da8b4b9bfd39cb5d718ce9e2d3ce1147ff8a1c4",
-    "user exclusions": "4d9712ee7f57d9bf2be7eeec9bf4b59e344682f8bf58532e0324b608260a11dc",
-    "whole grid": "f2ad5c50f1ac8763208150d44845f18fd6f4a63c90d45cb26b961b686d397b9a",
+    "30arcmin": "67ce53966e107bc44ce6c67325c28b8317ca1818a52766e90f6bbce730f88902",
+    "acea": "b3a399425f815a910bb90c2fdeda4599ca56e5590c71d3e4fbb169f0186d4c27",
+    "craft": "b3a399425f815a910bb90c2fdeda4599ca56e5590c71d3e4fbb169f0186d4c27",
+    "pythia": "b3a399425f815a910bb90c2fdeda4599ca56e5590c71d3e4fbb169f0186d4c27",
+    "sarra_py": "9d4d94245434b90cde1b0cb1c829d0666cda5be38af54ee3d105c15074025305",
+    "user exclusions": "ed1aae64a6b7e4c79c64b12f0fee3ee5ed9d945d18022d21796186cbf524d644",
 }
 _LEGACY_BOUNDARY_KEYS = {
     "source", "version", "inclusion_rule", "min_share_percent", "n_cells_full_extent",
@@ -131,7 +134,7 @@ def _unset_rule_config(tmp_path, case):
         return make_config(tmp_path, exclude_cells=[c.cell_id for c in box_cells(COAST_BOX)[:2]])
     if case == "30arcmin":
         return make_config(tmp_path, grid_resolution="30arcmin", targets=("pythia",))
-    return make_config(tmp_path, targets=("pythia", "craft", "acea", "sarra_py"))
+    return make_config(tmp_path, targets=(case,))
 
 
 @pytest.mark.parametrize("case", sorted(_BASE_HARMONIZE))
@@ -237,6 +240,15 @@ def test_zero_mapped_cells_fail_the_real_pipeline_with_a_classified_event(tmp_pa
     assert harmonize.errors == [f"Harmonization failed: {message}"]
     assert harmonize.error_events == [classify_to_event_dict(CropPresenceEmptyError(message))]
     assert "translate" not in result.stages
+
+
+def test_a_grid_emptied_before_the_rule_is_never_blamed_on_spam(tmp_path, monkeypatch):
+    lon, lat = 4.5, 6.5  # a 5' lattice corner: the box takes a quarter of 4 cells, all with maize
+    centres = [(lat + dy * INC / 2, lon + dx * INC / 2) for dx in (-1, 1) for dy in (-1, 1)]
+    assert all(mapped(COAST_MAIZ, *centre) for centre in centres)
+    box = (lon - INC / 4, lat - INC / 4, lon + INC / 4, lat + INC / 4)
+    result, _, ids, _ = run_grid_stages(_restricted(tmp_path, box=box, min_share=100), monkeypatch)
+    assert ids == [] and result.error_events == []
 
 
 @pytest.mark.parametrize("override", [{"sha256": "0" * 64}, {"width": 25}])

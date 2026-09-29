@@ -3,6 +3,8 @@ order, the same pick (the first match of the first matching pattern, in glob ord
 plus every match of that pattern so a caller can see an ambiguous layer."""
 from __future__ import annotations
 
+from fnmatch import fnmatch
+
 import pytest
 
 # The clip's pattern list at the base 4e763a1 (acea/translator.py:1774-1781), for MAIZ / FAO 56 / A.
@@ -56,6 +58,18 @@ def test_two_files_for_one_pattern_are_both_listed_in_glob_order(tmp_path):
     got = _resolve(tmp_path)
     assert got.matches == list(tmp_path.glob("*MAIZ*_A.tif")) and got.pick == got.matches[0]
     assert len(got.matches) == 2
+
+
+def test_the_pick_follows_the_directory_order_never_a_sort(tmp_path, monkeypatch):
+    names = ["b_MAIZ_2_A.tif", "c_MAIZ_3_A.tif", "a_MAIZ_1_A.tif"]  # neither ascending nor descending
+    _touch(tmp_path, *names)
+
+    def listing(directory, pattern):
+        return (directory / name for name in names if fnmatch(name, pattern))
+
+    monkeypatch.setattr(type(tmp_path), "glob", listing)
+    got = _resolve(tmp_path)
+    assert [p.name for p in got.matches] == names and got.pick.name == names[0]
 
 
 @pytest.mark.parametrize("crop,names", [("Maize", ()), ("Teff", ("spam2020_V2r0_global_H_MAIZ_A.tif",))])

@@ -9,6 +9,7 @@ that needs the new API fails on its own rather than at collection.
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import math
@@ -112,9 +113,11 @@ def box_cells(box):
 
 
 def make_config(tmp_path, *, rule=None, rule_path=None, targets=("craft",), exclude_cells=(),
-                grid_resolution="5arcmin", box=COAST_BOX, crop=("Maize", "mai")):
+                grid_resolution="5arcmin", box=COAST_BOX, crop=("Maize", "mai"), min_share=None):
     boundary = {"source": BoundarySource.MANUAL,
                 "manual_bounds": ManualBoundsConfig(minx=box[0], miny=box[1], maxx=box[2], maxy=box[3])}
+    if min_share is not None:
+        boundary["min_share_percent"] = min_share
     if rule is not None:
         boundary["crop_presence"] = rule
     if rule_path is not None:
@@ -143,14 +146,16 @@ def region_of(config):
     return region
 
 
-def run_grid_stages(config, monkeypatch):
+def run_grid_stages(config, monkeypatch, capture=None):
     """Run harmonize on the config's manual region; returns (stage result, boundary record,
     final cell ids, pipeline). The first soil fetch is replaced by StopAfterGrid, so the stage ends
-    right after the grid stages and the boundary record, with no network access."""
-    final = {}
+    right after the grid stages and the boundary record, with no network access. ``capture`` also
+    receives the grid's cells, in order, as field dicts."""
+    final = {} if capture is None else capture
 
     def _stop(self, grid, region):
         final["ids"] = [c.cell_id for c in grid.cells]
+        final["cells"] = [dataclasses.asdict(c) for c in grid.cells]
         raise StopAfterGrid("stopped after the grid stages")
 
     monkeypatch.setattr(TranslationPipeline, "_retrieve_isda_api_for_grid", _stop)
@@ -171,10 +176,12 @@ def _scrub(value):
 
 
 def harmonize_output_digest(config, monkeypatch):
-    """sha256 over what harmonize hands on for ``config``: the kept cell ids, the boundary record,
-    the stage's errors, warnings and events, and the provenance record less its VOLATILE_FIELDS."""
-    result, boundary, ids, pipe = run_grid_stages(config, monkeypatch)
-    payload = {"ids": sorted(ids), "boundary": boundary, "errors": result.errors,
+    """sha256 over what harmonize hands on for ``config``: the grid's cells in order with all their
+    fields, the boundary record, the stage's errors, warnings and events, and the provenance record
+    less its VOLATILE_FIELDS."""
+    captured = {}
+    result, boundary, _, pipe = run_grid_stages(config, monkeypatch, captured)
+    payload = {"cells": captured["cells"], "boundary": boundary, "errors": result.errors,
                "warnings": result.warnings, "events": getattr(result, "error_events", None),
                "provenance": _scrub(pipe.provenance.record.to_dict())}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
