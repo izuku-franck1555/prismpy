@@ -2430,7 +2430,7 @@ class TranslationPipeline:
                     outcome = apply_crop_presence_rule(
                         grid.cells, config_boundary.crop_presence, config_boundary.crop_presence_path,
                         crop_name=self.config.crop.name, acea_target=acea_target,
-                        grid_resolution=self.config.region.grid_resolution,
+                        grid_resolution=grid.resolution,
                     )
                     grid.cells = outcome.kept
                     crop_presence_record = outcome.record
