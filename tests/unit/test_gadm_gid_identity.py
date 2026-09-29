@@ -60,11 +60,13 @@ def local_pygadm(monkeypatch):
     pygadm.session.settings.disabled = prior_disabled
 
 
-def _shapefile_dir(tmp_path, nga):
+def _shapefile_dir(tmp_path, nga, level=2):
     directory = tmp_path / "gadm"
     directory.mkdir()
-    nga[["GID_0", "NAME_0", "GID_1", "NAME_1", "GID_2", "NAME_2", "geometry"]].to_file(
-        directory / "gadm41_NGA_2.shp")
+    units = nga[[c for n in range(level + 1) for c in (f"GID_{n}", f"NAME_{n}")] + ["geometry"]]
+    if level < 2:  # a coarser GADM file holds each unit once, as the union of its districts
+        units = units.dissolve(by=f"GID_{level}", as_index=False)
+    units.to_file(directory / f"gadm41_NGA_{level}.shp")
     return directory
 
 
@@ -72,7 +74,7 @@ class _StopAfterRegion(Exception):
     pass
 
 
-def _retrieve(tmp_path, monkeypatch, *, field, value, gadm_dir=None, manual=False, version="4.1"):
+def _retrieve(tmp_path, monkeypatch, *, field, value, gadm_dir=None, manual=False, version="4.1", level=2):
     seen = {}
 
     def _stop(self, region):
@@ -80,7 +82,7 @@ def _retrieve(tmp_path, monkeypatch, *, field, value, gadm_dir=None, manual=Fals
         raise _StopAfterRegion("stopped after the region")
 
     monkeypatch.setattr(TranslationPipeline, "_load_climate_data", _stop)
-    boundary = {"source": BoundarySource.GADM, "gadm_level": 2,
+    boundary = {"source": BoundarySource.GADM, "gadm_level": level,
                 "gadm_filter_field": field, "gadm_filter_value": value}
     if manual:
         boundary["manual_bounds"] = ManualBoundsConfig(minx=3.0, miny=4.0, maxx=4.0, maxy=5.0)
@@ -134,6 +136,27 @@ def test_the_shapefile_backend_selects_one_unit(tmp_path, nga, name, gid, other)
     assert result.data.bounds.to_gis_format() == pytest.approx(list(_unit(nga, gid).bounds))
 
 
+@pytest.mark.parametrize("backend", ["pygadm", "shapefile"])
+@pytest.mark.parametrize("level,gid", [(0, "NGA"), (1, "NGA.10_1")])
+def test_a_gid_config_loads_the_unit_at_its_own_level(tmp_path, monkeypatch, local_pygadm, nga, level,
+                                                      gid, backend):
+    gadm_dir = _shapefile_dir(tmp_path, nga, level) if backend == "shapefile" else None
+    _, region = _retrieve(tmp_path, monkeypatch, field=f"GID_{level}", value=gid, level=level,
+                          gadm_dir=gadm_dir)
+    unit = nga[nga[f"GID_{level}"] == gid].geometry.union_all()
+    assert region.gadm_level == level
+    assert region.bounds.to_gis_format() == pytest.approx(list(unit.bounds))
+    assert wkt.loads(region.geometry_wkt).area == pytest.approx(unit.area)
+    assert region.metadata.get("feature_count") == (1 if backend == "shapefile" else None)
+
+
+@pytest.mark.parametrize("field,value,level", [("GID_0", "NGA", 2), ("GID_2", "NGA.32.2_1", 0)])
+def test_a_gid_field_at_another_level_fails_loud(tmp_path, monkeypatch, local_pygadm, field, value, level):
+    result, region = _retrieve(tmp_path, monkeypatch, field=field, value=value, level=level)
+    assert result.success is False and region is None
+    assert any(field in error and f"gadm_level {level}" in error for error in result.errors)
+
+
 @pytest.mark.parametrize("with_shapefile", [False, True])
 @pytest.mark.parametrize("manual", [False, True])
 def test_a_gid_miss_fails_loud_in_both_backends(tmp_path, monkeypatch, local_pygadm, nga,
@@ -145,10 +168,11 @@ def test_a_gid_miss_fails_loud_in_both_backends(tmp_path, monkeypatch, local_pyg
     assert any("NGA.99.99_1" in error for error in result.errors)
 
 
-@pytest.mark.parametrize("value", ["MLI.32.2_1", "NGA.32_1", "NGA.32.2"])
+@pytest.mark.parametrize("level,value", [(2, "MLI.32.2_1"), (2, "NGA.32_1"), (2, "NGA.32.2"),
+                                         (0, "NGA_1"), (0, "MLI"), (1, "NGA.10")])
 def test_a_gid_that_does_not_fit_its_country_and_level_fails_loud(tmp_path, monkeypatch, local_pygadm,
-                                                                  value):
-    result, region = _retrieve(tmp_path, monkeypatch, field="GID_2", value=value)
+                                                                  level, value):
+    result, region = _retrieve(tmp_path, monkeypatch, field=f"GID_{level}", value=value, level=level)
     assert result.success is False and region is None
     assert any("GID" in error and value in error for error in result.errors)
 

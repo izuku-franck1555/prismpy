@@ -5,16 +5,21 @@ from __future__ import annotations
 
 import ast
 import csv
+import dataclasses
+from datetime import date, timedelta
 
 import geopandas as gpd
 import pytest
 
 from prismpy.config.schema import Platform
+from prismpy.models.climate import ClimateRecord, ClimateTimeSeries
+from prismpy.models.crop import CropCalendar
 from prismpy.models.spatial import SpatialGrid
 from prismpy.translators.base import UnifiedData
 from tests.unit._crop_presence_fixtures import (
     COAST_MAIZ, cell, identity_of, make_config, region_of, run_grid_stages,
 )
+from tests.unit.test_pythia_canonical_substrate_flag import _build_profiles
 
 
 def _digest(ids):
@@ -72,6 +77,35 @@ def test_each_engine_reads_back_what_its_writer_wrote(tmp_path, monkeypatch, pla
     assert readback["id_digest"] == _digest(_parse(platform, written)) == _final_digest(platform, record)
     if platform is Platform.ACEA:
         assert readback["n"] == record["n30_final"] == len(_parse(platform, written))
+
+
+def _harmonized(pipe, grid, region):
+    """What translate() consumes: each kept cell with a soil profile, daily climate over the run's
+    years and the configured calendar, plus the pipeline's default crop parameters."""
+    cfg, profile = pipe.config, _build_profiles()[0]
+    first = date(cfg.temporal.start_year, 1, 1)
+    records = [ClimateRecord(date=first + timedelta(days=k), tmax=30.0, tmin=21.0, precip=4.0, srad=18.0)
+               for k in range((date(cfg.temporal.end_year, 12, 31) - first).days + 1)]
+    calendar = cfg.crop.calendar
+    return UnifiedData(
+        region=region, grid=grid, crop_params=pipe._create_default_crop_params(),
+        soil={c.cell_id: dataclasses.replace(profile, profile_id=f"P{c.cell_id}", lat=c.lat, lon=c.lon)
+              for c in grid.cells},
+        climate={c.cell_id: ClimateTimeSeries(location_id=c.cell_id, lat=c.lat, lon=c.lon, source="station",
+                                              records=records) for c in grid.cells},
+        crop_calendar={c.cell_id: CropCalendar(location_id=c.cell_id, planting_doy=calendar.planting_doy,
+                                               maturity_doy=calendar.maturity_doy) for c in grid.cells})
+
+
+@pytest.mark.parametrize("platform", [Platform.PYTHIA, Platform.CRAFT, Platform.ACEA])
+def test_the_real_translation_records_the_engine_readback(tmp_path, monkeypatch, platform):
+    pipe, record, grid, region = _restricted_run(tmp_path, monkeypatch, platform)
+    results = pipe._execute_translate(_harmonized(pipe, grid, region))
+
+    assert results[platform.value].success, results[platform.value].errors
+    readbacks = pipe.provenance.record.boundary["crop_presence"]["roster_readback"]
+    assert set(readbacks) == {platform.value}
+    assert readbacks[platform.value]["id_digest"] == _final_digest(platform, record)
 
 
 def _tamper(platform, path, fault):
@@ -132,6 +166,37 @@ def test_a_writer_fault_is_visible_in_the_readback(tmp_path, monkeypatch, platfo
     assert readback.get("id_digest") != _final_digest(platform, record)
     if fault in ("missing", "duplicate", "malformed"):
         assert readback.get("id_digest") is None and readback["error"]
+
+
+def _craft_readback(tmp_path, monkeypatch, edit):
+    """The real CRAFT soil mask's read-back after ``edit`` rewrote its data rows (the header kept)."""
+    pipe, record, grid, region = _restricted_run(tmp_path, monkeypatch, Platform.CRAFT)
+    path = _write(pipe, Platform.CRAFT, grid, region)
+    header, *rows = path.read_text().splitlines()
+    path.write_text("\r\n".join([header] + edit(rows)) + "\r\n")
+    pipe._record_roster_readback(Platform.CRAFT)
+    return pipe.provenance.record.boundary["crop_presence"]["roster_readback"]["craft"], record
+
+
+def _second_row(rewrite):
+    return lambda rows: rows[:1] + [rewrite(*rows[1].split("\t"))] + rows[2:]
+
+
+@pytest.mark.parametrize("rewrite", [
+    lambda cid, profile, share: f"{cid}\t{profile}",
+    lambda cid, profile, share: f"{cid}\t{profile}\t{share}\t1",
+    lambda cid, profile, share: f"{cid}\t123\t{share}",
+    lambda cid, profile, share: f"{cid}\t{profile}\tnot-a-number",
+    lambda cid, profile, share: f"{cid}x\t{profile}\t{share}",
+], ids=["two-columns", "four-columns", "numeric-profile", "text-share", "text-cell-id"])
+def test_a_craft_data_row_the_runner_rejects_is_never_sealed(tmp_path, monkeypatch, rewrite):
+    readback, _ = _craft_readback(tmp_path, monkeypatch, _second_row(rewrite))
+    assert readback.get("id_digest") is None and readback["error"]
+
+
+def test_a_blank_craft_row_is_skipped_as_the_runner_does(tmp_path, monkeypatch):
+    readback, record = _craft_readback(tmp_path, monkeypatch, lambda rows: rows[:1] + [" \t\t"] + rows[1:])
+    assert readback["id_digest"] == record["n5_final_digest"]
 
 
 def test_the_acea_config_is_parsed_never_executed(tmp_path):
