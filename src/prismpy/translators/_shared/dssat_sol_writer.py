@@ -22,6 +22,16 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from prismpy.models.region import Region
 from prismpy.models.soil import SoilProfile
+from prismpy.packaging.soil_declaration import (
+    DETAIL_FILE,
+    PROFILE_SOURCE_TOKENS,
+    SoilStamp,
+    format_counts,
+    format_detail,
+    format_record,
+    profile_origin,
+    profile_source_token,
+)
 from prismpy.utils.sanitization import sanitize_admin_name
 
 
@@ -86,17 +96,6 @@ def _default_declaration(
         depth_cm=depth_cm,
         paw_mm=paw_mm,
     )
-
-
-def _default_source_label(profile_id: int) -> str:
-    """Default source-label generator (CRAFT historical wording).
-
-    Returns the string CRAFT has been writing into the per-profile
-    "Source" cell since the writer was first introduced. Translators
-    that pull from a different upstream substrate can pass their own
-    callable to override.
-    """
-    return f"HWSD v2 SMU {profile_id}"
 
 
 # ── DSSAT SLTX texture codes (USDA 12-class triangle) ────────────────
@@ -166,24 +165,27 @@ def _resolve_chem_default(
 
 
 def _soil_record_line(
+    stamp: SoilStamp,
     profiles_by_id: Mapping[int, SoilProfile],
     names: Mapping[int, str],
+    tokens: Mapping[int, str],
     written_layers: Mapping[int, List[Tuple[int, int, float, float]]],
+    ptf_layers: int,
     substitutions: List[Dict[str, Any]],
     profile_cell_counts: Mapping[int, int],
     default_causes: Mapping[str, int],
     default_declaration_out: Optional[List[DefaultDeclaration]],
 ) -> str:
-    """The ``! prismpy soil record:`` line: what the file holds (profiles,
-    layers, flagged layers, substituted chemistry) and how many grid cells run
-    on each kind of soil."""
+    """The ``! prismpy soil record:`` line: the soil's source and grid cells per
+    profile source, what the file holds (profiles, layers, flagged layers,
+    substituted chemistry) and how many grid cells run on each kind of soil."""
     generic = [key for key, p in profiles_by_id.items() if p.source in _GENERIC_SOURCES]
     if len(generic) > 1:
         raise ValueError(f"A soil file holds at most one generic profile, got keys {generic}")
     if any(default_causes.values()) and not generic:
         raise ValueError("Cells are declared on a generic soil, but no generic profile was written")
     declaration = _default_declaration(
-        cells=sum(profile_cell_counts.values()),
+        cells=sum(profile_cell_counts.values()) + stamp.no_profile_cells,
         default_causes=default_causes,
         profile_name=names[generic[0]] if generic else None,
         written_layers=written_layers.get(generic[0], []) if generic else [],
@@ -199,26 +201,34 @@ def _soil_record_line(
     def cells_on(keys) -> int:
         return sum(profile_cell_counts.get(key, 0) for key in keys)
 
+    per_token: Dict[str, int] = {}
+    for key, count in profile_cell_counts.items():
+        per_token[tokens[key]] = per_token.get(tokens[key], 0) + count
     d = declaration
-    return (
-        "! prismpy soil record:"
-        f" profiles={len(profiles_by_id)}"
-        f" layers={sum(len(p.layers) for p in profiles_by_id.values())}"
-        f" organic_layers={sum(list(f.values()).count('organic') for f in flags.values())}"
-        f" andic_layers={sum(list(f.values()).count('andic') for f in flags.values())}"
-        " chem_defaulted=" + ",".join(f"{field}:{n}" for field, n in by_field.items()) +
-        " chem_default_values=bulk_density:1.40,organic_carbon:0.50,ph:6.5"
-        f" cells_with_flagged_layers={cells_on(k for k, f in flags.items() if f)}"
-        f" cells_with_defaulted_chemistry={cells_on(substituted_keys)}"
-        f" cells={d.cells}"
-        f" default_cells={d.default_cells}"
-        " default_cause=" + (",".join(f"{c}:{n}" for c, n in d.causes) or "-") +
-        f" default_fraction={d.fraction:.4f}"
-        f" default_warning={int(d.warning)}"
-        f" default_profile={d.profile or '-'}"
-        f" default_depth_cm={d.depth_cm or '-'}"
-        f" default_paw_mm={'-' if d.paw_mm is None else d.paw_mm}"
-    )
+    return format_record([
+        ("source", stamp.source),
+        ("profile_sources", format_counts(
+            (token, per_token[token]) for token in PROFILE_SOURCE_TOKENS.values() if per_token.get(token))),
+        ("no_profile_cells", stamp.no_profile_cells),
+        ("override_cells", stamp.override_cells),
+        ("ptf_layers", ptf_layers),
+        ("profiles", len(profiles_by_id)),
+        ("layers", sum(len(p.layers) for p in profiles_by_id.values())),
+        ("organic_layers", sum(list(f.values()).count("organic") for f in flags.values())),
+        ("andic_layers", sum(list(f.values()).count("andic") for f in flags.values())),
+        ("chem_defaulted", format_counts(by_field.items())),
+        ("chem_default_values", "bulk_density:1.40,organic_carbon:0.50,ph:6.5"),
+        ("cells_with_flagged_layers", cells_on(k for k, f in flags.items() if f)),
+        ("cells_with_defaulted_chemistry", cells_on(substituted_keys)),
+        ("cells", d.cells),
+        ("default_cells", d.default_cells),
+        ("default_cause", format_counts(d.causes)),
+        ("default_fraction", f"{d.fraction:.4f}"),
+        ("default_warning", int(d.warning)),
+        ("default_profile", d.profile or "-"),
+        ("default_depth_cm", d.depth_cm or "-"),
+        ("default_paw_mm", "-" if d.paw_mm is None else d.paw_mm),
+    ])
 
 
 def write_dssat_sol(
@@ -226,12 +236,12 @@ def write_dssat_sol(
     profiles_by_id: Mapping[int, SoilProfile],
     country_code: str,
     region: Region,
-    file_header_suffix: str = "(HWSD-based)",
-    source_label_for_id: Callable[[int], str] = _default_source_label,
-    chem_default_log: Optional[List[Dict[str, Any]]] = None,
-    soil_record: bool = False,
+    *,
+    stamp: SoilStamp,
+    source_label_for_id: Callable[[int], str],
     profile_cell_counts: Optional[Mapping[int, int]] = None,
     default_causes: Optional[Mapping[str, int]] = None,
+    chem_default_log: Optional[List[Dict[str, Any]]] = None,
     default_declaration_out: Optional[List[DefaultDeclaration]] = None,
 ) -> Dict[int, str]:
     """Write a DSSAT v4.8-spec .SOL file containing the supplied profiles.
@@ -260,25 +270,19 @@ def write_dssat_sol(
         region: Region carrying the human-readable name plus the ISO3
             country code (used in the per-profile header) and the
             country name (used as a backup for site labelling).
-        file_header_suffix: Parenthetical fragment appended to the
-            top-of-file ``*SOILS:`` line. CRAFT has historically used
-            ``"(HWSD-based)"``. The eGHR substrate builder can
-            substitute a different label if it sources profiles from
-            another upstream dataset.
+        stamp: The soil's source as the caller selected it (and the cells
+            it knows had no profile or a user override). It fills the
+            ``! prismpy soil record:`` line written directly after the
+            ``*SOILS:`` line (DSSAT ignores it) and the ``*SOILS:`` text;
+            each profile's SLSOUR is its profile-source token, and
+            ``soil_record.json`` beside the file details every layer.
         source_label_for_id: Callable that turns a profile id into the
-            free-text "Source" cell on the per-profile header line.
-            Default reproduces CRAFT's historical wording exactly so
-            existing CRAFT packages remain byte-identical.
-        soil_record: Write the ``! prismpy soil record:`` comment line
-            directly after the ``*SOILS:`` line (DSSAT ignores it). Off
-            by default, so other callers' files are unchanged.
-        profile_cell_counts: With ``soil_record``: grid cells per profile
-            key; their sum is every grid cell of the package.
-        default_causes: With ``soil_record``: grid cells on the generic
-            (default or placeholder) profile, per cause in
-            :data:`DEFAULT_CAUSES`.
-        default_declaration_out: With ``soil_record``: receives the
-            :class:`DefaultDeclaration` the record was written from.
+            free-text description (SLDESC) on the per-profile header line.
+        profile_cell_counts: Grid cells per profile key.
+        default_causes: Grid cells on the generic (default or placeholder)
+            profile, per cause in :data:`DEFAULT_CAUSES`.
+        default_declaration_out: Receives the :class:`DefaultDeclaration`
+            the record was written from.
 
     Returns:
         Dict mapping profile id (the key from ``profiles_by_id``) to
@@ -295,8 +299,10 @@ def write_dssat_sol(
         chem_default_log if chem_default_log is not None else []
     )
 
-    if soil_record and profile_cell_counts is None:
-        raise ValueError("soil_record needs profile_cell_counts (grid cells per profile)")
+    profile_cell_counts = profile_cell_counts or {}
+    tokens = {key: profile_source_token(p.source) for key, p in profiles_by_id.items()}
+    detail: Dict[str, Any] = {}
+    ptf_layers = 0
     first_new_default = len(chem_defaults)
     # The layers as written (top cm, bottom cm, SLLL, SDUL), per profile key; a
     # layer's top is the previous written bottom, the first starting at 0 as DSSAT reads it.
@@ -317,17 +323,20 @@ def write_dssat_sol(
         # the code (<=4 chars) fits, so DSSAT reads the texture AND the depth
         # at their fixed columns. The prior spelled-out class overflowed the
         # field and shifted the depth column -> IPSOIL Error 5010.
-        # SLSOUR (DSSAT "Soil Source") carries the source tag (first token of
-        # the label, e.g. "eGHR"/"HWSD"); the full label + country go in the
-        # A50 SLDESC (country is also encoded in the PEDON id). Both are
-        # DSSAT-descriptive (not parsed for logic).
+        # SLSOUR (DSSAT "Soil Source") carries the profile-source token, which
+        # the soil declaration reads back; the full label + country go in the
+        # A50 SLDESC (country is also encoded in the PEDON id).
         sltx_code = _dssat_sltx_code(profile.surface_texture)
         # The one metre-to-centimetre step: each layer's SLB, and the header's depth is the last.
         slbs = [int(layer.depth_bottom * 100) for layer in profile.layers]
         depth_cm = slbs[-1] if slbs else int((profile.total_depth or 0.2) * 100)
         source_desc = source_label_for_id(smu_id)
-        slsour = (source_desc.split() or ["-99"])[0][:11]
+        slsour = tokens[smu_id]
         sldesc = f"{source_desc} ({region.country_iso3 or 'XXX'})"
+        flags = profile.metadata.get("ptf_domain_flags") or {}
+        layer_detail: Dict[str, Any] = {}
+        detail[profile_name] = {"source": slsour, "origin": profile_origin(profile),
+                                "n_cells": profile_cell_counts.get(smu_id, 0), "layers": layer_detail}
         f.write(
             f"*{profile_name:<10}  {slsour:<11} "
             f"{sltx_code:<5} {depth_cm:>5d} {sldesc}\n"
@@ -370,9 +379,13 @@ def write_dssat_sol(
         )
 
         # Layer data
-        for layer, slb in zip(profile.layers, slbs):
+        for index, (layer, slb) in enumerate(zip(profile.layers, slbs)):
             if layer.wilting_point is None:
                 layer.estimate_hydraulic_properties()
+            ptf_layers += layer.hydraulics_estimated
+            defaulted = [field for field, value in (("bulk_density", layer.bulk_density),
+                                                    ("organic_carbon", layer.organic_carbon),
+                                                    ("ph", layer.ph)) if value is None]
 
             slll = layer.wilting_point or 0.10
             sdul = layer.field_capacity or 0.25
@@ -424,19 +437,28 @@ def write_dssat_sol(
                 written[-1][1] if written else 0, slb,
                 float(f"{slll:6.3f}"), float(f"{sdul:6.3f}"),
             ))
+            layer_detail[str(index)] = {
+                "depth_cm": [written[-1][0], slb],
+                "ptf_domain_flag": flags.get(index, flags.get(str(index))),
+                "chem_defaulted": defaulted,
+                "hydraulics_estimated": layer.hydraulics_estimated,
+            }
 
         f.write("\n")
 
+    # The header names the stamped source and the distinct profile sources written.
+    written_tokens = [t for t in PROFILE_SOURCE_TOKENS.values() if t in tokens.values()]
+    header_source = f"{stamp.source}: {', '.join(written_tokens)}" if written_tokens else stamp.source
     with open(soil_path, "w", newline="\r\n") as out:
-        out.write(f"*SOILS: {region.name} - Generated by prismpy {file_header_suffix}\n")
-        if soil_record:
-            out.write(_soil_record_line(
-                profiles_by_id, smu_to_profile_name, written_layers,
-                chem_defaults[first_new_default:], profile_cell_counts,
-                default_causes or {}, default_declaration_out,
-            ) + "\n")
+        out.write(f"*SOILS: {region.name} - Generated by prismpy ({header_source})\n")
+        out.write(_soil_record_line(
+            stamp, profiles_by_id, smu_to_profile_name, tokens, written_layers, ptf_layers,
+            chem_defaults[first_new_default:], profile_cell_counts,
+            default_causes or {}, default_declaration_out,
+        ) + "\n")
         out.write("\n")
         out.write(f.getvalue())
+    (Path(soil_path).parent / DETAIL_FILE).write_text(format_detail(detail))
 
     if chem_defaults:
         logger.warning(

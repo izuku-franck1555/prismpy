@@ -16,6 +16,7 @@ from __future__ import annotations
 from prismpy.models.region import BoundingBox, Region
 from prismpy.models.soil import SoilLayer, SoilProfile
 from prismpy.translators._shared.dssat_sol_writer import write_dssat_sol
+from prismpy.packaging.soil_declaration import SoilStamp
 
 
 def _parse_headers(line: str):
@@ -68,7 +69,7 @@ def _render(tmp_path, lat: float = -6.042, lon: float = 37.708):
         )],
     )
     out = tmp_path / "TZ.SOL"
-    write_dssat_sol(out, {4: prof}, country_code="TZ", region=region)
+    write_dssat_sol(out, {4: prof}, country_code="TZ", region=region, stamp=SoilStamp("profiles"), source_label_for_id=lambda key: f"HWSD v2 SMU {key}")
     return out.read_text().splitlines()
 
 

@@ -451,7 +451,6 @@ def _write_acea_forced_co2_readme(
         "climate_name": climate_name
         or f"{str(region.get('name', '')).lower()}_nasapower",
         "climate_source": f"NASA POWER (observed {b_start}-{b_end}, HELD)",
-        "soil_source": ds.get("soil", "iSDA S3 (30m)"),
         "spam_source": ds.get("harvested_areas", "Dummy (placeholder)"),
         "gaez_source": ds.get("crop_suitability", "FAO GAEZ v4 (auto-downloaded)"),
         "gridcells": cell_ids,
@@ -460,7 +459,7 @@ def _write_acea_forced_co2_readme(
         "clock_start": f"{b_start}/01/01",
         "clock_end": f"{b_end}/12/31",
     }
-    generate_readme(readme_path, config, platform="acea")
+    generate_readme(readme_path, config, platform="acea", soil_label=_baseline_soil_label(baseline_manifest))
 
     text = readme_path.read_text(encoding="utf-8")
     banner = (
@@ -642,7 +641,13 @@ def _rewrite_projection_readme(
         readme_path, readme_config, platform="pythia",
         mask_present=_mask_present,
         crop_mask_vintage=_baseline_crop_mask_vintage,
+        soil_label=_baseline_soil_label(baseline_manifest),
     )
+
+
+def _baseline_soil_label(baseline_manifest: Dict[str, Any]) -> str:
+    """The baseline's declared soil (a projection clones its soil files), else "not recorded"."""
+    return ((baseline_manifest.get("inputs_used") or {}).get("soil") or {}).get("label") or "not recorded"
 
 
 def _open_cutout_variable(nc_path: Path, variable: str) -> Any:

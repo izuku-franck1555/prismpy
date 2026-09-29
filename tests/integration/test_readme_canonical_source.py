@@ -42,6 +42,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from tests.package_soil import stamp_package_soil
 
 from prismpy.packaging.readme_generator import (
     _coalesce,
@@ -329,6 +330,7 @@ class TestEndToEndReadmeRender(unittest.TestCase):
                 "data_sources": {},
             }
 
+            stamp_package_soil(Path(pkg / 'README.md').parent, 'craft')
             readme_path = generate_readme(
                 pkg / "README.md", config, platform="craft",
             )
@@ -382,6 +384,7 @@ class TestEndToEndReadmeRender(unittest.TestCase):
                 "craft_level": 2,
                 "data_sources": {},
             }
+            stamp_package_soil(Path(pkg / 'README.md').parent, 'craft')
             readme_path = generate_readme(
                 pkg / "README.md", config, platform="craft",
             )

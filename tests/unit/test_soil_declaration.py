@@ -3,6 +3,8 @@ binding, each engine's inspector, the generic-soil fields consumed from CRAFT's 
 pedotransfer mark that survives profile dedup."""
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -34,12 +36,18 @@ def _sol(path, record, profiles):
     path.write_text("\r\n".join(lines) + "\r\n")
 
 
+def _detail(profiles):
+    """The detail file the writer writes beside a .SOL: each profile's source token and written layers."""
+    return json.dumps({name: {"source": token, "layers": {"0": {"depth_cm": [0, depth]}}}
+                       for name, token, depth in profiles})
+
+
 def _craft(tmp_path, profiles, rows, **record):
     soil = tmp_path / "soil"
     _sol(soil / "ML.SOL", _record(**record), profiles)
     (soil / "soil_mask.txt").write_text("CellID\tSoilProfile\tSharePCT\n" +
                                         "".join(f"{i}\t{p}\t1\n" for i, p in enumerate(rows)))
-    (soil / sd.DETAIL_FILE).write_text("{}\n")
+    (soil / sd.DETAIL_FILE).write_text(_detail(profiles))
     sd.write_binding(tmp_path, "soil", [soil / "ML.SOL", soil / "soil_mask.txt", soil / sd.DETAIL_FILE])
     return tmp_path
 
@@ -83,7 +91,8 @@ def test_the_binding_fails_on_any_change_to_the_bound_set(tmp_path):
 def test_craft_counts_each_source_through_the_mask(tmp_path):
     rows = ["ML00001469", "ML00001469", "ML00001470"]
     decl = sd.declared_soil(_craft(tmp_path / "a", HWSD2, rows, profile_sources="hwsd:3", cells=3), "craft")
-    assert decl.label.startswith(sd.SOURCE_DESCRIPTIONS["hwsd"] + ", one profile per grid cell")
+    assert decl.label.startswith("HWSD v2.0 dominant soil component (max share), 0–60 cm to 0–100 cm from its own "
+                                 "HWSD layers, read at each cell centre, one profile per grid cell")
     assert decl.record["profile_sources"] == {"hwsd": 3}
     assert decl.inputs_used()["record"]["hydraulics"]["reference"].startswith("Saxton KE, Rawls WJ (2006)")
     # a record that disagrees with the mask, even with a fresh binding
@@ -133,7 +142,8 @@ def test_generic_soil_fields_are_consumed_from_the_record_and_checked_for_consis
 
 def _pythia(tmp_path, record, source=None, db=True):
     ghr = tmp_path / "eGHR"
-    _sol(ghr / "ML.SOL", record, [("ML00000001", "isda_s3", 50)])
+    profiles = [("ML00000001", "isda_s3", 50)]
+    _sol(ghr / "ML.SOL", record, profiles)
     files = [ghr / "ML.SOL"]
     if db:
         (ghr / "GHR.db").write_bytes(b"db")
@@ -141,7 +151,7 @@ def _pythia(tmp_path, record, source=None, db=True):
         (tmp_path / "raster/soil.tif").write_bytes(b"tif")
         files += [ghr / "GHR.db", tmp_path / "raster/soil.tif"]
     if source is None:
-        (ghr / sd.DETAIL_FILE).write_text("{}\n")
+        (ghr / sd.DETAIL_FILE).write_text(_detail(profiles))
         files.append(ghr / sd.DETAIL_FILE)
     sd.write_binding(tmp_path, "eGHR", files, source=source)
     return tmp_path
@@ -150,10 +160,10 @@ def _pythia(tmp_path, record, source=None, db=True):
 def test_pythia_canonical_legacy_and_their_mixtures(tmp_path):
     decl = sd.declared_soil(_pythia(tmp_path / "c", _record(profile_sources="isda_s3:3", cells=4,
                                                             no_profile_cells=1, ptf_layers=2)), "pythia")
-    assert decl.label.startswith(sd.SOURCE_DESCRIPTIONS["isda_s3"] + ", one profile per grid cell, stored in "
-                                 "the eGHR file format")
-    assert "1 of 4 grid cells have no soil profile in the package" in decl.label
-    assert "for 2 of 5 layers" in decl.label and "1 of 1 profiles are shallower than 100 cm (depth 50–50 cm)" in decl.label
+    assert decl.label.startswith("iSDA Africa soil properties, 0–50 cm, read at each cell centre, one profile for "
+                                 "each of 3 of 4 grid cells, stored in the eGHR file format")
+    assert "1 of 4 grid cells has no soil profile in the package" in decl.label
+    assert "for 2 of 5 layers" in decl.label and "1 of 1 profiles is shallower than 100 cm (depth 50 cm)" in decl.label
     assert sd.declared_soil(_pythia(tmp_path / "n", _record(source="none", profile_sources="-", profiles=0,
                                                             layers=0, cells=3, no_profile_cells=3)),
                             "pythia").label == sd.NO_PROFILE
@@ -163,6 +173,12 @@ def test_pythia_canonical_legacy_and_their_mixtures(tmp_path):
         sd.declared_soil(_pythia(tmp_path / "m", _record(), source=sd.EGHR_DATABASE), "pythia")
     with pytest.raises(sd.SoilDeclarationError, match="neither"):
         sd.declared_soil(_pythia(tmp_path / "u", None), "pythia")
+    mixed = _pythia(tmp_path / "x", _record(profile_sources="isda_s3:3"))     # two .SOLs whose records disagree
+    _sol(mixed / "eGHR/BF.SOL", _record(profile_sources="hwsd:3"), [("BF00000001", "hwsd", 100)])
+    sd.write_binding(mixed, "eGHR", sorted((mixed / "eGHR").glob("*.SOL")) + [
+        mixed / "eGHR/GHR.db", mixed / "raster/soil.tif", mixed / "eGHR" / sd.DETAIL_FILE])
+    with pytest.raises(sd.SoilDeclarationError, match="disagree"):
+        sd.declared_soil(mixed, "pythia")
 
 
 def _acea_netcdf(path, fill=-9999.0, record="source=hwsd_upper_layer_texture cells=3 hwsd=1 default=1 masked=1"):
@@ -184,8 +200,8 @@ def test_acea_binds_the_whole_netcdf(tmp_path):
     _acea_netcdf(nc)
     sd.write_binding(tmp_path, "soil", [nc])
     decl = sd.declared_soil(tmp_path, "acea")
-    assert decl.label == (sd.BASE[("acea", "hwsd_upper_layer_texture")] + "; 1 of 3 cells use a generic default "
-                          "soil (sand 40%, clay 25%); 1 of 3 cells have no soil value and are skipped by the engine")
+    assert decl.label == (sd.BASE[("acea", "hwsd_upper_layer_texture")] + "; 1 of 3 cells uses a generic default "
+                          "soil (sand 40%, clay 25%); 1 of 3 cells has no soil value and is skipped by the engine")
     _acea_netcdf(nc, fill=-8888.0)          # the same sand/clay values, another fill value
     with pytest.raises(sd.SoilDeclarationError, match="changed after it was bound"):
         sd.declared_soil(tmp_path, "acea")
@@ -208,10 +224,11 @@ def test_label_suffixes_name_their_numbers(tmp_path):
                                    organic_layers=1, andic_layers=2, cells_with_flagged_layers=2,
                                    chem_defaulted="bulk_density:2,organic_carbon:0,ph:1"), "craft")
     assert decl.label == (
-        sd.SOURCE_DESCRIPTIONS["hwsd"] + ", one profile per grid cell; water limits estimated with a pedotransfer "
-        "function (Saxton & Rawls 2006, simplified) for 3 of 5 layers; 1 of 2 profiles are shallower than 100 cm "
-        "(depth 60–60 cm); chemistry defaults used (bulk density 1.40 g/cm³ ×2, pH 6.5 ×1); 1 organic and 2 "
-        "andic layers (of 5 layers in 1 profiles; 2 cells), outside the pedotransfer function's calibration range")
+        "HWSD v2.0 dominant soil component (max share), 0–60 cm to 0–100 cm from its own HWSD layers, read at each "
+        "cell centre, one profile per grid cell; water limits estimated with a pedotransfer function adapted from "
+        "Saxton & Rawls (2006) for 3 of 5 layers; 1 of 2 profiles is shallower than 100 cm (depth 60 cm); chemistry "
+        "defaults used (bulk density 1.40 g/cm³ ×2, pH 6.5 ×1); 1 organic and 2 andic layers (of 5 layers in 1 "
+        "profile; 2 cells), outside the pedotransfer function's calibration range")
     assert decl.record["hydraulics"] == {**sd.HYDRAULICS, "estimated_layers": 3, "layers": 5}
 
 

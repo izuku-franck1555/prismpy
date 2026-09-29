@@ -13,7 +13,9 @@ import json
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+from prismpy.models import soil as soil_model
 
 RECORD_PREFIX = "! prismpy soil record:"
 BINDING_FILE = "prismpy_soil_binding.txt"
@@ -27,9 +29,10 @@ class SoilDeclarationError(Exception):
     """A package's soil files do not carry a bound, consistent soil declaration."""
 
 
-#: ``SoilProfile.source`` -> the profile-source token written in SLSOUR and the record.
+#: ``SoilProfile.source`` -> the profile-source token written in SLSOUR and the record, in the
+#: closed-token order the ``*SOILS:`` line and ``profile_sources`` list them.
 PROFILE_SOURCE_TOKENS: Dict[str, str] = {
-    "iSDA S3 (30m)": "isda_s3", "isda": "isda", "hwsd": "hwsd", "eghr": "eghr",
+    "hwsd": "hwsd", "iSDA S3 (30m)": "isda_s3", "isda": "isda", "eghr": "eghr",
     "placeholder": "placeholder", "default": "default",
 }
 #: Tokens of the generic soils: a CRAFT package declares their cells through the clause below.
@@ -51,7 +54,7 @@ SOL_RECORD_KEYS = (
 )
 _COUNT_KEYS = {"profile_sources", "chem_defaulted", "default_cause"}
 _TEXT_KEYS = {"source", "chem_default_values", "default_fraction", "default_profile", "default_depth_cm"}
-HYDRAULICS = {"method": "saxton_rawls_2006_simplified",
+HYDRAULICS = {"method": "adapted_from_saxton_rawls_2006",
               "reference": "Saxton KE, Rawls WJ (2006) Soil Sci. Soc. Am. J. 70:1569–1578"}
 
 
@@ -80,7 +83,8 @@ def profile_origin(profile: Any) -> Dict[str, Any]:
     """Where a written profile came from, for the detail file."""
     token = profile_source_token(profile.source)
     if token == "hwsd":
-        return {"hwsd_smu_id": int(profile.metadata["hwsd_smu_id"]),
+        unit = profile.metadata.get("hwsd_smu_id")
+        return {"hwsd_smu_id": None if unit is None else int(unit),
                 "component_rule": "max_share_then_lowest_sequence"}
     if token == "default":
         return {"generic_default": "branch-4 profile"}
@@ -259,6 +263,28 @@ class SoilDeclaration:
         return {"source_id": self.source_id, "label": self.label, "record": self.record}
 
 
+#: The platforms whose packages declare the soil their engine reads.
+DECLARED_PLATFORMS = ("acea", "craft", "pythia", "sarra_py")
+
+
+def final_package_problem(package_dir: Path, platform: str) -> Optional[str]:
+    """Why a finished package no longer declares its soil, or None: its soil files verify and
+    its written manifest states exactly their declaration."""
+    try:
+        declaration = declared_soil(package_dir, platform)
+    except SoilDeclarationError as exc:
+        return str(exc)
+    manifest_path = Path(package_dir) / "manifest.json"
+    if not manifest_path.is_file():
+        return "manifest.json is missing"
+    manifest = json.loads(manifest_path.read_text())
+    if (manifest.get("inputs_used") or {}).get("soil") != declaration.inputs_used():
+        return "the manifest's inputs_used.soil is not what the soil files declare"
+    if (manifest.get("data_sources") or {}).get("soil") != declaration.label:
+        return "the manifest's data_sources.soil is not what the soil files declare"
+    return None
+
+
 def declared_soil(package_dir: Path, platform: Any) -> SoilDeclaration:
     """The soil ``platform``'s engine reads from this package, verified and derived from the
     files themselves. It reads files, writes none and keeps no state between calls."""
@@ -293,7 +319,8 @@ def _craft(package_dir: Path) -> SoilDeclaration:
         raise SoilDeclarationError(
             f"the mask gives {dict(derived)} cells per source, the record {record['profile_sources']}")
     _check_generic_cells(record, rows, derived)
-    return SoilDeclaration(record["source"], _label("craft", record, sol.profiles), _with_hydraulics(record))
+    detail = _read_detail(package_dir / "soil" / DETAIL_FILE)
+    return SoilDeclaration(record["source"], _label("craft", record, detail), _with_hydraulics(record))
 
 
 def _token(sol: SolFile, profile: str) -> str:
@@ -322,6 +349,12 @@ def _check_generic_cells(record: Dict[str, Any], rows: List[str], derived: Count
         raise SoilDeclarationError("no default cells are declared, but a generic soil is used")
 
 
+def _read_detail(path: Path) -> Dict[str, Any]:
+    if not path.is_file():
+        raise SoilDeclarationError(f"{path.parent.name}/{DETAIL_FILE} is missing")
+    return json.loads(path.read_text())
+
+
 def _with_hydraulics(record: Dict[str, Any]) -> Dict[str, Any]:
     return {**record, "hydraulics": {**HYDRAULICS, "estimated_layers": record["ptf_layers"],
                                      "layers": record["layers"]}}
@@ -342,7 +375,7 @@ def _pythia(package_dir: Path) -> SoilDeclaration:
         if any(p.record is not None for p in parsed):
             raise SoilDeclarationError("a database-copied eGHR package carries a prismpy soil record")
         record = {"source": EGHR_DATABASE}
-        return SoilDeclaration(EGHR_DATABASE, _label("pythia", record, {}), record)
+        return SoilDeclaration(EGHR_DATABASE, _label("pythia", record), record)
     if source is not None or not parsed or any(p.record is None for p in parsed):
         raise SoilDeclarationError("eGHR soil files are neither prismpy-written nor a bound database copy")
     records = [_typed(p.record, SOL_RECORD_KEYS) for p in parsed]
@@ -358,14 +391,14 @@ def _pythia(package_dir: Path) -> SoilDeclaration:
         record[key] = {token: sum(r[key].get(token, 0) for r in records) for token in first[key]}
     if record["source"] not in ("profiles", "none") or any(r["default_cells"] for r in records):
         raise SoilDeclarationError(f"an eGHR soil record cannot say source={record['source']} with default cells")
-    profiles = {name: header for p in parsed for name, header in p.profiles.items()}
-    return SoilDeclaration(record["source"], _label("pythia", record, profiles), _with_hydraulics(record))
+    detail = _read_detail(ghr / DETAIL_FILE)
+    return SoilDeclaration(record["source"], _label("pythia", record, detail), _with_hydraulics(record))
 
 
 def _acea(package_dir: Path) -> SoilDeclaration:
     if not (package_dir / ACEA_SOIL_FILE).is_file():
         record = {"source": "engine_installed"}
-        return SoilDeclaration("engine_installed", _label("acea", record, {}), record)
+        return SoilDeclaration("engine_installed", _label("acea", record), record)
     check_binding(package_dir, "soil", [ACEA_SOIL_FILE])
     import netCDF4
 
@@ -373,28 +406,46 @@ def _acea(package_dir: Path) -> SoilDeclaration:
         if ACEA_RECORD_ATTR not in ds.ncattrs():
             raise SoilDeclarationError(f"{ACEA_SOIL_FILE} carries no {ACEA_RECORD_ATTR}")
         text = str(ds.getncattr(ACEA_RECORD_ATTR))
+    record = _acea_record(text)
+    return SoilDeclaration(record["source"], _label("acea", record), record)
+
+
+def _acea_record(text: str) -> Dict[str, Any]:
     fields = parse_record(text)
     keys = ACEA_RECORD_KEYS.get(fields.get("source", ""))
     if keys is None:
         raise SoilDeclarationError(f"an ACEA soil record cannot say source={fields.get('source')}")
-    record = _typed(fields, keys)
-    return SoilDeclaration(record["source"], _label("acea", record, {}), record)
+    return _typed(fields, keys)
+
+
+def acea_label(record_text: str) -> str:
+    """The declaration an ACEA soil record gives, for the netCDF's descriptive text."""
+    return _label("acea", _acea_record(record_text))
 
 
 def _sarra(package_dir: Path) -> SoilDeclaration:
     record = {"source": "engine_bundled_africa"}
-    return SoilDeclaration("engine_bundled_africa", _label("sarra_py", record, {}), record)
+    return SoilDeclaration("engine_bundled_africa", _label("sarra_py", record), record)
 
 
 # ── labels: the declaration's only wording ────────────────────────────────────
 
 SOURCE_DESCRIPTIONS = {
-    "isda_s3": "iSDA Africa soil properties, 0–50 cm, read at each cell centre",
-    "isda": "iSDA Africa topsoil properties, 0–20 cm, read at each cell centre",
-    "hwsd": ("HWSD v2.0 dominant soil component (max share), layered 0–100 cm from its own HWSD "
-             "layers, read at each cell centre"),
+    "isda_s3": "iSDA Africa soil properties, {D}, read at each cell centre",
+    "isda": "iSDA Africa topsoil properties, {D}, read at each cell centre",
+    "hwsd": "HWSD v2.0 dominant soil component (max share), {D} from its own HWSD layers, read at each cell centre",
     "eghr": "eGHR soil profiles",
     "placeholder": "a generic placeholder soil profile (no soil data was retrieved)",
+}
+#: ACEA's list-position writer reads only the top layer's sand and clay, so no depth reaches ACEA.
+ACEA_DESCRIPTIONS = {
+    "isda_s3": "iSDA Africa soil properties, top-layer sand and clay only (applied to the whole profile), "
+               "read at each cell centre",
+    "isda": "iSDA Africa topsoil properties, top-layer sand and clay only (applied to the whole profile), "
+            "read at each cell centre",
+    "hwsd": "HWSD v2.0 dominant soil component (max share), top-layer sand and clay only (applied to the whole "
+            "profile), read at each cell centre",
+    "placeholder": SOURCE_DESCRIPTIONS["placeholder"],
 }
 NO_PROFILE = "No soil profile is available for any cell in this package"
 BASE = {
@@ -408,7 +459,7 @@ BASE = {
     ("acea", "default_values"): "A generic default soil for every cell (sand 40%, clay 25%); no HWSD value was available",
     ("acea", "engine_installed"): "No soil in this package; ACEA reads the soil file installed with the engine",
     ("craft", "profiles"): "{S}, one profile per grid cell",
-    ("pythia", "profiles"): "{S}, one profile per grid cell, stored in the eGHR file format and looked up at each simulated site",
+    ("pythia", "profiles"): "{S}, {mapping}, stored in the eGHR file format and looked up at each simulated site",
     ("pythia", "eghr_database"): (
         "eGHR global soil profiles from the database configured for PYTHIA, looked up at each simulated site"),
     ("pythia", "none"): NO_PROFILE,
@@ -427,67 +478,107 @@ PACKAGE_CAUSES = {
     "no_soil_source": "no soil data source was available for this package",
     "retrieve_stage_placeholder": "the soil data for this package could not be retrieved when it was built",
 }
-#: The direction sentence of the WARNING form ({kind}: default or placeholder).
-WARNING_DIRECTION = ("the {kind} soil holds more water than most local soils, and its organic matter may be "
-                     "higher or lower than theirs, so these cells' yields may be over- or understated")
 _CHEM_TEXT = {"bulk_density": "bulk density {v} g/cm³", "organic_carbon": "organic carbon {v} %", "ph": "pH {v}"}
 
 
-def _sources_text(counts: Mapping[str, int], leave_out: Sequence[str]) -> str:
+def profile_depths_cm(detail: Mapping[str, Any]) -> Dict[str, List[int]]:
+    """Each written profile's depth, the bottom of its deepest layer in cm, grouped by its source
+    token: the one derivation that both the source text and the shallow-profile suffix read."""
+    depths: Dict[str, List[int]] = {}
+    for profile in detail.values():
+        bottom = max(layer["depth_cm"][1] for layer in profile["layers"].values())
+        depths.setdefault(profile["source"], []).append(bottom)
+    return depths
+
+
+def _cells(n: int) -> str:
+    return "1 cell" if n == 1 else f"{n} cells"
+
+
+def _describe(token: str, platform: str, depths: Mapping[str, List[int]]) -> str:
+    if platform == "acea":
+        return ACEA_DESCRIPTIONS[token]
+    text = SOURCE_DESCRIPTIONS[token]
+    if "{D}" not in text:
+        return text
+    if not depths.get(token):
+        raise SoilDeclarationError(f"{DETAIL_FILE} holds no written {token} profile")
+    low, high = min(depths[token]), max(depths[token])
+    return text.format(D=f"0–{low} cm" if low == high else f"0–{low} cm to 0–{high} cm")
+
+
+def _sources_text(counts: Mapping[str, int], leave_out: Sequence[str], describe: Callable[[str], str]) -> str:
     shown = sorted(((n, t) for t, n in counts.items() if t not in leave_out and n > 0), key=lambda x: (-x[0], x[1]))
     if len(shown) == 1:
-        return SOURCE_DESCRIPTIONS[shown[0][1]]
+        return describe(shown[0][1])
     if not shown:
         return ""
-    return "Retrieved soil: " + "; ".join(f"{SOURCE_DESCRIPTIONS[t]} for {n} cells" for n, t in shown)
+    return "Retrieved soil: " + "; ".join(f"{describe(t)} for {_cells(n)}" for n, t in shown)
+
+
+def _pythia_mapping(record: Mapping[str, Any]) -> str:
+    covered, n = record["cells"] - record["no_profile_cells"], record["cells"]
+    if covered == n:
+        return "one profile per grid cell"
+    if covered == 1:
+        return f"one profile for 1 of {n} grid cells"
+    return f"one profile for each of {covered} of {n} grid cells"
 
 
 def _generic_clause(record: Mapping[str, Any]) -> str:
     (cause, k), = record["default_cause"].items()
     kind = "placeholder" if cause == "retrieve_stage_placeholder" else "default"
-    n = record["cells"]
-    water = f"({record['default_depth_cm']} cm, about {record['default_paw_mm']} mm plant-available water)"
-    if cause in PER_CELL_CAUSES:
-        return (f"{k} of {n} candidate grid cells run on a generic default soil profile {water}, because no "
-                f"soil value exists at the cell centre: {PER_CELL_CAUSES[cause]}. Their results reflect "
-                f"this default soil, not the local soil.")
-    return (f"{k} of {n} candidate grid cells run on a generic {kind} soil profile {water}, because "
-            f"{PACKAGE_CAUSES[cause]}. Their results reflect this {kind} soil, not the local soil.")
+    runs, reflects = ("runs", "Its result reflects") if k == 1 else ("run", "Their results reflect")
+    lead = (f"{k} of {record['cells']} candidate grid cells {runs} on a generic {kind} soil profile "
+            f"({record['default_depth_cm']} cm, about {record['default_paw_mm']} mm plant-available water), because ")
+    because = (f"no soil value exists at the cell centre: {PER_CELL_CAUSES[cause]}" if cause in PER_CELL_CAUSES
+               else PACKAGE_CAUSES[cause])
+    return f"{lead}{because}. {reflects} this {kind} soil, not the local soil."
 
 
-def _suffixes(platform: str, record: Mapping[str, Any], profiles: Mapping[str, Tuple[str, int]]) -> List[str]:
+def _suffixes(platform: str, record: Mapping[str, Any], depths: Mapping[str, List[int]]) -> List[str]:
     items: List[str] = []
     n = record.get("cells", 0)
     if platform == "acea":
         if record.get("default"):
-            items.append(f"{record['default']} of {n} cells use a generic default soil (sand 40%, clay 25%)")
+            d = record["default"]
+            items.append(f"{d} of {n} cells {'uses' if d == 1 else 'use'} a generic default soil (sand 40%, clay 25%)")
         if record.get("masked"):
-            items.append(f"{record['masked']} of {n} cells have no soil value and are skipped by the engine")
+            m = record["masked"]
+            state = "has no soil value and is" if m == 1 else "have no soil value and are"
+            items.append(f"{m} of {n} cells {state} skipped by the engine")
         if record.get("field_default"):
-            items.append(f"{record['field_default']} of {n} cells lacked sand or clay and use the default for it")
+            f = record["field_default"]
+            items.append(f"{f} of {n} cells lacked sand or clay and {'uses' if f == 1 else 'use'} the default for it")
         return items
     if "ptf_layers" not in record:
         return items
     if record["ptf_layers"]:
-        items.append("water limits estimated with a pedotransfer function (Saxton & Rawls 2006, simplified) "
+        items.append("water limits estimated with a pedotransfer function adapted from Saxton & Rawls (2006) "
                      f"for {record['ptf_layers']} of {record['layers']} layers")
-    shallow = sorted(depth for _, depth in profiles.values() if depth < 100)
+    every = [depth for token_depths in depths.values() for depth in token_depths]
+    shallow = sorted(depth for depth in every if depth < 100)
     if shallow:
-        items.append(f"{len(shallow)} of {len(profiles)} profiles are shallower than 100 cm "
-                     f"(depth {shallow[0]}–{shallow[-1]} cm)")
+        text = f"(depth {shallow[0]} cm)" if shallow[0] == shallow[-1] else f"(depths {shallow[0]} to {shallow[-1]} cm)"
+        verb = "is" if len(shallow) == 1 else "are"
+        items.append(f"{len(shallow)} of {len(every)} profiles {verb} shallower than 100 cm {text}")
     if record["no_profile_cells"]:
-        items.append(f"{record['no_profile_cells']} of {n} grid cells have no soil profile in the package")
+        z = record["no_profile_cells"]
+        items.append(f"{z} of {n} grid cells {'has' if z == 1 else 'have'} no soil profile in the package")
     if record["override_cells"]:
-        items.append(f"user soil overrides applied to the top layer of {record['override_cells']} cells")
+        items.append(f"user soil overrides applied to the top layer of {_cells(record['override_cells'])}")
     values = dict(part.split(":", 1) for part in record["chem_default_values"].split(","))
     used = [_CHEM_TEXT[f].format(v=values[f]) + f" ×{c}" for f, c in record["chem_defaulted"].items() if c]
     if used:
         items.append(f"chemistry defaults used ({', '.join(used)})")
-    if record["organic_layers"] or record["andic_layers"]:
-        items.append(f"{record['organic_layers']} organic and {record['andic_layers']} andic layers (of "
-                     f"{record['layers']} layers in {record['profiles']} profiles; "
-                     f"{record['cells_with_flagged_layers']} cells), outside the pedotransfer function's "
-                     f"calibration range")
+    k, m = record["organic_layers"], record["andic_layers"]
+    if k or m:
+        noun = "layer" if k + m == 1 else "layers"
+        head = f"{k} organic and {m} andic {noun}" if k and m else f"{k} organic {noun}" if k else f"{m} andic {noun}"
+        profiles = "1 profile" if record["profiles"] == 1 else f"{record['profiles']} profiles"
+        flagged = _cells(record["cells_with_flagged_layers"])
+        items.append(f"{head} (of {record['layers']} layers in {profiles}; {flagged}), outside the pedotransfer "
+                     "function's calibration range")
     return items
 
 
@@ -499,20 +590,28 @@ def _chain(base: str, items: Sequence[str]) -> str:
     return f"{base}; {tail}" if tail else base
 
 
-def _label(platform: str, record: Mapping[str, Any], profiles: Mapping[str, Tuple[str, int]]) -> str:
-    source = record["source"]
-    if source == "none":
-        return NO_PROFILE
+def _base(platform: str, record: Mapping[str, Any], depths: Mapping[str, List[int]]) -> str:
     leave_out = GENERIC_TOKENS if platform == "craft" else ("default",)
-    sources = _sources_text(record.get("profile_sources", {}), leave_out)
-    template = BASE.get((platform, source))
-    base = template.format(S=sources) if template and (sources or "{S}" not in template) else ""
-    chain = _chain(base, _suffixes(platform, record, profiles))
+    sources = _sources_text(record.get("profile_sources", {}), leave_out, lambda t: _describe(t, platform, depths))
+    template = BASE.get((platform, record["source"]))
+    mapping = _pythia_mapping(record) if (platform, record["source"]) == ("pythia", "profiles") else ""
+    return template.format(S=sources, mapping=mapping) if template and (sources or "{S}" not in template) else ""
+
+
+def _warning(record: Mapping[str, Any]) -> str:
+    """The generic-soil clause as a WARNING: its final "." becomes the one direction clause."""
+    kind = "placeholder" if "retrieve_stage_placeholder" in record["default_cause"] else "default"
+    return f"WARNING: {_generic_clause(record)[:-1]}; {soil_model.generic_soil_direction(kind)}."
+
+
+def _label(platform: str, record: Mapping[str, Any], detail: Optional[Mapping[str, Any]] = None) -> str:
+    if record["source"] == "none":
+        return NO_PROFILE
+    depths = profile_depths_cm(detail) if detail is not None else {}
+    chain = _chain(_base(platform, record, depths), _suffixes(platform, record, depths))
     if not record.get("default_cells"):
         return chain
-    clause = _generic_clause(record)
     if record["default_warning"]:
-        kind = "placeholder" if "retrieve_stage_placeholder" in record["default_cause"] else "default"
-        warning = f"WARNING: {clause[:-1]}; {WARNING_DIRECTION.format(kind=kind)}."
-        return f"{warning} {chain}" if chain else warning
+        return f"{_warning(record)} {chain}" if chain else _warning(record)
+    clause = _generic_clause(record)
     return f"{chain}. {clause}" if chain else clause

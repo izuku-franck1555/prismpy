@@ -61,9 +61,9 @@ class SoilLayer:
     def estimate_hydraulic_properties(self) -> None:
         """Estimate hydraulic properties from texture using pedotransfer functions.
 
-        Uses simplified Saxton & Rawls (2006) equations.
+        Uses a pedotransfer function adapted from Saxton & Rawls (2006).
         """
-        # Saxton-Rawls pedotransfer functions (simplified)
+        # Pedotransfer functions adapted from Saxton & Rawls (2006)
         S = self.sand / 100  # Sand fraction
         C = self.clay / 100  # Clay fraction
         OM = (self.organic_carbon or 1.0) / 100  # Organic matter fraction

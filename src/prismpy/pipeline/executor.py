@@ -26,6 +26,7 @@ from prismpy.models.climate import ClimateTimeSeries, ClimateRecord
 from prismpy.models.soil import SoilProfile, SoilLayer
 from prismpy.models.crop import CropParameters, CropCalendar
 from prismpy.models.provenance import DecisionType, OperationType
+from prismpy.packaging.soil_declaration import DECLARED_PLATFORMS, final_package_problem
 from prismpy.provenance.tracker import ProvenanceTracker
 from prismpy.translators.base import (
     BaseTranslator,
@@ -4607,6 +4608,7 @@ class TranslationPipeline:
                     unified_data, translation_results, validate_result
                 )
                 stage_results["package"] = result
+                self._fail_package(result, self._package_soil_check(stage_results, translation_results))
                 _notify_complete("package", result)
                 if result.data:
                     provenance_path = result.data.get("provenance_path")
@@ -4638,12 +4640,42 @@ class TranslationPipeline:
                     finalize_exc,
                 )
 
+        # The returned package is verified after its last write: every package write, the
+        # package callback and finalize() come before this line.
+        self._fail_package(stage_results.get("package"),
+                           self._package_soil_check(stage_results, translation_results))
+
         # Determine overall success
         success = all(r.success for r in stage_results.values())
 
         return self._build_result(
             success, stage_results, translation_results, provenance_path, start_time
         )
+
+    @staticmethod
+    def _package_soil_check(
+        stage_results: Dict[str, "StageResult"],
+        translation_results: Dict[str, TranslationResult],
+    ) -> List[str]:
+        """Each packaged engine's soil declaration, re-read from its soil files and its written
+        manifest: a named error for every package where they no longer agree. Stateless: it
+        reads those files and the two dicts it is given."""
+        package = stage_results.get("package")
+        if package is None or not package.success:
+            return []
+        errors = []
+        for platform, result in translation_results.items():
+            if platform in DECLARED_PLATFORMS and result.success:
+                problem = final_package_problem(Path(result.output_dir), platform)
+                if problem:
+                    errors.append(f"{platform}: soil declaration check failed on the final package: {problem}")
+        return errors
+
+    @staticmethod
+    def _fail_package(package: Optional["StageResult"], errors: List[str]) -> None:
+        if errors:
+            package.errors.extend(errors)
+            package.success = False
 
     def _build_result(
         self,

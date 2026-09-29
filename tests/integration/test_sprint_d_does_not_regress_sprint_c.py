@@ -25,13 +25,15 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
+from tests.package_soil import stamp_package_soil
+
 from prismpy.packaging.manifest import create_manifest, derive_boundary_label
+from prismpy.packaging.soil_declaration import declared_soil
 
 
 def _build_project_config(
     platform: str,
     boundary_source: str,
-    soil_label: str,
 ) -> dict:
     """Mirror the post-Sprint-C discriminator + helper pattern
     every translator follows."""
@@ -53,7 +55,6 @@ def _build_project_config(
         "gadm_level": gadm_level,
         "data_sources": {
             "climate": "NASA POWER",
-            "soil": soil_label,
             "boundaries": boundary_label,
         },
     }
@@ -74,34 +75,30 @@ def _build_project_config(
 
 
 @pytest.mark.parametrize("platform", ["craft", "pythia", "acea", "sarra_py"])
-@pytest.mark.parametrize(
-    "soil_label",
-    ["iSDA Africa", "HWSD v2.0", "iSDA + HWSD fallback", "no_coverage"],
-)
-def test_manifest_data_sources_soil_is_string(platform, soil_label):
+def test_manifest_data_sources_soil_is_string(platform):
     """Sprint D.1 does NOT change the manifest soil field's
     shape; the existing prismweb consumers at ``views.py:982``
     and ``:2750`` call ``.lower()`` on the value, which only
     works if the value is a string. Sprint D.2 may introduce a
     structured identity ELSEWHERE (provenance / sidecar) but
     the manifest string shape must be preserved here."""
-    project_config = _build_project_config(
-        platform, boundary_source="manual", soil_label=soil_label,
-    )
+    project_config = _build_project_config(platform, boundary_source="manual")
     with TemporaryDirectory(prefix=f"no-regress-{platform}-") as tmp:
         package_dir = Path(tmp) / platform
         package_dir.mkdir(parents=True)
+        stamp_package_soil(package_dir, platform)
         manifest = create_manifest(
             package_dir, project_config, platform=platform,
         )
+        declared = declared_soil(package_dir, platform).label
 
     soil_value = manifest["data_sources"]["soil"]
     assert isinstance(soil_value, str), (
-        f"{platform}/{soil_label}: manifest.data_sources.soil "
+        f"{platform}: manifest.data_sources.soil "
         f"is {type(soil_value).__name__}, expected str."
     )
     # The existing prismweb consumer pattern must still work.
-    assert soil_value.lower() == soil_label.lower()
+    assert soil_value.lower() == declared.lower()
 
 
 # ---------------------------------------------------------------------------

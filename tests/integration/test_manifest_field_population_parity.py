@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import json
 import pytest
+
+from tests.package_soil import stamp_package_soil
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -74,7 +76,6 @@ def _project_config_for(platform: str, boundary_source: str):
         'gadm_level': gadm_level,
         'data_sources': {
             'climate': 'NASA POWER',
-            'soil': 'iSDA',
             'boundaries': label,
         },
     }
@@ -112,6 +113,7 @@ def test_manifest_fields_uniform_across_platforms(
     with TemporaryDirectory(prefix=f'parity-{platform}-') as tmp:
         package_dir = Path(tmp) / platform
         package_dir.mkdir(parents=True)
+        stamp_package_soil(package_dir, platform)
         manifest = create_manifest(
             package_dir, project_config, platform=platform,
         )

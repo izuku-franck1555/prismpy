@@ -17,6 +17,7 @@ Reference: CRAFT-Notes-Python/07-OUTPUT-GENERATION/
 """
 
 import logging
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -64,6 +65,7 @@ from prismpy.sources.soil.hwsd import HWSDSource, HWSDConfig
 from prismpy.config.defaults import DEFAULT_CLIMATE_START_YEAR
 from prismpy.packaging.manifest import create_manifest, save_manifest
 from prismpy.packaging.readme_generator import generate_readme
+from prismpy.packaging.soil_declaration import DETAIL_FILE, SoilStamp, write_binding
 
 
 logger = logging.getLogger(__name__)
@@ -131,6 +133,12 @@ def _profile_content_key(profile: SoilProfile) -> tuple:
             for layer in profile.layers
         ),
     )
+
+
+def _profile_description(key: int, profile: SoilProfile) -> str:
+    """A written profile's .SOL description, named for where it came from."""
+    return {"hwsd": f"HWSD v2 SMU {key}", "default": "Default profile",
+            "placeholder": f"Placeholder {key}"}.get(profile.source, f"{profile.source} profile {key}")
 
 
 def _default_soil_warning(declaration: DefaultDeclaration) -> str:
@@ -371,6 +379,12 @@ class CraftTranslator(CraftTranslatorBase):
                     cell_to_profile=cell_to_profile,
                 )
                 output_files.append(soil_mask_file)
+            if data.grid:
+                # Bound last: the .SOL, its detail file and the mask that picks each cell's profile.
+                bound = [soil_file, soil_file.parent / DETAIL_FILE]
+                if include_soil_mask:
+                    bound.append(soil_mask_file)
+                output_files.append(write_binding(self.output_dir, "soil", bound))
 
             # 5. Generate crop mask
             if data.grid:
@@ -1917,6 +1931,7 @@ class CraftTranslator(CraftTranslatorBase):
         profiles_by_key: Dict[int, SoilProfile] = {}
         cell_to_key: Dict[int, int] = {}
         default_cause: Dict[int, str] = {}  # cell_id -> cause, for generic-soil cells
+        stamp_source = "profiles"
 
         def add_hwsd(cell_id: int, profile: SoilProfile) -> None:
             smu_id = int(profile.metadata["hwsd_smu_id"])
@@ -1972,12 +1987,14 @@ class CraftTranslator(CraftTranslatorBase):
                 content = _profile_content_key(profile)
                 if content not in key_by_content:
                     key_by_content[content] = _RETRIEVED_PROFILE_KEY_BASE + len(key_by_content)
-                    profiles_by_key[key_by_content[content]] = profile
+                    profiles_by_key[key_by_content[content]] = profile if profile is placeholder else replace(
+                        profile, metadata={**profile.metadata, "source_cell_id": cell_id})
                 cell_to_key[cell_id] = key_by_content[content]
                 if profile is placeholder:
                     default_cause[cell_id] = "retrieve_stage_placeholder"
         else:
             logger.warning("No soil data available - every cell runs on the declared default soil")
+            stamp_source = "default_profile"
             for cell_id in cell_ids:
                 default_cause[cell_id] = "no_soil_source"
 
@@ -2017,8 +2034,9 @@ class CraftTranslator(CraftTranslatorBase):
             profiles_by_id=profiles_by_key,
             country_code=country_code,
             region=region,
+            stamp=SoilStamp(stamp_source),
+            source_label_for_id=lambda key: _profile_description(key, profiles_by_key[key]),
             chem_default_log=chem_defaults,
-            soil_record=True,
             profile_cell_counts=profile_cell_counts,
             default_causes=causes,
             default_declaration_out=declarations,
@@ -3165,32 +3183,6 @@ class CraftTranslator(CraftTranslatorBase):
         n_cells = len(data.grid.cells) if data.grid else 0
         n_soil_profiles = len(data.soil) if data.soil else 0
 
-        # V2-19b-fix Finding 7: determine soil source from ACTUAL data, not
-        # config inference. The config always has hwsd paths injected by
-        # prismweb regardless of whether the pipeline actually used HWSD.
-        # Reading SoilProfile.source reflects what the pipeline did, not
-        # what was available to it.
-        soil_source = "source unavailable"
-        soil_description = "Soil source could not be determined"
-        if data.soil:
-            first_source = next(
-                (p.source for p in data.soil.values() if hasattr(p, 'source') and p.source),
-                None,
-            )
-            if first_source:
-                soil_source = first_source
-                if "iSDA" in first_source or "isda" in first_source:
-                    soil_description = "Per-cell profiles from iSDA Africa (30m native)"
-                elif "HWSD" in first_source or "hwsd" in first_source:
-                    soil_description = "Per-SMU profiles from Harmonized World Soil Database"
-                elif "eGHR" in first_source or "eghr" in first_source:
-                    soil_description = "Per-cell profiles from eGHR global soil database"
-                elif "placeholder" in first_source.lower():
-                    soil_source = "Default profile"
-                    soil_description = "Generic soil profile for simulation"
-                else:
-                    soil_description = f"Soil data from {first_source}"
-
         crop_mask_source = "Uniform (100%)"
         crop_mask_description = "All cells assumed to have target crop"
         if platform_config:
@@ -3325,9 +3317,7 @@ class CraftTranslator(CraftTranslatorBase):
             'craft_level': (getattr(platform_config, 'craft_level', None) or getattr(platform_config, 'schema_level', 2)) if platform_config else 2,
             'admin_names': admin_names,
 
-            # Data sources
-            'soil_source': soil_source,
-            'soil_description': soil_description,
+            # Data sources (the soil comes from the package's own soil files)
             'crop_mask_source': crop_mask_source,
             'crop_mask_description': crop_mask_description,
             'boundary_source': boundary_source,
@@ -3343,7 +3333,6 @@ class CraftTranslator(CraftTranslatorBase):
 
             # Data sources dict for manifest
             'data_sources': {
-                'soil': soil_source,
                 'crop_mask': crop_mask_source,
                 'boundaries': boundary_source,
                 'climate': 'NASA POWER (to be downloaded)',

@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tests.package_soil import stamp_package_soil
 
 from prismpy.sources.crop_areas.spam_vintage import (
     AppliedVintage,
@@ -146,6 +147,7 @@ def test_generate_readme_renders_vintage_from_structured_field(tmp_path):
         "end_year": 2019,
     }
     out = tmp_path / "README.md"
+    stamp_package_soil(Path(out).parent, 'pythia')
     generate_readme(
         out, config, platform="pythia", mask_present=True,
         crop_mask_vintage={
@@ -192,8 +194,9 @@ def test_boundary_files_byte_identical_to_base():
     model must be BYTE-IDENTICAL to the merge-base with ``origin/main``. The SPAM vintage change
     touched CRAFT, so craft/translator.py left this frozen set; the crop-presence rule then exposed
     ACEA's harvested-area file choice (same pick) and added an optional record to the tracker's
-    boundary block, so acea/translator.py and provenance/tracker.py left it too. Skips where git
-    history / ``origin/main`` is unavailable (the grep guard above still runs everywhere).
+    boundary block, so acea/translator.py and provenance/tracker.py left it too (the ACEA
+    translator also stamps and binds the soil netCDF it writes). Skips where git history /
+    ``origin/main`` is unavailable (the grep guard above still runs everywhere).
     """
     import subprocess
 

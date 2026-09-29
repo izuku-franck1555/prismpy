@@ -24,6 +24,7 @@ from pathlib import Path
 from prismpy.models.region import BoundingBox, Region
 from prismpy.models.soil import SoilLayer, SoilProfile
 from prismpy.translators._shared.dssat_sol_writer import write_dssat_sol
+from prismpy.packaging.soil_declaration import SoilStamp
 
 
 FIXTURE_PATH = (
@@ -41,7 +42,7 @@ FIXTURE_PATH = (
 # overflowed the field and shifted the depth -> IPSOIL Error 5010. Update
 # only when the fixture is intentionally regenerated; paired with the fixture
 # file so a SHA update is meaningless without a corresponding fixture rewrite.
-EXPECTED_SHA256 = "6e57f5fc5bbbc615e52648112249b831cb2ffe83e59fcd64fcd3746e783e6585"
+EXPECTED_SHA256 = "6193f85a8301853aba12e259b22e573f315413ad50c4e1e90a85ef7f87296fd1"
 
 
 def _build_profiles() -> dict[int, SoilProfile]:
@@ -120,6 +121,7 @@ def test_write_dssat_sol_returns_expected_profile_name_mapping(tmp_path: Path) -
         profiles_by_id=_build_profiles(),
         country_code="CM",
         region=_build_region(),
+        stamp=SoilStamp("profiles"), source_label_for_id=lambda key: f"HWSD v2 SMU {key}",
     )
     assert mapping == {1: "CM00000001", 2: "CM00000002"}
 
@@ -132,6 +134,7 @@ def test_write_dssat_sol_byte_identical_to_fixture(tmp_path: Path) -> None:
         profiles_by_id=_build_profiles(),
         country_code="CM",
         region=_build_region(),
+        stamp=SoilStamp("profiles"), source_label_for_id=lambda key: f"HWSD v2 SMU {key}",
     )
     actual_bytes = out_path.read_bytes()
     expected_bytes = FIXTURE_PATH.read_bytes()
@@ -153,6 +156,7 @@ def test_write_dssat_sol_byte_identical_to_pinned_sha(tmp_path: Path) -> None:
         profiles_by_id=_build_profiles(),
         country_code="CM",
         region=_build_region(),
+        stamp=SoilStamp("profiles"), source_label_for_id=lambda key: f"HWSD v2 SMU {key}",
     )
     actual_sha = hashlib.sha256(out_path.read_bytes()).hexdigest()
     assert actual_sha == EXPECTED_SHA256, (

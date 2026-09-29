@@ -47,6 +47,7 @@ from prismpy.models.soil import SoilProfile
 from prismpy.models.spatial import SpatialGrid
 from prismpy.provenance.tracker import DecisionType, ProvenanceTracker
 from prismpy.sources.climate._cancel import PipelineCancelled, raise_if_cancelled
+from prismpy.packaging.soil_declaration import EGHR_DATABASE, write_binding
 from prismpy.translators._shared import build_eghr_substrate
 # Sprint E.3 AC-E3-9 — cockpit override dispatch helper. The
 # climate / soil / management per-cell write sites in this
@@ -3168,6 +3169,10 @@ class PythiaTranslator(PythiaTranslatorBase):
                 logger.warning(f"eGHR SOL directory not found at {src_sol_dir}")
 
         if files_copied > 0:
+            # Bound last: the copied database and .SOLs, and the clipped raster PYTHIA reads with them.
+            bound = sorted(eghr_output.glob("*.SOL")) + [
+                p for p in (eghr_output / "GHR.db", self.output_dir / "raster" / "soil.tif") if p.is_file()]
+            write_binding(self.output_dir, "eGHR", bound, source=EGHR_DATABASE)
             logger.info(f"eGHR data included in package: {eghr_output} ({files_copied} files)")
             return eghr_output
         else:
@@ -3631,7 +3636,6 @@ class PythiaTranslator(PythiaTranslatorBase):
             "spinup_years": self.config.temporal.spinup_years if self.config.temporal else 0,
             "data_sources": {
                 "climate": "NASA POWER",
-                "soil": "eGHR",
                 # Human-readable STRING label (add-a-field: type unchanged so ACEA/CRAFT/legacy/
                 # prismweb consumers of `crop_mask` are unaffected).
                 "crop_mask": self._crop_mask_provenance_label(),
@@ -3768,7 +3772,6 @@ class PythiaTranslator(PythiaTranslatorBase):
             # Data sources
             'data_sources': {
                 'climate': 'NASA POWER',
-                'soil': 'eGHR (GGCMI)',
                 'crop_mask': self._crop_mask_provenance_label(),
                 # Emitted ONLY on a masked run (no null key on a maskless run).
                 **({'crop_mask_vintage': self._applied_vintage.to_manifest_dict()}

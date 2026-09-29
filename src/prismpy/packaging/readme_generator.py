@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
+from prismpy.packaging.soil_declaration import DECLARED_PLATFORMS, declared_soil
+
 
 # SARRA-Py README template
 SARRA_PY_README_TEMPLATE = '''# {project_name}
@@ -369,7 +371,7 @@ craft/
 
 | Data Type | Source | Description |
 |-----------|--------|-------------|
-| **Soil** | {soil_source} | {soil_description} |
+| **Soil** | {soil_source} | Declared from this package's soil files |
 | **Crop Mask** | {crop_mask_source} | {crop_mask_description} |
 | **Boundaries** | {boundary_source} | {boundary_description} |
 | **Climate** | NASA POWER | To be downloaded (SRAD, TMAX, TMIN, RAIN) |
@@ -863,7 +865,7 @@ pythia --all config/pythia_config.json
 | Data Type | Source | Version | Description |
 |-----------|--------|---------|-------------|
 | Weather | {climate_source} | {start_year}-{end_year} | Daily SRAD, TMAX, TMIN, RAIN, TDEW, RHUM, WIND |
-| Soil | eGHR (GGCMI) | v2 | DSSAT-compatible soil profiles |
+| Soil | {soil_source} | — | DSSAT-compatible soil profiles |
 {crop_mask_row}
 | Boundary | GADM | v4.1 | Administrative boundaries |
 
@@ -1374,6 +1376,7 @@ def generate_readme(
     platform: str = "sarra_py",
     mask_present: bool = False,
     crop_mask_vintage: Optional[dict] = None,
+    soil_label: Optional[str] = None,
 ) -> Path:
     """
     Generate README from template.
@@ -1385,6 +1388,8 @@ def generate_readme(
         mask_present: Whether a crop-mask raster was produced for this run;
             drives the honest crop-mask provenance in the PYTHIA README. Defaults
             False (conservative — an omitting caller never falsely claims a mask).
+        soil_label: The soil row as already declared (a scenario README takes its baseline's);
+            by default it is declared from the package's own soil files.
 
     Returns:
         Path to generated README
@@ -1458,10 +1463,10 @@ def generate_readme(
             data_sources.get('temperature'),
             default='AgERA5',
         ),
-        'soil_source': _coalesce(
-            data_sources.get('soil'),
-            default='iSDA',
-        ),
+        # The soil the engine reads, declared from the package's own soil files.
+        'soil_source': soil_label if soil_label is not None else (
+            declared_soil(Path(output_path).parent, platform).label
+            if platform in DECLARED_PLATFORMS else 'not recorded'),
     }
 
     # CRAFT-specific values
@@ -1490,11 +1495,6 @@ def generate_readme(
             'country_code': _safe_get(config, 'country_code', 'ML'),
 
             # Data sources with descriptions
-            # V2-19b-fix Finding 7: default to "source unavailable" not
-            # "HWSD v2.0" — the caller must set soil_source explicitly
-            # from the actual SoilProfile.source field.
-            'soil_source': _safe_get(config, 'soil_source', 'source unavailable'),
-            'soil_description': _safe_get(config, 'soil_description', 'Soil source not specified'),
             'crop_mask_source': _safe_get(config, 'crop_mask_source', 'SPAM 2020'),
             'crop_mask_description': _safe_get(config, 'crop_mask_description', 'Harvested area fractions'),
             'boundary_source': _safe_get(config, 'boundary_source', 'GADM v4.1'),
@@ -1542,8 +1542,6 @@ def generate_readme(
             ),
 
             # Data sources
-            # V2-19b-fix Finding 7: same fix as CRAFT — honest default.
-            'soil_source': _safe_get(config, 'soil_source', 'source unavailable'),
             'spam_source': _safe_get(config, 'spam_source', 'Dummy (placeholder)'),
             'gaez_source': _safe_get(config, 'gaez_source', 'FAO GAEZ v4'),
 

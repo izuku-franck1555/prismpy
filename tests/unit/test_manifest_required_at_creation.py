@@ -12,6 +12,8 @@ zero false-reject on a complete (realistic) native config.
 from __future__ import annotations
 
 import pytest
+from prismpy.packaging.soil_declaration import declared_soil
+from tests.package_soil import stamp_package_soil
 
 from prismpy.packaging.manifest import (
     MANIFEST_L2_TIERS,
@@ -54,11 +56,12 @@ def test_manifest_error_is_valueerror():
 
 def test_complete_config_creates_manifest(tmp_path):
     """A complete native config builds without tripping the gate (zero false-reject)."""
+    stamp_package_soil(tmp_path, 'pythia')
     m = create_manifest(tmp_path, _complete_config(), platform="pythia")
     assert m["region"]["name"] == "Kano"
     assert m["crop"]["name"] == "maize"
     assert m["temporal"]["start_year"] == 2010
-    assert m["data_sources"] == {"climate": "AgERA5"}
+    assert m["data_sources"] == {"climate": "AgERA5", "soil": declared_soil(tmp_path, "pythia").label}
 
 
 @pytest.mark.parametrize(
@@ -74,11 +77,13 @@ def test_complete_config_creates_manifest(tmp_path):
 def test_absent_required_field_rejected(tmp_path, mutate, needle):
     """Each REQUIRED_AT_CREATION field, when absent/empty, hard-fails creation."""
     with pytest.raises(ManifestError, match=needle):
+        stamp_package_soil(tmp_path, 'pythia')
         create_manifest(tmp_path, _complete_config(**mutate), platform="pythia")
 
 
 def test_empty_platform_rejected(tmp_path):
     with pytest.raises(ManifestError, match="platform"):
+        stamp_package_soil(tmp_path, '')
         create_manifest(tmp_path, _complete_config(), platform="")
 
 

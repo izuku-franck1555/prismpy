@@ -20,6 +20,7 @@ from prismpy.translators._shared.dssat_sol_writer import (
     _dssat_sltx_code,
     write_dssat_sol,
 )
+from prismpy.packaging.soil_declaration import SoilStamp
 
 
 # ── the SLTX code mapping (helper) ───────────────────────────────────
@@ -110,7 +111,7 @@ def test_sandyclayloam_renders_sltx_code_at_dssat_column(tmp_path) -> None:
     scl = _profile(sand=55.0, clay=30.0)  # -> Sandy Clay Loam
     assert scl.surface_texture == "Sandy Clay Loam"  # premise guard
     out = tmp_path / "TZ.SOL"
-    write_dssat_sol(out, {4: scl}, country_code="TZ", region=_region())
+    write_dssat_sol(out, {4: scl}, country_code="TZ", region=_region(), stamp=SoilStamp("profiles"), source_label_for_id=lambda key: f"HWSD v2 SMU {key}")
     line = _star_line(out.read_text(), "TZ00000004")
     assert "SandyClayLoam" not in line  # the overflowing spelled-out name is gone
     assert line[25:30] == "SCL  "  # SLTX A5 field at cols 26-30 (0-indexed 25:30)
@@ -138,7 +139,7 @@ def test_sltx_and_depth_at_dssat_format_5030_columns(
     prof = _profile(sand=sand, clay=clay)
     assert prof.surface_texture == texture  # premise guard
     out = tmp_path / "TZ.SOL"
-    write_dssat_sol(out, {1: prof}, country_code="TZ", region=_region())
+    write_dssat_sol(out, {1: prof}, country_code="TZ", region=_region(), stamp=SoilStamp("profiles"), source_label_for_id=lambda key: f"HWSD v2 SMU {key}")
     line = _star_line(out.read_text(), "TZ00000001")
     assert line[25:30] == f"{code:<5}"  # SLTX A5, cols 26-30
     assert line[31:36] == "   50"       # depth F5.0, cols 32-36 (50 cm)

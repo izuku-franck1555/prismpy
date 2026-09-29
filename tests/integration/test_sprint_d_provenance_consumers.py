@@ -29,6 +29,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.package_soil import stamp_package_soil
+
 from prismpy.harmonize.rh_clip import RHClipProvenance
 from prismpy.harmonize.texture_renormalize import (
     TextureRenormalizationProvenance,
@@ -190,7 +192,6 @@ def test_sprint_d_does_not_change_manifest_data_sources_soil_shape():
         "gadm_level": None,
         "data_sources": {
             "climate": "NASA POWER",
-            "soil": "iSDA Africa",
             "boundaries": "Bounding box",
         },
     }
@@ -198,6 +199,7 @@ def test_sprint_d_does_not_change_manifest_data_sources_soil_shape():
     with tempfile.TemporaryDirectory() as tmp:
         package_dir = Path(tmp) / "test"
         package_dir.mkdir()
+        stamp_package_soil(package_dir, "craft")
         manifest = create_manifest(
             package_dir, project_config, platform="craft",
         )

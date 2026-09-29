@@ -11,6 +11,7 @@ from __future__ import annotations
 import inspect
 import re
 from pathlib import Path
+from tests.package_soil import stamp_package_soil
 from unittest import TestCase
 
 from prismpy.packaging.manifest import create_manifest, derive_boundary_label
@@ -106,6 +107,7 @@ class TestCreateManifestGadmLevelDefault(TestCase):
         from tempfile import TemporaryDirectory
         with TemporaryDirectory(prefix='manifest-pin-') as tmp:
             cfg = self._minimal_project_config()  # no gadm_level key
+            stamp_package_soil(Path(tmp), 'craft')
             manifest = create_manifest(
                 Path(tmp), cfg, platform='craft',
             )
@@ -120,6 +122,7 @@ class TestCreateManifestGadmLevelDefault(TestCase):
         from tempfile import TemporaryDirectory
         with TemporaryDirectory(prefix='manifest-pin-') as tmp:
             cfg = self._minimal_project_config(gadm_level=None)
+            stamp_package_soil(Path(tmp), 'craft')
             manifest = create_manifest(
                 Path(tmp), cfg, platform='craft',
             )
@@ -138,6 +141,7 @@ class TestCreateManifestGadmLevelDefault(TestCase):
         from tempfile import TemporaryDirectory
         with TemporaryDirectory(prefix='manifest-pin-') as tmp:
             cfg = self._minimal_project_config(gadm_level=1)
+            stamp_package_soil(Path(tmp), 'craft')
             manifest = create_manifest(
                 Path(tmp), cfg, platform='craft',
             )
@@ -389,6 +393,7 @@ class TestReadmeAdminLevelLabel(TestCase):
         from tempfile import TemporaryDirectory
         with TemporaryDirectory(prefix='readme-admin-') as tmp:
             output = Path(tmp) / 'README.md'
+            stamp_package_soil(Path(output).parent, 'sarra_py')
             generate_readme(
                 output,
                 {
@@ -408,6 +413,7 @@ class TestReadmeAdminLevelLabel(TestCase):
         from tempfile import TemporaryDirectory
         with TemporaryDirectory(prefix='readme-admin-') as tmp:
             output = Path(tmp) / 'README.md'
+            stamp_package_soil(Path(output).parent, 'sarra_py')
             generate_readme(
                 output,
                 {

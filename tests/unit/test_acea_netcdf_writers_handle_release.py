@@ -50,6 +50,8 @@ push-approval; behavioural complement to Pin DP-1).
 """
 from __future__ import annotations
 
+import dataclasses
+
 import ast
 import inspect
 import os
@@ -154,7 +156,8 @@ def test_generate_soil_netcdf_from_profiles_releases_handles(
     file AND release the underlying handle.
     """
     inst = _minimal_acea(tmp_path)
-    soil_profiles = {0: sample_soil_profile}
+    # A retrieved source the soil record can name (the shared fixture's is a test label).
+    soil_profiles = {0: dataclasses.replace(sample_soil_profile, source="isda")}
     cell_ids = [0]
 
     result = inst._generate_soil_netcdf_from_profiles(soil_profiles, cell_ids)

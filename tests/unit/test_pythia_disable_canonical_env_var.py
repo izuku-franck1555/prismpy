@@ -120,7 +120,7 @@ def _build_profiles() -> Dict[int, SoilProfile]:
             profile_id="P0",
             lat=12.0,
             lon=2.0,
-            source="hwsd2",
+            source="hwsd",
             layers=[
                 SoilLayer(
                     depth_top=0.0,

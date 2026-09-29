@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
+from tests.package_soil import stamp_package_soil
 
 from prismpy.packaging.manifest import create_manifest
 
@@ -277,6 +278,7 @@ def test_behavior_sarra_py_maize_at_deep_sahel_emits_advisory(
         bounds_gis=_MOPTI_BBOX_GIS,
         use_cases=["drought_management"],
     )
+    stamp_package_soil(package_dir, 'sarra_py')
     m = create_manifest(package_dir, cfg, platform="sarra_py")
     flags = m["uc_readiness"]["drought_management"]["advisory_flags"]
     assert (
@@ -302,6 +304,7 @@ def test_behavior_sarra_py_maize_at_landrace_lat_no_advisory(
         bounds_gis=_SEGOU_BBOX_GIS,
         use_cases=["drought_management"],
     )
+    stamp_package_soil(package_dir, 'sarra_py')
     m = create_manifest(package_dir, cfg, platform="sarra_py")
     flags = m["uc_readiness"]["drought_management"]["advisory_flags"]
     assert (
@@ -323,6 +326,7 @@ def test_behavior_boundary_lat_exactly_14_no_advisory(
         bounds_gis=_BOUNDARY_BBOX_GIS,
         use_cases=["drought_management"],
     )
+    stamp_package_soil(package_dir, 'sarra_py')
     m = create_manifest(package_dir, cfg, platform="sarra_py")
     flags = m["uc_readiness"]["drought_management"]["advisory_flags"]
     assert (
@@ -358,6 +362,7 @@ def test_behavior_advisory_does_not_leak_across_axes(
         bounds_gis=_MOPTI_BBOX_GIS,
         use_cases=["drought_management"],
     )
+    stamp_package_soil(package_dir, platform)
     m = create_manifest(package_dir, cfg, platform=platform)
     flags = m["uc_readiness"]["drought_management"]["advisory_flags"]
     assert (
@@ -381,6 +386,7 @@ def test_behavior_advisory_absent_when_uc4_not_declared(
         bounds_gis=_MOPTI_BBOX_GIS,
         use_cases=["yield_forecast"],
     )
+    stamp_package_soil(package_dir, 'sarra_py')
     m = create_manifest(package_dir, cfg, platform="sarra_py")
     ucr = m["uc_readiness"]
     assert "drought_management" not in ucr, (
@@ -416,6 +422,7 @@ def test_behavior_advisory_reads_from_bounds_sarra_py_fallback(
     # the northern (max) lat, lat_SE the southern (min). Mopti-like:
     # lat_NW=14.55, lat_SE=14.40 → lat_mid=14.475 > 14.0.
     cfg["bounds_sarra_py"] = [14.55, -4.20, 14.40, -4.05]
+    stamp_package_soil(package_dir, 'sarra_py')
     m = create_manifest(package_dir, cfg, platform="sarra_py")
     flags = m["uc_readiness"]["drought_management"]["advisory_flags"]
     assert (
@@ -440,6 +447,7 @@ def test_behavior_advisory_absent_when_bounds_missing(
         use_cases=["drought_management"],
     )
     cfg.pop("bounds_gis", None)  # nothing left for the predicate to read
+    stamp_package_soil(package_dir, 'sarra_py')
     m = create_manifest(package_dir, cfg, platform="sarra_py")
     flags = m["uc_readiness"]["drought_management"]["advisory_flags"]
     assert (
@@ -462,7 +470,9 @@ def test_behavior_advisory_emit_is_deterministic_across_repeat_calls(
         bounds_gis=_MOPTI_BBOX_GIS,
         use_cases=["drought_management"],
     )
+    stamp_package_soil(package_dir, 'sarra_py')
     m1 = create_manifest(package_dir, cfg, platform="sarra_py")
+    stamp_package_soil(package_dir, 'sarra_py')
     m2 = create_manifest(package_dir, cfg, platform="sarra_py")
     f1 = m1["uc_readiness"]["drought_management"]["advisory_flags"]
     f2 = m2["uc_readiness"]["drought_management"]["advisory_flags"]

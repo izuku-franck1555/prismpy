@@ -59,7 +59,7 @@ def _build_substrate(tmp_path: Path) -> "Path":
             profile_id="P0",
             lat=12.0,
             lon=2.0,
-            source="hwsd2",
+            source="hwsd",
             layers=[
                 SoilLayer(
                     depth_top=0.0,
@@ -79,7 +79,7 @@ def _build_substrate(tmp_path: Path) -> "Path":
             profile_id="P1",
             lat=12.0,
             lon=2.5,
-            source="hwsd2",
+            source="hwsd",
             layers=[
                 SoilLayer(
                     depth_top=0.0,

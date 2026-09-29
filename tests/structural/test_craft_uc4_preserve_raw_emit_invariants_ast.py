@@ -29,6 +29,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from tests.package_soil import stamp_package_soil
 
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -357,6 +358,7 @@ def test_craft_manifest_write_boundary_omits_capability_when_uc4_absent(
             "data_sources": {"climate": "AgERA5"},
             "use_case_config": {"yield_forecast": {}},
         }
+        stamp_package_soil(pkg, 'craft')
         manifest = create_manifest(
             pkg, project_config, platform="craft",
             additional_metadata=None,

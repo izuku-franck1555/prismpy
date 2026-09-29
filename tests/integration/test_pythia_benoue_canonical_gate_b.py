@@ -206,7 +206,7 @@ def _build_benoue_profiles() -> Dict[int, SoilProfile]:
             profile_id=f"BNU_{cell_id}",
             lat=8.0 + (cell_id // 6 + 0.5) / 6.0,
             lon=13.5 + (cell_id % 6 + 0.5) / 6.0,
-            source="hwsd2",
+            source="hwsd",
             layers=[layer],
         )
     return profiles
