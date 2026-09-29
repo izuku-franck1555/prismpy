@@ -14,8 +14,8 @@ from pydantic import ValidationError
 from prismpy.cells.admission import cell_id_5arcmin_to_30arcmin_parent as parent
 from prismpy.pipeline.executor import TranslationPipeline
 from tests.unit._crop_presence_fixtures import (
-    COAST_BOX, COAST_MAIZ, INLAND_BOX, INLAND_POTA, box_cells, identity_of, make_config, mapped,
-    region_of, run_grid_stages,
+    COAST_BOX, COAST_MAIZ, INLAND_BOX, INLAND_POTA, StopAfterGrid, box_cells, identity_of, make_config,
+    mapped, region_of, run_grid_stages,
 )
 
 # The whole-grid config's hash input and YAML dump at the pre-rule base 4e763a1.
@@ -186,12 +186,17 @@ def test_the_record_is_reproducible_and_digest_bound(tmp_path, monkeypatch):
 
 
 # --- the typed errors (FY-7, FY-8, FY-9) ------------------------------------------------------- #
+def _no_soil_fetch(self, grid, region):
+    raise StopAfterGrid("the region reached the soil fetch")
+
+
 def test_zero_mapped_cells_fail_the_real_pipeline_with_a_classified_event(tmp_path, monkeypatch):
     from prismpy.errors import classify_to_event_dict
     from prismpy.sources.crop_areas.presence import CropPresenceEmptyError
 
     monkeypatch.setattr(TranslationPipeline, "_load_climate_data", lambda self, region: {})
     monkeypatch.setattr(TranslationPipeline, "_load_soil_data", lambda self, region: None)
+    monkeypatch.setattr(TranslationPipeline, "_retrieve_isda_api_for_grid", _no_soil_fetch)
     rule = _rule(INLAND_POTA, crop_code="POTA")
     cfg = make_config(tmp_path, rule=rule, rule_path=INLAND_POTA, box=INLAND_BOX,
                       targets=("pythia",), crop=("Potato", "pot"))
