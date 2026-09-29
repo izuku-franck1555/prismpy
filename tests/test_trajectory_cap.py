@@ -63,7 +63,8 @@ _LOWER = 815
 #     COMMITTED (the §7 structural-emission probes, previously untracked scratch)
 #     → n_collected ≈ 3052 → ceil((3052 + 200) / 50) * 50 = 3300.
 #   Potato SUBSTOR support: n_collected ≈ 3382 → ceil((3382 + 200) / 50) * 50 = 3600.
-_UPPER = 3600
+#   Generic-soil warning wording: n_collected ≈ 3601 → ceil((3601 + 200) / 50) * 50 = 3850.
+_UPPER = 3850
 
 
 class TestTrajectoryCap(TestCase):

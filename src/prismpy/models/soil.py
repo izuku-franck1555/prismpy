@@ -296,3 +296,11 @@ class SoilProfile:
             layers=[layer],
             total_depth=depth
         )
+
+
+def generic_soil_direction(kind: str) -> str:
+    """The one wording of what a generic soil implies for its yields; callers add "; " and the final "."."""
+    if kind not in ("default", "placeholder"):
+        raise ValueError(f"no generic soil profile of kind {kind!r}")
+    return (f"the {kind} soil may hold more or less water, and more or less organic matter, than the "
+            "local soil, so the yields simulated on it may be over- or understated")
