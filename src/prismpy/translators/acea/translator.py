@@ -25,7 +25,7 @@ import pickle
 import sys
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -1770,22 +1770,7 @@ class AceaTranslator(AceaTranslatorBase):
         tech_levels = ['R', 'I', 'A']
 
         for tech in tech_levels:
-            # Try different file naming patterns
-            patterns = [
-                f"spam2020V2r0_global_H_{spam_code}_{tech}.tif",      # SPAM code naming
-                f"spam2020_V2r0_global_H_{spam_code}_{tech}.tif",     # Original ZIP naming (underscore after year)
-                f"spam2020V2r0_global_H_{acea_fao_code}_{tech}.tif",  # FAO code naming (ACEA convention)
-                f"spam2020v2r0_global_H_{spam_code}_{tech}.tif",      # Lowercase version
-                f"spam2010V1r0_global_H_{spam_code}_{tech}.tif",      # Older SPAM 2010
-                f"*{spam_code}*_{tech}.tif",                           # Wildcard fallback
-            ]
-
-            input_path = None
-            for pattern in patterns:
-                matches = list(spam_data_dir.glob(pattern))
-                if matches:
-                    input_path = matches[0]
-                    break
+            input_path = resolve_acea_spam_input(spam_data_dir, crop_name, tech).pick
 
             if not input_path:
                 logger.debug(f"SPAM file not found for {spam_code}_{tech}")
@@ -3194,3 +3179,37 @@ if __name__ == "__main__":
         lines[-1] = lines[-1].rstrip(',')  # Remove trailing comma
         lines.append("    ]")
         return "\n".join(lines)
+
+
+class AceaSpamInput(NamedTuple):
+    """The harvested-area file ACEA's clip reads for one technology, and every file its matching
+    pattern found (more than one means the pick depends on directory order)."""
+    pick: Optional[Path]
+    matches: List[Path]
+
+
+def acea_spam_input_patterns(spam_code: str, acea_fao_code: int, tech: str) -> List[str]:
+    """The file-name patterns ACEA's harvested-area clip tries, in order."""
+    return [
+        f"spam2020V2r0_global_H_{spam_code}_{tech}.tif",      # SPAM code naming
+        f"spam2020_V2r0_global_H_{spam_code}_{tech}.tif",     # Original ZIP naming (underscore after year)
+        f"spam2020V2r0_global_H_{acea_fao_code}_{tech}.tif",  # FAO code naming (ACEA convention)
+        f"spam2020v2r0_global_H_{spam_code}_{tech}.tif",      # Lowercase version
+        f"spam2010V1r0_global_H_{spam_code}_{tech}.tif",      # Older SPAM 2010
+        f"*{spam_code}*_{tech}.tif",                           # Wildcard fallback
+    ]
+
+
+def resolve_acea_spam_input(spam_data_dir, crop_name: str, tech: str) -> AceaSpamInput:
+    """The file ACEA's clip reads: the first match of the first pattern that matches, in glob
+    order, with all of that pattern's matches; (None, []) without a SPAM code or a match."""
+    spam_code = SPAM_CODE_MAP.get(crop_name)
+    if not spam_code:
+        return AceaSpamInput(None, [])
+    acea_fao_code = ACEA_FAO_CODE_MAP.get(crop_name, 999)
+    directory = Path(spam_data_dir)
+    for pattern in acea_spam_input_patterns(spam_code, acea_fao_code, tech):
+        matches = list(directory.glob(pattern))
+        if matches:
+            return AceaSpamInput(matches[0], matches)
+    return AceaSpamInput(None, [])
