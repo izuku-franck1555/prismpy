@@ -94,8 +94,9 @@ def test_one_open_and_one_windowed_read(monkeypatch):
         def __getattr__(self, name):
             return getattr(self._ds, name)
 
+    expected, cells = identity_of(COAST_MAIZ), box_cells(COAST_BOX)
     monkeypatch.setattr(rasterio, "open", lambda *a, **k: (opens.append(a), Counting(real_open(*a, **k)))[1])
-    cell_presence(box_cells(COAST_BOX), COAST_MAIZ, expected=identity_of(COAST_MAIZ))
+    cell_presence(cells, COAST_MAIZ, expected=expected)
     assert len(opens) == 1 and len(reads) == 1 and reads[0] is not None
 
 
