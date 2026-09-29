@@ -90,6 +90,7 @@ def test_one_roster_id_digest_encoding():
 # here; an independent SPAM presence/area sampler must read through ``cell_presence`` instead.
 _RASTER_READERS = {
     "sources/crop_areas/presence.py::cell_presence": "the one SPAM presence reader",
+    "sources/crop_areas/presence.py::raster_identity": "the one reader's identity (header + checksum)",
     "sources/crop_areas/spam.py::clip_to_file": "ACEA's harvested-area clip",
     "sources/crop_areas/spam.py::_sample_raster": "legacy SPAMSource.retrieve (no production caller)",
     "sources/crop_areas/spam.py::_extract_from_bounds": "legacy SPAMSource.retrieve (no production caller)",

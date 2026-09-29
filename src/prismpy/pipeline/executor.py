@@ -2244,6 +2244,7 @@ class TranslationPipeline:
 
         errors = []
         warnings = []
+        error_events: List[Dict[str, Any]] = []
 
         try:
             # Create unified data container
@@ -2399,6 +2400,19 @@ class TranslationPipeline:
                 # min_share_percent is a no-op; cell.share_percent stays
                 # None per AC-3.5.
 
+                # Stage 3b — the crop-presence rule: a roster definition, like min_share_percent.
+                crop_presence_record = None
+                acea_target = any(p.value == "acea" for p in self.config.get_enabled_platforms())
+                if config_boundary.crop_presence is not None:
+                    from prismpy.pipeline.crop_presence import apply_crop_presence_rule
+                    outcome = apply_crop_presence_rule(
+                        grid.cells, config_boundary.crop_presence, config_boundary.crop_presence_path,
+                        crop_name=self.config.crop.name, acea_target=acea_target,
+                        grid_resolution=self.config.region.grid_resolution,
+                    )
+                    grid.cells = outcome.kept
+                    crop_presence_record = outcome.record
+
                 # Stage 4 — apply user-skip filter (cockpit per-cell exclude).
                 user_excluded = set(getattr(
                     self.config.region, 'exclude_cells', None,
@@ -2407,6 +2421,9 @@ class TranslationPipeline:
                     grid.cells = [
                         c for c in grid.cells if c.cell_id not in user_excluded
                     ]
+                if crop_presence_record is not None:
+                    from prismpy.pipeline.crop_presence import finalize_crop_presence_record
+                    finalize_crop_presence_record(crop_presence_record, grid.cells, acea_target=acea_target)
 
                 self.logger.info(f"Created grid with {grid.n_cells} cells")
 
@@ -2441,6 +2458,7 @@ class TranslationPipeline:
                             n_cells_excluded_by_min_share_percent
                         ),
                         n_cells_admitted=len(grid.cells),
+                        crop_presence=crop_presence_record,
                     )
 
                 # V2-19 site #3: record AGGREGATION_METHOD decision for grid
@@ -2721,6 +2739,10 @@ class TranslationPipeline:
             errors.append(f"Harmonization failed: {str(e)}")
             self.logger.error(f"Harmonization error: {e}")
             unified_data = None
+            from prismpy.sources.crop_areas.presence import CropPresenceEmptyError, CropPresenceIdentityError
+            if isinstance(e, (CropPresenceEmptyError, CropPresenceIdentityError)):
+                from prismpy.errors import classify_to_event_dict
+                error_events.append(classify_to_event_dict(e))
 
         duration = (datetime.now() - start_time).total_seconds()
         return StageResult(
@@ -2730,6 +2752,7 @@ class TranslationPipeline:
             errors=errors,
             warnings=warnings,
             duration_seconds=duration,
+            error_events=error_events,
         )
 
     def _execute_translate(
