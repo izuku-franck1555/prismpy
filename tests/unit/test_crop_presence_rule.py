@@ -77,6 +77,15 @@ def test_the_rule_needs_the_5_arcmin_grid_and_a_restricting_engine(tmp_path):
         make_config(tmp_path, rule=_rule(), targets=("sarra_py",))
 
 
+def test_the_rule_refuses_a_grid_that_is_not_5_arcmin():
+    from prismpy.pipeline.crop_presence import apply_crop_presence_rule
+    from prismpy.sources.crop_areas.presence import CropPresenceIdentityError
+
+    with pytest.raises(CropPresenceIdentityError, match="not a 30arcmin grid"):
+        apply_crop_presence_rule(box_cells(COAST_BOX), _rule(), COAST_MAIZ, crop_name="Maize",
+                                 acea_target=False, grid_resolution="30arcmin")
+
+
 def test_the_frozen_rule_resolves_on_another_data_root(tmp_path, monkeypatch):
     moved = tmp_path / "elsewhere" / COAST_MAIZ.name
     moved.parent.mkdir()
