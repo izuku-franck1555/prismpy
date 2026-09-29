@@ -86,8 +86,7 @@ def test_one_roster_id_digest_encoding():
         assert hashing <= {"crop_presence_record_digest"}, (relpath, hashing)
 
 
-# Every function in src that opens or samples a raster, classified. A new reader must be classified
-# here; an independent SPAM presence/area sampler must read through ``cell_presence`` instead.
+# Every raster reader in src is classified here; a new SPAM area reader must use cell_presence.
 _RASTER_READERS = {
     "sources/crop_areas/presence.py::cell_presence": "the one SPAM presence reader",
     "sources/crop_areas/presence.py::raster_identity": "the one reader's identity (header + checksum)",
@@ -95,7 +94,7 @@ _RASTER_READERS = {
     "sources/crop_areas/spam.py::_sample_raster": "legacy SPAMSource.retrieve (no production caller)",
     "sources/crop_areas/spam.py::_extract_from_bounds": "legacy SPAMSource.retrieve (no production caller)",
     "translators/acea/translator.py::_generate_dummy_spam_files": "ACEA's placeholder SPAM writer",
-    "translators/pythia/translator.py::_cell_block_sums": "PYTHIA's per-cell crop area (M1 unification: Face 2)",
+    "translators/pythia/translator.py::_cell_block_sums": "PYTHIA's per-cell crop area (kept separate)",
     "translators/pythia/translator.py::_check_mask_covers_cells": "PYTHIA's mask extent check",
     "translators/pythia/translator.py::_clip_global_raster": "PYTHIA's raster clips",
     "translators/pythia/translator.py::_snap_bounds_outward": "PYTHIA's clip extent",

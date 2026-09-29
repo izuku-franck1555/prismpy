@@ -50,7 +50,7 @@ def _mapped_ids(ids):
     return {cid for cid in ids if mapped(COAST_MAIZ, by_id[cid].lat, by_id[cid].lon)}
 
 
-# --- the config identity (F6) ------------------------------------------------------------------- #
+# --- the config identity ------------------------------------------------------------------------ #
 def test_the_rule_is_an_identity_never_a_host_path():
     from prismpy.config.schema import CropPresenceRule
 
@@ -85,7 +85,7 @@ def test_the_frozen_rule_resolves_on_another_data_root(tmp_path, monkeypatch):
     assert ids and set(ids) == _mapped_ids(ids)
 
 
-# --- whole-grid byte identity (FY-24) ---------------------------------------------------------- #
+# --- whole-grid byte identity ------------------------------------------------------------------ #
 def test_the_whole_grid_config_is_byte_identical(tmp_path):
     from prismpy.config.loader import save_config
     from prismpy.utils.sanitization import region_cache_key_from_config, region_cache_key_from_region
@@ -111,7 +111,7 @@ def test_the_identity_enters_the_hash_and_the_rule_stays_out_of_the_cache_key(tm
         make_config(tmp_path).region)
 
 
-# --- the harmonize-stage cut and its record (FY-1, FY-2, FY-3, FY-4) --------------------------- #
+# --- the harmonize-stage cut and its record ---------------------------------------------------- #
 def test_the_rule_keeps_exactly_the_mapped_cells_with_exact_counts(tmp_path, monkeypatch):
     _, _, whole_ids, _ = run_grid_stages(make_config(tmp_path), monkeypatch)
     _, boundary, ids, _ = run_grid_stages(_restricted(tmp_path), monkeypatch)
@@ -185,7 +185,7 @@ def test_the_record_is_reproducible_and_digest_bound(tmp_path, monkeypatch):
     assert digest != crop_presence_record_digest({**record, "n5_final": record["n5_final"] + 1})
 
 
-# --- the typed errors (FY-7, FY-8, FY-9) ------------------------------------------------------- #
+# --- the typed errors -------------------------------------------------------------------------- #
 def _no_soil_fetch(self, grid, region):
     raise StopAfterGrid("the region reached the soil fetch")
 

@@ -455,9 +455,7 @@ class TestCarveOutRegression:
         # (the per-platform fallback read removed, net ~-11).
         # Then 2831 -> 2832 after the crop-support preflight call (+1).
         # Then 2832 -> 2854 after the HWSD outcome and the soil-cascade state (+22).
-        # Then 2854 -> 2877 after the crop-presence rule and its classified errors in harmonize (+23).
-        # Then 2877 -> 2897 after the roster read-back recorder before translate (+20).
-        # Then 2897 -> 2919 after the GID identity branches in _execute_retrieve (+22).
+        # Then 2854 -> 2919 after the crop-presence rule, the roster read-back and GID loading (+65).
         ("src/prismpy/pipeline/executor.py", 2919),
     }
 

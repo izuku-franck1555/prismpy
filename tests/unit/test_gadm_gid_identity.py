@@ -30,8 +30,7 @@ _DUPLICATES = {
 }
 _GIDS = [(name, gid, other) for name, pair in _DUPLICATES.items()
          for gid, other in (pair, pair[::-1])]
-# The region each legacy NAME config resolves to at the pre-change base 4e763a1 (pygadm = the first
-# name match; the shapefile = the union of namesakes), digested by _region_digest.
+# Each legacy NAME config's region at base 4e763a1 (pygadm: first match; shapefile: union).
 _BASE_NAME_REGIONS = {
     ("Bassa", "pygadm"): "0adb24c9d01cf099592fa5a60a741d77373320cbd552928a61d9831caea73b5a",
     ("Bassa", "shapefile"): "28942d125e33878e1ca96ce35754fa162af6ce4cca075749ce79c545c434b51f",

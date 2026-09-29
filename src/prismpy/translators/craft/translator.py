@@ -2232,18 +2232,14 @@ class CraftTranslator(CraftTranslatorBase):
         else:
             logger.warning("  Could not load schema areas - using estimated full cell areas")
 
-        # The one nodata-safe reader: the declared nodata (SPAM 2020 V2r2's finite -3.4e38), a
-        # non-finite and a negative value all read 0 ha, so no share can be negative.
+        # Nodata, non-finite and negative values all read 0 ha, so no share is ever negative.
         from prismpy.sources.crop_areas.presence import cell_presence
 
         presence = cell_presence(cells, spam_path, strict=False)
         logger.info(f"  SPAM raster: {presence.observed.height}x{presence.observed.width}, "
                     f"res={abs(presence.observed.transform[0]):.4f} deg")
 
-        # A SELECTED SPAM mask must cover EVERY requested cell. A short read would leave cells
-        # absent from cell_percents — they are then silently default-filled (100%) by the caller's
-        # .get(cell_id, default_percent). That is the per-cell form of the masquerade this
-        # fail-loud closes: raise here rather than ship a partially-defaulted mask.
+        # A selected mask covers every requested cell; a missing one would silently default to 100%.
         if len(presence.areas) != len(cells) or any(c.cell_id not in presence.areas for c in cells):
             raise SpamVintageError(
                 f"CRAFT SPAM extraction read {len(presence.areas)} values for {len(cells)} "
