@@ -2236,13 +2236,14 @@ class ProjectConfig(BaseModel):
             raise ValueError(f"the crop-presence rule restricts PYTHIA, CRAFT and ACEA rosters only, not {other}")
         return self
 
-    @model_validator(mode="after")
-    def validate_acea_harvested_area(self) -> "ProjectConfig":
-        """An ACEA package carries a registered SPAM layer, so ACEA needs the directory holding the
-        registered sources, and a crop-presence rule must restrict the grid with that same layer."""
-        if Platform.ACEA not in self.get_enabled_platforms():
-            return self
+    def assert_acea_harvested_area_compatible(self, targets=None) -> None:
+        """An ACEA package carries a registered SPAM layer, so a project that runs ACEA needs the
+        directory holding the registered sources, and a crop-presence rule must restrict the grid
+        with that same layer."""
+        targets = targets if targets is not None else self.targets
         acea = self.platform_config.acea
+        if Platform.ACEA not in targets or acea is None or not acea.enabled:
+            return
         if acea.spam_data_dir is None:
             raise ValueError("platform_config.acea.spam_data_dir is required when ACEA is enabled: "
                              "the package carries the registered SPAM harvested-area layer")
@@ -2251,7 +2252,7 @@ class ProjectConfig(BaseModel):
                              "an ACEA package always carries its harvested-area layer")
         rule = self.region.boundary.crop_presence
         if rule is None:
-            return self
+            return
         from prismpy.sources.crop_areas.spam_vintage import code_for_vintage
         from prismpy.translators.acea.translator import SPAM_CODE_MAP
 
@@ -2262,7 +2263,17 @@ class ProjectConfig(BaseModel):
             applied = f"SPAM {year} {release} {code}" if code else f"no SPAM layer ({self.crop.name} has no SPAM code)"
             raise ValueError(f"the crop-presence rule restricts the grid with SPAM {rule.year} {rule.release} "
                              f"{rule.crop_code}, but ACEA uses {applied}: both must name the same SPAM layer")
+
+    @model_validator(mode="after")
+    def validate_acea_harvested_area(self) -> "ProjectConfig":
+        self.assert_acea_harvested_area_compatible()
         return self
+
+    def assert_targets_compatible(self) -> None:
+        """Re-check the rules that depend on the targets, for targets changed after the model was
+        built (the CLI's --targets): CRAFT's grid and ACEA's harvested-area layer."""
+        self.assert_craft_resolution_compatible()
+        self.assert_acea_harvested_area_compatible()
 
     def get_enabled_platforms(self) -> List[Platform]:
         """Get list of enabled target platforms."""

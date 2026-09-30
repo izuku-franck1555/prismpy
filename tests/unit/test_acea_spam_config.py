@@ -20,7 +20,7 @@ def _rule(year, release, code):
                             nodata="nan")
 
 
-def _config(*, targets=("acea",), acea=None, rule=None, crop=("Maize", "mai")):
+def _config(*, targets=("acea",), acea=None, rule=None, crop=("Maize", "mai"), base_dir="out"):
     boundary = {"source": BoundarySource.MANUAL,
                 "manual_bounds": ManualBoundsConfig(minx=-6.0, miny=11.0, maxx=-5.0, maxy=12.0)}
     if rule is not None:
@@ -34,7 +34,7 @@ def _config(*, targets=("acea",), acea=None, rule=None, crop=("Maize", "mai")):
         temporal=TemporalConfig(start_year=2015, end_year=2016),
         targets=[Platform(t) for t in targets],
         platform_config={} if acea is None else {"acea": acea},
-        output=OutputConfig(base_dir="out"),
+        output=OutputConfig(base_dir=base_dir),
     )
 
 
@@ -126,3 +126,41 @@ SHIPPED = sorted((_ROOT / "configs" / "base").glob("*.yaml")) + sorted((_ROOT / 
 @pytest.mark.parametrize("path", SHIPPED, ids=lambda p: f"{p.parent.name}/{p.name}")
 def test_every_shipped_configuration_validates(path):
     load_config(path)
+
+
+# ── targets switched to ACEA after the configuration was built are checked again ──
+
+_AFTER = {"include_false": ({**SPAM, "include_spam_in_package": False}, None, "include_spam_in_package cannot be false"),
+          "rule_mismatch": (SPAM, ("2010", "V2r0", "WHEA"), "but ACEA uses SPAM 2020 V2r2 MAIZ"),
+          "no_spam_dir": ({}, None, "spam_data_dir is required when ACEA is enabled")}
+
+
+@pytest.mark.parametrize("case", sorted(_AFTER))
+def test_targets_switched_to_acea_are_refused_before_anything_is_written(tmp_path, case):
+    from prismpy.pipeline.executor import TranslationPipeline
+
+    acea, rule, message = _AFTER[case]
+    rule = _rule(int(rule[0]), rule[1], rule[2]) if rule else None
+    out = tmp_path / "out"
+    for switch in (lambda c: setattr(c, "targets", [Platform.ACEA]), lambda c: c.targets.append(Platform.ACEA)):
+        cfg = _config(targets=("pythia",), acea=acea, rule=rule, base_dir=str(out))
+        switch(cfg)
+        with pytest.raises(ValueError, match=message):
+            TranslationPipeline(cfg)
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("case", sorted(_AFTER))
+def test_the_cli_refuses_targets_switched_to_acea_before_anything_is_written(tmp_path, case):
+    import argparse
+
+    from prismpy.cli import cmd_translate
+    from prismpy.config.loader import save_config
+
+    acea, rule, _ = _AFTER[case]
+    rule = _rule(int(rule[0]), rule[1], rule[2]) if rule else None
+    out = tmp_path / "out"
+    path = tmp_path / "config.yaml"
+    save_config(_config(targets=("pythia",), acea=acea, rule=rule, base_dir=str(out)), path)
+    assert cmd_translate(argparse.Namespace(base=None, dome=None, config=str(path), targets=["acea"])) == 1
+    assert not out.exists()

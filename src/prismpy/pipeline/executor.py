@@ -256,7 +256,7 @@ class TranslationPipeline:
         """
         self.config = config
         # Defense-in-depth: a post-construction targets mutation (CLI --targets) skips the model_validator.
-        config.assert_craft_resolution_compatible()
+        config.assert_targets_compatible()
         self.logger = logging.getLogger(__name__)
 
         # Initialize provenance tracker
