@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -178,8 +179,14 @@ def test_the_canonical_triples_are_every_acea_crop_with_a_spam_code(vintage):
 
 
 def test_an_installed_prismpy_loads_the_pinned_digests(tmp_path):
+    # Built from a copy of the sources alone, so a build/ directory left by an earlier build cannot
+    # supply the data file the package data must declare.
+    source = tmp_path / "source"
+    shutil.copytree(ROOT / "src", source / "src", ignore=shutil.ignore_patterns("__pycache__", "*.egg-info"))
+    for name in ("pyproject.toml", "README.md"):
+        shutil.copy2(ROOT / name, source / name)
     subprocess.run([sys.executable, "-m", "pip", "wheel", "--no-deps", "--no-cache-dir",
-                    "--wheel-dir", str(tmp_path / "wheel"), str(ROOT)],
+                    "--wheel-dir", str(tmp_path / "wheel"), str(source)],
                    check=True, capture_output=True, text=True, timeout=240)
     (wheel,) = (tmp_path / "wheel").glob("prismpy-*.whl")
     site = tmp_path / "site"
