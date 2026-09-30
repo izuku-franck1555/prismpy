@@ -451,7 +451,8 @@ def _write_acea_forced_co2_readme(
         "climate_name": climate_name
         or f"{str(region.get('name', '')).lower()}_nasapower",
         "climate_source": f"NASA POWER (observed {b_start}-{b_end}, HELD)",
-        "spam_source": ds.get("harvested_areas", "Dummy (placeholder)"),
+        # The projection carries the baseline's harvested-area layer: its README states the same declaration.
+        "data_sources": {k: ds[k] for k in ("harvested_areas", "harvested_areas_layer") if k in ds},
         "gaez_source": ds.get("crop_suitability", "FAO GAEZ v4 (auto-downloaded)"),
         "gridcells": cell_ids,
         "resolution": 0,

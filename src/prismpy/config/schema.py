@@ -1830,7 +1830,8 @@ class AceaConfig(BaseModel):
     )
     spam_required: bool = Field(
         default=False,
-        description="If True, fail when SPAM data not provided. If False, generate dummy files for self-contained packages."
+        description="Accepted for older configurations; no effect: an ACEA package always carries the "
+                    "registered SPAM layer of its vintage, and fails when it cannot"
     )
 
     # GAEZ data (auto-download or user-provided)

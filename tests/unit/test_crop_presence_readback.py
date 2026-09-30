@@ -20,6 +20,7 @@ from prismpy.translators.base import UnifiedData
 from tests.unit._crop_presence_fixtures import (
     COAST_MAIZ, cell, identity_of, make_config, region_of, run_grid_stages,
 )
+from tests.package_spam import provision_spam
 from tests.unit.test_pythia_canonical_substrate_flag import _build_profiles
 
 
@@ -34,6 +35,8 @@ def _restricted_run(tmp_path, monkeypatch, platform):
 
     cfg = make_config(tmp_path, rule=CropPresenceRule(**identity_of(COAST_MAIZ)), rule_path=COAST_MAIZ,
                       targets=(platform.value,))
+    if platform is Platform.ACEA:
+        provision_spam(cfg.platform_config.acea.spam_data_dir, monkeypatch)
     _, boundary, ids, pipe = run_grid_stages(cfg, monkeypatch)
     grid = SpatialGrid(resolution="5arcmin", cells=[cell(i) for i in ids])
     return pipe, boundary["crop_presence"], grid, region_of(cfg)

@@ -1370,6 +1370,23 @@ def _resolve_admin_names(config: Dict[str, Any]) -> str:
     return 'admin_names_unavailable'
 
 
+def _harvested_area_row(config: Dict[str, Any]) -> str:
+    """ACEA's harvested-area README cell: the declared label, then the layer the package carries
+    under the engine's fixed read-keys, both from its harvested-area declaration."""
+    from prismpy.translators.base import RequiredPackageArtifactError
+
+    data_sources = config.get('data_sources') or {}
+    label, layer = data_sources.get('harvested_areas'), data_sources.get('harvested_areas_layer')
+    files = layer.get('files') if isinstance(layer, dict) else None
+    if not label or not isinstance(files, dict) or set(files) != {'R', 'I', 'A'}:
+        raise RequiredPackageArtifactError(
+            "the ACEA README needs the package's harvested-area declaration "
+            "(data_sources.harvested_areas and data_sources.harvested_areas_layer)")
+    r, i, a = (files[tech]['name'] for tech in ('R', 'I', 'A'))
+    return (f"{label}. SPAM {layer['year']} {layer['release']} ({layer['selection']}), carried by the "
+            f"package under the fixed engine read-keys {r}, {i} and {a}.")
+
+
 def generate_readme(
     output_path: Union[str, Path],
     config: Dict[str, Any],
@@ -1542,7 +1559,7 @@ def generate_readme(
             ),
 
             # Data sources
-            'spam_source': _safe_get(config, 'spam_source', 'Dummy (placeholder)'),
+            'spam_source': _harvested_area_row(config),
             'gaez_source': _safe_get(config, 'gaez_source', 'FAO GAEZ v4'),
 
             # Grid cells

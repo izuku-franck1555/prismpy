@@ -8,8 +8,8 @@ four distinct, actionable errors. This is what makes a completed masked PYTHIA
 run guarantee *applied == selected* without needing any provenance record.
 
 Scope note: the resolver :func:`resolve_spam_raster` is consumed by the PYTHIA
-translator. ACEA resolves harvested areas through its own ``SPAMSource`` /
-``_clip_spam_data`` path and is intentionally NOT wired here. CRAFT reads a
+translator and by ACEA, which carries the registered layer itself, verified
+against its pinned :func:`content_digest`. CRAFT reads a
 verbatim raster path and does not resolve — it consumes :func:`identify_vintage`
 to derive an honest ``SPAM <year> <release>`` label from that path's basename,
 and fails loud when the basename matches no registered vintage.
@@ -55,6 +55,7 @@ __all__ = [
     "resolve_spam_raster",
     "identify_vintage",
     "code_for_vintage",
+    "derive_harvested_area_label",
     "content_digest",
     "acea_canonical_triples",
 ]
@@ -262,6 +263,13 @@ def code_for_vintage(crop_code: str, year: str, release: str) -> str:
     if code not in spec.crops and _CODE_RENAMES.get(code) in spec.crops:
         return _CODE_RENAMES[code]
     return code
+
+
+def derive_harvested_area_label(year: str, release: str, selection: str) -> str:
+    """The harvested-area label of a package carrying SPAM ``year`` ``release``, selected or by default."""
+    if selection not in ("selected", "default"):
+        raise ValueError(f"a SPAM vintage is 'selected' or 'default', not {selection!r}")
+    return f"SPAM {year} {release}" + (" (default; no vintage selected)" if selection == "default" else "")
 
 
 def _content_header(dataset: Any) -> dict:

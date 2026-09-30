@@ -24,6 +24,7 @@ from prismpy.packaging.readme_generator import generate_readme
 from prismpy.translators.acea import translator as acea
 from prismpy.translators.base import HwsdOutcome, UnifiedData
 from prismpy.translators.pythia.translator import PythiaTranslator
+from tests.package_spam import harvested_area_entries
 from tests.unit import test_craft_declared_default_soil as craft_t
 from tests.unit.test_apply_soil_overrides_to_assignment import _make_sidecar, _sand_override_entry
 from tests.unit.test_pythia_canonical_substrate_flag import _build_grid_2x3
@@ -197,7 +198,8 @@ def _acea(tmp_path):
 
 def _acea_manifest(pkg):
     cfg = {"project_name": "acea", "region_name": "Koutiala", "country": "Mali", "crop_name": "Maize",
-           "start_year": 2015, "end_year": 2016, "data_sources": {"climate": "NASA POWER"}}
+           "start_year": 2015, "end_year": 2016,
+           "data_sources": {"climate": "NASA POWER", **harvested_area_entries()}}
     (pkg / "manifest.json").write_text(json.dumps(create_manifest(pkg, cfg, platform="acea")))
     generate_readme(pkg / "README.md", cfg, platform="acea")
     return _agrees(pkg, "acea")

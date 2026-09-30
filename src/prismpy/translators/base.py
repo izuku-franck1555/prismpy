@@ -111,6 +111,13 @@ class ObservedTrialsCopyError(RuntimeError):
     """
 
 
+class RequiredPackageArtifactError(RuntimeError):
+    """A file the package must carry, or the declaration it depends on, could not be written
+    (e.g. an ACEA README without its harvested-area declaration). The PACKAGE stage treats it
+    as FATAL, like :class:`ObservedTrialsCopyError`.
+    """
+
+
 class BaseTranslator(ABC):
     """Abstract base class for platform-specific translators.
 
