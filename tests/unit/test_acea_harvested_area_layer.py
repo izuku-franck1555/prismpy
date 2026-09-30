@@ -142,8 +142,29 @@ def test_a_source_that_is_not_the_registered_content_fails_before_anything_is_wr
         band = ds.read(1)
         band[10, 10] += 1.0
         ds.write(band, 1)
+    copies = []
+    monkeypatch.setattr(acea, "_reencode_losslessly", lambda source, target: copies.append(source))
     translator = _translator(tmp_path)
     with pytest.raises(sv.SpamVintageError, match="MAIZ_I"):
+        translator._write_harvested_area_layer()
+    assert copies == [] and _layer_files(translator, 56) == []
+
+
+def test_a_copy_that_does_not_reproduce_its_source_is_refused_and_removed(tmp_path, monkeypatch):
+    provision_spam(tmp_path / "spam", monkeypatch)
+    real = acea._reencode_losslessly
+
+    def faulty(source, target):
+        real(source, target)
+        if source.name.endswith("_A.tif"):
+            with rasterio.open(target, "r+") as ds:
+                band = ds.read(1)
+                band[5, 5] += 1.0
+                ds.write(band, 1)
+
+    monkeypatch.setattr(acea, "_reencode_losslessly", faulty)
+    translator = _translator(tmp_path)
+    with pytest.raises(sv.SpamVintageError, match="does not reproduce"):
         translator._write_harvested_area_layer()
     assert _layer_files(translator, 56) == []
 
@@ -213,21 +234,20 @@ def _row(readme):
     return row
 
 
-def _expected_row(label, year, release, selection):
-    keys = ", ".join(f"spam2020V2r0_global_H_56_{t}.tif" for t in "RI") + " and spam2020V2r0_global_H_56_A.tif"
-    return (f"| **Harvested Area** | {label}. SPAM {year} {release} ({selection}), carried by the package under "
-            f"the fixed engine read-keys {keys}. | Crop area fractions |")
+# The row as worded for the default and a selected vintage (the label as derived for each).
+DEFAULT_ROW = ("| **Harvested Area** | SPAM 2020 V2r2 (default; no vintage selected), crop layer MAIZ. Its rainfed, "
+               "irrigated and all-technology layers are carried under the engine's fixed file names "
+               "`spam2020V2r0_global_H_56_R.tif`, `spam2020V2r0_global_H_56_I.tif` and "
+               "`spam2020V2r0_global_H_56_A.tif`, which name the engine's read keys, not the SPAM version. "
+               "| Crop area fractions |")
+SELECTED_ROW = DEFAULT_ROW.replace("SPAM 2020 V2r2 (default; no vintage selected)", "SPAM 2010 V2r0")
 
 
-@pytest.mark.parametrize("vintage, label, selection", [
-    (None, "SPAM 2020 V2r2 (default; no vintage selected)", "default"),
-    (("2010", "V2r0"), "SPAM 2010 V2r0", "selected"),
-])
-def test_the_readme_states_the_declared_layer(tmp_path, monkeypatch, vintage, label, selection):
+@pytest.mark.parametrize("vintage, row", [(None, DEFAULT_ROW), (("2010", "V2r0"), SELECTED_ROW)])
+def test_the_readme_states_the_declared_layer(tmp_path, monkeypatch, vintage, row):
     declaration = _declared(tmp_path, monkeypatch, vintage)
-    year, release = vintage or ("2020", "V2r2")
     readme = generate_readme(tmp_path / "README.md", {"data_sources": declaration}, platform="acea", soil_label="x")
-    assert _row(readme) == _expected_row(label, year, release, selection)
+    assert _row(readme) == row
 
 
 def test_a_readme_without_the_declaration_is_refused(tmp_path):
@@ -289,3 +309,22 @@ def test_an_acea_readme_failure_is_the_typed_error(tmp_path, monkeypatch):
     with pytest.raises(RequiredPackageArtifactError, match="template error"):
         translator._generate_package_metadata(_unified(), [], "mopti_nasapower", [])
     json.dumps(translator._harvested_area_declaration())
+
+
+def test_the_manifest_and_readme_state_the_declaration(tmp_path, monkeypatch):
+    provision_spam(tmp_path / "spam", monkeypatch)
+    translator = _translator(tmp_path)
+    translator._write_harvested_area_layer()
+    declaration = translator._harvested_area_declaration()
+    translator._generate_package_metadata(_unified(), [], "mopti_nasapower", [])
+    data_sources = json.loads((translator.output_dir / "manifest.json").read_text())["data_sources"]
+    assert {key: data_sources.get(key) for key in declaration} == declaration
+    assert "crop_mask_vintage" not in data_sources
+    assert _row(translator.output_dir / "README.md") == DEFAULT_ROW
+
+
+def test_a_crop_without_an_acea_fao_code_is_refused(tmp_path, monkeypatch):
+    provision_spam(tmp_path / "spam", monkeypatch)
+    monkeypatch.delitem(ACEA_FAO_CODE_MAP, "Maize")
+    with pytest.raises(sv.SpamVintageError, match="not an ACEA crop"):
+        _translator(tmp_path)._write_harvested_area_layer()

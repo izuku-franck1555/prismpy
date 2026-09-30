@@ -1383,8 +1383,9 @@ def _harvested_area_row(config: Dict[str, Any]) -> str:
             "the ACEA README needs the package's harvested-area declaration "
             "(data_sources.harvested_areas and data_sources.harvested_areas_layer)")
     r, i, a = (files[tech]['name'] for tech in ('R', 'I', 'A'))
-    return (f"{label}. SPAM {layer['year']} {layer['release']} ({layer['selection']}), carried by the "
-            f"package under the fixed engine read-keys {r}, {i} and {a}.")
+    return (f"{label}, crop layer {layer['crop_code']}. Its rainfed, irrigated and all-technology layers are "
+            f"carried under the engine's fixed file names `{r}`, `{i}` and `{a}`, which name the engine's "
+            f"read keys, not the SPAM version.")
 
 
 def generate_readme(

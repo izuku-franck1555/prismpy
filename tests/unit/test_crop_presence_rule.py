@@ -18,9 +18,9 @@ from tests.unit._crop_presence_fixtures import (
     harmonize_output_digest, identity_of, make_config, mapped, region_of, run_grid_stages,
 )
 
-# The whole-grid config's hash input and YAML dump at the pre-rule base 4e763a1.
-_BASE_DUMP_SHA256 = "1e43bdfeb6607a60cd2c18b9f013959cf0d5b32880136ce2cafe216a295d40e9"
-_BASE_YAML_SHA256 = "f20f32d312296408692960ed0dc7c6db114271c6efa529d43e54877ee9106aef"
+# The whole-grid config's hash input and YAML dump at the pre-rule base 4e763a1, plus only ACEA's two unset vintage keys.
+_BASE_DUMP_SHA256 = "132579056e7436077f05bab174c23ff8fb292150bc9680428eb7b4cedcc75cc1"
+_BASE_YAML_SHA256 = "defff910870f11bc6be3df187060ecf285707a9d711ecb68a5c2901aaa01249e"
 # What harmonize hands on with the rule unset, per engine and config, at the pre-rule base 6b4eca1.
 _BASE_HARMONIZE = {
     "30arcmin": "67ce53966e107bc44ce6c67325c28b8317ca1818a52766e90f6bbce730f88902",

@@ -90,7 +90,8 @@ platform_config:
     include_soil_in_package: true
 
     # SPAM harvested area data
-    # spam_data_dir: "/path/to/spam2020"  # Uncomment if available
+    # Must hold the registered SPAM R, I and A sources of the vintage ACEA applies (SPAM 2020 V2r2 by default).
+    spam_data_dir: data/spam_2020_V2r2/
     include_spam_in_package: true
 
     # GAEZ crop suitability data (auto-download from FAO)

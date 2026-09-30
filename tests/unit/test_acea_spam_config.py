@@ -3,8 +3,11 @@ directory and the carried layer it needs only when ACEA is enabled, and a crop-p
 must name the same SPAM layer ACEA uses."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from prismpy.config.loader import load_config
 from prismpy.config.schema import (
     AceaConfig, BoundaryConfig, BoundarySource, CropCalendarConfig, CropConfig, CropPresenceRule,
     ManualBoundsConfig, OutputConfig, Platform, ProjectConfig, ProjectInfo, RegionConfig, TemporalConfig,
@@ -111,3 +114,15 @@ def test_a_renamed_crop_is_compared_in_its_vintage_spelling(vintage, code):
 
 def test_a_rule_is_not_checked_against_acea_when_acea_does_not_run():
     _config(targets=("pythia",), rule=_rule(2010, "V2r0", "WHEA"))
+
+
+# ── every configuration the repository ships still validates ────────────────
+
+_ROOT = Path(__file__).resolve().parents[2]
+# The full project configurations (configs/domes and configs/templates hold fragments of one).
+SHIPPED = sorted((_ROOT / "configs" / "base").glob("*.yaml")) + sorted((_ROOT / "examples").glob("*.yaml"))
+
+
+@pytest.mark.parametrize("path", SHIPPED, ids=lambda p: f"{p.parent.name}/{p.name}")
+def test_every_shipped_configuration_validates(path):
+    load_config(path)
