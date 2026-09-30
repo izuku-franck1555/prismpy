@@ -199,6 +199,12 @@ include = ["prismpy*"]
 "prismpy.vendor.hwsd_extraction" = [
     "LICENSE",
 ]
+# The pinned content digest of every registered SPAM source, which the
+# SPAM registry loads at import: without it an installed prismpy cannot
+# verify the harvested-area layers it packages.
+"prismpy.sources.crop_areas" = [
+    "spam_content_digests.json",
+]
 
 [tool.black]
 line-length = 100

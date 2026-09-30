@@ -30,15 +30,23 @@ vintage" is already a real, reachable condition, not hypothetical.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
+
+import numpy as np
 
 __all__ = [
     "VintageSpec",
     "AppliedVintage",
     "SPAM_VINTAGES",
+    "DEFAULT_SPAM_VINTAGE",
+    "SPAM_CONTENT_DIGESTS",
+    "SPAM_CONTENT_HEADERS",
     "SpamVintageError",
     "VintageNotRegisteredError",
     "CropNotInVintageError",
@@ -46,6 +54,9 @@ __all__ = [
     "VintageRasterAbsentError",
     "resolve_spam_raster",
     "identify_vintage",
+    "code_for_vintage",
+    "content_digest",
+    "acea_canonical_triples",
 ]
 
 
@@ -124,6 +135,15 @@ SPAM_VINTAGES: dict = {
         strata=frozenset({"A", "H", "I", "L", "R", "S"}),
     ),
 }
+
+#: The vintage an ACEA package carries when its project selects none.
+DEFAULT_SPAM_VINTAGE: Tuple[str, str] = ("2020", "V2r2")
+
+# One crop, spelled differently by the 2010 and 2020 releases.
+_CODE_RENAMES = {"ACOF": "COFF", "COFF": "ACOF", "SMIL": "MILL", "MILL": "SMIL"}
+
+_CONTENT_DIGEST_SCHEMA = "spam-content-digest/1"
+_CONTENT_DIGESTS_FILE = "spam_content_digests.json"
 
 
 class SpamVintageError(Exception):
@@ -225,3 +245,78 @@ def identify_vintage(filename) -> Optional[Tuple[str, str]]:
         if re.fullmatch(regex, base):
             return (year, release)
     return None
+
+
+def code_for_vintage(crop_code: str, year: str, release: str) -> str:
+    """``crop_code`` as the registered vintage ``(year, release)`` spells it.
+
+    The 2010 and 2020 releases name two crops differently (ACOF/COFF, SMIL/MILL). A code the
+    vintage maps under neither spelling is returned unchanged, so resolving it raises
+    :class:`CropNotInVintageError`.
+    """
+    spec = SPAM_VINTAGES.get((year, release))
+    if spec is None:
+        raise VintageNotRegisteredError(
+            f"SPAM vintage {year}/{release} is not a registered provisioned vintage")
+    code = str(crop_code).upper()
+    if code not in spec.crops and _CODE_RENAMES.get(code) in spec.crops:
+        return _CODE_RENAMES[code]
+    return code
+
+
+def _content_header(dataset: Any) -> dict:
+    if dataset.count != 1:
+        raise SpamVintageError(f"a SPAM layer holds one band; this one holds {dataset.count}")
+    authority = dataset.crs.to_authority() if dataset.crs else None
+    if not authority:
+        raise SpamVintageError(f"a SPAM layer's CRS has no authority code: {dataset.crs}")
+    nodata = dataset.nodata
+    return {
+        "schema": _CONTENT_DIGEST_SCHEMA,
+        "shape": [dataset.height, dataset.width],
+        "count": dataset.count,
+        "band_index": 1,
+        "dtype": np.dtype(dataset.dtypes[0]).name,
+        "byteorder": "<",
+        "transform": [repr(float(x)) for x in tuple(dataset.transform)[0:6]],
+        "crs": ":".join(authority),
+        "nodata": None if nodata is None else repr(float(nodata)),
+    }
+
+
+def content_digest(dataset: Any) -> str:
+    """The ``spam-content-digest/1`` of an open single-band raster.
+
+    The sha256 of its canonical header (grid, georeferencing, dtype, nodata) and its band as
+    decoded, never normalised: the same layer compressed or tiled differently has the same
+    digest, and any change to a value, a NaN payload or the sign of a zero changes it.
+    """
+    header = json.dumps(_content_header(dataset), sort_keys=True, separators=(",", ":"),
+                        ensure_ascii=True, allow_nan=False).encode("utf-8")
+    band = np.ascontiguousarray(dataset.read(1).astype("<f4", copy=False))
+    return hashlib.sha256(header + b"\n" + band.tobytes()).hexdigest()
+
+
+def _load_content_digests() -> Tuple[dict, dict]:
+    """The pinned digest and header of every registered source, keyed ``(year, release, code, tech)``."""
+    data = json.loads(resources.files(__package__).joinpath(_CONTENT_DIGESTS_FILE)
+                      .read_text(encoding="utf-8"))
+    if data.get("schema") != _CONTENT_DIGEST_SCHEMA:
+        raise SpamVintageError(f"{_CONTENT_DIGESTS_FILE} is not {_CONTENT_DIGEST_SCHEMA}")
+    digests, headers = {}, {}
+    for entry in data["entries"]:
+        key = (entry["year"], entry["release"], entry["crop_code"], entry["tech"])
+        digests[key], headers[key] = entry["content_digest"], entry["header"]
+    return digests, headers
+
+
+SPAM_CONTENT_DIGESTS, SPAM_CONTENT_HEADERS = _load_content_digests()
+
+
+def acea_canonical_triples(year: str, release: str) -> Tuple[Tuple[str, int, str], ...]:
+    """Every ``(crop name, ACEA FAO code, SPAM code)`` an ACEA package may declare in the vintage."""
+    # The maps live in the ACEA translator, which imports this module.
+    from prismpy.translators.acea.translator import ACEA_FAO_CODE_MAP, SPAM_CODE_MAP
+
+    return tuple((name, ACEA_FAO_CODE_MAP[name], code_for_vintage(SPAM_CODE_MAP[name], year, release))
+                 for name in sorted(ACEA_FAO_CODE_MAP) if name in SPAM_CODE_MAP)
