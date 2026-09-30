@@ -2204,7 +2204,7 @@ class CraftTranslator(CraftTranslatorBase):
             cells: List of GridCell objects
             spam_path: Path to SPAM GeoTIFF
             cap_at_100: Cap values > 1.0
-            na_to_zero: Replace NA with 0
+            na_to_zero: Kept for callers; every no-area value (nodata, NaN, negative) reads 0
 
         Returns:
             Dict mapping cell_id to percent (0-1)
@@ -2232,72 +2232,62 @@ class CraftTranslator(CraftTranslatorBase):
         else:
             logger.warning("  Could not load schema areas - using estimated full cell areas")
 
-        with rasterio.open(spam_path) as src:
-            logger.info(f"  SPAM raster: {src.height}x{src.width}, res={src.res[0]:.4f} deg")
+        # Nodata, non-finite and negative values all read 0 ha, so no share is ever negative.
+        from prismpy.sources.crop_areas.presence import cell_presence
 
-            # Extract values at cell centroids
-            coords = [(cell.lon, cell.lat) for cell in cells]
-            values = list(src.sample(coords))
+        presence = cell_presence(cells, spam_path, strict=False)
+        logger.info(f"  SPAM raster: {presence.observed.height}x{presence.observed.width}, "
+                    f"res={abs(presence.observed.transform[0]):.4f} deg")
 
-            # A SELECTED SPAM mask must cover EVERY requested cell. A short sample would let the
-            # zip below truncate, leaving the trailing cells absent from cell_percents — they are
-            # then silently default-filled (100%) by the caller's .get(cell_id, default_percent).
-            # That is the per-cell form of the masquerade this fail-loud closes: raise here rather
-            # than ship a partially-defaulted mask.
-            if len(values) != len(cells):
-                raise SpamVintageError(
-                    f"CRAFT SPAM extraction sampled {len(values)} values for {len(cells)} "
-                    f"requested cells — a selected mask cannot be partially honored; failing "
-                    f"loud rather than shipping a partially-defaulted crop mask."
-                )
+        # A selected mask covers every requested cell; a missing one would silently default to 100%.
+        if len(presence.areas) != len(cells) or any(c.cell_id not in presence.areas for c in cells):
+            raise SpamVintageError(
+                f"CRAFT SPAM extraction read {len(presence.areas)} values for {len(cells)} "
+                f"requested cells — a selected mask cannot be partially honored; failing "
+                f"loud rather than shipping a partially-defaulted crop mask."
+            )
 
-            na_count = 0
-            over_100_count = 0
-            estimated_area_count = 0
+        no_area_count = 0
+        over_100_count = 0
+        estimated_area_count = 0
 
-            for cell, value in zip(cells, values):
-                spam_ha = value[0]  # Harvested area in hectares
-                craft_cellid = self._to_craft_cellid(cell.cell_id)
+        for cell in cells:
+            spam_ha = presence.areas[cell.cell_id]  # Harvested area in hectares, >= 0
+            craft_cellid = self._to_craft_cellid(cell.cell_id)
+            if spam_ha == 0.0:
+                no_area_count += 1
 
-                # Handle NA
-                if np.isnan(spam_ha):
-                    na_count += 1
-                    if na_to_zero:
-                        spam_ha = 0.0
-                    else:
-                        spam_ha = 0.0  # Still need a value
+            # Get cell area from schema (actual intersection area)
+            # This is CRITICAL for matching legacy behavior
+            cell_area_km2 = schema_areas.get(craft_cellid) if schema_areas else None
 
-                # Get cell area from schema (actual intersection area)
-                # This is CRITICAL for matching legacy behavior
-                cell_area_km2 = schema_areas.get(craft_cellid) if schema_areas else None
+            if cell_area_km2 is None:
+                # Fallback: estimate full cell area (less accurate for edge cells)
+                estimated_area_count += 1
+                import math
+                dx = 5 / 60 * 111.32 * math.cos(math.radians(cell.lat))  # km
+                dy = 5 / 60 * 110.57  # km (roughly constant)
+                cell_area_km2 = dx * dy
 
-                if cell_area_km2 is None:
-                    # Fallback: estimate full cell area (less accurate for edge cells)
-                    estimated_area_count += 1
-                    import math
-                    dx = 5 / 60 * 111.32 * math.cos(math.radians(cell.lat))  # km
-                    dy = 5 / 60 * 110.57  # km (roughly constant)
-                    cell_area_km2 = dx * dy
+            cell_area_ha = cell_area_km2 * 100  # km² to ha
 
-                cell_area_ha = cell_area_km2 * 100  # km² to ha
+            # Calculate percentage
+            percent = spam_ha / cell_area_ha if cell_area_ha > 0 else 0
 
-                # Calculate percentage
-                percent = spam_ha / cell_area_ha if cell_area_ha > 0 else 0
+            # Cap at 100%
+            if percent > 1.0:
+                over_100_count += 1
+                if cap_at_100:
+                    percent = 1.0
 
-                # Cap at 100%
-                if percent > 1.0:
-                    over_100_count += 1
-                    if cap_at_100:
-                        percent = 1.0
+            cell_percents[cell.cell_id] = percent
 
-                cell_percents[cell.cell_id] = percent
-
-            if na_count > 0:
-                logger.info(f"  NA cells (set to 0): {na_count}")
-            if over_100_count > 0 and cap_at_100:
-                logger.info(f"  Cells capped at 100%: {over_100_count}")
-            if estimated_area_count > 0:
-                logger.warning(f"  Cells using estimated area (not in schema): {estimated_area_count}")
+        if no_area_count > 0:
+            logger.info(f"  Cells without harvested area (nodata, zero or negative read as 0): {no_area_count}")
+        if over_100_count > 0 and cap_at_100:
+            logger.info(f"  Cells capped at 100%: {over_100_count}")
+        if estimated_area_count > 0:
+            logger.warning(f"  Cells using estimated area (not in schema): {estimated_area_count}")
 
         # Coverage invariant: every requested cell must have a percent — else a selected mask
         # would ship partially default-filled. This also catches an empty extraction HERE, before

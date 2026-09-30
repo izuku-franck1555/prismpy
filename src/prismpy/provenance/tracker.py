@@ -647,6 +647,7 @@ class ProvenanceTracker:
         n_cells_excluded_by_inclusion_rule: int,
         n_cells_excluded_by_min_share_percent: int,
         n_cells_admitted: int,
+        crop_presence: Optional[Dict[str, Any]] = None,
     ) -> None:
         """F-R AC-4: record the boundary-rule decisions that
         produced the simulation domain.
@@ -703,6 +704,17 @@ class ProvenanceTracker:
             "n_cells_excluded_by_min_share_percent": n_cells_excluded_by_min_share_percent,
             "n_cells_admitted": n_cells_admitted,
         }
+        # The crop-presence record exists only when the rule ran, so whole-grid records are unchanged.
+        if crop_presence is not None:
+            self.record.boundary["crop_presence"] = crop_presence
+
+    def set_crop_presence_readback(self, platform: str, readback: Dict[str, Any]) -> None:
+        """Record one engine's roster as read back from the file its translator wrote."""
+        if not self.enabled:
+            return
+        rule = (self.record.boundary or {}).get("crop_presence")
+        if isinstance(rule, dict):
+            rule.setdefault("roster_readback", {})[platform] = readback
 
     def record_texture_renormalization(
         self,

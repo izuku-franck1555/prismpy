@@ -12,7 +12,7 @@ import unicodedata
 from datetime import date, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 
 # F-R AC-6: namespaced logger for boundary-config validators. INFO
@@ -236,7 +236,7 @@ def _contains_invisible_path_char(s: str) -> bool:
     """
     return any(not _is_path_char(c) for c in s)
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 
 class Platform(str, Enum):
@@ -291,6 +291,29 @@ class ManualBoundsConfig(BaseModel):
         if not (-90 <= self.miny <= 90 and -90 <= self.maxy <= 90):
             raise ValueError("Latitude must be between -90 and 90")
         return self
+
+
+class CropPresenceRule(BaseModel):
+    """The frozen identity of the SPAM layer a crop-presence rule reads, never a host path: the
+    caller resolves the file for each run and passes it as ``BoundaryConfig.crop_presence_path``,
+    and the reader refuses a file that does not match this identity."""
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    year: int = Field(..., ge=2000, le=2100)
+    release: str = Field(..., min_length=1)
+    crop_code: str = Field(..., pattern=r"^[A-Z]{4}$")
+    stratum: Literal["A"] = "A"
+    sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    crs: str = Field(..., min_length=1)
+    transform: Tuple[float, float, float, float, float, float]
+    band: int = Field(default=1, ge=1)
+    width: int = Field(..., gt=0)
+    height: int = Field(..., gt=0)
+    nodata: Union[Literal["nan"], float, None] = Field(...)
+
+    @property
+    def layer_label(self) -> str:
+        return f"SPAM {self.year} {self.release} {self.crop_code}_{self.stratum}"
 
 
 class BoundaryConfig(BaseModel):
@@ -361,6 +384,33 @@ class BoundaryConfig(BaseModel):
             "0.0 preserves AgMIP-canonical full-domain inclusion."
         ),
     )
+    crop_presence: Optional[CropPresenceRule] = Field(
+        default=None,
+        description=(
+            "Keep only the cells whose harvested area in this SPAM layer is > 0 ha, applied at "
+            "HARMONIZE after min_share_percent and before region.exclude_cells. None keeps every cell."
+        ),
+    )
+    crop_presence_path: Optional[str] = Field(
+        default=None,
+        description="The file resolved for crop_presence on this run; never part of its identity.",
+    )
+
+    @model_validator(mode="after")
+    def _crop_presence_path_needs_a_rule(self) -> "BoundaryConfig":
+        if self.crop_presence_path is not None and self.crop_presence is None:
+            raise ValueError("crop_presence_path is set without a crop_presence rule")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_crop_presence(self, handler):
+        # An unset rule is omitted, so whole-grid configs hash and export exactly as before it.
+        data = handler(self)
+        if isinstance(data, dict):
+            for key in ("crop_presence", "crop_presence_path"):
+                if data.get(key) is None:
+                    data.pop(key, None)
+        return data
 
     @field_validator(
         "gadm_filter_value", "gadm_filter_field", mode="before",
@@ -2147,6 +2197,18 @@ class ProjectConfig(BaseModel):
     @model_validator(mode="after")
     def validate_craft_requires_5arcmin(self) -> "ProjectConfig":
         self.assert_craft_resolution_compatible()
+        return self
+
+    @model_validator(mode="after")
+    def validate_crop_presence_scope(self) -> "ProjectConfig":
+        if self.region.boundary.crop_presence is None:
+            return self
+        if self.region.grid_resolution != "5arcmin":
+            raise ValueError("the crop-presence rule judges SPAM's 5-arcmin cells: "
+                             "region.grid_resolution must be '5arcmin'")
+        other = [p.value for p in self.targets if p not in (Platform.PYTHIA, Platform.CRAFT, Platform.ACEA)]
+        if other:
+            raise ValueError(f"the crop-presence rule restricts PYTHIA, CRAFT and ACEA rosters only, not {other}")
         return self
 
     def get_enabled_platforms(self) -> List[Platform]:

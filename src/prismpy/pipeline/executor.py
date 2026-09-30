@@ -486,12 +486,33 @@ class TranslationPipeline:
                     provenance=self.provenance,
                 )
 
+                import re
+
+                boundary_config = self.config.region.boundary
+                # A GID names one GADM 4.1 unit at its own level: never a name lookup, never a box.
+                gid_level = re.fullmatch(r"GID_([0-5])", boundary_config.gadm_filter_field or "")
+                gid_config = gid_level is not None
                 gadm_level = self.config.region.boundary.gadm_level or 2
+                if gid_config:
+                    gadm_level = int(gid_level.group(1))
+                    if boundary_config.gadm_level not in (None, gadm_level):
+                        raise ValueError(f"{gid_level.group(0)} names a GADM level-{gadm_level} unit, "
+                                         f"not one at gadm_level {boundary_config.gadm_level}")
                 filter_field = self.config.region.boundary.gadm_filter_field or f"NAME_{gadm_level}"
                 filter_value = self.config.region.boundary.gadm_filter_value
                 country_iso3 = self.config.region.country_iso3
 
                 self.logger.info(f"Loading GADM boundary: {filter_field}='{filter_value}'")
+
+                if gid_config:
+                    version = str(self.config.data_sources.gadm.version)
+                    if version != "4.1":
+                        raise ValueError(f"a region identified by its GID needs GADM 4.1, not GADM {version}")
+                    iso3 = re.escape(country_iso3.upper())
+                    shape = iso3 if gadm_level == 0 else rf"{iso3}(\.\d+){{{gadm_level}}}_\d+"
+                    if not re.fullmatch(shape, filter_value or ""):
+                        raise ValueError(f"GID {filter_value!r} is not a GADM 4.1 level-{gadm_level} unit "
+                                         f"of {country_iso3}")
 
                 # Try direct shapefile path first (for non-standard directory structures)
                 # Standard GADM: base_path/MLI/gadm41_MLI_2.shp
@@ -522,6 +543,8 @@ class TranslationPipeline:
 
                 if result.success and result.data:
                     region = result.data
+                    if gid_config:
+                        region.name = self.config.region.name
                     self.logger.info(f"Loaded GADM bounds: {region.bounds.to_gis_format()}")
                 else:
                     # GADM loading failed — try pygadm (downloads from web, caches locally)
@@ -536,15 +559,18 @@ class TranslationPipeline:
                             f"filter='{filter_value}'"
                         )
 
-                        names_df = pygadm.Names(
-                            admin=country_iso3, content_level=gadm_level
-                        )
-                        name_col = f"NAME_{gadm_level}"
-                        gid_col = f"GID_{gadm_level}"
+                        if gid_config:
+                            gid = filter_value
+                        else:
+                            names_df = pygadm.Names(
+                                admin=country_iso3, content_level=gadm_level
+                            )
+                            name_col = f"NAME_{gadm_level}"
+                            gid_col = f"GID_{gadm_level}"
 
-                        match = names_df[names_df[name_col] == filter_value]
-                        if len(match) > 0:
-                            gid = match.iloc[0][gid_col]
+                            match = names_df[names_df[name_col] == filter_value]
+                            gid = match.iloc[0][gid_col] if len(match) > 0 else None
+                        if gid is not None:
                             gdf = pygadm.Items(admin=gid)
 
                             if gdf is not None and len(gdf) > 0:
@@ -621,6 +647,11 @@ class TranslationPipeline:
 
                     # If pygadm also failed, fall back to manual bounds
                     if region is None:
+                        if gid_config:
+                            raise ValueError(
+                                f"GADM 4.1 unit {filter_value} was not found; a region identified by "
+                                f"its GID never falls back to a name or a box: {result.errors}"
+                            )
                         if self.config.region.boundary.manual_bounds:
                             mb = self.config.region.boundary.manual_bounds
                             bounds = BoundingBox(minx=mb.minx, miny=mb.miny, maxx=mb.maxx, maxy=mb.maxy)
@@ -2244,6 +2275,7 @@ class TranslationPipeline:
 
         errors = []
         warnings = []
+        error_events: List[Dict[str, Any]] = []
 
         try:
             # Create unified data container
@@ -2399,6 +2431,19 @@ class TranslationPipeline:
                 # min_share_percent is a no-op; cell.share_percent stays
                 # None per AC-3.5.
 
+                # Stage 3b — the crop-presence rule: a roster definition, like min_share_percent.
+                crop_presence_record = None
+                acea_target = any(p.value == "acea" for p in self.config.get_enabled_platforms())
+                if config_boundary.crop_presence is not None:
+                    from prismpy.pipeline.crop_presence import apply_crop_presence_rule
+                    outcome = apply_crop_presence_rule(
+                        grid.cells, config_boundary.crop_presence, config_boundary.crop_presence_path,
+                        crop_name=self.config.crop.name, acea_target=acea_target,
+                        grid_resolution=grid.resolution,
+                    )
+                    grid.cells = outcome.kept
+                    crop_presence_record = outcome.record
+
                 # Stage 4 — apply user-skip filter (cockpit per-cell exclude).
                 user_excluded = set(getattr(
                     self.config.region, 'exclude_cells', None,
@@ -2407,6 +2452,9 @@ class TranslationPipeline:
                     grid.cells = [
                         c for c in grid.cells if c.cell_id not in user_excluded
                     ]
+                if crop_presence_record is not None:
+                    from prismpy.pipeline.crop_presence import finalize_crop_presence_record
+                    finalize_crop_presence_record(crop_presence_record, grid.cells, acea_target=acea_target)
 
                 self.logger.info(f"Created grid with {grid.n_cells} cells")
 
@@ -2441,6 +2489,7 @@ class TranslationPipeline:
                             n_cells_excluded_by_min_share_percent
                         ),
                         n_cells_admitted=len(grid.cells),
+                        crop_presence=crop_presence_record,
                     )
 
                 # V2-19 site #3: record AGGREGATION_METHOD decision for grid
@@ -2721,6 +2770,10 @@ class TranslationPipeline:
             errors.append(f"Harmonization failed: {str(e)}")
             self.logger.error(f"Harmonization error: {e}")
             unified_data = None
+            from prismpy.sources.crop_areas.presence import CropPresenceEmptyError, CropPresenceIdentityError
+            if isinstance(e, (CropPresenceEmptyError, CropPresenceIdentityError)):
+                from prismpy.errors import classify_to_event_dict
+                error_events.append(classify_to_event_dict(e))
 
         duration = (datetime.now() - start_time).total_seconds()
         return StageResult(
@@ -2730,7 +2783,26 @@ class TranslationPipeline:
             errors=errors,
             warnings=warnings,
             duration_seconds=duration,
+            error_events=error_events,
         )
+
+    def _record_roster_readback(self, platform: Platform) -> None:
+        """When the crop-presence rule ran, read back the roster this platform's translator wrote and
+        record its id digest (or why it could not be read) in the rule's record."""
+        rule = (self.provenance.record.boundary or {}).get("crop_presence") if self.provenance.enabled else None
+        if not isinstance(rule, dict):
+            return
+        from prismpy.packaging.roster_readback import ROSTER_FILES, read_back_roster
+        if platform.value not in ROSTER_FILES:
+            return
+        try:
+            readback = read_back_roster(platform.value, Path(self.config.output.base_dir) / platform.value)
+            entry = {"file": readback.file, "field": readback.field, "grid": readback.grid,
+                     "n": len(readback.ids), "id_digest": readback.id_digest}
+        except Exception as exc:  # noqa: BLE001 — an unreadable roster is recorded, never fatal here
+            file, field, grid = ROSTER_FILES[platform.value]
+            entry = {"file": file, "field": field, "grid": grid, "error": f"{type(exc).__name__}: {exc}"}
+        self.provenance.set_crop_presence_readback(platform.value, entry)
 
     def _execute_translate(
         self,
@@ -2808,6 +2880,8 @@ class TranslationPipeline:
                 try:
                     result = translator.translate(unified_data)
                     results[platform.value] = result
+                    if getattr(result, "success", False):
+                        self._record_roster_readback(platform)
 
                     # V2-19: explicit TRANSLATE transformation flushes pending
                     # decisions (including the translator's FORMAT_CHOICE call)
