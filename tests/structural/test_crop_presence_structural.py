@@ -1,6 +1,6 @@
 """Where the crop-presence rule and its reader sit in the code: the rule between the share threshold
 and the user exclusions, through the one > 0 predicate; the harmonize catch classifying the typed
-errors; CRAFT's mask extraction and ACEA's clip routed through the one reader and the one resolver;
+errors; CRAFT's mask extraction through the one reader and ACEA's layer through the registry's resolver;
 one roster-id digest encoding; and no raster read call site beyond the classified inventory."""
 from __future__ import annotations
 
@@ -88,9 +88,9 @@ def test_one_roster_id_digest_encoding():
 _RASTER_READERS = {
     "sources/crop_areas/presence.py::cell_presence": "the one SPAM presence reader",
     "sources/crop_areas/presence.py::raster_identity": "the one reader's identity (header + checksum)",
+    "sources/crop_areas/spam_vintage.py::file_content_digest": "a carried SPAM layer's content digest",
     "sources/crop_areas/spam.py::_sample_raster": "legacy SPAMSource.retrieve (no production caller)",
     "sources/crop_areas/spam.py::_extract_from_bounds": "legacy SPAMSource.retrieve (no production caller)",
-    "translators/acea/translator.py::_layer_digest": "ACEA's carried layer: its content digest",
     "translators/acea/translator.py::_reencode_losslessly": "ACEA's carried layer: its lossless copy",
     "translators/pythia/translator.py::_cell_block_sums": "PYTHIA's per-cell crop area (kept separate)",
     "translators/pythia/translator.py::_check_mask_covers_cells": "PYTHIA's mask extent check",

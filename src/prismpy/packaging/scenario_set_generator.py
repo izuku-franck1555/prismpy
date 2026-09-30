@@ -280,6 +280,26 @@ def _baseline_platform(baseline_package: Path) -> str:
     return str(manifest.get("platform") or "")
 
 
+def _verify_carried_harvested_area_layer(projection_dir: Path, baseline_manifest: Dict[str, Any]) -> None:
+    """The projection carries its baseline's harvested-area layer: each read-key file must hold the
+    pinned content of the declared SPAM vintage and crop."""
+    from prismpy.sources.crop_areas.spam_vintage import SPAM_CONTENT_DIGESTS, file_content_digest
+    from prismpy.translators.base import RequiredPackageArtifactError
+
+    layer = (baseline_manifest.get("data_sources") or {}).get("harvested_areas_layer")
+    files = layer.get("files") if isinstance(layer, dict) else None
+    if not isinstance(files, dict) or set(files) != {"R", "I", "A"}:
+        raise RequiredPackageArtifactError("the baseline declares no harvested-area layer for the projection to carry")
+    for tech in ("R", "I", "A"):
+        rel = f"harvested_areas/{layer.get('fao')}/{(files[tech] or {}).get('name')}"
+        path = projection_dir / rel
+        pinned = SPAM_CONTENT_DIGESTS.get((layer.get("year"), layer.get("release"), layer.get("crop_code"), tech))
+        if not path.is_file() or pinned is None or file_content_digest(path) != pinned:
+            raise RequiredPackageArtifactError(
+                f"{rel} is not the registered SPAM {layer.get('year')} {layer.get('release')} "
+                f"{layer.get('crop_code')}_{tech} layer the baseline declares")
+
+
 def finalize_acea_forced_co2_projection(
     projection_dir: Path, baseline_package: Path
 ) -> None:
@@ -312,6 +332,11 @@ def finalize_acea_forced_co2_projection(
     b_manifest = json.loads(
         (baseline_package / "manifest.json").read_text(encoding="utf-8")
     )
+    try:
+        _verify_carried_harvested_area_layer(Path(projection_dir), b_manifest)
+    except Exception:
+        shutil.rmtree(projection_dir, ignore_errors=True)   # no half-finished projection is left
+        raise
     b_temporal = dict(b_manifest.get("temporal", {}))
     b_label = (b_manifest.get("scenario") or {}).get("scenario_label", "OBSERVED")
     b_start, b_end = int(b_temporal["start_year"]), int(b_temporal["end_year"])

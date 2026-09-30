@@ -4,6 +4,7 @@ data_sources and both READMEs state it, and a README that cannot state it fails 
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -16,7 +17,9 @@ from prismpy.config.schema import (
     Platform, ProjectConfig, ProjectInfo, RegionConfig, TemporalConfig,
 )
 from prismpy.packaging.readme_generator import generate_readme
-from prismpy.packaging.scenario_set_generator import _write_acea_forced_co2_readme
+from prismpy.packaging.scenario_set_generator import (
+    _verify_carried_harvested_area_layer, _write_acea_forced_co2_readme, finalize_acea_forced_co2_projection,
+)
 from prismpy.pipeline.executor import TranslationPipeline
 from prismpy.sources.crop_areas import spam as spam_module
 from prismpy.sources.crop_areas import spam_vintage as sv
@@ -328,3 +331,49 @@ def test_a_crop_without_an_acea_fao_code_is_refused(tmp_path, monkeypatch):
     monkeypatch.delitem(ACEA_FAO_CODE_MAP, "Maize")
     with pytest.raises(sv.SpamVintageError, match="not an ACEA crop"):
         _translator(tmp_path)._write_harvested_area_layer()
+
+
+
+def test_a_second_build_in_the_same_output_carries_only_its_own_layer(tmp_path, monkeypatch):
+    provision_spam(tmp_path / "spam", monkeypatch, codes=("MAIZ", "RICE"))
+    _translator(tmp_path)._write_harvested_area_layer()
+    rice = _translator(tmp_path, crop=("Rice", "ric"))
+    (rice.output_dir / "harvested_areas" / "27").mkdir()
+    (rice.output_dir / "harvested_areas" / "27" / ".left.partial").write_bytes(b"x")
+    rice._write_harvested_area_layer()
+    root = rice.output_dir / "harvested_areas"
+    assert sorted(p.relative_to(root).as_posix() for p in root.rglob("*")) == [
+        "27", *(f"27/spam2020V2r0_global_H_27_{tech}.tif" for tech in "AIR")]
+
+
+def _projection(tmp_path, monkeypatch):
+    provision_spam(tmp_path / "spam", monkeypatch)
+    translator = _translator(tmp_path)
+    translator._write_harvested_area_layer()
+    baseline = {"data_sources": translator._harvested_area_declaration(),
+                "temporal": {"start_year": 2015, "end_year": 2016}}
+    (translator.output_dir / "manifest.json").write_text(json.dumps(baseline))
+    projection = tmp_path / "projection"
+    shutil.copytree(translator.output_dir, projection)
+    return translator.output_dir, projection, baseline
+
+
+def test_a_projection_carrying_its_baselines_layer_is_verified(tmp_path, monkeypatch):
+    _, projection, baseline = _projection(tmp_path, monkeypatch)
+    _verify_carried_harvested_area_layer(projection, baseline)
+
+
+@pytest.mark.parametrize("fault", ["corrupted", "missing"])
+def test_a_projection_whose_carried_layer_is_not_the_declared_one_is_refused_and_removed(tmp_path, monkeypatch, fault):
+    package, projection, _ = _projection(tmp_path, monkeypatch)
+    alias = projection / "harvested_areas" / "56" / "spam2020V2r0_global_H_56_I.tif"
+    if fault == "missing":
+        alias.unlink()
+    else:
+        with rasterio.open(alias, "r+") as ds:
+            band = ds.read(1)
+            band[3, 3] += 1.0
+            ds.write(band, 1)
+    with pytest.raises(RequiredPackageArtifactError, match="MAIZ_I"):
+        finalize_acea_forced_co2_projection(projection, package)
+    assert not projection.exists()

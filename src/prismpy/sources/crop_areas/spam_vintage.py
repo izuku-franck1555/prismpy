@@ -57,6 +57,7 @@ __all__ = [
     "code_for_vintage",
     "derive_harvested_area_label",
     "content_digest",
+    "file_content_digest",
     "acea_canonical_triples",
 ]
 
@@ -303,6 +304,14 @@ def content_digest(dataset: Any) -> str:
                         ensure_ascii=True, allow_nan=False).encode("utf-8")
     band = np.ascontiguousarray(dataset.read(1).astype("<f4", copy=False))
     return hashlib.sha256(header + b"\n" + band.tobytes()).hexdigest()
+
+
+def file_content_digest(path) -> str:
+    """The :func:`content_digest` of the single-band raster at ``path``."""
+    import rasterio
+
+    with rasterio.open(path) as ds:
+        return content_digest(ds)
 
 
 def _load_content_digests() -> Tuple[dict, dict]:

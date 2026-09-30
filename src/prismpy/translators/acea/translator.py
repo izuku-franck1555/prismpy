@@ -65,8 +65,8 @@ from prismpy.sources.crop_areas.spam_vintage import (
     SpamVintageError,
     acea_canonical_triples,
     code_for_vintage,
-    content_digest,
     derive_harvested_area_label,
+    file_content_digest,
     resolve_spam_raster,
 )
 from prismpy.translators.base import (
@@ -1753,7 +1753,7 @@ class AceaTranslator(AceaTranslatorBase):
         sources = {}
         for tech in _HARVESTED_AREA_TECHS:
             source = resolve_spam_raster(Path(acea.spam_data_dir), year, release, code, tech)
-            if _layer_digest(source) != SPAM_CONTENT_DIGESTS[(year, release, code, tech)]:
+            if file_content_digest(source) != SPAM_CONTENT_DIGESTS[(year, release, code, tech)]:
                 raise SpamVintageError(f"{source} is not the registered SPAM {year} {release} {code}_{tech} "
                                        "layer: its content differs from the pinned digest")
             sources[tech] = source
@@ -1764,7 +1764,7 @@ class AceaTranslator(AceaTranslatorBase):
         try:
             for tech, source in sources.items():
                 _reencode_losslessly(source, staged[tech])
-                if _layer_digest(staged[tech]) != SPAM_CONTENT_DIGESTS[(year, release, code, tech)]:
+                if file_content_digest(staged[tech]) != SPAM_CONTENT_DIGESTS[(year, release, code, tech)]:
                     raise SpamVintageError(f"the copy of {source.name} does not reproduce its content")
             for tech, target in targets.items():
                 staged[tech].replace(target)
@@ -1772,6 +1772,18 @@ class AceaTranslator(AceaTranslatorBase):
             for path in (*staged.values(), *targets.values()):
                 path.unlink(missing_ok=True)
             raise
+        # The package carries exactly this layer: another crop's folder or a stray file left by an
+        # earlier build in the same output is removed.
+        import shutil
+
+        kept = set(targets.values())
+        for entry in [*folder.parent.iterdir(), *folder.iterdir()]:
+            if entry == folder or entry in kept:
+                continue
+            if entry.is_dir():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
         logger.info(f"Carried SPAM {year} {release} {code} (R, I, A) under {folder}")
         return list(targets.values())
 
@@ -1784,7 +1796,7 @@ class AceaTranslator(AceaTranslatorBase):
         for tech in _HARVESTED_AREA_TECHS:
             name = _HARVESTED_AREA_READ_KEY.format(fao=fao, tech=tech)
             path = self.output_dir / "harvested_areas" / str(fao) / name
-            digest = _layer_digest(path) if path.is_file() else None
+            digest = file_content_digest(path) if path.is_file() else None
             if digest != SPAM_CONTENT_DIGESTS[(year, release, code, tech)]:
                 raise RequiredPackageArtifactError(
                     f"harvested_areas/{fao}/{name} is not the registered SPAM {year} {release} "
@@ -3059,14 +3071,6 @@ if __name__ == "__main__":
 _HARVESTED_AREA_READ_KEY = "spam2020V2r0_global_H_{fao}_{tech}.tif"
 _HARVESTED_AREA_CONTRACT = "acea-spam-identity/1"
 _HARVESTED_AREA_TECHS = ("R", "I", "A")
-
-
-def _layer_digest(path: Path) -> str:
-    """The content digest of the harvested-area layer at ``path``."""
-    import rasterio
-
-    with rasterio.open(path) as ds:
-        return content_digest(ds)
 
 
 def _reencode_losslessly(source: Path, target: Path) -> None:
