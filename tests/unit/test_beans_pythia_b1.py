@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.package_soil import stamp_package_soil
+
 from prismpy.config.schema import (
     BoundaryConfig,
     BoundarySource,
@@ -72,6 +74,7 @@ def _translator_and_data(tmp_path: Path, management, *, mask_present: bool,
     translator = PythiaTranslator(config=_beans_cfg(tmp_path, management, crop_name, crop_short),
                                   output_dir=str(tmp_path))
     (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    stamp_package_soil(tmp_path, "pythia")
     translator._mask_present = mask_present
     if mask_present:
         # Mirror _generate_crop_mask_raster: a present mask ⟹ the single applied-vintage state is
@@ -183,6 +186,7 @@ def test_pythia_readme_template_crop_mask_row(tmp_path, mask_present):
         {"year": "2020", "release": "V2r2", "mask_filename": "harvest_area_2020_V2r2.tif"}
         if mask_present else None
     )
+    stamp_package_soil(Path(out).parent, 'pythia')
     generate_readme(out, {}, platform="pythia", mask_present=mask_present,
                     crop_mask_vintage=_vintage)
     text = out.read_text()

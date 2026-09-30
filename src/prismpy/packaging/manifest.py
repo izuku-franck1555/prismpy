@@ -39,6 +39,7 @@ from prismpy.cells.canonical_cell_area_km2 import (
     SpatialRef,
     canonical_cell_area_km2,
 )
+from prismpy.packaging.soil_declaration import DECLARED_PLATFORMS, declared_soil
 
 
 KNOWN_USE_CASE_NAMES: Tuple[str, ...] = (
@@ -179,7 +180,7 @@ ADVISORY_GATES: FrozenSet[str] = frozenset({
 })
 
 
-# The 18 reserved top-level manifest keys. The 5 REQUIRED_AT_CREATION fields in
+# The 19 reserved top-level manifest keys. The 5 REQUIRED_AT_CREATION fields in
 # MANIFEST_L2_TIERS (region / crop / platform / temporal / data_sources — the
 # user-facing gen-time inputs) are a SUBSET of these; the rest are generator-emitted
 # (package_version / generator / summary / cells / files / uc_readiness / ...).
@@ -202,6 +203,7 @@ _RESERVED_MANIFEST_KEYS: FrozenSet[str] = frozenset({
     "uc_readiness",
     "validation_status",
     "scenario",
+    "inputs_used",
 })
 
 
@@ -1482,6 +1484,18 @@ def create_manifest(
     # fields (region / crop / platform / baked years / data source). Mirrors the
     # run-side required-parameter door at the creation surface.
     _check_required_at_creation(manifest)
+
+    # The soil an engine reads is declared from the package's own soil files, and nowhere else
+    # (after the gate above, which checks the sources the caller supplied).
+    engine = str(getattr(platform, "value", platform)).lower()
+    if engine in DECLARED_PLATFORMS:
+        if "soil" in manifest["data_sources"]:
+            raise ValueError(
+                "data_sources.soil is declared from the package's soil files; a caller cannot set it"
+            )
+        declaration = declared_soil(package_dir, engine)
+        manifest["data_sources"] = {**manifest["data_sources"], "soil": declaration.label}
+        manifest["inputs_used"] = {"schema_version": 1, "soil": declaration.inputs_used()}
 
     return manifest
 

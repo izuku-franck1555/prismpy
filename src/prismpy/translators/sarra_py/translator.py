@@ -1909,7 +1909,6 @@ class SarraPyTranslator(SarraPyTranslatorBase):
                 "boundaries": boundary_label,
                 "rainfall": "TAMSAT v3.1",
                 "temperature": "AgERA5",
-                "soil": "iSDA",
                 "crop_parameters": "SARRA-Py defaults",
             },
             "package_name": f"{data.region.name.lower()}_{self.config.crop.name.lower()}_sarra_py_package",

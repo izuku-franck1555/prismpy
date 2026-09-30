@@ -65,7 +65,8 @@ _LOWER = 815
 #   Potato SUBSTOR support: n_collected ≈ 3382 → ceil((3382 + 200) / 50) * 50 = 3600.
 #   Generic-soil warning wording: n_collected ≈ 3601 → ceil((3601 + 200) / 50) * 50 = 3850.
 #   Crop-presence roster rule: n_collected ≈ 3752 → ceil((3752 + 200) / 50) * 50 = 4000.
-_UPPER = 4000
+#   Declared package soil: n_collected ≈ 3960 → ceil((3960 + 200) / 50) * 50 = 4200.
+_UPPER = 4200
 
 
 class TestTrajectoryCap(TestCase):

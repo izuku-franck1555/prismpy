@@ -16,6 +16,8 @@ from pathlib import Path
 import jinja2
 import pytest
 
+from tests.package_soil import stamp_package_soil
+
 from prismpy.config.schema import (
     AceaConfig,
     BoundaryConfig,
@@ -80,6 +82,7 @@ def _cfg(out: Path, *, crop: str = "Potato", short: str = "pot", management=None
 def _translator(out: Path, **kw) -> PythiaTranslator:
     t = PythiaTranslator(config=_cfg(out, **kw), output_dir=str(out))
     (out / "config").mkdir(parents=True, exist_ok=True)
+    stamp_package_soil(out, "pythia")
     return t
 
 

@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from prismpy.packaging.manifest import UC_CONFIG_KEY_TABLE
+from tests.package_soil import stamp_package_soil
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -275,9 +276,9 @@ def build_project_config(
         "end_year": end_year,
         "spinup_years": 0,
         # data_sources is REQUIRED_AT_CREATION + must be NON-EMPTY (manifest.py
-        # MANIFEST_L2_TIERS / create_manifest validation): a realistic climate +
-        # soil source pair so the fixture builds a valid manifest.
-        "data_sources": {"climate": "AgERA5", "soil": "iSDA"},
+        # MANIFEST_L2_TIERS / create_manifest validation). The soil entry is
+        # declared by create_manifest from the package's own soil files.
+        "data_sources": {"climate": "AgERA5"},
         "use_case_config": use_case_config,
         "platform_translator": platform_translator,
     }
@@ -300,4 +301,7 @@ def package_dir(tmp_path: Path) -> Path:
     pkg = tmp_path / "pkg"
     pkg.mkdir()
     (pkg / "metadata.json").write_text(json.dumps({"placeholder": True}))
+    # CRAFT's and PYTHIA's soil files (ACEA and SARRA-Py need none), as their writers stamp them.
+    stamp_package_soil(pkg, "craft")
+    stamp_package_soil(pkg, "pythia")
     return pkg

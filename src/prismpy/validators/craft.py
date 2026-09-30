@@ -142,7 +142,8 @@ class CraftValidator(BaseValidator):
             self.output_dir / "weather", ['.csv', '.txt'], dir_label="weather"
         ))
         issues.extend(self.validate_file_types(
-            self.output_dir / "soil", ['.SOL', '.sol', '.txt'], dir_label="soil"
+            self.output_dir / "soil", ['.SOL', '.sol', '.txt'], dir_label="soil",
+            allowed_names=("soil_record.json",),
         ))
         issues.extend(self.validate_file_types(
             self.output_dir / "crop_mask", ['.txt'], dir_label="crop_mask"

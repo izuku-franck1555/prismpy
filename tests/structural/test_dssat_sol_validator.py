@@ -28,6 +28,7 @@ from prismpy.translators._shared import (
     validate_dssat_sol,
     write_dssat_sol,
 )
+from prismpy.packaging.soil_declaration import SoilStamp
 
 
 # Reference fixture — the canonical writer's two-profile golden
@@ -116,6 +117,7 @@ def test_canonical_writer_output_validates_cleanly(tmp_path: Path) -> None:
         profiles_by_id=_build_profiles(),
         country_code="CM",
         region=_build_region(),
+        stamp=SoilStamp("profiles"), source_label_for_id=lambda key: f"HWSD v2 SMU {key}",
     )
 
     result = validate_dssat_sol(sol_path)
@@ -189,6 +191,7 @@ def test_validator_flags_layer_row_field_count_mismatch(tmp_path: Path) -> None:
         profiles_by_id=_build_profiles(),
         country_code="CM",
         region=_build_region(),
+        stamp=SoilStamp("profiles"), source_label_for_id=lambda key: f"HWSD v2 SMU {key}",
     )
 
     # Truncate the last layer row by removing tokens.

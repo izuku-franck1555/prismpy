@@ -18,6 +18,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from tests.package_soil import stamp_package_soil
+
 from prismpy.config.schema import (
     BoundaryConfig,
     BoundarySource,
@@ -183,6 +185,7 @@ def _manifest(tmp_path, spam_name):
         ),
         grid=_grid(),
     )
+    stamp_package_soil(tr.output_dir, "craft")
     tr._generate_package_metadata(data, [])
     return json.loads((tr.output_dir / "manifest.json").read_text())
 

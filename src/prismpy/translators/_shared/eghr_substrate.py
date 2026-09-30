@@ -30,6 +30,8 @@ import copy
 import hashlib
 import logging
 import sqlite3
+from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 from typing import Dict, Mapping, Optional, Tuple
 
@@ -42,6 +44,7 @@ from prismpy.cockpit.cockpit_overrides_writer import CockpitOverrideSidecar
 from prismpy.models.region import Region
 from prismpy.models.soil import SoilLayer, SoilProfile
 from prismpy.models.spatial import SpatialGrid
+from prismpy.packaging.soil_declaration import DETAIL_FILE, SoilStamp, write_binding
 from prismpy.translators._shared.dssat_sol_writer import write_dssat_sol
 
 
@@ -182,7 +185,12 @@ def assign_cell_to_profile_id(
         if key not in profile_id_by_dedup_key:
             new_id = len(profile_id_by_dedup_key) + 1  # 1-based; 0 == nodata
             profile_id_by_dedup_key[key] = new_id
-            profiles_by_id[new_id] = profile
+            profiles_by_id[new_id] = replace(
+                profile, metadata={**profile.metadata, "source_cell_id": cell.cell_id})
+        else:
+            # A layer whose water limits were estimated in ANY merged cell counts as estimated.
+            for kept, merged in zip(profiles_by_id[profile_id_by_dedup_key[key]].layers, profile.layers):
+                kept.hydraulics_estimated = kept.hydraulics_estimated or merged.hydraulics_estimated
         cell_to_profile_id[cell.cell_id] = profile_id_by_dedup_key[key]
 
     return cell_to_profile_id, profiles_by_id
@@ -375,6 +383,7 @@ def build_eghr_substrate(
     # mutation of a shared profile would silently affect every other cell
     # using that profile (honest-signal floor per
     # ``feedback_no_data_cooking.md``).
+    assigned = cell_to_profile_id
     if cockpit_override_sidecar is not None and cockpit_override_sidecar.overrides:
         cell_to_profile_id, profiles_by_id = _apply_soil_overrides_to_assignment(
             cell_to_profile_id=cell_to_profile_id,
@@ -382,17 +391,20 @@ def build_eghr_substrate(
             sidecar=cockpit_override_sidecar,
         )
 
-    # Step 2: write the .SOL via the canonical writer. The eGHR substrate
-    # uses a different file-header suffix and source label so a manual
-    # inspector can tell a per-package substrate apart from a CRAFT
-    # HWSD-derived package without grepping for column conventions.
+    # Step 2: write the .SOL via the canonical writer, stamped with the cells
+    # that have no profile and those an override re-pointed.
     profile_id_to_name = write_dssat_sol(
         soil_path=sol_path,
         profiles_by_id=profiles_by_id,
         country_code=country_code,
         region=region,
-        file_header_suffix="(eGHR per-package substrate)",
+        stamp=SoilStamp(
+            "profiles" if profiles_by_id else "none",
+            no_profile_cells=len(grid.cells) - len(cell_to_profile_id),
+            override_cells=sum(1 for c, pid in cell_to_profile_id.items() if assigned.get(c) != pid),
+        ),
         source_label_for_id=lambda pid: f"eGHR profile {pid}",
+        profile_cell_counts=Counter(cell_to_profile_id.values()),
     )
 
     # Step 3: GeoTIFF profile-id raster aligned to the grid.
@@ -407,6 +419,9 @@ def build_eghr_substrate(
         db_path=db_path,
         profile_id_to_name=profile_id_to_name,
     )
+
+    # Step 5: bind the set PYTHIA reads, after its last write.
+    write_binding(output_dir, "eGHR", [sol_path, raster_path, db_path, eghr_dir / DETAIL_FILE])
 
     logger.info(
         "Built eGHR substrate at %s: %d cells -> %d unique profiles "

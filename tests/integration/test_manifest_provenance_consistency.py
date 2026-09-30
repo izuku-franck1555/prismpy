@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import json
 import pytest
+
+from tests.package_soil import stamp_package_soil
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -86,13 +88,13 @@ def _build_manifest_via_discriminator(
         'gadm_level': manifest_gadm_level,
         'data_sources': {
             'climate': 'NASA POWER',
-            'soil': 'iSDA',
             'boundaries': label,
         },
     }
     with TemporaryDirectory(prefix=f'consistency-{platform}-') as tmp:
         package_dir = Path(tmp) / platform
         package_dir.mkdir(parents=True)
+        stamp_package_soil(package_dir, platform)
         return create_manifest(package_dir, project_config, platform=platform)
 
 

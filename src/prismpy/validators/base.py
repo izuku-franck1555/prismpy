@@ -9,7 +9,7 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 from prismpy.config.schema import Platform
 
@@ -164,6 +164,7 @@ class BaseValidator(ABC):
         directory: Path,
         allowed_extensions: List[str],
         dir_label: str = "",
+        allowed_names: Sequence[str] = (),
     ) -> List[ValidationIssue]:
         """Check that a directory contains only expected file types.
 
@@ -174,6 +175,7 @@ class BaseValidator(ABC):
             directory: Path to check
             allowed_extensions: List of allowed extensions (e.g., ['.tif', '.tiff'])
             dir_label: Human-readable directory name for messages
+            allowed_names: Exact file names also allowed, whatever their extension
 
         Returns:
             List of validation issues for unexpected files
@@ -186,6 +188,7 @@ class BaseValidator(ABC):
         non_matching = [
             f for f in directory.iterdir()
             if f.is_file() and f.suffix.lower() not in [e.lower() for e in allowed_extensions]
+            and f.name not in allowed_names
         ]
         if non_matching:
             extensions = set(f.suffix for f in non_matching)

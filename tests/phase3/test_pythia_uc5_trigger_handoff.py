@@ -43,6 +43,8 @@ from typing import Any
 
 import pytest
 
+from tests.package_soil import stamp_package_soil
+
 from prismpy.packaging.manifest import (
     ADVISORY_FLAG_UC5_PYTHIA_PK_SILENT_NO_OP as ADVISORY_UC5_PYTHIA_PK,
     create_manifest,
@@ -66,7 +68,7 @@ def package_dir(tmp_path: Path) -> Path:
     pkg = tmp_path / "pkg"
     pkg.mkdir()
     (pkg / "metadata.json").write_text(json.dumps({"placeholder": True}))
-    return pkg
+    return stamp_package_soil(pkg, "pythia")
 
 
 def _pythia_project_config(
@@ -106,7 +108,6 @@ def _pythia_project_config(
         "spinup_years": 0,
         "data_sources": {
             "climate": "NASA POWER",
-            "soil": "eGHR",
             "crop_mask": "SPAM 2020",
             "boundaries": "GADM 4.1",
         },

@@ -24,6 +24,7 @@ from prismpy.models.region import BoundingBox, Region
 from prismpy.models.soil import SoilLayer, SoilProfile
 from prismpy.models.spatial import GridCell, SpatialGrid
 from prismpy.packaging.manifest import create_manifest
+from prismpy.packaging.soil_declaration import SoilStamp
 from prismpy.pipeline.executor import TranslationPipeline
 from prismpy.translators._shared import dssat_sol_writer
 from prismpy.translators.base import HwsdOutcome, SoilCascadeState, UnifiedData
@@ -122,8 +123,11 @@ def _run(tr, grid, existing=None, state=None):
 
 def _reference_block(tmp_path, key, profile):
     path = tmp_path / "reference.SOL"
-    dssat_sol_writer.write_dssat_sol(path, {key: profile}, "ML", REGION)
-    return [ln for ln in path.read_text().splitlines()[2:]][1:]
+    dssat_sol_writer.write_dssat_sol(path, {key: profile}, "ML", REGION, stamp=SoilStamp("profiles"),
+                                     source_label_for_id=lambda key: f"HWSD v2 SMU {key}")
+    lines = path.read_text().splitlines()
+    header = next(i for i, ln in enumerate(lines) if ln.startswith("*") and not ln.startswith("*SOILS"))
+    return lines[header + 1:]
 
 
 def _default_block(tmp_path):
@@ -341,9 +345,11 @@ def test_no_soil_source_is_the_base_default_plus_its_record(tmp_path):
                           organic_carbon=0.3, bulk_density=1.5, ph=6.3,
                           field_capacity=0.28, wilting_point=0.12)])
     reference = tmp_path / "base.SOL"
-    dssat_sol_writer.write_dssat_sol(reference, {0: base_default}, "ML", REGION)
-    assert [ln for ln in out.lines if not ln.startswith("! prismpy soil record:")] == \
-        reference.read_text().splitlines()
+    dssat_sol_writer.write_dssat_sol(reference, {0: base_default}, "ML", REGION,
+                                     stamp=SoilStamp("default_profile"),
+                                     source_label_for_id=lambda key: "Default profile")
+    assert [ln for ln in out.lines if not ln.startswith("! prismpy soil record:")] == [
+        ln for ln in reference.read_text().splitlines() if not ln.startswith("! prismpy soil record:")]
     assert {k: out.record[k] for k in ("default_cells", "default_cause", "default_fraction",
                                        "default_warning", "default_depth_cm",
                                        "default_paw_mm")} == {

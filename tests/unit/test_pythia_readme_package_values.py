@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.package_soil import stamp_package_soil
+
 from prismpy.config.schema import (
     BoundaryConfig,
     BoundarySource,
@@ -86,6 +88,7 @@ def _baseline(out: Path, crop: str, short: str, sowing: str = "opportunistic") -
                        grid=_build_grid_2x3(), soil=_build_profiles())
     translator._generate_pythia_json(data)
     translator._generate_snx_template(data)
+    stamp_package_soil(out, "pythia")
     translator._generate_readme(data)
     return out
 

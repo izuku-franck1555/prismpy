@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.package_soil import stamp_package_soil
+
 from prismpy.packaging.manifest import (
     ADVISORY_GATES,
     KNOWN_USE_CASE_NAMES,
@@ -118,6 +120,7 @@ def _pkg(tmp_path, name, with_trials):
     pkg = tmp_path / name
     pkg.mkdir()
     (pkg / "metadata.json").write_text("{}")
+    stamp_package_soil(pkg, "pythia")
     if with_trials:
         (pkg / "data").mkdir()
         (pkg / "data" / "n_trials.csv").write_text(

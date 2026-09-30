@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 
 import pytest
+from tests.package_soil import stamp_package_soil
 
 from prismpy.models.scenario import (
     BiasCorrectionMethod,
@@ -586,6 +587,7 @@ def test_pythia_translator_baseline_manifest_has_scenario_block(tmp_path: Path) 
     data = UnifiedData(region=region)
 
     translator = PythiaTranslator(config=cfg, output_dir=str(tmp_path))
+    stamp_package_soil(tmp_path, "pythia")
     manifest_path = translator._generate_manifest(data)
 
     with manifest_path.open("r", encoding="utf-8") as fh:
@@ -626,6 +628,7 @@ def test_baseline_block_round_trips_through_manifest_creation(
     pkg_dir.mkdir()
     (pkg_dir / "README.md").write_text("test\n", encoding="utf-8")
 
+    stamp_package_soil(pkg_dir, 'pythia')
     manifest = create_manifest(
         package_dir=pkg_dir,
         project_config={

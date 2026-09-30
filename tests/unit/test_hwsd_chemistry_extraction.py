@@ -22,6 +22,7 @@ from prismpy.models.region import BoundingBox, Region
 from prismpy.models.soil import SoilLayer, SoilProfile
 from prismpy.sources.soil.hwsd import HWSDConfig, HWSDSource
 from prismpy.translators._shared.dssat_sol_writer import write_dssat_sol
+from prismpy.packaging.soil_declaration import SoilStamp
 
 FIXTURE = (
     Path(__file__).resolve().parents[1] / "fixtures" / "hwsd_3smu_fixture_calvados.csv"
@@ -139,7 +140,7 @@ class ChemistryExtractionPins(TestCase):
 class SolHonestyPin(TestCase):
     def _write(self, layer, log):
         profile = SoilProfile(
-            profile_id="FR00000001", lat=49.0, lon=-0.3, source="HWSD",
+            profile_id="FR00000001", lat=49.0, lon=-0.3, source="hwsd",
             total_depth=0.2, layers=[layer],
         )
         with tempfile.TemporaryDirectory() as d:
@@ -149,6 +150,7 @@ class SolHonestyPin(TestCase):
                 country_code="FR",
                 region=_region(),
                 chem_default_log=log,
+                stamp=SoilStamp("profiles"), source_label_for_id=lambda key: f"HWSD v2 SMU {key}",
             )
 
     def test_p_sol_honesty_discloses_default(self):

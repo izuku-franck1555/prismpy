@@ -24,6 +24,7 @@ class SoilLayer:
         field_capacity: Volumetric water content at field capacity (cm³/cm³)
         wilting_point: Volumetric water content at wilting point (cm³/cm³)
         saturated_wc: Saturated water content (cm³/cm³)
+        hydraulics_estimated: The water limits came from the pedotransfer function, not the source
     """
     depth_top: float
     depth_bottom: float
@@ -36,6 +37,8 @@ class SoilLayer:
     field_capacity: Optional[float] = None
     wilting_point: Optional[float] = None
     saturated_wc: Optional[float] = None
+    # Provenance only: outside equality, to_dict and the eGHR dedup key.
+    hydraulics_estimated: bool = field(default=False, compare=False, repr=False)
 
     def __post_init__(self):
         """Compute derived values."""
@@ -58,9 +61,9 @@ class SoilLayer:
     def estimate_hydraulic_properties(self) -> None:
         """Estimate hydraulic properties from texture using pedotransfer functions.
 
-        Uses simplified Saxton & Rawls (2006) equations.
+        Uses a pedotransfer function adapted from Saxton & Rawls (2006).
         """
-        # Saxton-Rawls pedotransfer functions (simplified)
+        # Pedotransfer functions adapted from Saxton & Rawls (2006)
         S = self.sand / 100  # Sand fraction
         C = self.clay / 100  # Clay fraction
         OM = (self.organic_carbon or 1.0) / 100  # Organic matter fraction
@@ -76,6 +79,7 @@ class SoilLayer:
         # Saturated water content
         sat = 0.332 - 0.0007251 * self.sand + 0.1276 * C
         self.saturated_wc = max(self.field_capacity + 0.05, min(0.6, sat))
+        self.hydraulics_estimated = True
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
