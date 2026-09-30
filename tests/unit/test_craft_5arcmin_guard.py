@@ -46,6 +46,7 @@ def _cfg(*, targets, resolution: str, base_dir: str = 'outputs') -> ProjectConfi
         ),
         temporal=TemporalConfig(start_year=2015, end_year=2020, spinup_years=2),
         targets=targets,
+        platform_config={"acea": {"spam_data_dir": "spam"}},
         output=OutputConfig(base_dir=base_dir, structure="by_platform"),
     )
 

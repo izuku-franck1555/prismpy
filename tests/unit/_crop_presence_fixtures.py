@@ -131,6 +131,7 @@ def make_config(tmp_path, *, rule=None, rule_path=None, targets=("craft",), excl
                         calendar=CropCalendarConfig(planting_doy=166, maturity_doy=285)),
         temporal=TemporalConfig(start_year=2015, end_year=2020, spinup_years=2),
         targets=[Platform(t) for t in targets],
+        platform_config={"acea": {"spam_data_dir": str(tmp_path / "spam")}} if "acea" in targets else {},
         output=OutputConfig(base_dir=str(tmp_path / "out"), structure="by_platform"),
     )
 

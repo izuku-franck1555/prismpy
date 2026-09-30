@@ -74,7 +74,7 @@ def _cfg(out: Path, *, crop: str = "Potato", short: str = "pot", management=None
         management=management,
         targets=list(targets),
         platform_config=PlatformConfigGroup(pythia=pythia or PythiaConfig(),
-                                            acea=AceaConfig(enabled=acea_enabled)),
+                                            acea=AceaConfig(enabled=acea_enabled, spam_data_dir=out / "spam")),
         output=OutputConfig(base_dir=str(out), structure="by_platform"),
     )
 
