@@ -426,13 +426,13 @@ def test_a_truncated_layer_file_is_the_typed_error(tmp_path, monkeypatch):
 # ── a projection is complete or absent ───────────────────────────────────────
 
 
-def _assemble_projection(tmp_path, **extra):
+def _assemble_projection(tmp_path, baseline_root=None, **extra):
     from prismpy.packaging import scenario_set_generator as ssg
     from tests.structural.test_scenario_set_generator import (
         _BASELINE_LABEL, _SLICE, _baseline_fixture, _project_config, _projection_climate)
 
     return ssg.assemble_projection_package(
-        baseline_package=_baseline_fixture(tmp_path), baseline_config=_project_config(tmp_path / "out"),
+        baseline_package=_baseline_fixture(baseline_root or tmp_path), baseline_config=_project_config(tmp_path / "out"),
         projection_climate=_projection_climate(), grid=None, region_name="Kano", crop_name="Cowpea",
         gcm_source="gfdl-esm4", rcp_or_ssp="ssp245", time_slice=_SLICE, baseline_reference_label=_BASELINE_LABEL,
         output_dir=tmp_path / "out", **extra)
@@ -473,3 +473,82 @@ def test_a_projection_whose_finalization_refuses_its_layer_is_not_left_behind(tm
     with pytest.raises(RequiredPackageArtifactError, match="declares no harvested-area layer"):
         _assemble_projection(tmp_path, finalize=lambda staged: ssg.finalize_acea_forced_co2_projection(staged, baseline))
     assert list((tmp_path / "out").iterdir()) == []
+
+
+
+@pytest.mark.parametrize("target", ["outside_file", "dangling", "outside_directory"])
+def test_a_planted_partial_link_is_removed_never_written_through(tmp_path, monkeypatch, target):
+    import hashlib
+
+    provision_spam(tmp_path / "spam", monkeypatch)
+    outside = tmp_path / "outside"
+    (outside / "d").mkdir(parents=True)
+    (outside / "users_file.bin").write_bytes(b"precious bytes")
+    (outside / "d" / "kept.txt").write_text("kept")
+
+    def state():
+        return {p.relative_to(outside).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else "dir"
+                for p in sorted(outside.rglob("*"))}
+
+    before = state()
+    translator = _translator(tmp_path)
+    folder = translator.output_dir / "harvested_areas" / "56"
+    folder.mkdir(parents=True)
+    link = folder / ".spam2020V2r0_global_H_56_R.tif.partial"
+    link.symlink_to({"outside_file": outside / "users_file.bin", "dangling": outside / "new_outside.tif",
+                     "outside_directory": outside / "d"}[target])
+    translator._write_harvested_area_layer()
+    assert state() == before
+    assert _layer_files(translator, 56) == sorted(f"spam2020V2r0_global_H_56_{tech}.tif" for tech in "RIA")
+    assert not any((folder / name).is_symlink() for name in _layer_files(translator, 56))
+
+
+def test_a_linked_read_key_is_never_declared(tmp_path, monkeypatch):
+    import shutil as sh
+
+    provision_spam(tmp_path / "spam", monkeypatch)
+    translator = _translator(tmp_path)
+    translator._write_harvested_area_layer()
+    read_key = translator.output_dir / "harvested_areas" / "56" / "spam2020V2r0_global_H_56_R.tif"
+    same_bytes = tmp_path / "elsewhere.tif"
+    sh.copy2(read_key, same_bytes)          # the registered content, held outside the package
+    read_key.unlink()
+    read_key.symlink_to(same_bytes)
+    with pytest.raises(RequiredPackageArtifactError, match="symbolic link"):
+        translator._harvested_area_declaration()
+
+
+def test_a_projection_that_cannot_be_moved_into_place_keeps_the_previous_one(tmp_path, monkeypatch):
+    final = _assemble_projection(tmp_path)
+    (final / "previous.txt").write_text("the previous projection")
+    real = Path.rename
+
+    def failing(self, target):
+        if self.name == final.name and self.parent.name.startswith(".staging-"):
+            raise OSError("rename failed")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "rename", failing)
+    with pytest.raises(OSError, match="rename failed"):
+        _assemble_projection(tmp_path, baseline_root=tmp_path / "second")
+    assert (final / "previous.txt").read_text() == "the previous projection"
+    assert [p.name for p in final.parent.iterdir()] == [final.name]
+
+
+def test_a_staging_directory_that_cannot_be_removed_is_logged_and_the_new_projection_kept(tmp_path, monkeypatch, caplog):
+    from prismpy.packaging import scenario_set_generator as ssg
+
+    final = _assemble_projection(tmp_path)
+    (final / "previous.txt").write_text("the previous projection")
+    real = ssg.shutil.rmtree
+
+    def failing(path, *args, **kwargs):
+        if Path(path).name.startswith(".staging-"):
+            raise OSError("permission denied")
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(ssg.shutil, "rmtree", failing)
+    with caplog.at_level("WARNING", logger="prismpy.packaging.scenario_set_generator"):
+        assert _assemble_projection(tmp_path, baseline_root=tmp_path / "second") == final
+    assert final.is_dir() and not (final / "previous.txt").exists()
+    assert any("could not remove the projection staging directory" in r.getMessage() for r in caplog.records)

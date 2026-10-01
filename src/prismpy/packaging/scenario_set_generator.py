@@ -26,6 +26,7 @@ that bypassed the cutout primitive and drove private translator internals.
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -53,6 +54,8 @@ from prismpy.packaging.scenario_helpers import (
     rewrite_pythia_config_for_scenario,
 )
 from prismpy.translators.pythia.translator import PythiaTranslator
+
+logger = logging.getLogger(__name__)
 
 # The DSSAT-driving variables plus hurs: the bridge derives TDEW + RHUM from
 # humidity, and the observed (AgERA5) baseline carries humidity, so fetching
@@ -280,12 +283,34 @@ def assemble_projection_package(
         )
         if finalize is not None:
             finalize(staged)
-        if projection_dir.exists():
-            shutil.rmtree(projection_dir)
-        staged.rename(projection_dir)
+        _move_into_place(staged, projection_dir, aside=stage_root / f".old-{projection_dir.name}")
     finally:
-        shutil.rmtree(stage_root, ignore_errors=True)
+        _remove_staging(stage_root)
     return projection_dir
+
+
+def _move_into_place(staged: Path, final: Path, *, aside: Path) -> None:
+    """Rename ``staged`` to ``final``. An existing ``final`` is first renamed to ``aside`` and is
+    renamed back if the move fails, so a final-named projection is never missing or partial."""
+    replaced = final.exists() or final.is_symlink()
+    if replaced:
+        final.rename(aside)
+    try:
+        staged.rename(final)
+    except BaseException:
+        if replaced:
+            aside.rename(final)
+        raise
+
+
+def _remove_staging(stage_root: Path) -> None:
+    """Remove the staging directory, with any projection set aside in it; a failure is logged."""
+    try:
+        shutil.rmtree(stage_root)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning(f"could not remove the projection staging directory {stage_root}: {exc}")
 
 
 def _baseline_platform(baseline_package: Path) -> str:

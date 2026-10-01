@@ -1767,6 +1767,7 @@ class AceaTranslator(AceaTranslatorBase):
         staged = {tech: target.with_name(f".{target.name}.partial") for tech, target in targets.items()}
         try:
             for tech, source in sources.items():
+                staged[tech].unlink(missing_ok=True)   # a leftover or a link is removed, never written through
                 _reencode_losslessly(source, staged[tech])
                 if file_content_digest(staged[tech]) != SPAM_CONTENT_DIGESTS[(year, release, code, tech)]:
                     raise SpamVintageError(f"the copy of {source.name} does not reproduce its content")
@@ -1804,6 +1805,9 @@ class AceaTranslator(AceaTranslatorBase):
         for tech in _HARVESTED_AREA_TECHS:
             name = _HARVESTED_AREA_READ_KEY.format(fao=fao, tech=tech)
             path = self.output_dir / "harvested_areas" / str(fao) / name
+            if path.is_symlink():
+                raise RequiredPackageArtifactError(
+                    f"harvested_areas/{fao}/{name} is a symbolic link: a package declares only a layer it holds")
             try:
                 digest = file_content_digest(path) if path.is_file() else None
             except Exception:                   # a truncated or unreadable file is not the layer
