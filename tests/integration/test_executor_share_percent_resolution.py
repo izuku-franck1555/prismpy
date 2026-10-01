@@ -96,6 +96,7 @@ def _make_pipeline(*, resolution: str, min_share_percent: float) -> TranslationP
         ),
         temporal=TemporalConfig(start_year=2015, end_year=2020, spinup_years=2),
         targets=[target],
+        platform_config={"acea": {"spam_data_dir": "spam"}},
         output=OutputConfig(base_dir='outputs', structure='by_platform'),
     )
     return TranslationPipeline(

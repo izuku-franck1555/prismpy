@@ -1,6 +1,6 @@
 """Where the crop-presence rule and its reader sit in the code: the rule between the share threshold
 and the user exclusions, through the one > 0 predicate; the harmonize catch classifying the typed
-errors; CRAFT's mask extraction and ACEA's clip routed through the one reader and the one resolver;
+errors; CRAFT's mask extraction through the one reader and ACEA's layer through the registry's resolver;
 one roster-id digest encoding; and no raster read call site beyond the classified inventory."""
 from __future__ import annotations
 
@@ -69,10 +69,10 @@ def test_craft_mask_extraction_reads_through_the_one_reader_and_keeps_its_own_ch
     assert "cap_at_100" in source and "SpamVintageError" in source
 
 
-def test_the_acea_clip_resolves_its_input_through_the_exposed_resolver():
-    clip = _function("translators/acea/translator.py", "_clip_spam_data")
-    calls = _calls(clip)
-    assert "resolve_acea_spam_input" in calls and "glob" not in calls
+def test_the_acea_layer_resolves_its_sources_through_the_registry():
+    writer = _function("translators/acea/translator.py", "_write_harvested_area_layer")
+    calls = _calls(writer)
+    assert "resolve_spam_raster" in calls and "glob" not in calls
 
 
 def test_one_roster_id_digest_encoding():
@@ -88,10 +88,10 @@ def test_one_roster_id_digest_encoding():
 _RASTER_READERS = {
     "sources/crop_areas/presence.py::cell_presence": "the one SPAM presence reader",
     "sources/crop_areas/presence.py::raster_identity": "the one reader's identity (header + checksum)",
-    "sources/crop_areas/spam.py::clip_to_file": "ACEA's harvested-area clip",
+    "sources/crop_areas/spam_vintage.py::file_content_digest": "a carried SPAM layer's content digest",
     "sources/crop_areas/spam.py::_sample_raster": "legacy SPAMSource.retrieve (no production caller)",
     "sources/crop_areas/spam.py::_extract_from_bounds": "legacy SPAMSource.retrieve (no production caller)",
-    "translators/acea/translator.py::_generate_dummy_spam_files": "ACEA's placeholder SPAM writer",
+    "translators/acea/translator.py::_reencode_losslessly": "ACEA's carried layer: its lossless copy",
     "translators/pythia/translator.py::_cell_block_sums": "PYTHIA's per-cell crop area (kept separate)",
     "translators/pythia/translator.py::_check_mask_covers_cells": "PYTHIA's mask extent check",
     "translators/pythia/translator.py::_clip_global_raster": "PYTHIA's raster clips",
@@ -122,7 +122,8 @@ _RASTER_READERS = {
 
 # The classified scopes that read more than once; every other one reads exactly once.
 _MULTI_READ_SITES = {
-    "sources/crop_areas/spam.py::clip_to_file": 2, "sources/crop_areas/spam.py::_sample_raster": 2,
+    "sources/crop_areas/spam.py::_sample_raster": 2,
+    "translators/acea/translator.py::_reencode_losslessly": 2,
     "translators/pythia/translator.py::_clip_global_raster": 2,
     "translators/pythia/translator.py::_generate_management_rasters": 3,
     "pipeline/executor.py::_ensure_isda_1km_cache": 2,
@@ -202,4 +203,4 @@ def test_spam_source_retrieve_keeps_no_production_caller():
                      for t in n.targets}
         used = {n.func.attr for n in ast.walk(tree) if isinstance(n, ast.Call)
                 and isinstance(n.func, ast.Attribute) and ast.unparse(n.func.value) in instances}
-        assert used <= {"clip_to_file"}, (path, used)
+        assert not used, (path, used)

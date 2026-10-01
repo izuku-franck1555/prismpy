@@ -133,7 +133,7 @@ def cmd_translate(args: argparse.Namespace) -> int:
                 return 1
         config.targets = targets
         try:
-            config.assert_craft_resolution_compatible()
+            config.assert_targets_compatible()
         except ValueError as e:
             logger.error(str(e))
             return 1

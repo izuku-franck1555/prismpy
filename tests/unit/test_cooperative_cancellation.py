@@ -383,7 +383,8 @@ class TestCarveOutRegression:
         # Then 529 -> 531 after importing the soil-cascade types (+2).
         # Then 531 -> 554 after the GID identity check ahead of both GADM backends (+23).
         # Then 554 -> 555 after importing the package soil check (+1).
-        ("src/prismpy/pipeline/executor.py", 555),
+        # Then 555 -> 558 after recording why a translator could not be created (+3).
+        ("src/prismpy/pipeline/executor.py", 558),
         # Provenance-flush inside the translator-dispatch except handler
         # in _execute_translate: writes decision records, cancel-inert.
         # Line shifted from 2338 → 2346 (PRE.3.3 thread-through)
@@ -458,7 +459,8 @@ class TestCarveOutRegression:
         # Then 2832 -> 2854 after the HWSD outcome and the soil-cascade state (+22).
         # Then 2854 -> 2928 after the crop-presence rule, the roster read-back and GID loading (+74).
         # Then 2928 -> 2929 after importing the package soil check (+1).
-        ("src/prismpy/pipeline/executor.py", 2929),
+        # Then 2929 -> 2932 after recording why a translator could not be created (+3).
+        ("src/prismpy/pipeline/executor.py", 2932),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed

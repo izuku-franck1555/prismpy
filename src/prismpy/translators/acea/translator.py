@@ -26,7 +26,7 @@ import sys
 from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -38,7 +38,6 @@ from prismpy.cells.admission import (
 from prismpy.config.schema import Platform
 from prismpy.models.climate import ClimateRecord, ClimateTimeSeries
 from prismpy.models.crop import CropParameters, CropCalendar
-from prismpy.models.region import Region
 from prismpy.models.soil import SoilProfile
 from prismpy.models.spatial import SpatialGrid, GridCell
 from prismpy.provenance.tracker import DecisionType, ProvenanceTracker
@@ -60,9 +59,20 @@ from prismpy.packaging.soil_declaration import (
     profile_source_token,
     write_binding,
 )
+from prismpy.sources.crop_areas.spam_vintage import (
+    SPAM_CONTENT_DIGESTS,
+    SPAM_VINTAGES,
+    SpamVintageError,
+    acea_canonical_triples,
+    code_for_vintage,
+    derive_harvested_area_label,
+    file_content_digest,
+    resolve_spam_raster,
+)
 from prismpy.translators.base import (
     BaseTranslator,
     AceaTranslatorBase,
+    RequiredPackageArtifactError,
     TranslationResult,
     UnifiedData,
 )
@@ -634,55 +644,9 @@ class AceaTranslator(AceaTranslatorBase):
             co2_file = self._generate_co2_data()
             output_files.append(co2_file)
 
-            # 6. Generate harvested areas (SPAM data) - REQUIRED by ACEA
-            # ACEA always loads SPAM files during initialization, even with real_cropland=False
-            spam_files = []
-            spam_dir = None
-            spam_required = False
-            include_spam = True
-
-            if platform_config:
-                spam_dir = getattr(platform_config, 'spam_data_dir', None)
-                spam_required = getattr(platform_config, 'spam_required', False)
-                include_spam = getattr(platform_config, 'include_spam_in_package', True)
-
-            if include_spam and data.region:
-                if spam_dir:
-                    # User provided SPAM directory - clip the files
-                    logger.info("Clipping SPAM harvested area data...")
-                    spam_files = self._clip_spam_data(
-                        data.region,
-                        self.config.crop.name,
-                        Path(spam_dir),
-                    )
-
-                    # Check if clipping succeeded
-                    if not spam_files and spam_required:
-                        raise ValueError(
-                            f"SPAM files not found in {spam_dir} for crop {self.config.crop.name}. "
-                            f"ACEA requires SPAM harvested area files. Either:\n"
-                            f"  1. Provide correct spam_data_dir path with SPAM files\n"
-                            f"  2. Set spam_required=False to generate dummy files"
-                        )
-                    elif not spam_files:
-                        # Clipping failed but not required - generate dummy files
-                        logger.warning(f"SPAM files not found in {spam_dir}, generating dummy files")
-                        spam_files = self._generate_dummy_spam_files(data.region, self.config.crop.name)
-
-                elif spam_required:
-                    # SPAM required but no directory provided
-                    raise ValueError(
-                        f"SPAM data is required (spam_required=True) but spam_data_dir not provided. "
-                        f"ACEA requires SPAM harvested area files. Either:\n"
-                        f"  1. Provide spam_data_dir path with SPAM files\n"
-                        f"  2. Set spam_required=False to generate dummy files"
-                    )
-                else:
-                    # Not required and not provided - generate dummy files for self-contained package
-                    logger.info("Generating dummy SPAM files for self-contained package...")
-                    spam_files = self._generate_dummy_spam_files(data.region, self.config.crop.name)
-
-                output_files.extend(spam_files)
+            # 6. The harvested-area layer ACEA reads: the registered SPAM layer of the applied
+            # vintage (R, I and A), carried whole under the engine's fixed read-keys.
+            output_files.extend(self._write_harvested_area_layer())
 
             # 7. Handle GAEZ data (download/copy) if configured
             if platform_config:
@@ -1764,186 +1728,108 @@ class AceaTranslator(AceaTranslatorBase):
         logger.info(f"Generated ACEA soil NetCDF: {nc_path}")
         return nc_path
 
-    def _clip_spam_data(
-        self,
-        region: Region,
-        crop_name: str,
-        spam_data_dir: Path,
-    ) -> List[Path]:
-        """Clip SPAM harvested area rasters to region bounds.
+    def _harvested_area_identity(self, year: str, release: str) -> Tuple[str, int, str]:
+        """``(crop name, ACEA FAO code, SPAM code)`` of the project's crop in SPAM ``year``
+        ``release``: one of the vintage's canonical ACEA triples, else fail loud."""
+        crop = self.config.crop.name
+        if crop not in SPAM_CODE_MAP:
+            raise SpamVintageError(f"ACEA crop {crop!r} has no SPAM code, so the package cannot carry "
+                                   "its harvested-area layer")
+        triple = (crop, ACEA_FAO_CODE_MAP.get(crop), code_for_vintage(SPAM_CODE_MAP[crop], year, release))
+        if triple not in acea_canonical_triples(year, release):
+            raise SpamVintageError(f"{triple} is not an ACEA crop of SPAM {year} {release}")
+        return triple
 
-        Clips global SPAM rasters to the region and saves them in the
-        package output directory for self-contained packages.
-
-        Args:
-            region: Region with bounding box
-            crop_name: Crop name (e.g., 'Wheat')
-            spam_data_dir: Path to directory containing global SPAM rasters
-
-        Returns:
-            List of paths to clipped SPAM files
-        """
-        from prismpy.sources.crop_areas.spam import SPAMSource, SPAMConfig
-
-        clipped_files = []
-
-        # Get SPAM code for crop
-        spam_code = SPAM_CODE_MAP.get(crop_name)
-        if not spam_code:
-            logger.warning(f"No SPAM code mapping for crop: {crop_name}")
-            return clipped_files
-
-        # Get ACEA FAO code for output directory
-        acea_fao_code = ACEA_FAO_CODE_MAP.get(crop_name, 999)
-
-        # Output directory for harvested areas
-        output_dir = self.output_dir / "harvested_areas" / str(acea_fao_code)
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Initialize SPAM source
-        spam_source = SPAMSource(
-            config=SPAMConfig(data_dir=spam_data_dir)
-        )
-
-        # Technology levels to clip (R=Rainfed, I=Irrigated, A=All)
-        tech_levels = ['R', 'I', 'A']
-
-        for tech in tech_levels:
-            input_path = resolve_acea_spam_input(spam_data_dir, crop_name, tech).pick
-
-            if not input_path:
-                logger.debug(f"SPAM file not found for {spam_code}_{tech}")
-                continue
-
-            # Output file maintains similar naming
-            output_filename = f"spam2020V2r0_global_H_{acea_fao_code}_{tech}.tif"
-            output_path = output_dir / output_filename
-
-            # Clip to region bounds
-            result = spam_source.clip_to_file(
-                input_path=input_path,
-                output_path=output_path,
-                bounds=region.bounds,
-            )
-
-            if result:
-                clipped_files.append(result)
-
-        if clipped_files:
-            logger.info(f"Clipped {len(clipped_files)} SPAM files to {output_dir}")
-        else:
-            logger.warning(f"No SPAM files found for {crop_name} in {spam_data_dir}")
-
-        return clipped_files
-
-    def _generate_dummy_spam_files(
-        self,
-        region: Region,
-        crop_name: str,
-    ) -> List[Path]:
-        """Generate GLOBAL dummy SPAM files for self-contained packages.
-
-        Creates GLOBAL 5-arcmin SPAM GeoTIFF files (2160x4320 pixels) that
-        ACEA expects. Only populates cells within the region with positive
-        values. This allows ACEA to initialize and run without real SPAM data.
-
-        IMPORTANT: ACEA indexes SPAM rasters using global 5-arcmin coordinates:
-            y5 = (30-arcmin row) * 6
-            x5 = (30-arcmin col) * 6
-        So the raster MUST be global (2160x4320) for indexing to work.
-
-        Args:
-            region: Region with bounding box
-            crop_name: Crop name (e.g., 'Wheat')
-
-        Returns:
-            List of paths to generated dummy SPAM files
-        """
+    def _write_harvested_area_layer(self) -> List[Path]:
+        """Carry the registered SPAM layer of the applied vintage (R, I and A) under the engine's
+        fixed read-keys: each source must be exactly its pinned registered content, each copy
+        must reproduce it, and the three are written together or not at all."""
+        acea = self.get_platform_config()
+        if acea is None or acea.spam_data_dir is None:
+            raise ValueError("ACEA needs platform_config.acea.spam_data_dir: the package carries the "
+                             "registered SPAM harvested-area layer")
+        year, release, _ = acea.applied_spam_vintage()
+        _, fao, code = self._harvested_area_identity(year, release)
+        sources = {}
+        for tech in _HARVESTED_AREA_TECHS:
+            source = resolve_spam_raster(Path(acea.spam_data_dir), year, release, code, tech)
+            if file_content_digest(source) != SPAM_CONTENT_DIGESTS[(year, release, code, tech)]:
+                raise SpamVintageError(f"{source} is not the registered SPAM {year} {release} {code}_{tech} "
+                                       "layer: its content differs from the pinned digest")
+            sources[tech] = source
+        folder = self.output_dir / "harvested_areas" / str(fao)
+        for path in (folder.parent, folder):
+            if path.is_symlink():
+                raise RequiredPackageArtifactError(
+                    f"{path} is a symbolic link: the harvested-area layer is written only inside the package")
+        folder.mkdir(parents=True, exist_ok=True)
+        targets = {tech: folder / _HARVESTED_AREA_READ_KEY.format(fao=fao, tech=tech) for tech in sources}
+        staged = {tech: target.with_name(f".{target.name}.partial") for tech, target in targets.items()}
         try:
-            import rasterio
-            from rasterio.transform import Affine
-        except ImportError:
-            logger.error("rasterio required for dummy SPAM generation")
-            return []
+            for tech, source in sources.items():
+                staged[tech].unlink(missing_ok=True)   # a leftover or a link is removed, never written through
+                _reencode_losslessly(source, staged[tech])
+                if file_content_digest(staged[tech]) != SPAM_CONTENT_DIGESTS[(year, release, code, tech)]:
+                    raise SpamVintageError(f"the copy of {source.name} does not reproduce its content")
+            for tech, target in targets.items():
+                staged[tech].replace(target)
+        except BaseException:
+            for path in (*staged.values(), *targets.values()):
+                path.unlink(missing_ok=True)
+            raise
+        # The package carries exactly this layer: another crop's folder or a stray file left by an
+        # earlier build in the same output is removed.
+        import shutil
 
-        generated_files = []
+        kept = set(targets.values())
+        package = self.output_dir.resolve()
+        for entry in [*folder.parent.iterdir(), *folder.iterdir()]:
+            if entry == folder or entry in kept:
+                continue
+            if entry.is_symlink():
+                entry.unlink()                  # the link itself, never what it points to
+            elif entry.resolve().is_relative_to(package):
+                if entry.is_dir():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+        logger.info(f"Carried SPAM {year} {release} {code} (R, I, A) under {folder}")
+        return list(targets.values())
 
-        # Get ACEA FAO code for output directory
-        acea_fao_code = ACEA_FAO_CODE_MAP.get(crop_name, 999)
-
-        # Output directory for harvested areas
-        output_dir = self.output_dir / "harvested_areas" / str(acea_fao_code)
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        # SPAM is GLOBAL 5-arcmin grid (ACEA expects this exact size)
-        # 360 degrees / (5/60) = 4320 columns
-        # 180 degrees / (5/60) = 2160 rows
-        resolution = 5 / 60  # 5 arc-minutes in degrees
-        width = 4320   # Global columns
-        height = 2160  # Global rows
-
-        # Transform: top-left is (-180, 90), pixel size is resolution
-        # Note: y resolution is negative (north to south)
-        transform = Affine(resolution, 0, -180, 0, -resolution, 90)
-
-        # Create global grid initialized with nodata
-        # Use 0 for no harvested area (nodata=-1 would mark as invalid)
-        dummy_data = np.zeros((height, width), dtype=np.float32)
-
-        # Calculate which 5-arcmin pixels fall within the region
-        # and set them to 1.0 hectare
-        min_col = int((region.bounds.minx + 180) / resolution)
-        max_col = int((region.bounds.maxx + 180) / resolution) + 1
-        min_row = int((90 - region.bounds.maxy) / resolution)
-        max_row = int((90 - region.bounds.miny) / resolution) + 1
-
-        # Clamp to valid range
-        min_col = max(0, min(min_col, width - 1))
-        max_col = max(0, min(max_col, width))
-        min_row = max(0, min(min_row, height - 1))
-        max_row = max(0, min(max_row, height))
-
-        # Set region cells to 1.0 hectare
-        dummy_data[min_row:max_row, min_col:max_col] = 1.0
-
-        n_cells = (max_row - min_row) * (max_col - min_col)
-        logger.info(f"Creating global SPAM raster (2160x4320) with {n_cells} region cells")
-
-        # Raster profile matching SPAM format
-        profile = {
-            'driver': 'GTiff',
-            'dtype': 'float32',
-            'width': width,
-            'height': height,
-            'count': 1,
-            'crs': 'EPSG:4326',
-            'transform': transform,
-            'nodata': -1,
-            'compress': 'lzw',
-        }
-
-        # Generate files for each technology level (R, I, A)
-        tech_levels = ['R', 'I', 'A']
-
-        for tech in tech_levels:
-            output_filename = f"spam2020V2r0_global_H_{acea_fao_code}_{tech}.tif"
-            output_path = output_dir / output_filename
-
+    def _harvested_area_declaration(self) -> Dict[str, Any]:
+        """The package's harvested-area entries of ``data_sources``, declared from the layer it
+        carries: each read-key file must hold its pinned registered content."""
+        year, release, selection = self.get_platform_config().applied_spam_vintage()
+        crop, fao, code = self._harvested_area_identity(year, release)
+        files = {}
+        for tech in _HARVESTED_AREA_TECHS:
+            name = _HARVESTED_AREA_READ_KEY.format(fao=fao, tech=tech)
+            path = self.output_dir / "harvested_areas" / str(fao) / name
+            if path.is_symlink():
+                raise RequiredPackageArtifactError(
+                    f"harvested_areas/{fao}/{name} is a symbolic link: a package declares only a layer it holds")
             try:
-                with rasterio.open(output_path, 'w', **profile) as dst:
-                    dst.write(dummy_data, 1)
-
-                generated_files.append(output_path)
-                logger.debug(f"Generated dummy SPAM file: {output_path}")
-
-            except Exception as e:
-                logger.error(f"Failed to generate dummy SPAM file {output_path}: {e}")
-
-        if generated_files:
-            logger.info(f"Generated {len(generated_files)} dummy SPAM files for self-contained package")
-            logger.info(f"  Note: Using placeholder data since real_cropland=False")
-
-        return generated_files
+                digest = file_content_digest(path) if path.is_file() else None
+            except Exception:                   # a truncated or unreadable file is not the layer
+                digest = None
+            if digest != SPAM_CONTENT_DIGESTS[(year, release, code, tech)]:
+                raise RequiredPackageArtifactError(
+                    f"harvested_areas/{fao}/{name} is not the registered SPAM {year} {release} "
+                    f"{code}_{tech} layer the package declares")
+            files[tech] = {"name": name, "content_digest": digest}
+        entries = {
+            "harvested_areas": derive_harvested_area_label(year, release, selection),
+            "harvested_areas_layer": {"contract": _HARVESTED_AREA_CONTRACT, "year": year, "release": release,
+                                      "selection": selection, "crop": crop, "crop_code": code, "fao": fao,
+                                      "files": files},
+        }
+        if selection == "selected":
+            entries["crop_mask_vintage"] = {
+                "year": year, "release": release,
+                "source_filename": SPAM_VINTAGES[(year, release)].pattern.format(code=code, tech="A"),
+                "mask_filename": files["A"]["name"],
+            }
+        return entries
 
     def _handle_gaez_data(
         self,
@@ -2377,9 +2263,6 @@ if __name__ == "__main__":
         logger.info("Generating ACEA package metadata...")
         metadata_files = []
 
-        # Get platform config
-        platform_config = self.get_platform_config()
-
         # Count files by type
         climate_files = list((self.output_dir / "climate").glob("*.pckl"))
         n_climate_files = len(climate_files)
@@ -2390,12 +2273,8 @@ if __name__ == "__main__":
 
         # Determine data sources
         climate_source = "NASA POWER"
-
-        spam_source = "Dummy (placeholder)"
-        if platform_config:
-            spam_dir = getattr(platform_config, 'spam_data_dir', None)
-            if spam_dir:
-                spam_source = "SPAM 2020"
+        # The harvested-area layer, declared from the files the package carries.
+        harvested_areas = self._harvested_area_declaration()
 
         gaez_source = "Not available"
         gaez_dir = self.output_dir / "gaez"
@@ -2484,12 +2363,11 @@ if __name__ == "__main__":
 
             # Data sources
             'climate_source': climate_source,
-            'spam_source': spam_source,
             'gaez_source': gaez_source,
 
             'data_sources': {
                 'climate': climate_source,
-                'harvested_areas': spam_source,
+                **harvested_areas,
                 'crop_suitability': gaez_source,
                 'boundaries': boundary_label,
             },
@@ -2556,7 +2434,7 @@ if __name__ == "__main__":
             metadata_files.append(readme_path)
             logger.info(f"Generated README: {readme_path}")
         except Exception as e:
-            logger.warning(f"Failed to generate README: {e}")
+            raise RequiredPackageArtifactError(f"the ACEA README could not be written: {e}") from e
 
         # V2-20: Legacy System B provenance.json generation deleted.
         # Provenance is now handled by System A (prismpy.provenance.tracker)
@@ -3204,36 +3082,21 @@ if __name__ == "__main__":
         lines.append("    ]")
         return "\n".join(lines)
 
-
-class AceaSpamInput(NamedTuple):
-    """The harvested-area file ACEA's clip reads for one technology, and every file its matching
-    pattern found (more than one means the pick depends on directory order)."""
-    pick: Optional[Path]
-    matches: List[Path]
+# The engine's fixed read-key for a harvested-area layer, whatever vintage it holds.
+_HARVESTED_AREA_READ_KEY = "spam2020V2r0_global_H_{fao}_{tech}.tif"
+_HARVESTED_AREA_CONTRACT = "acea-spam-identity/1"
+_HARVESTED_AREA_TECHS = ("R", "I", "A")
 
 
-def acea_spam_input_patterns(spam_code: str, acea_fao_code: int, tech: str) -> List[str]:
-    """The file-name patterns ACEA's harvested-area clip tries, in order."""
-    return [
-        f"spam2020V2r0_global_H_{spam_code}_{tech}.tif",      # SPAM code naming
-        f"spam2020_V2r0_global_H_{spam_code}_{tech}.tif",     # Original ZIP naming (underscore after year)
-        f"spam2020V2r0_global_H_{acea_fao_code}_{tech}.tif",  # FAO code naming (ACEA convention)
-        f"spam2020v2r0_global_H_{spam_code}_{tech}.tif",      # Lowercase version
-        f"spam2010V1r0_global_H_{spam_code}_{tech}.tif",      # Older SPAM 2010
-        f"*{spam_code}*_{tech}.tif",                           # Wildcard fallback
-    ]
+def _reencode_losslessly(source: Path, target: Path) -> None:
+    """Write ``source``'s band to ``target`` compressed (deflate, floating-point predictor, tiles),
+    with the same values, grid, transform, CRS, dtype and nodata."""
+    import rasterio
 
-
-def resolve_acea_spam_input(spam_data_dir, crop_name: str, tech: str) -> AceaSpamInput:
-    """The file ACEA's clip reads: the first match of the first pattern that matches, in glob
-    order, with all of that pattern's matches; (None, []) without a SPAM code or a match."""
-    spam_code = SPAM_CODE_MAP.get(crop_name)
-    if not spam_code:
-        return AceaSpamInput(None, [])
-    acea_fao_code = ACEA_FAO_CODE_MAP.get(crop_name, 999)
-    directory = Path(spam_data_dir)
-    for pattern in acea_spam_input_patterns(spam_code, acea_fao_code, tech):
-        matches = list(directory.glob(pattern))
-        if matches:
-            return AceaSpamInput(matches[0], matches)
-    return AceaSpamInput(None, [])
+    with rasterio.open(source) as src:
+        band = src.read(1)
+        profile = {"driver": "GTiff", "height": src.height, "width": src.width, "count": 1,
+                   "dtype": src.dtypes[0], "crs": src.crs, "transform": src.transform, "nodata": src.nodata,
+                   "compress": "deflate", "predictor": 3, "tiled": True, "blockxsize": 256, "blockysize": 256}
+    with rasterio.open(target, "w", **profile) as dst:
+        dst.write(band, 1)

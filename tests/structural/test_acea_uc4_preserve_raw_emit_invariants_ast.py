@@ -322,6 +322,9 @@ def test_a7_runtime_invokes_translator_and_captures_adapter_capability() -> None
             return_value=Path(tmp) / "README.md",
         ), patch.object(
             AceaTranslator, "get_platform_config", return_value=None,
+        ), patch.object(
+            AceaTranslator, "_harvested_area_declaration",
+            return_value={"harvested_areas": "SPAM 2020 V2r2 (default; no vintage selected)"},
         ):
             translator._generate_package_metadata(
                 data, [], "acea_test", [],

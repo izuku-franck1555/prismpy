@@ -256,7 +256,7 @@ class TranslationPipeline:
         """
         self.config = config
         # Defense-in-depth: a post-construction targets mutation (CLI --targets) skips the model_validator.
-        config.assert_craft_resolution_compatible()
+        config.assert_targets_compatible()
         self.logger = logging.getLogger(__name__)
 
         # Initialize provenance tracker
@@ -277,6 +277,7 @@ class TranslationPipeline:
 
         # Initialize translators and validators (lazy loading)
         self._translators: Dict[Platform, BaseTranslator] = {}
+        self._translator_errors: Dict[Platform, str] = {}   # why a platform's translator could not be created
         self._validators: Dict[Platform, BaseValidator] = {}
 
     def _get_translator(self, platform: Platform) -> Optional[BaseTranslator]:
@@ -313,21 +314,23 @@ class TranslationPipeline:
                 self.logger.warning(f"No translator available for {platform.value}")
                 return None
 
-            # Create output directory for this platform
+            # Instantiate translator (it refuses a configuration it cannot honour before writing)
             output_dir = Path(self.config.output.base_dir) / platform.value
-            output_dir.mkdir(parents=True, exist_ok=True)
-
-            # Instantiate translator
             translator = translator_class(
                 config=self.config,
                 output_dir=output_dir,
                 provenance=self.provenance,
             )
+
+            # Create output directory for this platform
+            output_dir.mkdir(parents=True, exist_ok=True)
             self._translators[platform] = translator
             self.logger.debug(f"Created translator for {platform.value}")
             return translator
 
         except Exception as e:
+            # Recorded: the platform's translation then fails, naming the cause (never a placeholder).
+            self._translator_errors[platform] = f"{type(e).__name__}: {e}"
             self.logger.error(f"Failed to create translator for {platform.value}: {e}")
             return None
 
@@ -2940,19 +2943,18 @@ class TranslationPipeline:
                         except Exception:
                             pass  # never crash on provenance errors
             else:
-                # Create placeholder result for unimplemented translator
+                # A translator that cannot be imported, built or found fails its platform: no
+                # placeholder, no output directory.
                 from prismpy.translators.base import TranslationResult
-                output_dir = Path(self.config.output.base_dir) / platform.value / self.config.region.name
-                output_dir.mkdir(parents=True, exist_ok=True)
-
+                cause = self._translator_errors.get(platform, "no translator is registered for it")
                 results[platform.value] = TranslationResult(
-                    success=True,
+                    success=False,
                     platform=platform,
-                    output_dir=output_dir,
+                    output_dir=Path(self.config.output.base_dir) / platform.value,
                     output_files=[],
-                    errors=[],
-                    warnings=[f"Translator for {platform.value} not yet fully implemented"],
-                    metadata={"status": "placeholder"},
+                    errors=[f"{platform.value}: the translator could not be created: {cause}"],
+                    warnings=[],
+                    metadata={},
                 )
 
         return results
@@ -3572,7 +3574,7 @@ class TranslationPipeline:
         package_summary = {}
 
         # Local (not module-top): a top import would shift the cancel-carveout whitelist line-map.
-        from prismpy.translators.base import ObservedTrialsCopyError
+        from prismpy.translators.base import ObservedTrialsCopyError, RequiredPackageArtifactError
 
         # Generate per-platform packages via translator.generate_package()
         for platform_name, result in translation_results.items():
@@ -3607,6 +3609,11 @@ class TranslationPipeline:
                     self.logger.error(
                         f"Observed-trials copy failed for {platform_name}: {e}"
                     )
+                except RequiredPackageArtifactError as e:
+                    # FATAL: a file the package must carry (e.g. ACEA's README with its
+                    # harvested-area declaration) could not be written.
+                    errors.append(f"{platform_name}: required package file failed: {e}")
+                    self.logger.error(f"Required package file failed for {platform_name}: {e}")
                 except Exception as e:
                     warnings.append(f"{platform_name}: Package generation failed: {e}")
                     self.logger.warning(f"Package generation failed for {platform_name}: {e}")

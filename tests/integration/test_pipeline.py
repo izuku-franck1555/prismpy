@@ -310,6 +310,7 @@ class TestEndToEndWorkflow:
             ),
             temporal=TemporalConfig(start_year=2015, end_year=2020),
             targets=[Platform.SARRA_PY, Platform.CRAFT, Platform.PYTHIA, Platform.ACEA],
+            platform_config={"acea": {"spam_data_dir": "spam"}},
             output=OutputConfig(base_dir="outputs"),
         )
 

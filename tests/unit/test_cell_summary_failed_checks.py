@@ -803,6 +803,7 @@ class TestProjectConfigRemediationSpec:
                 "spinup_years": 0,
             },
             "remediation_spec": spec,
+            "platform_config": {"acea": {"spam_data_dir": "spam"}},
         })
         assert cfg.remediation_spec == spec, (
             "remediation_spec was dropped by Pydantic — codex P1 #2 "

@@ -171,12 +171,9 @@ def test_boundary_resolver_wired_into_pythia_only():
     import prismpy.translators.craft.translator as craft_mod
     import prismpy.translators.pythia.translator as pythia_mod
 
-    # ACEA is out of scope for the whole cropland-vintage module (a separate change).
+    # ACEA carries the registered layer of its vintage, resolved through the same fail-loud resolver.
     acea_src = Path(acea_mod.__file__).read_text()
-    assert "spam_vintage" not in acea_src, (
-        "ACEA must not reference the cropland-vintage module (ACEA vintage-honesty is separate)."
-    )
-    assert "resolve_spam_raster" not in acea_src, "ACEA must not call resolve_spam_raster."
+    assert "resolve_spam_raster" in acea_src, "ACEA must resolve its harvested-area layer through resolve_spam_raster."
 
     # CRAFT MAY consume identify_vintage for the basename-derived honest label, but it reads a
     # verbatim spam_raster_path — it must NEVER call the dir-resolver resolve_spam_raster.
@@ -190,19 +187,19 @@ def test_boundary_resolver_wired_into_pythia_only():
 
 
 def test_boundary_files_byte_identical_to_base():
-    """Stronger boundary guard: the ACEA-only ``SPAMSource`` module (spam.py) and the provenance
-    model must be BYTE-IDENTICAL to the merge-base with ``origin/main``. The SPAM vintage change
-    touched CRAFT, so craft/translator.py left this frozen set; the crop-presence rule then exposed
-    ACEA's harvested-area file choice (same pick) and added an optional record to the tracker's
-    boundary block, so acea/translator.py and provenance/tracker.py left it too (the ACEA
-    translator also stamps and binds the soil netCDF it writes). Skips where git history /
-    ``origin/main`` is unavailable (the grep guard above still runs everywhere).
+    """Stronger boundary guard: the provenance model must be BYTE-IDENTICAL to the merge-base with
+    ``origin/main``. The SPAM vintage change touched CRAFT, so craft/translator.py left this frozen
+    set; the crop-presence rule then exposed ACEA's harvested-area file choice (same pick) and added
+    an optional record to the tracker's boundary block, so acea/translator.py and
+    provenance/tracker.py left it too (the ACEA translator also stamps and binds the soil netCDF it
+    writes); ACEA's carried SPAM layer then removed SPAMSource.clip_to_file, so spam.py left it.
+    Skips where git history / ``origin/main`` is unavailable (the grep guard above still runs
+    everywhere).
     """
     import subprocess
 
     repo = Path(__file__).resolve().parents[2]
     boundary = (
-        "src/prismpy/sources/crop_areas/spam.py",
         "src/prismpy/models/provenance.py",
     )
 
@@ -220,5 +217,5 @@ def test_boundary_files_byte_identical_to_base():
     ]
     assert not breached, (
         "Boundary breached — these files must be byte-identical to the base "
-        f"(the SPAMSource module and the provenance model stay untouched): {breached}"
+        f"(the provenance model stays untouched): {breached}"
     )

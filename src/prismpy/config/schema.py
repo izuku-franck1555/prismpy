@@ -1815,13 +1815,23 @@ class AceaConfig(BaseModel):
         default=None,
         description="Path to directory containing SPAM raster files"
     )
+    spam_version: Optional[str] = Field(
+        default=None,
+        description="SPAM cropland-vintage year of the harvested-area layer the package carries "
+                    "(e.g. '2020' or '2010'); set with spam_release, or neither for SPAM 2020 V2r2"
+    )
+    spam_release: Optional[str] = Field(
+        default=None,
+        description="SPAM cropland-vintage release (e.g. 'V2r2' or 'V2r0'); set with spam_version"
+    )
     include_spam_in_package: bool = Field(
         default=True,
         description="Include SPAM data in output package (required by ACEA)"
     )
     spam_required: bool = Field(
         default=False,
-        description="If True, fail when SPAM data not provided. If False, generate dummy files for self-contained packages."
+        description="Accepted for older configurations; no effect: an ACEA package always carries the "
+                    "registered SPAM layer of its vintage, and fails when it cannot"
     )
 
     # GAEZ data (auto-download or user-provided)
@@ -1883,6 +1893,21 @@ class AceaConfig(BaseModel):
         default=None,
         description="Override GDD from sowing to max rooting depth (°Cd)"
     )
+
+    @model_validator(mode="after")
+    def _spam_vintage_is_both_or_neither(self) -> "AceaConfig":
+        if (self.spam_version is None) != (self.spam_release is None):
+            raise ValueError("spam_version and spam_release select the SPAM vintage together: "
+                             "set both, or neither for SPAM 2020 V2r2")
+        return self
+
+    def applied_spam_vintage(self) -> Tuple[str, str, str]:
+        """``(year, release, selection)``: the selected SPAM vintage, else the default."""
+        from prismpy.sources.crop_areas.spam_vintage import DEFAULT_SPAM_VINTAGE
+
+        if self.spam_version is None:
+            return (*DEFAULT_SPAM_VINTAGE, "default")
+        return (self.spam_version, self.spam_release, "selected")
 
 
 class PlatformConfigGroup(BaseModel):
@@ -2210,6 +2235,46 @@ class ProjectConfig(BaseModel):
         if other:
             raise ValueError(f"the crop-presence rule restricts PYTHIA, CRAFT and ACEA rosters only, not {other}")
         return self
+
+    def assert_acea_harvested_area_compatible(self, targets=None, *, enabled_only=True) -> None:
+        """An ACEA package carries a registered SPAM layer, so a project that runs ACEA needs the
+        directory holding the registered sources, and a crop-presence rule must restrict the grid
+        with that same layer. ``enabled_only=False`` also checks a disabled ACEA block: an ACEA
+        translator built directly writes an ACEA package whatever the block says."""
+        targets = targets if targets is not None else self.targets
+        acea = self.platform_config.acea
+        if Platform.ACEA not in targets or (enabled_only and (acea is None or not acea.enabled)):
+            return
+        if acea is None or acea.spam_data_dir is None:
+            raise ValueError("platform_config.acea.spam_data_dir is required when ACEA is enabled: "
+                             "the package carries the registered SPAM harvested-area layer")
+        if not acea.include_spam_in_package:
+            raise ValueError("platform_config.acea.include_spam_in_package cannot be false: "
+                             "an ACEA package always carries its harvested-area layer")
+        rule = self.region.boundary.crop_presence
+        if rule is None:
+            return
+        from prismpy.sources.crop_areas.spam_vintage import code_for_vintage
+        from prismpy.translators.acea.translator import SPAM_CODE_MAP
+
+        year, release, _ = acea.applied_spam_vintage()
+        code = SPAM_CODE_MAP.get(self.crop.name)
+        code = code_for_vintage(code, year, release) if code else None
+        if (str(rule.year), rule.release, rule.crop_code.upper()) != (year, release, code):
+            applied = f"SPAM {year} {release} {code}" if code else f"no SPAM layer ({self.crop.name} has no SPAM code)"
+            raise ValueError(f"the crop-presence rule restricts the grid with SPAM {rule.year} {rule.release} "
+                             f"{rule.crop_code}, but ACEA uses {applied}: both must name the same SPAM layer")
+
+    @model_validator(mode="after")
+    def validate_acea_harvested_area(self) -> "ProjectConfig":
+        self.assert_acea_harvested_area_compatible()
+        return self
+
+    def assert_targets_compatible(self) -> None:
+        """Re-check the rules that depend on the targets, for targets changed after the model was
+        built (the CLI's --targets): CRAFT's grid and ACEA's harvested-area layer."""
+        self.assert_craft_resolution_compatible()
+        self.assert_acea_harvested_area_compatible()
 
     def get_enabled_platforms(self) -> List[Platform]:
         """Get list of enabled target platforms."""
