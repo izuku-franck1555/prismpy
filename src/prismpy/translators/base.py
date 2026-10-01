@@ -595,5 +595,14 @@ class AceaTranslatorBase(BaseTranslator):
     GRID_ROWS_5ARCMIN = 2160
     GRID_COLS_5ARCMIN = 4320
 
+    def __init__(self, *args, **kwargs):
+        # Root choke point + side-effect-free: check BEFORE super().__init__ creates
+        # the output dir. Any ACEA instantiation writes an ACEA package, whatever
+        # config.targets and the ACEA block say, so its harvested-area rules are checked here.
+        config = args[0] if args else kwargs.get("config")
+        if config is not None:
+            config.assert_acea_harvested_area_compatible(targets=[Platform.ACEA], enabled_only=False)
+        super().__init__(*args, **kwargs)
+
     def get_required_data(self) -> List[str]:
         return self.REQUIRED_DATA

@@ -313,21 +313,21 @@ class TranslationPipeline:
                 self.logger.warning(f"No translator available for {platform.value}")
                 return None
 
-            # Create output directory for this platform
+            # Instantiate translator (it refuses a configuration it cannot honour before writing)
             output_dir = Path(self.config.output.base_dir) / platform.value
-            output_dir.mkdir(parents=True, exist_ok=True)
-
-            # Instantiate translator
             translator = translator_class(
                 config=self.config,
                 output_dir=output_dir,
                 provenance=self.provenance,
             )
+
+            # Create output directory for this platform
+            output_dir.mkdir(parents=True, exist_ok=True)
             self._translators[platform] = translator
             self.logger.debug(f"Created translator for {platform.value}")
             return translator
 
-        except Exception as e:
+        except ImportError as e:
             self.logger.error(f"Failed to create translator for {platform.value}: {e}")
             return None
 

@@ -2236,15 +2236,16 @@ class ProjectConfig(BaseModel):
             raise ValueError(f"the crop-presence rule restricts PYTHIA, CRAFT and ACEA rosters only, not {other}")
         return self
 
-    def assert_acea_harvested_area_compatible(self, targets=None) -> None:
+    def assert_acea_harvested_area_compatible(self, targets=None, *, enabled_only=True) -> None:
         """An ACEA package carries a registered SPAM layer, so a project that runs ACEA needs the
         directory holding the registered sources, and a crop-presence rule must restrict the grid
-        with that same layer."""
+        with that same layer. ``enabled_only=False`` also checks a disabled ACEA block: an ACEA
+        translator built directly writes an ACEA package whatever the block says."""
         targets = targets if targets is not None else self.targets
         acea = self.platform_config.acea
-        if Platform.ACEA not in targets or acea is None or not acea.enabled:
+        if Platform.ACEA not in targets or (enabled_only and (acea is None or not acea.enabled)):
             return
-        if acea.spam_data_dir is None:
+        if acea is None or acea.spam_data_dir is None:
             raise ValueError("platform_config.acea.spam_data_dir is required when ACEA is enabled: "
                              "the package carries the registered SPAM harvested-area layer")
         if not acea.include_spam_in_package:

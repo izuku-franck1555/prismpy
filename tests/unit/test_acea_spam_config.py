@@ -164,3 +164,43 @@ def test_the_cli_refuses_targets_switched_to_acea_before_anything_is_written(tmp
     save_config(_config(targets=("pythia",), acea=acea, rule=rule, base_dir=str(out)), path)
     assert cmd_translate(argparse.Namespace(base=None, dome=None, config=str(path), targets=["acea"])) == 1
     assert not out.exists()
+
+
+# ── an ACEA translator refuses, whatever the targets, before writing ─────────
+
+@pytest.mark.parametrize("acea, rule", [({}, None), ({"enabled": False}, None),
+                                        ({**SPAM, "include_spam_in_package": False}, None),
+                                        (SPAM, ("2010", "V2r0", "WHEA"))])
+def test_an_acea_translator_refuses_a_project_whose_acea_rules_fail_before_writing(tmp_path, acea, rule):
+    from prismpy.translators.acea.translator import AceaTranslator
+
+    rule = _rule(int(rule[0]), rule[1], rule[2]) if rule else None
+    out = tmp_path / "acea"
+    with pytest.raises(ValueError, match="spam_data_dir|include_spam_in_package|crop-presence rule"):
+        AceaTranslator(_config(targets=("pythia",), acea=acea, rule=rule), output_dir=out)
+    assert not out.exists()
+    AceaTranslator(_config(targets=("pythia",), acea=SPAM), output_dir=out)
+    assert out.is_dir()
+
+
+@pytest.mark.parametrize("switch", ["assign", "append"])
+def test_targets_switched_to_acea_after_the_pipeline_is_built_fail_before_any_acea_file(tmp_path, switch):
+    from prismpy.models.region import BoundingBox, Region
+    from prismpy.pipeline.executor import PipelineStage, StageResult, TranslationPipeline
+    from prismpy.translators.base import UnifiedData
+
+    out = tmp_path / "out"
+    cfg = _config(targets=("pythia",), acea={}, base_dir=str(out))
+    pipeline = TranslationPipeline(cfg)
+    if switch == "assign":
+        cfg.targets = [Platform.PYTHIA, Platform.ACEA]
+    else:
+        cfg.targets.append(Platform.ACEA)
+    region = Region(name="Koutiala", country="Mali", country_iso3="MLI",
+                    bounds=BoundingBox(minx=-6.0, miny=11.0, maxx=-5.0, maxy=12.0))
+    pipeline._execute_harmonize = lambda *a, **k: StageResult(stage=PipelineStage.HARMONIZE, success=True,
+                                                              data=UnifiedData(region=region))
+    result = pipeline.execute(stages=[PipelineStage.HARMONIZE, PipelineStage.TRANSLATE])
+    assert not result.success
+    assert any("spam_data_dir is required" in e for e in result.stages["execute"].errors)
+    assert not (out / "acea").exists()
