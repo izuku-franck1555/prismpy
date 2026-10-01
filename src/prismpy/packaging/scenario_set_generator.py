@@ -27,9 +27,10 @@ from __future__ import annotations
 
 import json
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from prismpy.data_sources.isimip3b import (
     ISIMIP3bClient,
@@ -149,13 +150,13 @@ def generate_scenario_set(
                     baseline_reference_label=baseline_reference_label,
                     output_dir=output_dir,
                     planting_doy=planting_doy,
+                    # ACEA reads the cloned OBSERVED climate pickles, not the ISIMIP
+                    # .WTH → an ACEA projection is a forced-CO₂ CO₂-SENSITIVITY, not a
+                    # GCM future. Reconcile temporal/bias/co2/label to that reality.
+                    # pythia/craft (.WTH-driven GCM projections) are left untouched.
+                    finalize=(lambda staged: finalize_acea_forced_co2_projection(staged, baseline_package))
+                    if baseline_platform == "acea" else None,
                 )
-                # ACEA reads the cloned OBSERVED climate pickles, not the ISIMIP
-                # .WTH → an ACEA projection is a forced-CO₂ CO₂-SENSITIVITY, not a
-                # GCM future. Reconcile temporal/bias/co2/label to that reality.
-                # pythia/craft (.WTH-driven GCM projections) are left untouched.
-                if baseline_platform == "acea":
-                    finalize_acea_forced_co2_projection(projection, baseline_package)
                 projections.append(projection)
                 matrix.append((gcm, ssp, time_slice))
 
@@ -180,6 +181,7 @@ def assemble_projection_package(
     baseline_reference_label: str,
     output_dir: Union[str, Path],
     planting_doy: Optional[int] = None,
+    finalize: Optional[Callable[[Path], None]] = None,
 ) -> Path:
     """Assemble one canonical projection package by clone-and-swap (no network).
 
@@ -190,6 +192,9 @@ def assemble_projection_package(
     ``manifest.limitations`` (calendar + dewpoint policy from the bridge).
     Everything else (soil, raster, SNX template, shapefiles, use_case_config)
     is inherited from the baseline clone unchanged.
+
+    The package is built in a staging directory, ``finalize`` (if given) runs on it last, and
+    only then is it moved to its final name: a failure at any step leaves no projection.
     """
     baseline_package = Path(baseline_package)
     output_dir = Path(output_dir)
@@ -205,70 +210,81 @@ def assemble_projection_package(
     projection_dir = output_dir / (
         f"projection_{gcm_source}_{rcp_or_ssp}_{start_year}-{end_year}"
     )
-    if projection_dir.exists():
-        shutil.rmtree(projection_dir)
-    shutil.copytree(baseline_package, projection_dir)
+    # Built under a staging directory whose leaf is the final name (the package's texts name it),
+    # moved to the final name only after the last write.
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stage_root = Path(tempfile.mkdtemp(prefix=".staging-", dir=output_dir))
+    staged = stage_root / projection_dir.name
+    try:
+        shutil.copytree(baseline_package, staged)
 
-    # Capture the baseline manifest (region / crop / project_name) before it is
-    # overwritten, so the projection README can be regenerated from the
-    # projection's own params.
-    cloned_manifest = json.loads(
-        (projection_dir / "manifest.json").read_text(encoding="utf-8")
-    )
-
-    # Swap weather: wipe the inherited baseline WTH then write the projection.
-    weather_dir = projection_dir / "weather"
-    if weather_dir.exists():
-        for stale in weather_dir.glob("*.WTH"):
-            stale.unlink()
-    else:
-        weather_dir.mkdir(parents=True)
-    translator = PythiaTranslator(config=baseline_config, output_dir=projection_dir)
-    translator.write_weather_files(
-        projection_climate, climate_kind=ClimateKind.PROJECTION, grid=grid
-    )
-
-    # Align the cloned config's year fields to the projection slice so DSSAT
-    # requests weather records for the projection years, not the baseline's.
-    config_path = projection_dir / "config" / "pythia_config.json"
-    if config_path.exists():
-        rewrite_pythia_config_for_scenario(
-            config_path,
-            time_slice_start=start_year,
-            time_slice_end=end_year,
-            planting_doy=planting_doy,
+        # Capture the baseline manifest (region / crop / project_name) before it is
+        # overwritten, so the projection README can be regenerated from the
+        # projection's own params.
+        cloned_manifest = json.loads(
+            (staged / "manifest.json").read_text(encoding="utf-8")
         )
 
-    scenario_block = build_projection_scenario_block_for_period(
-        region_name=region_name,
-        crop_name=crop_name,
-        gcm_source=gcm_source,
-        rcp_or_ssp=rcp_or_ssp,
-        time_slice_start=start_year,
-        time_slice_end=end_year,
-        baseline_reference_label=baseline_reference_label,
-    )
+        # Swap weather: wipe the inherited baseline WTH then write the projection.
+        weather_dir = staged / "weather"
+        if weather_dir.exists():
+            for stale in weather_dir.glob("*.WTH"):
+                stale.unlink()
+        else:
+            weather_dir.mkdir(parents=True)
+        translator = PythiaTranslator(config=baseline_config, output_dir=staged)
+        translator.write_weather_files(
+            projection_climate, climate_kind=ClimateKind.PROJECTION, grid=grid
+        )
 
-    # README is rewritten BEFORE the manifest so the manifest's files[]
-    # checksum inventory captures the final (projection) README, not the
-    # cloned baseline one.
-    _rewrite_projection_readme(
-        projection_dir,
-        baseline_manifest=cloned_manifest,
-        start_year=start_year,
-        end_year=end_year,
-        gcm_source=gcm_source,
-        rcp_or_ssp=rcp_or_ssp,
-    )
-    _rewrite_projection_manifest(
-        projection_dir,
-        scenario_block=scenario_block,
-        gcm_source=gcm_source,
-        rcp_or_ssp=rcp_or_ssp,
-        start_year=start_year,
-        end_year=end_year,
-        projection_climate=projection_climate,
-    )
+        # Align the cloned config's year fields to the projection slice so DSSAT
+        # requests weather records for the projection years, not the baseline's.
+        config_path = staged / "config" / "pythia_config.json"
+        if config_path.exists():
+            rewrite_pythia_config_for_scenario(
+                config_path,
+                time_slice_start=start_year,
+                time_slice_end=end_year,
+                planting_doy=planting_doy,
+            )
+
+        scenario_block = build_projection_scenario_block_for_period(
+            region_name=region_name,
+            crop_name=crop_name,
+            gcm_source=gcm_source,
+            rcp_or_ssp=rcp_or_ssp,
+            time_slice_start=start_year,
+            time_slice_end=end_year,
+            baseline_reference_label=baseline_reference_label,
+        )
+
+        # README is rewritten BEFORE the manifest so the manifest's files[]
+        # checksum inventory captures the final (projection) README, not the
+        # cloned baseline one.
+        _rewrite_projection_readme(
+            staged,
+            baseline_manifest=cloned_manifest,
+            start_year=start_year,
+            end_year=end_year,
+            gcm_source=gcm_source,
+            rcp_or_ssp=rcp_or_ssp,
+        )
+        _rewrite_projection_manifest(
+            staged,
+            scenario_block=scenario_block,
+            gcm_source=gcm_source,
+            rcp_or_ssp=rcp_or_ssp,
+            start_year=start_year,
+            end_year=end_year,
+            projection_climate=projection_climate,
+        )
+        if finalize is not None:
+            finalize(staged)
+        if projection_dir.exists():
+            shutil.rmtree(projection_dir)
+        staged.rename(projection_dir)
+    finally:
+        shutil.rmtree(stage_root, ignore_errors=True)
     return projection_dir
 
 
@@ -294,7 +310,11 @@ def _verify_carried_harvested_area_layer(projection_dir: Path, baseline_manifest
         rel = f"harvested_areas/{layer.get('fao')}/{(files[tech] or {}).get('name')}"
         path = projection_dir / rel
         pinned = SPAM_CONTENT_DIGESTS.get((layer.get("year"), layer.get("release"), layer.get("crop_code"), tech))
-        if not path.is_file() or pinned is None or file_content_digest(path) != pinned:
+        try:
+            digest = file_content_digest(path) if path.is_file() else None
+        except Exception:                       # a truncated or unreadable file is not the layer
+            digest = None
+        if pinned is None or digest != pinned:
             raise RequiredPackageArtifactError(
                 f"{rel} is not the registered SPAM {layer.get('year')} {layer.get('release')} "
                 f"{layer.get('crop_code')}_{tech} layer the baseline declares")
@@ -332,11 +352,7 @@ def finalize_acea_forced_co2_projection(
     b_manifest = json.loads(
         (baseline_package / "manifest.json").read_text(encoding="utf-8")
     )
-    try:
-        _verify_carried_harvested_area_layer(Path(projection_dir), b_manifest)
-    except Exception:
-        shutil.rmtree(projection_dir, ignore_errors=True)   # no half-finished projection is left
-        raise
+    _verify_carried_harvested_area_layer(Path(projection_dir), b_manifest)
     b_temporal = dict(b_manifest.get("temporal", {}))
     b_label = (b_manifest.get("scenario") or {}).get("scenario_label", "OBSERVED")
     b_start, b_end = int(b_temporal["start_year"]), int(b_temporal["end_year"])

@@ -1758,6 +1758,10 @@ class AceaTranslator(AceaTranslatorBase):
                                        "layer: its content differs from the pinned digest")
             sources[tech] = source
         folder = self.output_dir / "harvested_areas" / str(fao)
+        for path in (folder.parent, folder):
+            if path.is_symlink():
+                raise RequiredPackageArtifactError(
+                    f"{path} is a symbolic link: the harvested-area layer is written only inside the package")
         folder.mkdir(parents=True, exist_ok=True)
         targets = {tech: folder / _HARVESTED_AREA_READ_KEY.format(fao=fao, tech=tech) for tech in sources}
         staged = {tech: target.with_name(f".{target.name}.partial") for tech, target in targets.items()}
@@ -1777,13 +1781,17 @@ class AceaTranslator(AceaTranslatorBase):
         import shutil
 
         kept = set(targets.values())
+        package = self.output_dir.resolve()
         for entry in [*folder.parent.iterdir(), *folder.iterdir()]:
             if entry == folder or entry in kept:
                 continue
-            if entry.is_dir():
-                shutil.rmtree(entry)
-            else:
-                entry.unlink()
+            if entry.is_symlink():
+                entry.unlink()                  # the link itself, never what it points to
+            elif entry.resolve().is_relative_to(package):
+                if entry.is_dir():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
         logger.info(f"Carried SPAM {year} {release} {code} (R, I, A) under {folder}")
         return list(targets.values())
 
@@ -1796,7 +1804,10 @@ class AceaTranslator(AceaTranslatorBase):
         for tech in _HARVESTED_AREA_TECHS:
             name = _HARVESTED_AREA_READ_KEY.format(fao=fao, tech=tech)
             path = self.output_dir / "harvested_areas" / str(fao) / name
-            digest = file_content_digest(path) if path.is_file() else None
+            try:
+                digest = file_content_digest(path) if path.is_file() else None
+            except Exception:                   # a truncated or unreadable file is not the layer
+                digest = None
             if digest != SPAM_CONTENT_DIGESTS[(year, release, code, tech)]:
                 raise RequiredPackageArtifactError(
                     f"harvested_areas/{fao}/{name} is not the registered SPAM {year} {release} "

@@ -364,7 +364,7 @@ def test_a_projection_carrying_its_baselines_layer_is_verified(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("fault", ["corrupted", "missing"])
-def test_a_projection_whose_carried_layer_is_not_the_declared_one_is_refused_and_removed(tmp_path, monkeypatch, fault):
+def test_a_projection_whose_carried_layer_is_not_the_declared_one_is_refused(tmp_path, monkeypatch, fault):
     package, projection, _ = _projection(tmp_path, monkeypatch)
     alias = projection / "harvested_areas" / "56" / "spam2020V2r0_global_H_56_I.tif"
     if fault == "missing":
@@ -376,4 +376,100 @@ def test_a_projection_whose_carried_layer_is_not_the_declared_one_is_refused_and
             ds.write(band, 1)
     with pytest.raises(RequiredPackageArtifactError, match="MAIZ_I"):
         finalize_acea_forced_co2_projection(projection, package)
-    assert not projection.exists()
+
+
+
+@pytest.mark.parametrize("linked", ["harvested_areas", "harvested_areas/56"])
+def test_a_symlinked_layer_folder_is_refused_and_nothing_outside_is_touched(tmp_path, monkeypatch, linked):
+    provision_spam(tmp_path / "spam", monkeypatch)
+    outside = tmp_path / "outside"
+    (outside / "56").mkdir(parents=True)
+    (outside / "keep.txt").write_text("x")
+    (outside / "56" / "keep.tif").write_text("y")
+    translator = _translator(tmp_path)
+    link = translator.output_dir / linked
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(outside if linked == "harvested_areas" else outside / "56", target_is_directory=True)
+    with pytest.raises(RequiredPackageArtifactError, match="symbolic link"):
+        translator._write_harvested_area_layer()
+    assert sorted(p.relative_to(outside).as_posix() for p in outside.rglob("*")) == ["56", "56/keep.tif", "keep.txt"]
+
+
+def test_a_symlinked_stray_is_unlinked_and_what_it_points_to_is_kept(tmp_path, monkeypatch):
+    provision_spam(tmp_path / "spam", monkeypatch)
+    outside = tmp_path / "outside"
+    (outside / "dir").mkdir(parents=True)
+    (outside / "dir" / "a.txt").write_text("a")
+    (outside / "file.txt").write_text("f")
+    translator = _translator(tmp_path)
+    layer = translator.output_dir / "harvested_areas"
+    (layer / "56").mkdir(parents=True)
+    (layer / "99").symlink_to(outside / "dir", target_is_directory=True)
+    (layer / "56" / "stray.tif").symlink_to(outside / "file.txt")
+    translator._write_harvested_area_layer()
+    assert [p.name for p in layer.iterdir()] == ["56"]
+    assert _layer_files(translator, 56) == sorted(f"spam2020V2r0_global_H_56_{tech}.tif" for tech in "RIA")
+    assert (outside / "dir" / "a.txt").read_text() == "a" and (outside / "file.txt").read_text() == "f"
+
+
+def test_a_truncated_layer_file_is_the_typed_error(tmp_path, monkeypatch):
+    package, projection, baseline = _projection(tmp_path, monkeypatch)
+    for root in (package, projection):
+        alias = root / "harvested_areas" / "56" / "spam2020V2r0_global_H_56_R.tif"
+        alias.write_bytes(alias.read_bytes()[:200])
+    with pytest.raises(RequiredPackageArtifactError, match="MAIZ_R"):
+        _verify_carried_harvested_area_layer(projection, baseline)
+    with pytest.raises(RequiredPackageArtifactError, match="MAIZ_R"):
+        _translator(tmp_path)._harvested_area_declaration()
+
+
+# ── a projection is complete or absent ───────────────────────────────────────
+
+
+def _assemble_projection(tmp_path, **extra):
+    from prismpy.packaging import scenario_set_generator as ssg
+    from tests.structural.test_scenario_set_generator import (
+        _BASELINE_LABEL, _SLICE, _baseline_fixture, _project_config, _projection_climate)
+
+    return ssg.assemble_projection_package(
+        baseline_package=_baseline_fixture(tmp_path), baseline_config=_project_config(tmp_path / "out"),
+        projection_climate=_projection_climate(), grid=None, region_name="Kano", crop_name="Cowpea",
+        gcm_source="gfdl-esm4", rcp_or_ssp="ssp245", time_slice=_SLICE, baseline_reference_label=_BASELINE_LABEL,
+        output_dir=tmp_path / "out", **extra)
+
+
+def test_a_projection_is_moved_to_its_final_name_only_when_complete(tmp_path):
+    projection = _assemble_projection(tmp_path)
+    assert projection.is_dir() and [p.name for p in projection.parent.iterdir()] == [projection.name]
+    for path in projection.rglob("*"):
+        if path.is_file() and path.suffix in (".json", ".md", ".WTH", ".txt", ".yaml"):
+            assert ".staging-" not in path.read_text(errors="ignore"), path
+
+
+@pytest.mark.parametrize("fail_at", ["readme", "manifest", "finalize"])
+def test_a_failed_projection_leaves_neither_a_projection_nor_its_staging(tmp_path, monkeypatch, fail_at):
+    from prismpy.packaging import scenario_set_generator as ssg
+
+    def disk_full(*args, **kwargs):
+        raise OSError("disk full")
+
+    extra = {}
+    if fail_at == "readme":
+        monkeypatch.setattr(ssg, "_rewrite_projection_readme", disk_full)
+    elif fail_at == "manifest":
+        monkeypatch.setattr(ssg, "_rewrite_projection_manifest", disk_full)
+    else:
+        extra["finalize"] = disk_full
+    with pytest.raises(OSError, match="disk full"):
+        _assemble_projection(tmp_path, **extra)
+    assert list((tmp_path / "out").iterdir()) == []
+
+
+def test_a_projection_whose_finalization_refuses_its_layer_is_not_left_behind(tmp_path):
+    from prismpy.packaging import scenario_set_generator as ssg
+    from tests.structural.test_scenario_set_generator import _baseline_fixture
+
+    baseline = _baseline_fixture(tmp_path / "b")
+    with pytest.raises(RequiredPackageArtifactError, match="declares no harvested-area layer"):
+        _assemble_projection(tmp_path, finalize=lambda staged: ssg.finalize_acea_forced_co2_projection(staged, baseline))
+    assert list((tmp_path / "out").iterdir()) == []
