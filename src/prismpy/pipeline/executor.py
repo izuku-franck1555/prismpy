@@ -277,6 +277,7 @@ class TranslationPipeline:
 
         # Initialize translators and validators (lazy loading)
         self._translators: Dict[Platform, BaseTranslator] = {}
+        self._translator_errors: Dict[Platform, str] = {}   # why a platform's translator could not be created
         self._validators: Dict[Platform, BaseValidator] = {}
 
     def _get_translator(self, platform: Platform) -> Optional[BaseTranslator]:
@@ -327,7 +328,9 @@ class TranslationPipeline:
             self.logger.debug(f"Created translator for {platform.value}")
             return translator
 
-        except ImportError as e:
+        except Exception as e:
+            # Recorded: the platform's translation then fails, naming the cause (never a placeholder).
+            self._translator_errors[platform] = f"{type(e).__name__}: {e}"
             self.logger.error(f"Failed to create translator for {platform.value}: {e}")
             return None
 
@@ -2940,19 +2943,18 @@ class TranslationPipeline:
                         except Exception:
                             pass  # never crash on provenance errors
             else:
-                # Create placeholder result for unimplemented translator
+                # A translator that cannot be imported, built or found fails its platform: no
+                # placeholder, no output directory.
                 from prismpy.translators.base import TranslationResult
-                output_dir = Path(self.config.output.base_dir) / platform.value / self.config.region.name
-                output_dir.mkdir(parents=True, exist_ok=True)
-
+                cause = self._translator_errors.get(platform, "no translator is registered for it")
                 results[platform.value] = TranslationResult(
-                    success=True,
+                    success=False,
                     platform=platform,
-                    output_dir=output_dir,
+                    output_dir=Path(self.config.output.base_dir) / platform.value,
                     output_files=[],
-                    errors=[],
-                    warnings=[f"Translator for {platform.value} not yet fully implemented"],
-                    metadata={"status": "placeholder"},
+                    errors=[f"{platform.value}: the translator could not be created: {cause}"],
+                    warnings=[],
+                    metadata={},
                 )
 
         return results

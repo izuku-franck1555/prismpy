@@ -202,5 +202,43 @@ def test_targets_switched_to_acea_after_the_pipeline_is_built_fail_before_any_ac
                                                               data=UnifiedData(region=region))
     result = pipeline.execute(stages=[PipelineStage.HARMONIZE, PipelineStage.TRANSLATE])
     assert not result.success
-    assert any("spam_data_dir is required" in e for e in result.stages["execute"].errors)
+    assert any("spam_data_dir is required" in e for stage in result.stages.values() for e in stage.errors)
     assert not (out / "acea").exists()
+
+
+
+@pytest.mark.parametrize("where", ["import", "constructor"])
+def test_a_translator_that_cannot_be_created_fails_its_platform_with_no_output(tmp_path, monkeypatch, where):
+    import prismpy.translators as translators
+    from prismpy.models.region import BoundingBox, Region
+    from prismpy.pipeline.executor import PipelineStage, StageResult, TranslationPipeline
+    from prismpy.translators.base import UnifiedData
+
+    if where == "import":
+        monkeypatch.delattr(translators, "AceaTranslator")
+    else:
+        class Unbuildable:
+            def __init__(self, *args, **kwargs):
+                raise ImportError("an optional dependency is missing")
+
+        monkeypatch.setattr(translators, "AceaTranslator", Unbuildable)
+    out = tmp_path / "out"
+    pipeline = TranslationPipeline(_config(acea=SPAM, base_dir=str(out)))
+    region = Region(name="Koutiala", country="Mali", country_iso3="MLI",
+                    bounds=BoundingBox(minx=-6.0, miny=11.0, maxx=-5.0, maxy=12.0))
+    pipeline._execute_harmonize = lambda *a, **k: StageResult(stage=PipelineStage.HARMONIZE, success=True,
+                                                              data=UnifiedData(region=region))
+    result = pipeline.execute(stages=[PipelineStage.HARMONIZE, PipelineStage.TRANSLATE])
+    assert not result.success
+    assert any(e.startswith("acea: the translator could not be created: ImportError")
+               for e in result.stages["translate"].errors)
+    assert not (out / "acea").exists()
+
+
+
+@pytest.mark.parametrize("base", sorted((_ROOT / "configs" / "base").glob("*.yaml")), ids=lambda p: p.name)
+def test_each_shipped_base_with_the_acea_dome_validates(base):
+    from prismpy.config.loader import load_dome_config
+
+    merged, _ = load_dome_config(base, _ROOT / "configs" / "domes" / "acea_dome.yaml")
+    ProjectConfig.model_validate(merged)
