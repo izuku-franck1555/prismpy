@@ -158,7 +158,7 @@ def test_pythia_translator_generate_manifest_real_path(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "prismpy.packaging.manifest.derive_boundary_label",
-        lambda source, gadm_level: ("gadm_l2", "ok"),
+        lambda source, gadm_level, units=None: ("gadm_l2", "ok"),
     )
     monkeypatch.setattr(
         "prismpy.packaging.scenario_helpers."

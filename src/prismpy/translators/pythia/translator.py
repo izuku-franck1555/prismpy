@@ -3589,7 +3589,7 @@ class PythiaTranslator(PythiaTranslatorBase):
             Path to manifest.json
         """
         from prismpy.packaging.manifest import (
-            create_manifest, derive_boundary_label, save_manifest,
+            create_manifest, declared_region_boundary, derive_boundary_label, save_manifest,
         )
         from prismpy.packaging.readme_generator import read_pythia_run_config
         from prismpy.packaging.scenario_helpers import (
@@ -3600,19 +3600,17 @@ class PythiaTranslator(PythiaTranslatorBase):
         emitted_setup = (read_pythia_run_config(self.output_dir) or {}).get("default_setup") or {}
 
         # Resolved-source discriminator: read the runtime boundary
-        # source recorded on the Region (post-fallback at retrieve)
-        # and honor the configured GADM admin level only under GADM.
+        # source recorded on the Region (post-fallback at retrieve);
+        # the level is the one the package declares.
         boundary_config = self.config.region.boundary
         resolved_boundary_source = (
             getattr(data.region, 'boundary_source', None)
             or boundary_config.source.value
         )
-        manifest_gadm_level = (
-            boundary_config.gadm_level
-            if resolved_boundary_source == 'gadm' else None
-        )
+        region_boundary = declared_region_boundary(data.region, boundary_config)
+        manifest_gadm_level = region_boundary["gadm_level"]
         boundary_label, _ = derive_boundary_label(
-            resolved_boundary_source, manifest_gadm_level,
+            resolved_boundary_source, manifest_gadm_level, units=region_boundary.get("units"),
         )
 
         # Build project config for manifest. ``use_case_config`` declares
@@ -3627,6 +3625,7 @@ class PythiaTranslator(PythiaTranslatorBase):
             "region_name": data.region.name,
             "country": data.region.country,
             "gadm_level": manifest_gadm_level,
+            "region_boundary": region_boundary,
             "crop_name": self.config.crop.name,
             "cultivar_id": emitted_setup.get("ingeno", ""),
             "planting_doy": self.config.crop.calendar.planting_doy if self.config.crop.calendar else None,
@@ -3724,7 +3723,7 @@ class PythiaTranslator(PythiaTranslatorBase):
         Returns:
             Path to README.md
         """
-        from prismpy.packaging.manifest import derive_boundary_label
+        from prismpy.packaging.manifest import declared_region_boundary, derive_boundary_label
         from prismpy.packaging.readme_generator import generate_readme
 
         # Resolved-source discriminator (mirrors the manifest path)
@@ -3734,12 +3733,10 @@ class PythiaTranslator(PythiaTranslatorBase):
             getattr(data.region, 'boundary_source', None)
             or boundary_config.source.value
         )
-        manifest_gadm_level = (
-            boundary_config.gadm_level
-            if resolved_boundary_source == 'gadm' else None
-        )
+        region_boundary = declared_region_boundary(data.region, boundary_config)
+        manifest_gadm_level = region_boundary["gadm_level"]
         boundary_label, _ = derive_boundary_label(
-            resolved_boundary_source, manifest_gadm_level,
+            resolved_boundary_source, manifest_gadm_level, units=region_boundary.get("units"),
         )
 
         # Count files by type

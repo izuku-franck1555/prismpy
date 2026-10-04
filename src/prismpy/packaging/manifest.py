@@ -661,14 +661,15 @@ def declared_region_boundary(region: Any, boundary_config: Any, *,
         return {"boundary_source": resolved, "gadm_level": None}
     if resolved != "gadm":
         raise ValueError(f"Unknown boundary source: {resolved!r}")
-    level = region.gadm_level
+    level = getattr(region, "gadm_level", None)
     if boundary_config.gadm_level is not None and boundary_config.gadm_level != level:
         return {"gadm_level": None}  # a substituted level is never recorded
     if type(level) is not int or not 0 <= level <= 5:
         return {"gadm_level": level}
     from prismpy.sources.boundaries.gadm import GADMSource
 
-    md = region.metadata if type(region.metadata) is dict else {}
+    md = getattr(region, "metadata", None)
+    md = md if type(md) is dict else {}
     count, field, gids = md.get("feature_count"), md.get("filter_field"), md.get("gids")
     if "name_matches" in md:
         if count == 1 and type(count) is int and type(md["name_matches"]) is int and md["name_matches"] == 1:
@@ -1416,6 +1417,17 @@ def create_manifest(
     """
     Create a complete manifest for a package.
 
+    The ``region`` block declares the package's boundary only as far as its build proves it
+    (``project_config["region_boundary"]``, from :func:`declared_region_boundary`):
+
+    - ``boundary_source`` (optional; present only when proven): "gadm" = one GADM 4.1 unit,
+      unambiguously selected, at ``gadm_level``; "gadm_union" = ``units`` same-named GADM units
+      dissolved at ``gadm_level``, with their ``gids`` when known; "manual" = a coordinate box;
+      "shapefile" = a user-supplied shapefile;
+    - ``gadm_level``: the resolved level under GADM, null otherwise.
+
+    Without ``region_boundary`` the block carries ``gadm_level`` alone, as before.
+
     Args:
         package_dir: Root directory of the package
         project_config: Project configuration dictionary
@@ -1473,7 +1485,8 @@ def create_manifest(
             # matches the BoundaryConfig schema default for GADM
             # configs, which is the only path that reaches this
             # branch via the omit semantics.
-            "gadm_level": project_config.get("gadm_level", 2),
+            **(project_config["region_boundary"] if "region_boundary" in project_config
+               else {"gadm_level": project_config.get("gadm_level", 2)}),
         },
 
         "crop": {
