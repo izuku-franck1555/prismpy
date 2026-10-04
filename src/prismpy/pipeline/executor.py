@@ -578,6 +578,12 @@ class TranslationPipeline:
                             gdf = pygadm.Items(admin=gid)
 
                             if gdf is not None and len(gdf) > 0:
+                                # What was built, for the package's boundary declaration: the rows
+                                # pygadm returned (before they are dissolved) and how the unit was found.
+                                evidence = ({"feature_count": len(gdf), "filter_field": f"GID_{gadm_level}"}
+                                            if gid_config else
+                                            {"feature_count": len(gdf), "name_matches": len(match),
+                                             "filter_field": f"NAME_{gadm_level}"})
                                 if len(gdf) > 1:
                                     gdf = gdf.dissolve()
 
@@ -598,6 +604,7 @@ class TranslationPipeline:
                                     bounds=bounds,
                                     gadm_level=gadm_level,
                                     geometry_wkt=geometry_wkt,
+                                    metadata=evidence,
                                 )
                                 self.logger.info(
                                     f"Loaded boundary via pygadm: {bounds.to_gis_format()}"

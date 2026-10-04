@@ -349,6 +349,10 @@ class GADMSource(DataSource):
         else:
             country_name = country_iso3 or "Unknown"
 
+        # Every unit dissolved into the region, by GID, for the package's boundary declaration.
+        gid_column = f"GID_{gadm_level}"
+        gids = {"gids": [str(g) for g in gdf[gid_column]]} if gid_column in gdf.columns else {}
+
         # Create Region object
         region = Region(
             name=filter_value or "Full Region",
@@ -363,6 +367,7 @@ class GADMSource(DataSource):
                 "filter_field": filter_field,
                 "filter_value": filter_value,
                 "feature_count": len(gdf),
+                **gids,
             },
         )
 

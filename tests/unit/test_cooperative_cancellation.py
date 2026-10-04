@@ -460,7 +460,8 @@ class TestCarveOutRegression:
         # Then 2854 -> 2928 after the crop-presence rule, the roster read-back and GID loading (+74).
         # Then 2928 -> 2929 after importing the package soil check (+1).
         # Then 2929 -> 2932 after recording why a translator could not be created (+3).
-        ("src/prismpy/pipeline/executor.py", 2932),
+        # Then 2932 -> 2939 after recording the pygadm boundary evidence (+7).
+        ("src/prismpy/pipeline/executor.py", 2939),
     }
 
     # V2-22b L Gate B round 3 F-9B: methods whose bodies are allowed
