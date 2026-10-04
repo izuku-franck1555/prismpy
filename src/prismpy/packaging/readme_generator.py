@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
+from prismpy.packaging.manifest import describe_boundary_label
 from prismpy.packaging.soil_declaration import DECLARED_PLATFORMS, declared_soil
 
 
@@ -867,7 +868,7 @@ pythia --all config/pythia_config.json
 | Weather | {climate_source} | {start_year}-{end_year} | Daily SRAD, TMAX, TMIN, RAIN, TDEW, RHUM, WIND |
 | Soil | {soil_source} | — | DSSAT-compatible soil profiles |
 {crop_mask_row}
-| Boundary | GADM | v4.1 | Administrative boundaries |
+| Boundary | {boundary_source} | — | {boundary_description} |
 
 ---
 
@@ -1469,10 +1470,9 @@ def generate_readme(
         'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'gadm_level': raw_gadm_level if raw_gadm_level is not None else 'N/A',
         'admin_level_label': admin_level_label,
-        'boundary_source': _coalesce(
-            data_sources.get('boundaries'),
-            default='GADM v4.1',
-        ),
+        # The one boundary label (data_sources.boundaries) and its description; no label is "not recorded".
+        'boundary_source': _coalesce(data_sources.get('boundaries'), default=NOT_RECORDED),
+        'boundary_description': describe_boundary_label(data_sources.get('boundaries')),
         'rainfall_source': _coalesce(
             data_sources.get('rainfall'),
             default='TAMSAT v3.1',
@@ -1515,8 +1515,6 @@ def generate_readme(
             # Data sources with descriptions
             'crop_mask_source': _safe_get(config, 'crop_mask_source', 'SPAM 2020'),
             'crop_mask_description': _safe_get(config, 'crop_mask_description', 'Harvested area fractions'),
-            'boundary_source': _safe_get(config, 'boundary_source', 'GADM v4.1'),
-            'boundary_description': _safe_get(config, 'boundary_description', 'Administrative boundaries'),
 
             # Management parameters — F-AF-v2: every field passes
             # through ``_resolve_management_table`` so a None

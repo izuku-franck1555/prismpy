@@ -128,6 +128,36 @@ def _sarra(tmp_path, monkeypatch, boundary, region):
 
 BUILDERS = {"pythia": _pythia, "craft": _craft, "acea": _acea, "sarra_py": _sarra}
 
+#: Each label's README description.
+DESCRIPTIONS = {
+    "GADM v4.1": OFFICIAL,
+    "GADM v4.1 admin level 2": OFFICIAL,
+    "GADM v4.1 admin level 1": OFFICIAL,
+    "GADM v4.1 admin level 2, 2 same-named units merged":
+        "Official administrative boundaries; several units share the region's name and were merged",
+    "Bounding box": "Manual coordinate bounds",
+    "Custom shapefile": "User-provided boundary",
+    "not recorded": "—",
+}
+
+
+def _readme_row(package: Path, platform: str):
+    """The README's boundary row: PYTHIA and CRAFT whole, SARRA-Py up to its format column, ACEA none."""
+    starts = {"pythia": "| Boundary |", "craft": "| **Boundaries** |", "sarra_py": "| Boundaries |"}
+    rows = [line for line in (package / "README.md").read_text(encoding="utf-8").splitlines()
+            if line.startswith(("| Boundary |", "| **Boundaries** |", "| Boundaries |"))]
+    if platform == "acea":
+        return rows or None
+    (row,) = rows
+    assert row.startswith(starts[platform]), row
+    return row if platform != "sarra_py" else row.rsplit("| JSON |", 1)[0] + "| JSON |"
+
+
+def _expected_row(platform: str, label: str):
+    return {"pythia": f"| Boundary | {label} | — | {DESCRIPTIONS[label]} |",
+            "craft": f"| **Boundaries** | {label} | {DESCRIPTIONS[label]} |",
+            "sarra_py": f"| Boundaries | {label} | JSON |", "acea": None}[platform]
+
 
 @pytest.mark.parametrize("state", list(STATES))
 @pytest.mark.parametrize("platform", list(BUILDERS))
@@ -137,6 +167,7 @@ def test_each_translator_declares_the_region_and_labels_it(tmp_path, monkeypatch
     manifest = _final_manifest(translator)
     assert _region_block(manifest) == {"name": "Mopti", "country": "Mali", **declared}
     assert manifest["data_sources"]["boundaries"] == label
+    assert _readme_row(translator.output_dir, platform) == _expected_row(platform, label)
 
 
 @pytest.mark.parametrize("platform", ["craft", "acea", "sarra_py"])
@@ -154,6 +185,7 @@ def test_a_gid_package_declares_the_level_of_its_gid(tmp_path, monkeypatch) -> N
     manifest = _final_manifest(tr)
     assert _region_block(manifest) == {"name": "Mopti", "country": "Mali", "boundary_source": "gadm", "gadm_level": 1}
     assert manifest["data_sources"]["boundaries"] == "GADM v4.1 admin level 1"
+    assert _readme_row(tr.output_dir, "pythia") == _expected_row("pythia", "GADM v4.1 admin level 1")
 
 
 @pytest.mark.parametrize("platform", list(BUILDERS))
@@ -165,6 +197,7 @@ def test_a_substituted_level_is_neither_declared_nor_labelled(tmp_path, monkeypa
     manifest = _final_manifest(translator)
     assert _region_block(manifest) == {"name": "Mopti", "country": "Mali", "gadm_level": None}
     assert manifest["data_sources"]["boundaries"] == "GADM v4.1"
+    assert _readme_row(translator.output_dir, platform) == _expected_row(platform, "GADM v4.1")
 
 
 # ── CRAFT's own GADM schema ─────────────────────────────────────────────────
@@ -189,6 +222,7 @@ def test_cells_from_crafts_own_gadm_unit_declare_nothing_about_the_region(tmp_pa
     manifest = _final_manifest(tr)
     assert _region_block(manifest) == {"name": "Mopti", "country": "Mali", "gadm_level": None}
     assert manifest["data_sources"]["boundaries"] == "GADM v4.1"
+    assert _readme_row(tr.output_dir, "craft") == _expected_row("craft", "GADM v4.1")
 
 
 def test_crafts_own_unit_without_cells_falls_back_to_the_region(tmp_path, monkeypatch) -> None:
@@ -270,3 +304,86 @@ def test_every_manifest_is_written_from_a_configuration_holding_the_declaration(
     owners = [p.relative_to(SRC).as_posix() for p in SRC.rglob("*.py")
               if "own_unit_override=" in p.read_text(encoding="utf-8") and p.name != "manifest.py"]
     assert owners == ["translators/craft/translator.py"]
+
+
+# ── The READMEs and the projections ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize("platform", ["pythia", "craft", "sarra_py"])
+def test_a_readme_without_a_boundary_label_says_it_is_not_recorded(tmp_path, platform) -> None:
+    from prismpy.packaging.readme_generator import generate_readme
+    from tests.package_soil import stamp_package_soil
+
+    stamp_package_soil(tmp_path, platform)
+    generate_readme(tmp_path / "README.md", {**PROJECT, "data_sources": {}}, platform=platform)
+    assert _readme_row(tmp_path, platform) == _expected_row(platform, "not recorded")
+    assert "GADM" not in _readme_row(tmp_path, platform)
+
+
+BASELINE = {"project_name": "baseline", "platform": "pythia",
+            "region": {"name": "Mopti", "country": "Mali", "boundary_source": "gadm", "gadm_level": 1},
+            "crop": {"name": "Millet"}, "temporal": {"start_year": 2001, "end_year": 2010},
+            "data_sources": {"climate": "NASA POWER", "rainfall": "CHIRPS v2.0", "temperature": "ERA5",
+                             "boundaries": "GADM v4.1 admin level 1", "crop_mask": "SPAM 2020 V2r2"}}
+
+
+def _projection_readme(tmp_path, monkeypatch, baseline):
+    """The projection README's config and its boundary row, rebuilt from ``baseline``."""
+    from prismpy.packaging import scenario_set_generator as ssg
+
+    seen, real = {}, ssg.generate_readme
+
+    def _capture(path, config, **kwargs):
+        seen["config"] = config
+        return real(path, config, **kwargs)
+
+    monkeypatch.setattr(ssg, "generate_readme", _capture)
+    ssg._rewrite_projection_readme(tmp_path, baseline_manifest=baseline, start_year=2041, end_year=2050,
+                                   gcm_source="GFDL-ESM4", rcp_or_ssp="ssp585")
+    return seen["config"], _readme_row(tmp_path, "pythia")
+
+
+def test_a_projection_readme_carries_its_own_climate_and_only_the_baselines_boundary(tmp_path, monkeypatch) -> None:
+    config, row = _projection_readme(tmp_path, monkeypatch, BASELINE)
+    assert config["data_sources"] == {"climate": "ISIMIP3b GFDL-ESM4 ssp585",
+                                      "boundaries": "GADM v4.1 admin level 1"}
+    assert row == _expected_row("pythia", "GADM v4.1 admin level 1")
+
+
+def test_a_projection_of_a_baseline_without_a_boundary_label_says_not_recorded(tmp_path, monkeypatch) -> None:
+    baseline = {**BASELINE, "data_sources": {"climate": "NASA POWER"}}
+    config, row = _projection_readme(tmp_path, monkeypatch, baseline)
+    assert config["data_sources"] == {"climate": "ISIMIP3b GFDL-ESM4 ssp585"}
+    assert row == _expected_row("pythia", "not recorded")
+
+
+def test_a_projection_keeps_its_baselines_region_block(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from prismpy.packaging import scenario_set_generator as ssg
+
+    (tmp_path / "manifest.json").write_text(json.dumps(BASELINE))
+    ssg._rewrite_projection_manifest(tmp_path, scenario_block=SimpleNamespace(model_dump=lambda: {}),
+                                     gcm_source="GFDL-ESM4", rcp_or_ssp="ssp585", start_year=2041, end_year=2050,
+                                     projection_climate={})
+    assert json.loads((tmp_path / "manifest.json").read_text())["region"] == BASELINE["region"]
+
+
+# ── One meaning per key ──────────────────────────────────────────────────────
+
+
+def test_no_translator_writes_a_boundary_source_into_its_configuration() -> None:
+    """The manifest's ``boundary_source`` comes only from the declaration; the label lives in
+    ``data_sources.boundaries``."""
+    for platform in ("pythia", "craft", "acea", "sarra_py"):
+        tree = ast.parse((SRC / "translators" / platform / "translator.py").read_text(encoding="utf-8"))
+        keys = [k.value for node in ast.walk(tree) if isinstance(node, ast.Dict)
+                for k in node.keys if isinstance(k, ast.Constant)]
+        assert "boundary_source" not in keys and "boundary_description" not in keys, platform
+
+
+def test_a_label_is_derived_only_from_a_runtime_source() -> None:
+    for path in SRC.rglob("*.py"):
+        for call in _calls(path, "derive_boundary_label"):
+            first = call.args[0] if call.args else None
+            assert not (isinstance(first, ast.Constant) and first.value in ("gadm_union", None)), path

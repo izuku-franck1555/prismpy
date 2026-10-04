@@ -3226,7 +3226,7 @@ class CraftTranslator(CraftTranslatorBase):
             data.region, boundary_config, own_unit_override=getattr(self, '_own_unit_schema', False),
         )
         manifest_gadm_level = region_boundary["gadm_level"]
-        boundary_source, boundary_description = derive_boundary_label(
+        boundary_label, _ = derive_boundary_label(
             resolved_boundary_source, manifest_gadm_level, units=region_boundary.get("units"),
         )
 
@@ -3323,8 +3323,6 @@ class CraftTranslator(CraftTranslatorBase):
             # Data sources (the soil comes from the package's own soil files)
             'crop_mask_source': crop_mask_source,
             'crop_mask_description': crop_mask_description,
-            'boundary_source': boundary_source,
-            'boundary_description': boundary_description,
 
             # Management parameters
             'cultivar': cultivar,
@@ -3337,7 +3335,7 @@ class CraftTranslator(CraftTranslatorBase):
             # Data sources dict for manifest
             'data_sources': {
                 'crop_mask': crop_mask_source,
-                'boundaries': boundary_source,
+                'boundaries': boundary_label,
                 'climate': 'NASA POWER (to be downloaded)',
             },
 
