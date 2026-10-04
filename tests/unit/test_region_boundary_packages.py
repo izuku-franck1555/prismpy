@@ -266,8 +266,8 @@ PROJECT = {"project_name": "p", "region_name": "Mopti", "country": "Mali", "crop
 
 
 def test_a_declaration_without_a_source_writes_no_source(tmp_path) -> None:
-    manifest = create_manifest(tmp_path, {**PROJECT, "region_boundary": {"gadm_level": 2}})
-    assert manifest["region"] == {"name": "Mopti", "country": "Mali", "gadm_level": 2}
+    manifest = create_manifest(tmp_path, {**PROJECT, "gadm_level": 2, "region_boundary": {"gadm_level": 1}})
+    assert manifest["region"] == {"name": "Mopti", "country": "Mali", "gadm_level": 1}
 
 
 @pytest.mark.parametrize("config", [{}, {"gadm_level": None}, {"gadm_level": 1}])
