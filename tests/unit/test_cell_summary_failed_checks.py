@@ -199,9 +199,9 @@ class TestSoilClassField:
 
     def test_soil_class_emitted_when_surface_layer_present(self):
         pipeline = _make_pipeline()
-        # Loamy Sand: sand=80, clay=10 (per _get_texture_class thresholds)
+        # Loamy Sand: sand=85, clay=8 (silt + 1.5 clay >= 15 and silt + 2 clay < 30)
         soil = {
-            0: _make_soil_profile(profile_id="p0", sand=80.0, clay=10.0),
+            0: _make_soil_profile(profile_id="p0", sand=85.0, clay=8.0),
         }
         unified = UnifiedData(
             region=_make_region(), grid=_make_grid(n_cells=1), soil=soil,

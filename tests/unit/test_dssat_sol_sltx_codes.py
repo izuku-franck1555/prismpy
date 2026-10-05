@@ -117,15 +117,23 @@ def test_sandyclayloam_renders_sltx_code_at_dssat_column(tmp_path) -> None:
     assert line[25:30] == "SCL  "  # SLTX A5 field at cols 26-30 (0-indexed 25:30)
 
 
-@pytest.mark.parametrize(
-    "sand, clay, texture, code",
-    [
-        (40.0, 22.0, "Loam", "L"),               # 1-char code
-        (60.0, 10.0, "Sandy Loam", "SL"),        # 2-char code
-        (55.0, 30.0, "Sandy Clay Loam", "SCL"),  # 3-char code (census-dominant)
-        (20.0, 30.0, "Silty Clay Loam", "SICL"),  # 4-char code (misread risk)
-    ],
-)
+THE_TWELVE_CLASSES = [  # (sand, clay, class, SLTX code): a point inside each USDA class
+    (92.0, 3.0, "Sand", "S"),
+    (82.0, 6.0, "Loamy Sand", "LS"),
+    (60.0, 10.0, "Sandy Loam", "SL"),
+    (40.0, 22.0, "Loam", "L"),
+    (20.0, 15.0, "Silt Loam", "SIL"),
+    (8.0, 5.0, "Silt", "SI"),
+    (55.0, 30.0, "Sandy Clay Loam", "SCL"),
+    (32.0, 33.0, "Clay Loam", "CL"),
+    (20.0, 30.0, "Silty Clay Loam", "SICL"),
+    (52.0, 42.0, "Sandy Clay", "SC"),
+    (8.0, 47.0, "Silty Clay", "SIC"),
+    (20.0, 60.0, "Clay", "C"),
+]
+
+
+@pytest.mark.parametrize("sand, clay, texture, code", THE_TWELVE_CLASSES)
 def test_sltx_and_depth_at_dssat_format_5030_columns(
     tmp_path, sand: float, clay: float, texture: str, code: str
 ) -> None:
@@ -146,3 +154,16 @@ def test_sltx_and_depth_at_dssat_format_5030_columns(
     # the 1X separators DSSAT skips at cols 25 / 31 / 37 (0-indexed 24/30/36).
     assert line[24] == " " and line[30] == " " and line[36] == " "
     assert texture.replace(" ", "") not in line  # no spelled-out class anywhere
+
+
+def test_every_class_header_differs_only_in_its_code_and_parses_as_the_runner_reads_it(tmp_path) -> None:
+    """The runner's CRAFT reader splits the header once into 5 parts: part 2 the code, int(part 3) the depth."""
+    lines = []
+    for sand, clay, _texture, code in THE_TWELVE_CLASSES:
+        out = tmp_path / f"{code}.SOL"
+        write_dssat_sol(out, {1: _profile(sand=sand, clay=clay)}, country_code="TZ", region=_region(),
+                        stamp=SoilStamp("profiles"), source_label_for_id=lambda key: f"HWSD v2 SMU {key}")
+        lines.append(_star_line(out.read_text(), "TZ00000001"))
+        parts = lines[-1].lstrip("*").strip().split(maxsplit=4)
+        assert (parts[2], int(parts[3])) == (code, 50)
+    assert {line[:25] + line[30:] for line in lines} == {lines[0][:25] + lines[0][30:]}

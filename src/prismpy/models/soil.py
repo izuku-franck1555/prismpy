@@ -117,6 +117,25 @@ class SoilLayer:
         return errors
 
 
+# The USDA (NRCS) soil texture classes by their published definitions: (class, rule on sand, silt, clay %).
+# NRCS's sand bounds (sand > 85 %; loamy sand 70-91 %) follow from these lines inside the texture triangle.
+_USDA_TEXTURE_RULES = (
+    ("Sand", lambda sand, silt, clay: silt + 1.5 * clay < 15),
+    ("Loamy Sand", lambda sand, silt, clay: silt + 1.5 * clay >= 15 and silt + 2 * clay < 30),
+    ("Sandy Loam", lambda sand, silt, clay: silt + 2 * clay >= 30
+        and ((7 <= clay < 20 and sand > 52) or (clay < 7 and silt < 50))),
+    ("Loam", lambda sand, silt, clay: 7 <= clay < 27 and 28 <= silt < 50 and sand <= 52),
+    ("Silt Loam", lambda sand, silt, clay: (silt >= 50 and 12 <= clay < 27) or (50 <= silt < 80 and clay < 12)),
+    ("Silt", lambda sand, silt, clay: silt >= 80 and clay < 12),
+    ("Sandy Clay Loam", lambda sand, silt, clay: 20 <= clay < 35 and silt < 28 and sand > 45),
+    ("Clay Loam", lambda sand, silt, clay: 27 <= clay < 40 and 20 < sand <= 45),
+    ("Silty Clay Loam", lambda sand, silt, clay: 27 <= clay < 40 and sand <= 20),
+    ("Sandy Clay", lambda sand, silt, clay: clay >= 35 and sand > 45),
+    ("Silty Clay", lambda sand, silt, clay: clay >= 40 and silt >= 40),
+    ("Clay", lambda sand, silt, clay: clay >= 40 and sand <= 45 and silt < 40),
+)
+
+
 @dataclass
 class SoilProfile:
     """Unified soil profile representation.
@@ -159,38 +178,12 @@ class SoilProfile:
 
     @staticmethod
     def _get_texture_class(sand: float, clay: float) -> str:
-        """Determine USDA texture class from sand and clay percentages."""
+        """The USDA (NRCS) texture class of sand and clay percentages, silt being the rest."""
         silt = 100 - sand - clay
-
-        if sand >= 85 and clay < 10:
-            return "Sand"
-        elif sand >= 70 and clay < 15:
-            return "Loamy Sand"
-        elif clay >= 40:
-            if silt >= 40:
-                return "Silty Clay"
-            elif sand >= 45:
-                return "Sandy Clay"
-            else:
-                return "Clay"
-        elif clay >= 27:
-            if sand >= 45:
-                return "Sandy Clay Loam"
-            elif silt >= 50:
-                return "Silty Clay Loam"
-            else:
-                return "Clay Loam"
-        elif clay >= 20:
-            return "Loam"
-        elif silt >= 50:
-            if clay >= 12:
-                return "Silt Loam"
-            else:
-                return "Silt"
-        elif sand >= 52:
-            return "Sandy Loam"
-        else:
-            return "Loam"
+        for name, rule in _USDA_TEXTURE_RULES:
+            if rule(sand, silt, clay):
+                return name
+        raise ValueError(f"No USDA texture class for sand {sand} % and clay {clay} %")
 
     def get_layer_at_depth(self, depth: float) -> Optional[SoilLayer]:
         """Get the layer containing the specified depth."""
