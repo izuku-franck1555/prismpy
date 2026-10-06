@@ -178,14 +178,15 @@ def test_the_manifest_the_executor_writes_last_keeps_the_declaration(tmp_path, m
     assert _region_block(_final_manifest(translator)) == first == {"name": "Mopti", "country": "Mali", **declared}
 
 
-def test_a_gid_package_declares_the_level_of_its_gid(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("platform", ["pythia", "sarra_py"])
+def test_a_gid_package_declares_the_level_of_its_gid(tmp_path, monkeypatch, platform) -> None:
     region = _region("gadm", 1, {"feature_count": 1, "filter_field": "GID_1"})
-    tr = _pythia(tmp_path, monkeypatch, {"gadm_level": None, "gadm_filter_field": "GID_1",
-                                         "gadm_filter_value": "MLI.6_1"}, region)
+    tr = BUILDERS[platform](tmp_path, monkeypatch, {"gadm_level": None, "gadm_filter_field": "GID_1",
+                                                    "gadm_filter_value": "MLI.6_1"}, region)
     manifest = _final_manifest(tr)
     assert _region_block(manifest) == {"name": "Mopti", "country": "Mali", "boundary_source": "gadm", "gadm_level": 1}
     assert manifest["data_sources"]["boundaries"] == "GADM v4.1 admin level 1"
-    assert _readme_row(tr.output_dir, "pythia") == _expected_row("pythia", "GADM v4.1 admin level 1")
+    assert _readme_row(tr.output_dir, platform) == _expected_row(platform, "GADM v4.1 admin level 1")
 
 
 @pytest.mark.parametrize("platform", list(BUILDERS))
