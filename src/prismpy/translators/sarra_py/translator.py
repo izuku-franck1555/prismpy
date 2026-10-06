@@ -1868,8 +1868,8 @@ class SarraPyTranslator(SarraPyTranslatorBase):
         ]
 
         # Resolved-source discriminator: read the runtime boundary
-        # source recorded on the Region (post-fallback at retrieve)
-        # and honor the configured GADM admin level only under GADM.
+        # source recorded on the Region (post-fallback at retrieve);
+        # the level is the one the package declares.
         # Reading from the runtime ``Region.gadm_level`` here (the
         # previous behavior) bypassed the resolved-source path —
         # the runtime ``gadm_level`` is coerced to an integer for
@@ -1877,18 +1877,16 @@ class SarraPyTranslator(SarraPyTranslatorBase):
         # MANUAL or SHAPEFILE configurations. Manifest derivation
         # uses the discriminated value below; cache paths continue
         # to read the runtime field unchanged.
-        from prismpy.packaging.manifest import derive_boundary_label
+        from prismpy.packaging.manifest import declared_region_boundary, derive_boundary_label
         boundary_config = self.config.region.boundary
         resolved_boundary_source = (
             getattr(data.region, 'boundary_source', None)
             or boundary_config.source.value
         )
-        manifest_gadm_level = (
-            boundary_config.gadm_level
-            if resolved_boundary_source == 'gadm' else None
-        )
+        region_boundary = declared_region_boundary(data.region, boundary_config)
+        manifest_gadm_level = region_boundary["gadm_level"]
         boundary_label, _ = derive_boundary_label(
-            resolved_boundary_source, manifest_gadm_level,
+            resolved_boundary_source, manifest_gadm_level, units=region_boundary.get("units"),
         )
 
         from prismpy.packaging.manifest import use_case_config_for
@@ -1897,6 +1895,7 @@ class SarraPyTranslator(SarraPyTranslatorBase):
             "region_name": data.region.name,
             "country": data.region.country,
             "gadm_level": manifest_gadm_level,
+            "region_boundary": region_boundary,
             "crop_name": self.config.crop.name,
             "planting_doy": self.config.crop.calendar.planting_doy if self.config.crop.calendar else None,
             "maturity_doy": self.config.crop.calendar.maturity_doy if self.config.crop.calendar else None,

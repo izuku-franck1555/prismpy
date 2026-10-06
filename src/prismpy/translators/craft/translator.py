@@ -241,6 +241,8 @@ class CraftTranslator(CraftTranslatorBase):
         # This will be populated by _generate_craft_schema() if GADM is used
         # All management files will use these cells for consistency
         self._valid_cellids: Optional[set] = None
+        # Whether those cells come from a GADM unit the platform config selected itself.
+        self._own_unit_schema = False
         # Store full GADM cell data (cellid, lat, lon) for management files
         # This ensures all GADM cells are used even if not in grid bounding box
         self._gadm_cells: Optional[List[Dict]] = None
@@ -734,6 +736,7 @@ class CraftTranslator(CraftTranslatorBase):
             )
 
             if craft_schema_rows:
+                self._own_unit_schema = True
                 # F-AK substrate fix: intersect the GADM-resolved schema
                 # rows with the canonical post-harmonize grid.cells
                 # roster so the schema file emits exactly the same cell
@@ -3209,22 +3212,22 @@ class CraftTranslator(CraftTranslatorBase):
         # on disk (the executor sets ``data.region.boundary_source``
         # after any retrieve-stage fallback fires; a config that
         # requested GADM but fell back to manual bounds resolves to
-        # ``manual``). The configured GADM admin level is honored
-        # only when the resolved source is GADM, so non-GADM
-        # packages emit a null admin level rather than a fake
-        # default.
-        from prismpy.packaging.manifest import derive_boundary_label
+        # ``manual``). The level is the one the package declares, so
+        # non-GADM packages emit a null admin level rather than a fake
+        # default, and a schema built from a unit CRAFT selected itself
+        # declares nothing about the executor's region.
+        from prismpy.packaging.manifest import declared_region_boundary, derive_boundary_label
         boundary_config = self.config.region.boundary
         resolved_boundary_source = (
             getattr(data.region, 'boundary_source', None)
             or boundary_config.source.value
         )
-        manifest_gadm_level = (
-            boundary_config.gadm_level
-            if resolved_boundary_source == 'gadm' else None
+        region_boundary = declared_region_boundary(
+            data.region, boundary_config, own_unit_override=getattr(self, '_own_unit_schema', False),
         )
-        boundary_source, boundary_description = derive_boundary_label(
-            resolved_boundary_source, manifest_gadm_level,
+        manifest_gadm_level = region_boundary["gadm_level"]
+        boundary_label, _ = derive_boundary_label(
+            resolved_boundary_source, manifest_gadm_level, units=region_boundary.get("units"),
         )
 
         # Get admin names for schema
@@ -3320,8 +3323,6 @@ class CraftTranslator(CraftTranslatorBase):
             # Data sources (the soil comes from the package's own soil files)
             'crop_mask_source': crop_mask_source,
             'crop_mask_description': crop_mask_description,
-            'boundary_source': boundary_source,
-            'boundary_description': boundary_description,
 
             # Management parameters
             'cultivar': cultivar,
@@ -3334,17 +3335,18 @@ class CraftTranslator(CraftTranslatorBase):
             # Data sources dict for manifest
             'data_sources': {
                 'crop_mask': crop_mask_source,
-                'boundaries': boundary_source,
+                'boundaries': boundary_label,
                 'climate': 'NASA POWER (to be downloaded)',
             },
 
             # Additional manifest metadata. ``gadm_level`` is the
-            # configured admin level only when the resolved source
-            # is GADM; otherwise it is ``None`` so the manifest
+            # declared admin level; ``None`` when no level is declared
+            # (a non-GADM source among them) so the manifest
             # signals "no admin level applied" instead of leaking
-            # a fake default. Computed once via the resolved-source
-            # discriminator above.
+            # a fake default. ``region_boundary`` is the manifest's
+            # boundary declaration, computed once above.
             'gadm_level': manifest_gadm_level,
+            'region_boundary': region_boundary,
 
             # F-BP-18: config-driven from the platform→UC SSOT (was a hardcoded
             # literal that DRIFTED — it declared sowing_optimization +

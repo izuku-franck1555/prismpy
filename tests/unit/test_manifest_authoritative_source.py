@@ -39,12 +39,11 @@ class TestDeriveBoundaryLabelExhaustiveness(TestCase):
         label, _ = derive_boundary_label('gadm', 1)
         self.assertEqual(label, 'GADM v4.1 admin level 1')
 
-    def test_gadm_with_none_level_falls_back_to_two(self):
-        # Honors the BoundaryConfig schema default when the caller
-        # forgot to thread the configured level. Pin so a future
-        # refactor doesn't change this invariant silently.
-        label, _ = derive_boundary_label('gadm', None)
-        self.assertEqual(label, 'GADM v4.1 admin level 2')
+    def test_gadm_with_no_declared_level_names_no_level(self):
+        # A package that declares no level must not be labelled with one.
+        label, description = derive_boundary_label('gadm', None)
+        self.assertEqual(label, 'GADM v4.1')
+        self.assertEqual(description, 'Official administrative boundaries')
 
     def test_manual_returns_bounding_box_label(self):
         label, description = derive_boundary_label('manual', None)

@@ -2288,20 +2288,18 @@ if __name__ == "__main__":
         climate_start = start_year - spinup_years
 
         # Resolved-source discriminator for manifest derivation:
-        # read the runtime boundary source (post-fallback) and
-        # honor the configured GADM admin level only under GADM.
-        from prismpy.packaging.manifest import derive_boundary_label
+        # read the runtime boundary source (post-fallback); the
+        # level is the one the package declares.
+        from prismpy.packaging.manifest import declared_region_boundary, derive_boundary_label
         boundary_config = self.config.region.boundary
         resolved_boundary_source = (
             getattr(data.region, 'boundary_source', None)
             or boundary_config.source.value
         )
-        manifest_gadm_level = (
-            boundary_config.gadm_level
-            if resolved_boundary_source == 'gadm' else None
-        )
+        region_boundary = declared_region_boundary(data.region, boundary_config)
+        manifest_gadm_level = region_boundary["gadm_level"]
         boundary_label, _ = derive_boundary_label(
-            resolved_boundary_source, manifest_gadm_level,
+            resolved_boundary_source, manifest_gadm_level, units=region_boundary.get("units"),
         )
 
         # Build config dict for manifest/README
@@ -2331,11 +2329,12 @@ if __name__ == "__main__":
                 else None
             ),
 
-            # Boundary metadata. ``gadm_level`` is the configured
-            # admin level only when the resolved source is GADM;
-            # ``None`` for manual / shapefile / GADM-failed-fallback
+            # Boundary metadata. ``gadm_level`` is the declared
+            # admin level; ``None`` for manual / shapefile / GADM-failed-fallback
             # so the manifest tracks the actual on-disk artifact.
+            # ``region_boundary`` is the manifest's boundary declaration.
             'gadm_level': manifest_gadm_level,
+            'region_boundary': region_boundary,
 
             # Temporal info
             'start_year': start_year,

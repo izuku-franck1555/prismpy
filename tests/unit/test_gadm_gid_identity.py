@@ -147,7 +147,7 @@ def test_a_gid_config_loads_the_unit_at_its_own_level(tmp_path, monkeypatch, loc
     assert region.gadm_level == level
     assert region.bounds.to_gis_format() == pytest.approx(list(unit.bounds))
     assert wkt.loads(region.geometry_wkt).area == pytest.approx(unit.area)
-    assert region.metadata.get("feature_count") == (1 if backend == "shapefile" else None)
+    assert region.metadata["feature_count"] == 1 and region.metadata["filter_field"] == f"GID_{level}"
 
 
 @pytest.mark.parametrize("field,value,level", [("GID_0", "NGA", 2), ("GID_2", "NGA.32.2_1", 0)])

@@ -672,6 +672,7 @@ def _rewrite_projection_readme(
     n_weather = len(list((projection_dir / "weather").glob("*.WTH")))
     eghr_dir = projection_dir / "eGHR"
     n_sol = len(list(eghr_dir.glob("*.SOL"))) if eghr_dir.exists() else 0
+    baseline_sources = baseline_manifest.get("data_sources") or {}
     readme_config = {
         "project_name": baseline_manifest.get("project_name", "projection"),
         "region": region,
@@ -685,7 +686,9 @@ def _rewrite_projection_readme(
         "temporal": {"start_year": start_year, "end_year": end_year},
         "start_year": start_year,
         "end_year": end_year,
-        "data_sources": {"climate": projection_source},
+        # The projection's own climate, and the boundary label of the region it shares with the baseline.
+        "data_sources": {"climate": projection_source,
+                         **{key: baseline_sources[key] for key in ("boundaries",) if baseline_sources.get(key)}},
         # Real package contents (not the 0 defaults).
         "package_dir": projection_dir.name,
         "n_sites": n_weather,

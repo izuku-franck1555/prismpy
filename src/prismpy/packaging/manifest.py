@@ -30,6 +30,7 @@ Determinism details:
 
 import hashlib
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple, Union
@@ -547,9 +548,30 @@ class UnsupportedCropError(ValueError):
         )
 
 
+#: Every boundary label a package declares, as a pattern, with its README description: the one
+#: table behind ``derive_boundary_label`` and ``describe_boundary_label``.
+_BOUNDARY_LABELS = (
+    (r"GADM v4\.1 admin level \d+, \d+ same-named units merged",
+     "Official administrative boundaries; several units share the region's name and were merged"),
+    (r"GADM v4\.1( admin level \d+)?", "Official administrative boundaries"),
+    (r"Bounding box", "Manual coordinate bounds"),
+    (r"Custom shapefile", "User-provided boundary"),
+)
+
+
+def describe_boundary_label(label: Any) -> str:
+    """The README description of a boundary label (``data_sources.boundaries``); "—" for a
+    label this table does not know, such as "not recorded"."""
+    for pattern, description in _BOUNDARY_LABELS:
+        if isinstance(label, str) and re.fullmatch(pattern, label):
+            return description
+    return "—"
+
+
 def derive_boundary_label(
     resolved_source: str,
     gadm_level: Optional[int],
+    units: Optional[int] = None,
 ) -> Tuple[str, str]:
     """Derive (label, description) for the boundary inclusion field
     on a package manifest and the corresponding README cells.
@@ -557,8 +579,9 @@ def derive_boundary_label(
     The pipeline executor records the RESOLVED boundary source on
     the runtime ``Region`` object after any retrieve-stage fallback
     fires. Manifest writers must read that resolved value and pass
-    it here, along with the configured GADM admin level. The level
-    is only emitted when the resolved source is GADM; otherwise the
+    it here, along with the GADM admin level the package declares
+    (see :func:`declared_region_boundary`). The level is only
+    emitted when the resolved source is GADM; otherwise the
     label / description describe the actual on-disk boundary
     artifact (a manual bounding box, a shapefile, or — when the
     resolved value is the runtime alias ``manual_bounds`` produced
@@ -569,14 +592,18 @@ def derive_boundary_label(
         resolved_source: the runtime-resolved boundary source string.
             Expected values: ``"gadm"``, ``"manual"``,
             ``"manual_bounds"``, ``"shapefile"``. Unknown values
+            (including the declaration token ``"gadm_union"``)
             raise ``ValueError`` so a future ``BoundarySource`` enum
-            extension surfaces at sprint-time rather than as a
+            extension surfaces at once rather than as a
             silent fallthrough into the manual label.
-        gadm_level: the configured GADM admin level. Honored only
+        gadm_level: the declared GADM admin level. Honored only
             when ``resolved_source == "gadm"``; ignored (and may be
-            ``None``) for every other source. ``None`` is also
-            tolerated under GADM with a fallback to admin level 2 —
-            the same default the BoundaryConfig schema uses.
+            ``None``) for every other source. ``None`` under GADM
+            means the package declares no level, and the label names
+            none.
+        units: the number of same-named GADM units dissolved into the
+            region (the declaration's ``units``); an exact int of 2 or
+            more names the merge in the label.
 
     Returns:
         A ``(label, description)`` tuple suitable for the manifest's
@@ -589,20 +616,75 @@ def derive_boundary_label(
             the caller can map it to a new branch in this helper.
     """
     if resolved_source == "gadm":
-        level = gadm_level if gadm_level is not None else 2
-        return (
-            f"GADM v4.1 admin level {level}",
-            "Official administrative boundaries",
+        if gadm_level is None:
+            label = "GADM v4.1"
+        elif type(units) is int and units >= 2:
+            label = f"GADM v4.1 admin level {gadm_level}, {units} same-named units merged"
+        else:
+            label = f"GADM v4.1 admin level {gadm_level}"
+    elif resolved_source in ("manual", "manual_bounds"):
+        label = "Bounding box"
+    elif resolved_source == "shapefile":
+        label = "Custom shapefile"
+    else:
+        raise ValueError(
+            f"Unknown boundary source: {resolved_source!r}. "
+            "Update derive_boundary_label() when adding a "
+            "BoundarySource enum value."
         )
-    if resolved_source in ("manual", "manual_bounds"):
-        return ("Bounding box", "Manual coordinate bounds")
-    if resolved_source == "shapefile":
-        return ("Custom shapefile", "User-provided boundary")
-    raise ValueError(
-        f"Unknown boundary source: {resolved_source!r}. "
-        "Update derive_boundary_label() when adding a "
-        "BoundarySource enum value."
-    )
+    return label, describe_boundary_label(label)
+
+
+def declared_region_boundary(region: Any, boundary_config: Any, *,
+                             own_unit_override: bool = False) -> Dict[str, Any]:
+    """The manifest region-block entries for the package's boundary: what the build proves,
+    and nothing more. A key left out is absent from the manifest, never null.
+
+    ``boundary_source`` is written only when the build proves it: "gadm" when one GADM 4.1 unit
+    was built and unambiguously selected; "gadm_union" when several units sharing the requested
+    name were dissolved (with ``units`` and, when every unit's GID is known, ``gids``); "manual"
+    or "shapefile". ``gadm_level`` is the level the region was resolved at under GADM, and None
+    otherwise. Nothing is declared about the region (``gadm_level`` None) when the resolved
+    level is not the configured one, or when ``own_unit_override`` says the simulated cells come
+    from a unit the platform selected itself.
+
+    The evidence is the region's ``metadata``: ``feature_count`` (the features dissolved),
+    ``filter_field`` (the column the name or GID was matched in), ``name_matches`` (how many
+    units carried the name, when a fallback picked one of them) and ``gids``.
+    """
+    if own_unit_override:
+        return {"gadm_level": None}
+    resolved = getattr(region, "boundary_source", None) or boundary_config.source.value
+    if resolved == "manual_bounds":
+        resolved = "manual"
+    if resolved in ("manual", "shapefile"):
+        return {"boundary_source": resolved, "gadm_level": None}
+    if resolved != "gadm":
+        raise ValueError(f"Unknown boundary source: {resolved!r}")
+    level = getattr(region, "gadm_level", None)
+    if boundary_config.gadm_level is not None and boundary_config.gadm_level != level:
+        return {"gadm_level": None}  # a substituted level is never recorded
+    if type(level) is not int or not 0 <= level <= 5:
+        return {"gadm_level": level}
+    from prismpy.sources.boundaries.gadm import GADMSource
+
+    md = getattr(region, "metadata", None)
+    md = md if type(md) is dict else {}
+    count, field, gids = md.get("feature_count"), md.get("filter_field"), md.get("gids")
+    if "name_matches" in md:
+        if count == 1 and type(count) is int and type(md["name_matches"]) is int and md["name_matches"] == 1:
+            return {"boundary_source": "gadm", "gadm_level": level}
+        return {"gadm_level": level}  # a fallback picked one of several units, or its parts
+    if type(count) is not int or count < 1:
+        return {"gadm_level": level}
+    if count == 1:
+        return {"boundary_source": "gadm", "gadm_level": level}
+    if field != GADMSource.GADM_NAME_COLUMNS[level]:
+        return {"gadm_level": level}  # a parent or other area, not same-named units
+    declared = {"boundary_source": "gadm_union", "gadm_level": level, "units": count}
+    if type(gids) is list and len(gids) == count and all(type(g) is str for g in gids):
+        declared["gids"] = sorted(gids)
+    return declared
 
 
 def compute_sha256(file_path: Union[str, Path]) -> str:
@@ -1335,6 +1417,17 @@ def create_manifest(
     """
     Create a complete manifest for a package.
 
+    The ``region`` block declares the package's boundary only as far as its build proves it
+    (``project_config["region_boundary"]``, from :func:`declared_region_boundary`):
+
+    - ``boundary_source`` (optional; present only when proven): "gadm" = one GADM 4.1 unit,
+      unambiguously selected, at ``gadm_level``; "gadm_union" = ``units`` same-named GADM units
+      dissolved at ``gadm_level``, with their ``gids`` when known; "manual" = a coordinate box;
+      "shapefile" = a user-supplied shapefile;
+    - ``gadm_level``: the resolved level under GADM, null otherwise.
+
+    Without ``region_boundary`` the block carries ``gadm_level`` alone, as before.
+
     Args:
         package_dir: Root directory of the package
         project_config: Project configuration dictionary
@@ -1392,7 +1485,8 @@ def create_manifest(
             # matches the BoundaryConfig schema default for GADM
             # configs, which is the only path that reaches this
             # branch via the omit semantics.
-            "gadm_level": project_config.get("gadm_level", 2),
+            **(project_config["region_boundary"] if "region_boundary" in project_config
+               else {"gadm_level": project_config.get("gadm_level", 2)}),
         },
 
         "crop": {
