@@ -17,6 +17,7 @@ THE_TWELVE = {
     "Clay Loam", "Silty Clay Loam", "Sandy Clay", "Silty Clay", "Clay",
 }
 TRIANGLE = [(float(sand), float(clay)) for sand in range(101) for clay in range(101 - sand)]
+HALF_PERCENT = [(sand / 2, clay / 2) for sand in range(201) for clay in range(201 - sand)]
 
 # (edge, the path across it, t on the edge, the class below it, on it, above it)
 EDGES = [
@@ -30,6 +31,7 @@ EDGES = [
     ("clay 40 at sand 10", lambda t: (10, t), 40, "Silty Clay Loam", "Silty Clay", "Silty Clay"),
     ("sand 20 at clay 33", lambda t: (t, 33), 20, "Silty Clay Loam", "Silty Clay Loam", "Clay Loam"),
     ("sand 45 at clay 30", lambda t: (t, 30), 45, "Clay Loam", "Clay Loam", "Sandy Clay Loam"),
+    ("sand 45 at clay 37", lambda t: (t, 37), 45, "Clay Loam", "Clay Loam", "Sandy Clay"),
     ("sand 45 at clay 45", lambda t: (t, 45), 45, "Clay", "Clay", "Sandy Clay"),
     ("sand 52 at clay 15", lambda t: (t, 15), 52, "Loam", "Loam", "Sandy Loam"),
     ("silt 28 at clay 22", lambda t: (78 - t, 22), 28, "Sandy Clay Loam", "Loam", "Loam"),
@@ -63,9 +65,9 @@ def test_the_ranges_the_old_triangle_mislabelled(sand, clay, usda) -> None:
     assert texture(sand, clay) == usda
 
 
-def test_exactly_one_rule_holds_at_every_whole_percent_of_the_triangle() -> None:
+def test_exactly_one_rule_holds_at_every_half_percent_of_the_triangle() -> None:
     from prismpy.models.soil import _USDA_TEXTURE_RULES
-    for sand, clay in TRIANGLE:
+    for sand, clay in HALF_PERCENT:
         silt = 100 - sand - clay
         holding = [name for name, rule in _USDA_TEXTURE_RULES if rule(sand, silt, clay)]
         assert holding == [texture(sand, clay)], (sand, clay, holding)

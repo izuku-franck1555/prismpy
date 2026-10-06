@@ -159,8 +159,8 @@ class TestVetoNoOp:
 
 class TestSilentTier:
     def test_all_neighbors_same_class_no_exception(self):
-        """Test #2 — target sand=80 clay=10 → Loamy Sand. All 4
-        neighbors also Loamy Sand. _veto_4_tier returns ('silent',
+        """Test #2 — target sand=80 clay=10 → Sandy Loam. All 4
+        neighbors also Sandy Loam. _veto_4_tier returns ('silent',
         None); no exception."""
         soil = {
             0: _profile("p0", 80, 10),
@@ -182,13 +182,13 @@ class TestSilentTier:
 
 class TestWarnTier:
     def _mixed_neighborhood(self):
-        """Target Loamy Sand; 3 neighbors Loamy Sand, 1 Clay → warn."""
+        """Target Sandy Loam; 3 neighbors Sandy Loam, 1 Clay → warn."""
         return _unified({
-            0: _profile("p0", 80, 10),  # target — Loamy Sand
-            1: _profile("p1", 80, 10),  # Loamy Sand
-            2: _profile("p2", 80, 10),  # Loamy Sand
+            0: _profile("p0", 80, 10),  # target — Sandy Loam
+            1: _profile("p1", 80, 10),  # Sandy Loam
+            2: _profile("p2", 80, 10),  # Sandy Loam
             3: _profile("p3", 20, 50),  # Clay (different class)
-            4: _profile("p4", 80, 10),  # Loamy Sand
+            4: _profile("p4", 80, 10),  # Sandy Loam
         })
 
     def test_warn_unacknowledged_raises_warn_unacked(self):
@@ -277,7 +277,7 @@ class TestBlockAdversarialBypass:
         with ack=True."""
         pipeline = _make_pipeline()
         soil = {
-            0: _profile("p0", 80, 10),  # target — Loamy Sand
+            0: _profile("p0", 80, 10),  # target — Sandy Loam
             1: _profile("p1", 20, 50),  # Clay
             2: _profile("p2", 20, 50),  # Clay
             3: _profile("p3", 20, 50),  # Clay
@@ -369,7 +369,7 @@ class TestNeighborNullPreserveOrder:
         """Critical adversarial test: cell 3 (one of the 4
         neighbors) is NOT in the soil dict at all. soil.get(3)
         returns None. Without the fix, this gets filtered out and
-        only cells 1, 2, 4 are checked — all Loamy Sand → silent
+        only cells 1, 2, 4 are checked — all Sandy Loam → silent
         tier (BUG). With the fix, the None entry remains in the
         list, the `any(p is None ...)` check fires, and the tier
         is BLOCK neighbor_null."""
