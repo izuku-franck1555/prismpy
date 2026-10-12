@@ -46,6 +46,8 @@ dependencies = [
     # netCDF4/HDF5 C state and SIGSEGVs the bound-gen test job. Cap pandas to
     # the numpy-1.x-compatible 2.x line, atomic with the numpy<2.0 pin.
     "pandas>=2.0.0,<3.0",
+    # pyarrow 26 wheels fail to import on numpy<2; atomic with the numpy<2.0 cap.
+    "pyarrow>=10.0.1,<26",
     "pydantic>=2.0,<3.0",
     "pyyaml>=6.0",
     "geopandas>=0.14.0",
