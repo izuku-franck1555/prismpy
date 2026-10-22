@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Literal, Mapping, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -117,7 +117,9 @@ def _lattice_counts(series: Mapping[str, Any]) -> Tuple[int, int]:
     return len(wet), sum(1 for value in wet if _on_lattice(value))
 
 
-def _classify_precip(series: Optional[Mapping[str, Any]]) -> str:
+def _classify_precip(
+    series: Optional[Mapping[str, Any]],
+) -> Literal["clean", "scaled", "unconfirmed", "n/a"]:
     """"clean", "scaled" (k >= 10 with >= half on the lattice, or 3-9 all on
     it), "unconfirmed" (1-2 wet days, all on it) or "n/a" (no series)."""
     if series is None:
@@ -157,44 +159,65 @@ class _Measurement(NamedTuple):
     descaled: Optional[Dict[str, Any]]
 
 
+def _within(
+    series: Optional[Mapping[str, Any]], first: str, last: str
+) -> Optional[Dict[str, Any]]:
+    """The days of a PRECTOTCORR series within [first, last] (``YYYYMMDD``)."""
+    if series is None:
+        return None
+    return {day: value for day, value in series.items() if first <= day <= last}
+
+
+def _day_keys(first: date, last: date) -> List[str]:
+    """Every calendar day of [first, last] as ``YYYYMMDD``."""
+    return [(first + timedelta(days=n)).strftime("%Y%m%d") for n in range((last - first).days + 1)]
+
+
 def _measure_factor(
     response: Mapping[str, Any],
     ref: Mapping[str, Any],
-    ref_end: str,
+    ref_end: date,
+    year_end: date,
 ) -> _Measurement:
     """Measure a response's factor (24, 1 or None) against REF, a CLEAN
-    retrieval of [1 January, ``ref_end``] with >= 3 wet days, on REF's dates.
+    retrieval of [1 January, ``ref_end``] with >= 3 wet days.
 
-    ×24 also needs a REF value >= 1.0 mm, every wet value of the response on
-    the lattice and a CLEAN de-scaled series equal to REF on the overlap; ×1
-    needs a tail after ``ref_end`` that is dry or has a value off the lattice.
+    The overlap is every day of [1 January, ref_end]: both series must carry
+    each one and share its wet dates. ×24 needs every wet overlap value at
+    24 × REF's, a REF value >= 1.0 mm, every wet value of the used span
+    [1 January, year_end] on the lattice and a CLEAN de-scaled used span
+    equal to REF on the overlap. ×1 needs every wet overlap value equal to
+    REF's at 0.01 mm and a tail (ref_end, year_end] that is dry or has a
+    value off the lattice.
     """
     no_measurement = _Measurement(None, 0, None)
-    if _classify_precip(ref) != "clean":
+    first = date(ref_end.year, 1, 1)
+    overlap = _day_keys(first, ref_end)
+    if any(day not in ref or day not in response for day in overlap):
         return no_measurement
-    overlap = sorted(day for day in ref if day <= ref_end)
-    if any(day not in response for day in overlap):
+    if _classify_precip({day: ref[day] for day in overlap}) != "clean":
         return no_measurement
     ref_wet = [day for day in overlap if _is_wet(ref[day])]
     k_ov = len(ref_wet)
     if k_ov < _REF_MIN_OVERLAP_WET_DAYS:
         return no_measurement
-    if {day for day in overlap if _is_wet(response[day])} != set(ref_wet):
+    if [day for day in overlap if _is_wet(response[day])] != ref_wet:
         return no_measurement
+    used = {day: response[day] for day in _day_keys(first, year_end) if day in response}
     unproven = _Measurement(None, k_ov, None)
     if all(_scaled_by(response[day], ref[day], X24_FACTOR) for day in ref_wet):
         if not any(ref[day] >= _REF_MIN_MAGNITUDE_MM for day in ref_wet):
             return unproven
-        if not all(_on_lattice(v) for v in response.values() if _is_wet(v)):
+        if not all(_on_lattice(v) for v in used.values() if _is_wet(v)):
             return unproven
-        descaled = _descale_precip(response)
+        descaled = _descale_precip(used)
         if any(descaled[day] != ref[day] for day in overlap):
             return unproven
         if _classify_precip(descaled) != "clean":
             return unproven
         return _Measurement(X24_FACTOR, k_ov, descaled)
-    if all(_scaled_by(response[day], ref[day], 1) for day in ref_wet):
-        tail_wet = [v for day, v in response.items() if day > ref_end and _is_wet(v)]
+    if all(round(response[day], 2) == round(ref[day], 2) for day in ref_wet):
+        tail_wet = [v for day, v in used.items() if day > overlap[-1] and _is_wet(v)]
         if tail_wet and all(_on_lattice(v) for v in tail_wet):
             return unproven
         return _Measurement(1, k_ov, None)
@@ -915,14 +938,14 @@ class NASAPowerSource(DataSource):
                 if not rejected:
                     raise
                 continue
-            precip = parameter.get("PRECTOTCORR")
+            precip = _within(parameter.get("PRECTOTCORR"), window["start"], window["end"])
             classification = _classify_precip(precip)
             if classification in ("clean", "n/a"):
                 if rejected:
                     finish("resolved by a clean response")
                 return parameter
             evidence = _classification_evidence(precip, classification)
-            rejected.append((parameter, evidence))
+            rejected.append((parameter, precip, evidence))
             self.logger.info(
                 f"{tag}: validation attempt {len(rejected)} of "
                 f"{_GUARD_MAX_VALIDATIONS} is {classification}: {evidence}; "
@@ -931,7 +954,7 @@ class NASAPowerSource(DataSource):
             )
             ref = ref_precip()
             if ref is not None:
-                measured = _measure_factor(precip, ref, ref_end_key)
+                measured = _measure_factor(precip, ref, ref_end, end_date)
                 if measured.factor == X24_FACTOR:
                     self.logger.info(
                         f"{tag}: ×24 measured against a clean retrieval to "
@@ -953,8 +976,8 @@ class NASAPowerSource(DataSource):
                         f"to {ref_end.isoformat()}"
                     )
                     return parameter
-            for earlier, _ in rejected[:-1]:
-                smaller = _x24_pair_smaller(precip, earlier.get("PRECTOTCORR"))
+            for earlier, earlier_precip, _ in rejected[:-1]:
+                smaller = _x24_pair_smaller(precip, earlier_precip)
                 if smaller is not None:
                     finish("resolved by the smaller of a ×24 pair")
                     return parameter if smaller == "first" else earlier
@@ -963,7 +986,7 @@ class NASAPowerSource(DataSource):
             lat=lat,
             lon=lon,
             year=year,
-            evidence=[evidence for _, evidence in rejected],
+            evidence=[evidence for _, _, evidence in rejected],
             year_end=end_date,
             latest_available=latest_available,
         )

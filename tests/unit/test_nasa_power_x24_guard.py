@@ -27,6 +27,7 @@ from tests.unit._nasa_x24_support import (
     precip_window,
     records_digest,
     run,
+    window_days,
     zero_cache_outcomes,
     zero_cases,
 )
@@ -153,12 +154,7 @@ def test_both_sides_of_a_january_boundary_are_guarded(tmp_path, today, windows):
 
 
 # ── the measured de-scale and the injected date ─────────────────────────────
-RATE_SCALED = [e for e in RATE["manifest"] if e["class"] == "scaled" and e["window"][1] == "2026-10-11"]
-RATE_CLEAN = [e for e in RATE["manifest"] if e["class"] == "clean" and e["window"][1] == "2026-10-11"]
-
-
-@pytest.mark.parametrize("entry", RATE_SCALED, ids=lambda e: e["body"].rsplit("/", 1)[-1])
-def test_banked_scaled_response_is_descaled_to_the_clean_records(tmp_path, entry):
+def test_banked_scaled_series_is_descaled_to_the_clean_records(tmp_path):
     clean = run(FakeNasa({W: [CLEAN]}), cache_dir=tmp_path / "clean", lat=LAT, lon=LON, start=JAN1, end=END)
     fake = FakeNasa({W: [SCALED], REF: [REF_BLOCK]})
     result = run(fake, cache_dir=tmp_path / "scaled", lat=LAT, lon=LON, start=JAN1, end=END)
@@ -166,11 +162,22 @@ def test_banked_scaled_response_is_descaled_to_the_clean_records(tmp_path, entry
     assert records_digest(result.data.records) == records_digest(clean.data.records)
 
 
-@pytest.mark.parametrize("entry", RATE_CLEAN, ids=lambda e: e["body"].rsplit("/", 1)[-1])
-def test_banked_clean_response_is_used_in_one_request(tmp_path, entry):
+def test_banked_clean_series_is_used_in_one_request(tmp_path):
     fake = FakeNasa({W: [CLEAN]})
     result = run(fake, cache_dir=tmp_path, lat=LAT, lon=LON, start=JAN1, end=END)
     assert fake.calls == [W] and precip_of(result) == CLEAN["PRECTOTCORR"]
+
+
+def test_over_wide_payload_is_judged_on_the_requested_window(tmp_path):
+    # 12 ×24 wet days in the window, 40 off-lattice days after it: 23% on the lattice overall.
+    beyond = body(precip_window(date(2026, 2, 20), date(2026, 3, 31),
+                                {key: 3.13 for key in window_days(date(2026, 2, 20), date(2026, 3, 31))}))
+    padded = {name: dict(series, **beyond[name]) for name, series in EARLY_SCALED.items()}
+    fake = FakeNasa({EARLY_W: [padded, EARLY_CLEAN]}, exact_window=False)
+    result = run(fake, cache_dir=tmp_path, lat=LAT, lon=LON, start=JAN1, end=EARLY_END,
+                 today=EARLY_TODAY)
+    assert fake.calls == [EARLY_W, EARLY_W]
+    assert precip_of(result) == EARLY_CLEAN["PRECTOTCORR"]
 
 
 def test_ref_window_follows_the_injected_today(tmp_path):
@@ -290,6 +297,16 @@ def test_unconfirmed_then_off_lattice_response_resolves(tmp_path):
 def test_unconfirmed_x24_pair_uses_the_smaller_in_both_orders(tmp_path, items):
     fake, result = _early_run(tmp_path, items)
     assert result.success and len(fake.calls) == 2
+    assert precip_of(result)["20260110"] == 0.24
+
+def test_over_wide_pair_is_judged_on_the_requested_window(tmp_path):
+    # Only the ×24 member carries a wet day after the window; within the window the pair holds.
+    wide = dict(UNCONF_X24, PRECTOTCORR=dict(UNCONF_X24["PRECTOTCORR"], **{"20260301": 3.13}))
+    fake = FakeNasa({EARLY_W: [wide, UNCONF]}, exact_window=False)
+    result = run(
+        fake, cache_dir=tmp_path, lat=LAT, lon=LON, start=JAN1, end=EARLY_END, today=EARLY_TODAY
+    )
+    assert result.success and fake.calls == [EARLY_W, EARLY_W]
     assert precip_of(result)["20260110"] == 0.24
 
 

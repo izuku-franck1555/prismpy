@@ -2,7 +2,10 @@
 ×24 pair and the de-scale (NASA POWER's PRECTOTCORR ×24 responses)."""
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+from collections import Counter
 from datetime import date
 
 import pytest
@@ -91,7 +94,7 @@ def test_excluded_values_are_never_wet():
 
 
 # ── the measured factor: ×24 de-scale, ×1 admission ─────────────────────────
-REF_END = "20260630"
+REF_END, YEAR_END = date(2026, 6, 30), date(2026, 10, 11)
 REF_WET = {"20260105": 1.37, "20260212": 0.53, "20260320": 2.11, "20260410": 4.07,
            "20260515": 12.3}
 TAIL_WET = {"20260705": 3.13, "20260812": 0.71, "20260901": 8.44}
@@ -111,7 +114,7 @@ def _x(values, factor):
 
 def test_x24_measured_and_descaled_to_ref():
     response = _response(_x(REF_WET, 24), _x(TAIL_WET, 24))
-    measured = _measure_factor(response, _ref(), REF_END)
+    measured = _measure_factor(response, _ref(), REF_END, YEAR_END)
     assert measured.factor == 24 and measured.k_ov == 5
     assert all(measured.descaled[d] == v for d, v in _ref().items())
     assert all(measured.descaled[d] == v for d, v in TAIL_WET.items())
@@ -119,7 +122,7 @@ def test_x24_measured_and_descaled_to_ref():
 
 def test_x1_proven_unscaled():
     response = _response(REF_WET, TAIL_WET)
-    assert _measure_factor(response, _ref(), REF_END).factor == 1
+    assert _measure_factor(response, _ref(), REF_END, YEAR_END).factor == 1
 
 
 @pytest.mark.parametrize("case", ["x48", "ref_on_lattice", "kov_2", "off_by_cent", "descaled_not_clean"])
@@ -138,36 +141,37 @@ def test_negatives_are_not_measured(case):
         overlap = dict(overlap, **{"20260320": round(overlap["20260320"] + 0.01, 2)})
     elif case == "descaled_not_clean":
         tail = {f"202607{n:02d}": 5.76 for n in range(1, 11)}
-    assert _measure_factor(_response(overlap, tail), ref, REF_END).factor is None
+    assert _measure_factor(_response(overlap, tail), ref, REF_END, YEAR_END).factor is None
 
 
 def test_unequal_wet_dates_are_not_measured():
     extra = dict(REF_WET, **{"20260601": 0.37})
-    assert _measure_factor(_response(extra, TAIL_WET), _ref(), REF_END).factor is None
+    assert _measure_factor(_response(extra, TAIL_WET), _ref(), REF_END, YEAR_END).factor is None
     extra_x24 = dict(_x(REF_WET, 24), **{"20260601": 0.48})
-    assert _measure_factor(_response(extra_x24, _x(TAIL_WET, 24)), _ref(), REF_END).factor is None
+    response = _response(extra_x24, _x(TAIL_WET, 24))
+    assert _measure_factor(response, _ref(), REF_END, YEAR_END).factor is None
 
 
 def test_orthogonal_tail_off_lattice_blocks_descale():
     tail = dict(_x(TAIL_WET, 24), **{"20260920": 17.05})
-    assert _measure_factor(_response(_x(REF_WET, 24), tail), _ref(), REF_END).factor is None
+    assert _measure_factor(_response(_x(REF_WET, 24), tail), _ref(), REF_END, YEAR_END).factor is None
 
 
 def test_orthogonal_magnitude_floor_blocks_descale():
     small = {"20260105": 0.01, "20260212": 0.01, "20260320": 0.01}
     response = _response(_x(small, 24), {})
-    assert _measure_factor(response, _ref(small), REF_END).factor is None
+    assert _measure_factor(response, _ref(small), REF_END, YEAR_END).factor is None
 
 
 def test_x24_4_alias_is_not_descaled():
     small = {"20260105": 0.01, "20260212": 0.01, "20260320": 0.01}
     response = _response(_x(small, 24.4), {"20260705": 24.40})
-    assert _measure_factor(response, _ref(small), REF_END).factor is None
+    assert _measure_factor(response, _ref(small), REF_END, YEAR_END).factor is None
 
 
 def test_partial_tail_x24_with_clean_overlap_is_neither():
     response = _response(REF_WET, _x(TAIL_WET, 24))
-    assert _measure_factor(response, _ref(), REF_END).factor is None
+    assert _measure_factor(response, _ref(), REF_END, YEAR_END).factor is None
 
 
 def test_admit_x1_with_one_tail_value_off_lattice():
@@ -176,52 +180,99 @@ def test_admit_x1_with_one_tail_value_off_lattice():
     tail["20260815"] = 0.37
     response = _response(overlap, tail)
     assert _classify_precip(response) == "scaled"
-    assert _measure_factor(response, _ref(overlap), REF_END).factor == 1
+    assert _measure_factor(response, _ref(overlap), REF_END, YEAR_END).factor == 1
 
 
 def test_x1_with_tail_entirely_on_lattice_is_not_admitted():
     overlap = {"20260105": 0.01, "20260212": 0.02, "20260320": 1.37}
     tail = {f"202607{n:02d}": 0.24 * n for n in range(1, 10)}
-    assert _measure_factor(_response(overlap, tail), _ref(overlap), REF_END).factor is None
+    assert _measure_factor(_response(overlap, tail), _ref(overlap), REF_END, YEAR_END).factor is None
 
 
-# ── the banked scaled bodies at the seam (73) ────────────────────────────
+# ── the banked bodies at the seam ───────────────────────────────────────────
 RATE = load("rate_probe_compact.json")
-RATE_SCALED = [entry for entry in RATE["manifest"]
-               if entry["class"] == "scaled" and entry["window"][1] == "2026-10-11"]
+T_H1 = "ng_10.75_5.75_2026-01-01_2026-06-30_clean.json"
 
 
-def test_rate_probe_manifest_holds_68_scaled_and_20_ref_bodies():
-    assert len(RATE_SCALED) == 68
-    assert sum(1 for e in RATE["manifest"] if e["window"] == ["2026-01-01", "2026-06-30"]) == 20
+def _digest(series):
+    return hashlib.sha256(json.dumps(series, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-@pytest.mark.parametrize("entry", RATE_SCALED, ids=lambda e: e["body"].rsplit("/", 1)[-1])
-def test_rate_probe_scaled_bodies_measure_x24(entry):
+def _last_day(series):
+    last = max(series)
+    return date(int(last[:4]), int(last[4:6]), int(last[6:]))
+
+
+def test_rate_probe_bodies_reduce_to_three_distinct_series():
+    # 90 recorded bodies, 3 distinct PRECTOTCORR series (per each body's own digest).
+    expected = {
+        ("scaled", "2026-10-11"): _digest(RATE["scaled_precip"]),
+        ("clean", "2026-10-11"): _digest(RATE["clean_precip"]),
+        ("clean", "2026-06-30"): _digest(RATE["ref_jan_jun_parameter"]["PRECTOTCORR"]),
+    }
+    counts = Counter()
+    for entry in RATE["manifest"]:
+        kind = (entry["class"], entry["window"][1])
+        assert entry["precip_sha256"] == expected[kind], entry["body"]
+        counts[kind] += 1
+    assert counts == {("scaled", "2026-10-11"): 68, ("clean", "2026-10-11"): 2,
+                      ("clean", "2026-06-30"): 20}
+
+
+def test_rate_probe_scaled_series_measures_x24():
     ref = RATE["ref_jan_jun_parameter"]["PRECTOTCORR"]
-    measured = _measure_factor(RATE["scaled_precip"], ref, REF_END)
-    assert measured.factor == 24
-    assert {d: v for d, v in measured.descaled.items()} == RATE["clean_precip"]
+    measured = _measure_factor(RATE["scaled_precip"], ref, REF_END, YEAR_END)
+    assert measured.factor == 24 and measured.descaled == RATE["clean_precip"]
 
 
-@pytest.mark.parametrize("scaled, ref_name, ref_span", [
-    ("ng_10.75_5.75_2026-01-01_2026-10-10_x24_a.json", "ng_10.75_5.75_2026-01-01_2026-06-30_clean.json", None),
-    ("ng_10.75_5.75_2026-01-01_2026-10-10_x24_b.json", "ng_10.75_5.75_2026-01-01_2026-06-30_clean.json", None),
-    ("ng_10.75_5.75_2026-01-01_2026-10-10_precip_only_x24.json", "ng_10.75_5.75_2026-01-01_2026-06-30_clean.json", None),
-    ("ng_10.75_5.75_2026-04-01_2026-10-10_x24.json", "ng_10.75_5.75_2026-01-01_2026-06-30_clean.json", "20260401"),
-    ("ng_11.25_3.75_2026-01-01_2026-10-10_x24.json", "ng_11.25_3.75_2026-05-01_2026-05-31_clean.json", None),
+@pytest.mark.parametrize("scaled", [
+    "ng_10.75_5.75_2026-01-01_2026-10-10_x24_a.json",
+    "ng_10.75_5.75_2026-01-01_2026-10-10_x24_b.json",
+    "ng_10.75_5.75_2026-01-01_2026-10-10_precip_only_x24.json",
 ])
-def test_banked_scaled_bodies_measure_x24(scaled, ref_name, ref_span):
-    ref = banked(ref_name)["PRECTOTCORR"]
-    if ref_span is not None:
-        ref = {d: v for d, v in ref.items() if d >= ref_span}
-    measured = _measure_factor(banked(scaled)["PRECTOTCORR"], ref, max(ref))
-    assert measured.factor == 24
+def test_banked_morning_bodies_measure_x24(scaled):
+    response, ref = banked(scaled)["PRECTOTCORR"], banked(T_H1)["PRECTOTCORR"]
+    assert _measure_factor(response, ref, _last_day(ref), _last_day(response)).factor == 24
+
+
+@pytest.mark.parametrize("scaled, ref_name", [
+    ("ng_10.75_5.75_2026-04-01_2026-10-10_x24.json", T_H1),
+    ("ng_11.25_3.75_2026-01-01_2026-10-10_x24.json", "ng_11.25_3.75_2026-05-01_2026-05-31_clean.json"),
+], ids=["window_starts_1_april", "ref_covers_may_only"])
+def test_banked_bodies_without_a_full_overlap_are_not_measured(scaled, ref_name):
+    response, ref = banked(scaled)["PRECTOTCORR"], banked(ref_name)["PRECTOTCORR"]
+    assert _measure_factor(response, ref, _last_day(ref), _last_day(response)).factor is None
+
+
+def test_incomplete_ref_is_not_measured():
+    ref = _ref()
+    del ref["20260301"]
+    overlap = dict(_x(REF_WET, 24), **{"20260301": 4.80})
+    assert _measure_factor(_response(overlap, _x(TAIL_WET, 24)), ref, REF_END, YEAR_END).factor is None
+
+
+def test_x1_tail_ends_at_year_end():
+    response = _response(REF_WET, {"20260705": 0.24, "20260812": 0.48})
+    response["20261020"] = 0.37
+    assert _measure_factor(response, _ref(), REF_END, YEAR_END).factor is None
+
+def test_x24_used_span_ends_at_year_end():
+    response = _response(_x(REF_WET, 24), _x(TAIL_WET, 24))
+    response["20261020"] = 3.13
+    measured = _measure_factor(response, _ref(), REF_END, YEAR_END)
+    assert measured.factor == 24 and "20261020" not in measured.descaled
+
+
+def test_x1_is_exact_at_the_api_resolution():
+    big = {"20260105": 10000.00, "20260212": 0.53, "20260320": 2.11}
+    off_by_a_cent = _response(dict(big, **{"20260105": 10000.01}), {"20260705": 3.13})
+    assert _measure_factor(off_by_a_cent, _ref(big), REF_END, YEAR_END).factor is None
+    assert _measure_factor(_response(big, {"20260705": 3.13}), _ref(big), REF_END, YEAR_END).factor == 1
 
 
 def test_clean_rate_probe_bodies_measure_x1():
     ref = RATE["ref_jan_jun_parameter"]["PRECTOTCORR"]
-    assert _measure_factor(RATE["clean_precip"], ref, REF_END).factor == 1
+    assert _measure_factor(RATE["clean_precip"], ref, REF_END, YEAR_END).factor == 1
 
 
 # ── the ×24 pair and the de-scale ────────────────────────────────────────

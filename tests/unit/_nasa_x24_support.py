@@ -80,9 +80,11 @@ class FakeNasa:
     """Stands in for ``requests.get``. ``script`` maps a requested
     (start, end) window to the items served in order (the last one
     repeats): a parameter block, sliced to the requested window like
-    NASA's, or an exception to raise. Requests land in ``calls``."""
+    NASA's (``exact_window=False`` serves it whole), or an exception to
+    raise. Requests land in ``calls``."""
 
-    def __init__(self, script: Script) -> None:
+    def __init__(self, script: Script, exact_window: bool = True) -> None:
+        self.exact_window = exact_window
         self.script = {window: list(items) for window, items in script.items()}
         self.calls: List[Tuple[str, str]] = []
         self.sleeps: List[float] = []
@@ -96,6 +98,8 @@ class FakeNasa:
         item = queue.pop(0) if len(queue) > 1 else queue[0]
         if isinstance(item, BaseException):
             raise item
+        if not self.exact_window:
+            return _Response(item)
         return _Response({
             name: {day: value for day, value in series.items() if window[0] <= day <= window[1]}
             for name, series in item.items()
