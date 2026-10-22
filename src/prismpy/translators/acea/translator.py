@@ -62,6 +62,7 @@ from prismpy.packaging.soil_declaration import (
 from prismpy.sources.crop_areas.spam_vintage import (
     SPAM_CONTENT_DIGESTS,
     SPAM_VINTAGES,
+    CropNotInVintageError,
     SpamVintageError,
     acea_canonical_triples,
     code_for_vintage,
@@ -1733,8 +1734,8 @@ class AceaTranslator(AceaTranslatorBase):
         ``release``: one of the vintage's canonical ACEA triples, else fail loud."""
         crop = self.config.crop.name
         if crop not in SPAM_CODE_MAP:
-            raise SpamVintageError(f"ACEA crop {crop!r} has no SPAM code, so the package cannot carry "
-                                   "its harvested-area layer")
+            raise CropNotInVintageError(f"ACEA crop {crop!r} has no SPAM code, so the package "
+                                        "cannot carry its harvested-area layer")
         triple = (crop, ACEA_FAO_CODE_MAP.get(crop), code_for_vintage(SPAM_CODE_MAP[crop], year, release))
         if triple not in acea_canonical_triples(year, release):
             raise SpamVintageError(f"{triple} is not an ACEA crop of SPAM {year} {release}")

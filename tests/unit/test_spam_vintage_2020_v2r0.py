@@ -74,7 +74,8 @@ def _refusal(call):
     return None
 
 
-@pytest.mark.parametrize("crop", [("Wheat", "whe"), ("Beans", "bea"), ("Soybean", "soy")])
+@pytest.mark.parametrize("crop", [("Wheat", "whe"), ("Beans", "bea"), ("Soybean", "soy"),
+                                  ("Oats", "oat")])   # Oats has no SPAM code at all
 def test_another_acea_crop_on_2020_v2r0_is_refused_before_any_file_is_read(tmp_path, crop):
     assert V2R0 in sv.SPAM_VINTAGES
     refusal = _refusal(_translator(tmp_path, crop, tmp_path / "no-folder")._write_harvested_area_layer)
