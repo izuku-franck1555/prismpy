@@ -240,7 +240,9 @@ def test_single_latest_available_source():
 # ── Published-date helper: conservative, floored, deterministic ────────────
 def test_availability_helper_arithmetic_floor_underclaim():
     today = date(2026, 6, 2)
-    assert nasa_power_latest_available_date(10, today) == date(2026, 5, 23)
+    assert nasa_power_latest_available_date(MIN_LAG_DAYS + 2, today) == (
+        today - timedelta(days=MIN_LAG_DAYS + 2)
+    )
     assert nasa_power_latest_available_date(DEFAULT_LAG_DAYS, today) == (
         today - timedelta(days=DEFAULT_LAG_DAYS)
     )
@@ -253,6 +255,31 @@ def test_availability_helper_arithmetic_floor_underclaim():
     )
     # The estimate is always strictly in the past (under-claiming).
     assert nasa_power_latest_available_date(10, today) < today
+
+
+# ── The interim default: it ends a request before a solar hole, not behind the tail ──
+def test_the_default_and_the_floor_are_the_interim_fourteen_days():
+    assert (DEFAULT_LAG_DAYS, MIN_LAG_DAYS) == (14, 14)
+
+
+def test_a_source_without_a_lag_of_its_own_takes_the_default():
+    assert NASAPowerConfig().climate_lag_days == DEFAULT_LAG_DAYS
+
+
+def test_a_default_source_refuses_ten_days_back_and_serves_the_lag_behind_today(tmp_path):
+    today, real = date(2026, 10, 22), nasa_power_latest_available_date
+
+    def latest(lag_days=None, today_=None):   # the real helper, at a fixed today
+        return real(lag_days, today=today)
+
+    src = NASAPowerSource(config=NASAPowerConfig(request_delay=0.0), cache_dir=tmp_path)
+    with mock.patch.object(np_mod, "nasa_power_latest_available_date", latest), \
+            mock.patch.object(NASAPowerSource, "_fetch_from_api", _fake_api(today)):
+        late, held = (src.retrieve(lat=_LAT, lon=_LON, start_date=date(2026, 1, 1),
+                                   end_date=today - timedelta(days=back), use_cache=False)
+                      for back in (10, 14))
+    assert (late.success, held.success) == (False, True), (late.errors, held.errors)
+    assert "latest available: 2026-10-08" in " ".join(late.errors)
 
 
 # ── Var-aware recovery: short gaps load, rain / over-long gaps reject ──────

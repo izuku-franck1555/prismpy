@@ -8,22 +8,25 @@ Kept dependency-light (only the standard ``datetime`` module) so a downstream
 web view can import the latest-available date without pulling numpy / pandas /
 requests through the full climate-source module.
 
-NASA POWER daily data lags real time: solar radiation (the slowest-published
-required parameter) runs roughly 5-7 days behind, and the rest a couple of
-days. The default lag adds a small margin for processing variance and the
-UTC-vs-local-clock skew. The estimate is deliberately conservative — claiming
-a date is published a little later than it truly is only makes a very recent
-season unavailable for a few extra days; it never reports missing data as
-present. The post-fetch coverage check is the real source of truth, so an
-imperfect lag can never produce a false success.
+NASA POWER does not publish its recent days in order. Solar radiation, the
+slowest required parameter, trails real time, and a whole span can stay missing
+behind its published tail: on 2026-10-22, 2026-10-12..14 had no solar radiation
+at every point checked (Abuja, Niger State, Mopti) while later days did. So the
+default must end a request before such a hole, not merely behind the tail. The
+14 days below were chosen 2026-10-22 against the FLASHFlux hole of
+2026-10-12..14; re-probe before 2026-10-26. The estimate is deliberately
+conservative — claiming a date is published later than it truly is only makes a
+very recent season unavailable for a few extra days; it never reports missing
+data as present. The post-fetch coverage check is the real source of truth, so
+an imperfect lag can never produce a false success.
 """
 from datetime import datetime, timedelta, timezone
 
 # Days behind "today" that data is conservatively assumed published.
-DEFAULT_LAG_DAYS = 10
+DEFAULT_LAG_DAYS = 14
 # Floor so a caller cannot configure an over-claiming (too-small) lag that
 # would request solar radiation NASA POWER has not published yet.
-MIN_LAG_DAYS = 8
+MIN_LAG_DAYS = 14
 
 
 def nasa_power_latest_available_date(lag_days=DEFAULT_LAG_DAYS, today=None):
