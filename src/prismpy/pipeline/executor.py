@@ -4115,6 +4115,10 @@ class TranslationPipeline:
                             for variable, record in gap_fill.items()
                         ],
                     }
+                # the retrieval's record of the rain it divided by 24, verbatim; omitted when none
+                descaled = ts_meta.get("precip_x24_descaled")
+                if descaled:
+                    cell_data["climate_precip_descaled"] = descaled
             if sources_block:
                 cell_data["sources"] = sources_block
 
