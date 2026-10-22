@@ -136,7 +136,7 @@ OMITTED = [
     ("a missing day with later rows", _rows(1, lambda lines, at: lines[:at(MAY1)]
                                             + lines[at(MAY1) + 1:]), "1.WTH", "skips after"),
     *[(f"{text} {column} with later rows", _value(1, MAY1, column, text), "1.WTH", "not recorded")
-      for column in ("SRAD", "TMAX", "TMIN", "RAIN") for text in ("-99.0", "nan")],
+      for column in ("SRAD", "TMAX", "TMIN", "RAIN") for text in ("-99.0", "nan", "-99.4")],
     ("a non-recorded last row", _value(1, date(2026, 10, 10), "RAIN", "-99.0"), "1.WTH",
      "not recorded"),
     ("an invalid leap-day date", _rows(2, lambda lines, at: lines[:at(MAY1)]
