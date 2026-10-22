@@ -517,6 +517,14 @@ def _compute_summary_stats(unified_data, config) -> Dict[str, Any]:
 # Check 1: Temporal completeness
 # =============================================================================
 
+def _pythia_requested_end(config) -> Optional[date]:
+    """The end PYTHIA's own weather download requests (``platform_config.pythia.
+    climate_end_date``, the field the PYTHIA translator reads), or None when unset."""
+    pythia = getattr(getattr(config, "platform_config", None), "pythia", None)
+    end = getattr(pythia, "climate_end_date", None)
+    return date.fromisoformat(end) if end else None
+
+
 def _check_temporal_completeness(
     unified_data, config,
     enabled_platforms: Optional[List[str]] = None,
@@ -584,6 +592,9 @@ def _check_temporal_completeness(
     expected_start_no_spinup = date(start_year, 1, 1)
     crop_cal = config.crop.calendar if config.crop else None
     expected_end = config.temporal.get_climate_end_date(crop_cal)
+    requested = _pythia_requested_end(config)
+    if requested is not None and list(enabled_platforms or []) == ["pythia"]:
+        expected_end = requested   # PYTHIA's own download ends there; no other engine reads it
     expected_days_with_spinup = (expected_end - expected_start_with_spinup).days + 1
     expected_days_no_spinup = (expected_end - expected_start_no_spinup).days + 1
 
