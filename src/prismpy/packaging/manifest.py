@@ -41,6 +41,7 @@ from prismpy.cells.canonical_cell_area_km2 import (
     canonical_cell_area_km2,
 )
 from prismpy.packaging.soil_declaration import DECLARED_PLATFORMS, declared_soil
+from prismpy.packaging.weather_declaration import declared_weather_end
 
 
 KNOWN_USE_CASE_NAMES: Tuple[str, ...] = (
@@ -1590,6 +1591,12 @@ def create_manifest(
         declaration = declared_soil(package_dir, engine)
         manifest["data_sources"] = {**manifest["data_sources"], "soil": declaration.label}
         manifest["inputs_used"] = {"schema_version": 1, "soil": declaration.inputs_used()}
+
+    # A PYTHIA package's weather end is declared from its own .WTH files, and nowhere else.
+    if engine == "pythia":
+        weather_end = declared_weather_end(package_dir, manifest["temporal"]["end_year"])
+        if weather_end is not None:
+            manifest["temporal"]["weather_end"] = weather_end.isoformat()
 
     return manifest
 
