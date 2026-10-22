@@ -11,7 +11,8 @@ climate pickle files in the package).
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from datetime import date
+from typing import List, Optional, Sequence
 
 
 class ClimateDownloadError(Exception):
@@ -58,3 +59,38 @@ class ClimateDownloadError(Exception):
             else ""
         )
         super().__init__(f"{prefix}{message}{suffix}")
+
+
+class NasaPowerScaledPrecipError(Exception):
+    """Raised when NASA POWER's daily precipitation for one cell-year does
+    not pass the ×24 scaling guard within its retry budget.
+
+    ``evidence`` holds one text per classified response, in arrival order;
+    ``year_end`` is the fetch's own end and ``latest_available`` prismpy's
+    offline estimate of the latest published day (never a NASA statement).
+    """
+
+    def __init__(
+        self,
+        *,
+        lat: float,
+        lon: float,
+        year: int,
+        evidence: Sequence[str],
+        year_end: date,
+        latest_available: date,
+    ) -> None:
+        self.lat = lat
+        self.lon = lon
+        self.year = year
+        self.evidence: List[str] = list(evidence)
+        self.year_end = year_end
+        self.latest_available = latest_available
+        super().__init__(
+            f"NASA POWER's daily precipitation for ({lat}, {lon}) did not pass "
+            f"the ×24 scaling guard in {len(self.evidence)} consecutive "
+            f"responses ({'; '.join(self.evidence)}); this retrieval checked "
+            f"{year} through {year_end.isoformat()}; prismpy's conservative "
+            f"latest-available estimate was {latest_available.isoformat()}; "
+            f"a later retrieval may resolve it"
+        )

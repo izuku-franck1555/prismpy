@@ -18,11 +18,12 @@ V2-19 note on climate validation:
 
 import json
 import logging
+import math
 import time
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -38,6 +39,7 @@ from prismpy.sources.climate._gapfill import (
     normalize_missing,
     recompute_means,
 )
+from prismpy.sources.climate.errors import NasaPowerScaledPrecipError
 
 from prismpy.models.climate import ClimateRecord, ClimateTimeSeries
 from prismpy.models.region import Region
@@ -75,6 +77,144 @@ DEFAULT_PARAMETERS = [
     "ALLSKY_SFC_SW_DWN",
     "RH2M",
 ]
+
+# NASA POWER intermittently serves PRECTOTCORR ×24 in windows reaching its near-real-time period.
+PRECIP_LATTICE_MM = 0.24
+X24_FACTOR = 24
+X24_DESCALE_REASON = "nasa_power_x24_response"
+# A fetch window ending this many days or more before latest_available is not guarded.
+X24_EXPOSURE_MARGIN_DAYS = 120
+_LATTICE_TOLERANCE = 1e-6
+_GUARD_MAX_VALIDATIONS = 6
+_GUARD_MAX_HTTP_ATTEMPTS = 12
+_REF_MIN_OVERLAP_WET_DAYS = 3
+_REF_MIN_MAGNITUDE_MM = 1.0
+
+
+class _NasaPowerTransportError(Exception):
+    """The transport retries of one NASA POWER request are exhausted."""
+
+
+def _is_wet(value: Any) -> bool:
+    """A wet day: a finite number above zero (never the -999 fill value,
+    None, NaN, ±inf, 0, a negative or a bool)."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
+def _on_lattice(value: float) -> bool:
+    ratio = value / PRECIP_LATTICE_MM
+    return abs(ratio - round(ratio)) <= _LATTICE_TOLERANCE
+
+
+def _lattice_counts(series: Mapping[str, Any]) -> Tuple[int, int]:
+    """(k, m): a PRECTOTCORR series' wet days and those on the lattice."""
+    wet = [value for value in series.values() if _is_wet(value)]
+    return len(wet), sum(1 for value in wet if _on_lattice(value))
+
+
+def _classify_precip(series: Optional[Mapping[str, Any]]) -> str:
+    """"clean", "scaled" (k >= 10 with >= half on the lattice, or 3-9 all on
+    it), "unconfirmed" (1-2 wet days, all on it) or "n/a" (no series)."""
+    if series is None:
+        return "n/a"
+    k, m = _lattice_counts(series)
+    if (k >= 10 and 2 * m >= k) or (3 <= k <= 9 and m == k):
+        return "scaled"
+    if 1 <= k <= 2 and m == k:
+        return "unconfirmed"
+    return "clean"
+
+
+def _classification_evidence(series: Mapping[str, Any], classification: str) -> str:
+    k, m = _lattice_counts(series)
+    if classification == "unconfirmed":
+        return f"only {k} wet day(s), all on the {PRECIP_LATTICE_MM} mm lattice"
+    return f"{m} of {k} wet days on the {PRECIP_LATTICE_MM} mm lattice"
+
+
+def _scaled_by(a: float, b: float, factor: int) -> bool:
+    """a == factor · b at the API's resolution."""
+    return abs(a - factor * b) <= _LATTICE_TOLERANCE * max(1.0, abs(a))
+
+
+def _descale_precip(series: Mapping[str, Any]) -> Dict[str, Any]:
+    """Divide each wet value by 24 at the API's 0.01 mm; every other value
+    passes through unchanged."""
+    return {
+        day: round(value / X24_FACTOR, 2) if _is_wet(value) else value
+        for day, value in series.items()
+    }
+
+
+class _Measurement(NamedTuple):
+    factor: Optional[int]
+    k_ov: int
+    descaled: Optional[Dict[str, Any]]
+
+
+def _measure_factor(
+    response: Mapping[str, Any],
+    ref: Mapping[str, Any],
+    ref_end: str,
+) -> _Measurement:
+    """Measure a response's factor (24, 1 or None) against REF, a CLEAN
+    retrieval of [1 January, ``ref_end``] with >= 3 wet days, on REF's dates.
+
+    ×24 also needs a REF value >= 1.0 mm, every wet value of the response on
+    the lattice and a CLEAN de-scaled series equal to REF on the overlap; ×1
+    needs a tail after ``ref_end`` that is dry or has a value off the lattice.
+    """
+    no_measurement = _Measurement(None, 0, None)
+    if _classify_precip(ref) != "clean":
+        return no_measurement
+    overlap = sorted(day for day in ref if day <= ref_end)
+    if any(day not in response for day in overlap):
+        return no_measurement
+    ref_wet = [day for day in overlap if _is_wet(ref[day])]
+    k_ov = len(ref_wet)
+    if k_ov < _REF_MIN_OVERLAP_WET_DAYS:
+        return no_measurement
+    if {day for day in overlap if _is_wet(response[day])} != set(ref_wet):
+        return no_measurement
+    unproven = _Measurement(None, k_ov, None)
+    if all(_scaled_by(response[day], ref[day], X24_FACTOR) for day in ref_wet):
+        if not any(ref[day] >= _REF_MIN_MAGNITUDE_MM for day in ref_wet):
+            return unproven
+        if not all(_on_lattice(v) for v in response.values() if _is_wet(v)):
+            return unproven
+        descaled = _descale_precip(response)
+        if any(descaled[day] != ref[day] for day in overlap):
+            return unproven
+        if _classify_precip(descaled) != "clean":
+            return unproven
+        return _Measurement(X24_FACTOR, k_ov, descaled)
+    if all(_scaled_by(response[day], ref[day], 1) for day in ref_wet):
+        tail_wet = [v for day, v in response.items() if day > ref_end and _is_wet(v)]
+        if tail_wet and all(_on_lattice(v) for v in tail_wet):
+            return unproven
+        return _Measurement(1, k_ov, None)
+    return unproven
+
+
+def _x24_pair_smaller(
+    first: Mapping[str, Any], second: Mapping[str, Any]
+) -> Optional[str]:
+    """"first" or "second": the smaller of two PRECTOTCORR series when one
+    is exactly 24 × the other on the same wet dates; else None."""
+    wet_first = {day for day, value in first.items() if _is_wet(value)}
+    wet_second = {day for day, value in second.items() if _is_wet(value)}
+    if not wet_first or wet_first != wet_second:
+        return None
+    if all(_scaled_by(first[day], second[day], X24_FACTOR) for day in wet_first):
+        return "second"
+    if all(_scaled_by(second[day], first[day], X24_FACTOR) for day in wet_first):
+        return "first"
+    return None
 
 
 @dataclass
@@ -314,6 +454,7 @@ class NASAPowerSource(DataSource):
             years_to_fetch = years_needed
 
         # Fetch missing years from API
+        descaled: List[Dict[str, Any]] = []
         for year in years_to_fetch:
             # V2-22b L: year-top cancel — AC L.2. Operator clicks cancel
             # and the loop exits cleanly via PipelineCancelled rather
@@ -337,6 +478,8 @@ class NASAPowerSource(DataSource):
                     parameters=params_to_fetch,
                     cancel_check=cancel_check,
                     on_attempt=kwargs.get('on_attempt'),
+                    latest_available=latest_available,
+                    descaled=descaled,
                 )
                 year_ts = self._convert_to_climate_timeseries(
                     nasa_data=nasa_data,
@@ -348,7 +491,10 @@ class NASAPowerSource(DataSource):
 
                 # Cache a year only when fetched in full; a clamp-shortened
                 # (partial) year must not be reused as complete on a later run.
-                if year_end == date(year, 12, 31):
+                # A de-scaled year is never cached, so every package using it carries its record.
+                if year_end == date(year, 12, 31) and not any(
+                    entry["year"] == year for entry in descaled
+                ):
                     year_cache_path = self._get_year_cache_path(lat, lon, year)
                     try:
                         self._save_climate_cache(year_ts, year_cache_path)
@@ -430,6 +576,9 @@ class NASAPowerSource(DataSource):
                 metadata=metadata,
             )
         climate_ts.metadata["gap_fill"] = fill_provenance
+        descale_record = self._descale_record(descaled, filtered_records)
+        if descale_record:
+            climate_ts.metadata["precip_x24_descaled"] = descale_record
 
         return self.create_result(
             success=True,
@@ -537,6 +686,8 @@ class NASAPowerSource(DataSource):
         parameters: List[str],
         cancel_check: Optional[Callable[[], bool]] = None,
         on_attempt: Optional[Callable[[int, int, float], None]] = None,
+        latest_available: Optional[date] = None,
+        descaled: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Dict[str, float]]:
         """Fetch data from NASA POWER API.
 
@@ -546,12 +697,19 @@ class NASAPowerSource(DataSource):
             start_date: Start date
             end_date: End date
             parameters: Parameters to fetch
+            latest_available: ``retrieve``'s estimate of the latest
+                published day. A window ending after it minus
+                ``X24_EXPOSURE_MARGIN_DAYS`` is EXPOSED and passes the ×24
+                precipitation guard; ``None`` fetches without the guard.
+            descaled: receives one entry per response divided by 24.
 
         Returns:
             Dictionary of parameter data {param: {date_str: value}}
 
         Raises:
             Exception: If API request fails after retries
+            NasaPowerScaledPrecipError: If the guard's budget ends without
+                a clean, measured or paired response
         """
         # Format dates as YYYYMMDD
         start_str = start_date.strftime("%Y%m%d")
@@ -581,7 +739,8 @@ class NASAPowerSource(DataSource):
         # transient external-API blips need a ≥120 s cumulative budget
         # to absorb. Config-supplied values raise the ceiling but
         # never lower below the contract floor.
-        attempt_counter = {"i": 0}
+        attempt_counter = {"i": 0, "parsed": 0}
+        current = {"params": params}
 
         def _attempt() -> Dict[str, Dict[str, float]]:
             # V2-22b L: per-attempt cancel check — fires at the top of
@@ -595,13 +754,14 @@ class NASAPowerSource(DataSource):
             attempt_counter["i"] += 1
             response = requests.get(
                 self.config.base_url,
-                params=params,
+                params=current["params"],
                 timeout=self.config.timeout,
             )
             response.raise_for_status()
             data = response.json()
             if "properties" not in data or "parameter" not in data["properties"]:
                 raise ValueError("Invalid response format from NASA POWER")
+            attempt_counter["parsed"] += 1
             return data["properties"]["parameter"]
 
         def _on_retry(attempt_index, exc, sleep_s):
@@ -621,26 +781,224 @@ class NASAPowerSource(DataSource):
         max_attempts = max(6, int(self.config.retry_count))
         base_delay_s = max(5.0, float(self.config.retry_delay))
 
-        try:
-            return retry_with_exponential_backoff(
-                _attempt,
-                max_attempts=max_attempts,
-                base_delay_s=base_delay_s,
-                jitter_ratio=0.2,
-                exception_classes=(
-                    requests.exceptions.Timeout,
-                    requests.exceptions.ConnectionError,
-                    requests.exceptions.HTTPError,
-                    requests.exceptions.ChunkedEncodingError,
-                    ValueError,
-                ),
-                on_retry=_on_retry,
-                on_attempt=on_attempt,
+        def _request(window: Dict[str, Any], attempts: int) -> Dict[str, Dict[str, float]]:
+            current["params"] = window
+            try:
+                return retry_with_exponential_backoff(
+                    _attempt,
+                    max_attempts=attempts,
+                    base_delay_s=base_delay_s,
+                    jitter_ratio=0.2,
+                    exception_classes=(
+                        requests.exceptions.Timeout,
+                        requests.exceptions.ConnectionError,
+                        requests.exceptions.HTTPError,
+                        requests.exceptions.ChunkedEncodingError,
+                        ValueError,
+                    ),
+                    on_retry=_on_retry,
+                    on_attempt=on_attempt,
+                )
+            except (requests.exceptions.RequestException, ValueError) as exc:
+                raise _NasaPowerTransportError(
+                    f"API request failed after retries: {exc}"
+                ) from exc
+
+        if latest_available is None:
+            return _request(params, max_attempts)
+        if end_date <= latest_available - timedelta(days=X24_EXPOSURE_MARGIN_DAYS):
+            parameter = _request(params, max_attempts)
+            self._warn_unguarded_x24_signature(
+                parameter, lat, lon, start_date.year, end_date,
             )
-        except (requests.exceptions.RequestException, ValueError) as exc:
-            raise Exception(
-                f"API request failed after retries: {exc}"
-            ) from exc
+            return parameter
+        return self._guard_exposed_window(
+            _request, params, attempt_counter, max_attempts,
+            lat, lon, start_date, end_date, latest_available,
+            cancel_check, descaled,
+        )
+
+    def _warn_unguarded_x24_signature(
+        self,
+        parameter: Dict[str, Dict[str, float]],
+        lat: float,
+        lon: float,
+        year: int,
+        end_date: date,
+    ) -> None:
+        """Log a window outside the guard that shows the ×24 signature; its
+        data is used as received (never refused, never re-fetched)."""
+        precip = parameter.get("PRECTOTCORR")
+        if precip is None:
+            return
+        k, m = _lattice_counts(precip)
+        if k >= 10 and 2 * m >= k:
+            self.logger.warning(
+                f"NASA POWER rain guard ({lat}, {lon}) {year}: precipitation "
+                f"shows the ×24 signature ({m} of {k} wet days on the "
+                f"{PRECIP_LATTICE_MM} mm lattice) in a window ending "
+                f"{end_date.isoformat()}, before the guarded period; "
+                f"used as received"
+            )
+
+    def _guard_exposed_window(
+        self,
+        request: Callable[[Dict[str, Any], int], Dict[str, Dict[str, float]]],
+        window: Dict[str, Any],
+        counter: Dict[str, int],
+        max_attempts: int,
+        lat: float,
+        lon: float,
+        start_date: date,
+        end_date: date,
+        latest_available: date,
+        cancel_check: Optional[Callable[[], bool]],
+        descaled: Optional[List[Dict[str, Any]]],
+    ) -> Dict[str, Dict[str, float]]:
+        """Return a CLEAN, ×24-corrected, ×1-proven or ×24-paired response for
+        an exposed window, or raise NasaPowerScaledPrecipError. REF (1 January
+        to latest_available - margin) is requested at most once, never empty."""
+        year = start_date.year
+        ref_end = latest_available - timedelta(days=X24_EXPOSURE_MARGIN_DAYS)
+        ref_end_key = ref_end.strftime("%Y%m%d")
+        tag = f"NASA POWER rain guard ({lat}, {lon}) {year}"
+        rejected: List[Tuple[Dict[str, Dict[str, float]], str]] = []
+        reference: Dict[str, Any] = {"requested": False, "precip": None}
+
+        def remaining() -> int:
+            return _GUARD_MAX_HTTP_ATTEMPTS - counter["i"]
+
+        def transport_retries() -> int:
+            return counter["i"] - counter["parsed"]
+
+        def pause(step: str) -> None:
+            raise_if_cancelled(cancel_check, f"nasa_power.x24.before_{step}_delay={year}")
+            time.sleep(self.config.request_delay)
+            raise_if_cancelled(cancel_check, f"nasa_power.x24.before_{step}={year}")
+
+        def finish(outcome: str) -> None:
+            self.logger.info(
+                f"{tag}: {outcome} after {len(rejected)} validation attempts "
+                f"and {counter['i']} HTTP attempts ({transport_retries()} "
+                f"transport retries)"
+            )
+
+        def ref_precip() -> Optional[Dict[str, Any]]:
+            if reference["requested"]:
+                return reference["precip"]
+            reference["requested"] = True
+            if ref_end < date(year, 1, 1) or remaining() <= 0:
+                return None
+            pause("ref")
+            try:
+                body = request(
+                    dict(window, start=f"{year}0101", end=ref_end_key),
+                    min(max_attempts, _GUARD_MAX_HTTP_ATTEMPTS - counter["i"]),
+                )
+            except _NasaPowerTransportError:
+                return None
+            reference["precip"] = body.get("PRECTOTCORR")
+            return reference["precip"]
+
+        first_request = True
+        while True:
+            if not first_request:
+                if len(rejected) >= _GUARD_MAX_VALIDATIONS or remaining() <= 0:
+                    break
+                pause("refetch")
+            first_request = False
+            try:
+                parameter = request(
+                    window, min(max_attempts, _GUARD_MAX_HTTP_ATTEMPTS - counter["i"]),
+                )
+            except _NasaPowerTransportError:
+                if not rejected:
+                    raise
+                continue
+            precip = parameter.get("PRECTOTCORR")
+            classification = _classify_precip(precip)
+            if classification in ("clean", "n/a"):
+                if rejected:
+                    finish("resolved by a clean response")
+                return parameter
+            evidence = _classification_evidence(precip, classification)
+            rejected.append((parameter, evidence))
+            self.logger.info(
+                f"{tag}: validation attempt {len(rejected)} of "
+                f"{_GUARD_MAX_VALIDATIONS} is {classification}: {evidence}; "
+                f"HTTP attempts so far {counter['i']} of "
+                f"{_GUARD_MAX_HTTP_ATTEMPTS} ({transport_retries()} transport retries)"
+            )
+            ref = ref_precip()
+            if ref is not None:
+                measured = _measure_factor(precip, ref, ref_end_key)
+                if measured.factor == X24_FACTOR:
+                    self.logger.info(
+                        f"{tag}: ×24 measured against a clean retrieval to "
+                        f"{ref_end.isoformat()} ({measured.k_ov} wet days); "
+                        f"divided by 24"
+                    )
+                    finish("resolved by dividing a ×24 response by 24")
+                    if descaled is not None:
+                        descaled.append({
+                            "year": year,
+                            "ref_end": ref_end,
+                            "k_ov": measured.k_ov,
+                            "divided": {d for d, v in precip.items() if _is_wet(v)},
+                        })
+                    return dict(parameter, PRECTOTCORR=measured.descaled)
+                if measured.factor == 1:
+                    finish(
+                        f"resolved by measuring ×1 against a clean retrieval "
+                        f"to {ref_end.isoformat()}"
+                    )
+                    return parameter
+            for earlier, _ in rejected[:-1]:
+                smaller = _x24_pair_smaller(precip, earlier.get("PRECTOTCORR"))
+                if smaller is not None:
+                    finish("resolved by the smaller of a ×24 pair")
+                    return parameter if smaller == "first" else earlier
+        finish("refused")
+        raise NasaPowerScaledPrecipError(
+            lat=lat,
+            lon=lon,
+            year=year,
+            evidence=[evidence for _, evidence in rejected],
+            year_end=end_date,
+            latest_available=latest_available,
+        )
+
+    @staticmethod
+    def _descale_record(
+        descaled: List[Dict[str, Any]],
+        records: List[ClimateRecord],
+    ) -> List[Dict[str, Any]]:
+        """One provenance record per de-scaled year, sorted by year, over
+        the RETURNED records (the final filter to the caller's range)."""
+        out = []
+        for entry in sorted(descaled, key=lambda e: e["year"]):
+            year_records = [r for r in records if r.date.year == entry["year"]]
+            if not year_records:
+                continue
+            divided_dates = sorted(
+                r.date.isoformat() for r in year_records
+                if r.date.strftime("%Y%m%d") in entry["divided"]
+            )
+            out.append({
+                "year": entry["year"],
+                "first_date": year_records[0].date.isoformat(),
+                "last_date": year_records[-1].date.isoformat(),
+                "wet_days_divided": len(divided_dates),
+                "divided_dates": divided_dates,
+                "factor": X24_FACTOR,
+                "reason": X24_DESCALE_REASON,
+                "evidence": (
+                    f"×24 measured on {entry['k_ov']} wet days against a clean "
+                    f"retrieval of {entry['year']}-01-01 to "
+                    f"{entry['ref_end'].isoformat()}"
+                ),
+            })
+        return out
 
     def _convert_to_climate_timeseries(
         self,
