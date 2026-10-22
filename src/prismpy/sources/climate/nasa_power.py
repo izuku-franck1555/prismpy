@@ -883,7 +883,7 @@ class NASAPowerSource(DataSource):
         ref_end = latest_available - timedelta(days=X24_EXPOSURE_MARGIN_DAYS)
         ref_end_key = ref_end.strftime("%Y%m%d")
         tag = f"NASA POWER rain guard ({lat}, {lon}) {year}"
-        rejected: List[Tuple[Dict[str, Dict[str, float]], str]] = []
+        rejected: List[Tuple[Dict[str, Dict[str, float]], Optional[Dict[str, Any]], str]] = []
         reference: Dict[str, Any] = {"requested": False, "precip": None}
 
         def remaining() -> int:

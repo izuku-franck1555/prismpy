@@ -236,17 +236,15 @@ def test_rate_probe_scaled_series_measures_x24():
     assert measured.factor == 24 and measured.descaled == RATE["clean_precip"]
 
 
-@pytest.mark.parametrize(
-    "scaled",
-    [
-        "ng_10.75_5.75_2026-01-01_2026-10-10_x24_a.json",
-        "ng_10.75_5.75_2026-01-01_2026-10-10_x24_b.json",
-        "ng_10.75_5.75_2026-01-01_2026-10-10_precip_only_x24.json",
-    ],
-)
-def test_banked_morning_bodies_measure_x24(scaled):
-    response, ref = banked(scaled)["PRECTOTCORR"], banked(T_H1)["PRECTOTCORR"]
-    assert _measure_factor(response, ref, _last_day(ref), _last_day(response)).factor == 24
+def test_banked_morning_series_measures_x24():
+    # Three recorded bodies, one PRECTOTCORR series.
+    stem = "ng_10.75_5.75_2026-01-01_2026-10-10"
+    series = [
+        banked(f"{stem}_{n}.json")["PRECTOTCORR"] for n in ("x24_a", "x24_b", "precip_only_x24")
+    ]
+    assert all(other == series[0] for other in series[1:])
+    ref = banked(T_H1)["PRECTOTCORR"]
+    assert _measure_factor(series[0], ref, _last_day(ref), _last_day(series[0])).factor == 24
 
 
 @pytest.mark.parametrize(
@@ -272,6 +270,20 @@ def test_incomplete_ref_is_not_measured():
     assert (
         _measure_factor(_response(overlap, _x(TAIL_WET, 24)), ref, REF_END, YEAR_END).factor is None
     )
+
+
+@pytest.mark.parametrize(
+    "case", ["ref_lacks_1_january", "response_lacks_1_january", "response_wet_on_1_january"]
+)
+def test_overlap_starts_on_1_january(case):
+    ref, response = _ref(), _response(_x(REF_WET, 24), _x(TAIL_WET, 24))
+    if case == "ref_lacks_1_january":
+        del ref["20260101"]
+    elif case == "response_lacks_1_january":
+        del response["20260101"]
+    else:
+        response["20260101"] = 4.80
+    assert _measure_factor(response, ref, REF_END, YEAR_END).factor is None
 
 
 def test_x1_tail_ends_at_year_end():
