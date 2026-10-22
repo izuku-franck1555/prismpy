@@ -176,14 +176,26 @@ def zero_cases() -> List[Tuple[str, Dict[str, Any], Script]]:
     """Every unchanged-output retrieval: (id, run kwargs, script)."""
     rate = load("rate_probe_compact.json")
     cases = [
-        ("fresh_2025_full", dict(lat=10.75, lon=5.75, start=date(2025, 1, 1), end=date(2025, 12, 31)),
-         {("20250101", "20251231"): [banked("ng_10.75_5.75_2025_full_clean.json")]}),
-        ("fresh_2020_full", dict(lat=9.75, lon=8.75, start=date(2020, 1, 1), end=date(2020, 12, 31)),
-         {("20200101", "20201231"): [banked("ng_9.75_8.75_2020_full_clean.json")]}),
-        ("exposed_clean_w1", dict(lat=10.75, lon=5.75, start=date(2026, 1, 1), end=date(2026, 10, 11)),
-         {("20260101", "20261011"): [body(rate["clean_precip"], rate["other_variables"])]}),
-        ("exposed_clean_fx_a8", dict(lat=10.75, lon=5.75, start=date(2026, 1, 1), end=date(2026, 10, 10)),
-         {("20260101", "20261010"): [banked("ng_10.75_5.75_2026-01-01_2026-10-10_clean.json")]}),
+        (
+            "fresh_2025_full",
+            dict(lat=10.75, lon=5.75, start=date(2025, 1, 1), end=date(2025, 12, 31)),
+            {("20250101", "20251231"): [banked("ng_10.75_5.75_2025_full_clean.json")]},
+        ),
+        (
+            "fresh_2020_full",
+            dict(lat=9.75, lon=8.75, start=date(2020, 1, 1), end=date(2020, 12, 31)),
+            {("20200101", "20201231"): [banked("ng_9.75_8.75_2020_full_clean.json")]},
+        ),
+        (
+            "exposed_clean_w1",
+            dict(lat=10.75, lon=5.75, start=date(2026, 1, 1), end=date(2026, 10, 11)),
+            {("20260101", "20261011"): [body(rate["clean_precip"], rate["other_variables"])]},
+        ),
+        (
+            "exposed_clean_fx_a8",
+            dict(lat=10.75, lon=5.75, start=date(2026, 1, 1), end=date(2026, 10, 10)),
+            {("20260101", "20261010"): [banked("ng_10.75_5.75_2026-01-01_2026-10-10_clean.json")]},
+        ),
     ]
     for file_year in load("past_prefixes_compact.json")["file_years"]:
         year = int(file_year["cache_file"][-9:-5])

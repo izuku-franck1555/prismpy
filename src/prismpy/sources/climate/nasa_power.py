@@ -159,9 +159,7 @@ class _Measurement(NamedTuple):
     descaled: Optional[Dict[str, Any]]
 
 
-def _within(
-    series: Optional[Mapping[str, Any]], first: str, last: str
-) -> Optional[Dict[str, Any]]:
+def _within(series: Optional[Mapping[str, Any]], first: str, last: str) -> Optional[Dict[str, Any]]:
     """The days of a PRECTOTCORR series within [first, last] (``YYYYMMDD``)."""
     if series is None:
         return None
