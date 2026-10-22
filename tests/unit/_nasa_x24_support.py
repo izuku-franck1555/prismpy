@@ -1,6 +1,6 @@
 """Helpers for the NASA POWER ×24 guard tests.
 
-They import no guard symbol, so the same AC-ZERO harness also runs against
+They import no guard symbol, so the same unchanged-output harness also runs against
 the pre-guard code that produced ``zero_goldens.json``.
 """
 from __future__ import annotations
@@ -169,7 +169,7 @@ def outcome(result, cache_dir: Path) -> Dict[str, Any]:
 
 
 def zero_cases() -> List[Tuple[str, Dict[str, Any], Script]]:
-    """Every AC-ZERO retrieval: (id, run kwargs, script)."""
+    """Every unchanged-output retrieval: (id, run kwargs, script)."""
     rate = load("rate_probe_compact.json")
     cases = [
         ("fresh_2025_full", dict(lat=10.75, lon=5.75, start=date(2025, 1, 1), end=date(2025, 12, 31)),
@@ -195,7 +195,7 @@ def zero_cases() -> List[Tuple[str, Dict[str, Any], Script]]:
 
 
 def zero_cache_outcomes(root: Path) -> Dict[str, Dict[str, Any]]:
-    """AC-ZERO's cache paths: a per-year cache hit and an old-style hit."""
+    """The unchanged-output cache paths: a per-year cache hit and an old-style hit."""
     out = {}
     full = banked("ng_10.75_5.75_2025_full_clean.json")
     per_year = root / "per_year"
@@ -216,7 +216,7 @@ def zero_cache_outcomes(root: Path) -> Dict[str, Dict[str, Any]]:
 
 
 def zero_outcomes(root: Path) -> Dict[str, Dict[str, Any]]:
-    """Run every AC-ZERO retrieval in its own cold cache under ``root``."""
+    """Run every unchanged-output retrieval in its own cold cache under ``root``."""
     out = {}
     for index, (case_id, kwargs, script) in enumerate(zero_cases()):
         cache_dir = root / f"c{index}"

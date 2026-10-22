@@ -43,7 +43,7 @@ def _series(*values):
     return {f"202601{n + 1:02d}": v for n, v in enumerate(values)}
 
 
-# ── AC-CLASS ─────────────────────────────────────────────────────────────
+# ── classification ──────────────────────────────────────────────────────────
 @pytest.mark.parametrize("name", SCALED_BANKED)
 def test_banked_scaled_responses_classify_scaled(name):
     assert _classify_precip(banked(name)["PRECTOTCORR"]) == "scaled"
@@ -90,7 +90,7 @@ def test_excluded_values_are_never_wet():
     assert _classify_precip(_series(*excluded)) == "clean"
 
 
-# ── the measured factor (AC-DESCALE″ / AC-DESCALE‴ / AC-ADMIT) ───────────
+# ── the measured factor: ×24 de-scale, ×1 admission ─────────────────────────
 REF_END = "20260630"
 REF_WET = {"20260105": 1.37, "20260212": 0.53, "20260320": 2.11, "20260410": 4.07,
            "20260515": 12.3}
@@ -232,6 +232,8 @@ def test_x24_pair_in_both_orders():
 
 def test_x24_pair_rejected():
     assert _x24_pair_smaller({"20260110": 5.76}, {"20260111": 0.24}) is None
+    assert _x24_pair_smaller({"20260110": 5.76, "20260112": 11.52},
+                             {"20260110": 0.24, "20260112": 0.0}) is None
     assert _x24_pair_smaller({"20260110": 5.76, "20260111": 11.52},
                              {"20260110": 0.24, "20260111": 0.49}) is None
     assert _x24_pair_smaller({"20260110": 0.24}, {"20260110": 0.24}) is None

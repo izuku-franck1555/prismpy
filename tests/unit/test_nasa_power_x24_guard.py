@@ -85,7 +85,7 @@ def precip_of(result):
     return {r.date.strftime("%Y%m%d"): r.precip for r in result.data.records}
 
 
-# ── AC-ZERO″ ─────────────────────────────────────────────────────────────
+# ── unguarded and clean retrievals are unchanged ────────────────────────────
 def test_unguarded_and_clean_retrievals_are_byte_identical_to_pre_guard(tmp_path):
     goldens = load("zero_goldens.json")["outcomes"]
     classified = {}
@@ -106,7 +106,7 @@ def test_unguarded_and_clean_retrievals_are_byte_identical_to_pre_guard(tmp_path
     assert all(n >= 1 for c, n in classified.items() if c.startswith("exposed_"))
 
 
-# ── AC-EXPOSE + AC-NONEXPOSED-WARN ───────────────────────────────────────
+# ── exposure and the unguarded-window warning ───────────────────────────────
 @pytest.mark.parametrize("end, exposed", [
     (date(2026, 6, 30), False), (date(2026, 7, 1), True), (date(2026, 7, 20), True),
 ])
@@ -152,7 +152,7 @@ def test_both_sides_of_a_january_boundary_are_guarded(tmp_path, today, windows):
     assert spy.call_count == len(windows)
 
 
-# ── AC-DESCALE″ + AC-FROZEN-DATE ─────────────────────────────────────────
+# ── the measured de-scale and the injected date ─────────────────────────────
 RATE_SCALED = [e for e in RATE["manifest"] if e["class"] == "scaled" and e["window"][1] == "2026-10-11"]
 RATE_CLEAN = [e for e in RATE["manifest"] if e["class"] == "clean" and e["window"][1] == "2026-10-11"]
 
@@ -180,7 +180,7 @@ def test_ref_window_follows_the_injected_today(tmp_path):
     assert fake.calls[:2] == [window, ref]
 
 
-# ── AC-ADMIT (×1) ────────────────────────────────────────────────────────
+# ── ×1 admission ────────────────────────────────────────────────────────────
 X1_OVERLAP = {"20260105": 0.01, "20260212": 0.02, "20260320": 1.37}
 X1_TAIL = dict({f"202607{n:02d}": round(0.24 * n, 2) for n in range(1, 9)}, **{"20260815": 0.37})
 
@@ -202,7 +202,7 @@ def test_x1_response_is_admitted_unchanged_without_record(tmp_path, caplog):
     ]
 
 
-# ── AC-RECORD ────────────────────────────────────────────────────────────
+# ── the de-scale record ─────────────────────────────────────────────────────
 def _expected_record(start, end):
     k_ov = sum(1 for v in REF_BLOCK["PRECTOTCORR"].values() if v > 0)
     wet = sorted(d for d, v in RATE["scaled_precip"].items()
@@ -236,7 +236,7 @@ def test_no_record_when_nothing_was_descaled(tmp_path):
     assert "precip_x24_descaled" not in result.data.metadata
 
 
-# ── AC-NOCACHE + AC-REF + AC-REF-EMPTY ───────────────────────────────────
+# ── caching and the REF request ─────────────────────────────────────────────
 def test_descaled_complete_year_is_never_cached(tmp_path):
     fake = FakeNasa({Y25: [FULL25_X24], REF25: [FULL25]})
     result = run(fake, cache_dir=tmp_path / "d", lat=LAT, lon=LON,
@@ -266,7 +266,7 @@ def test_empty_ref_is_never_requested(tmp_path):
     assert precip_of(result)["20260110"] == 0.24
 
 
-# ── AC-PAIR (re-fetch, the ×24 pair, cancel points) ──────────────────────
+# ── re-fetch, the ×24 pair, cancel points ───────────────────────────────────
 def _early_run(tmp_path, items, **kwargs):
     fake = FakeNasa({EARLY_W: items})
     result = run(fake, cache_dir=tmp_path, lat=LAT, lon=LON, start=JAN1, end=EARLY_END,
@@ -300,7 +300,7 @@ def test_scaled_3_to_9_pair_resolves(tmp_path):
 
 
 @pytest.mark.parametrize("items", [
-    [UNCONF_X24, early({"20260111": 0.24})],
+    [early({"20260110": 5.76, "20260112": 11.52}), early({"20260110": 0.24})],
     [early({"20260110": 5.76, "20260111": 11.76}), early({"20260110": 0.24, "20260111": 0.48})],
 ], ids=["unequal_dates", "outside_tolerance"])
 def test_non_pairs_are_refused(tmp_path, items):
@@ -338,7 +338,7 @@ def test_cancel_before_ref(tmp_path):
     assert fake.calls == [W]
 
 
-# ── AC-FAIL″ + AC-BUDGET ─────────────────────────────────────────────────
+# ── refusal and the retry budget ────────────────────────────────────────────
 def test_refusal_on_a_complete_year_is_exact_unconverted_and_uncached(tmp_path):
     fake = FakeNasa({Y25: [FULL25_X24], REF25: [FULL25_X24]})
     with mock.patch.object(NASAPowerSource, "_convert_to_climate_timeseries",
@@ -395,7 +395,7 @@ def test_http_budget_counts_ref(tmp_path):
                                      "2026-10-11", "2026-10-28")]
 
 
-# ── AC-LOG ───────────────────────────────────────────────────────────────
+# ── log lines ───────────────────────────────────────────────────────────────
 def test_log_lines_of_the_descale_path(tmp_path, caplog):
     caplog.set_level(logging.INFO)
     run(FakeNasa({W: [SCALED], REF: [REF_BLOCK]}), cache_dir=tmp_path, lat=LAT, lon=LON, start=JAN1, end=END)
