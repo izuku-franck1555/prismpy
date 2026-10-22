@@ -29,7 +29,7 @@ from prismpy.validators.scientific import _check_temporal_completeness
 MISSED = date(2020, 3, 1)
 
 
-def _config(end):
+def _config(end, spinup=0):
     return ProjectConfig(
         project=ProjectInfo(name="requested-end", description="a season in progress"),
         region=RegionConfig(
@@ -38,20 +38,21 @@ def _config(end):
                 minx=3.0, miny=9.0, maxx=4.0, maxy=10.0))),
         crop=CropConfig(name="Maize", name_short="mai", variety="Medium-duration",
                         calendar=CropCalendarConfig(planting_doy=166, maturity_doy=285)),
-        temporal=TemporalConfig(start_year=2016, end_year=2026, spinup_years=0),
+        temporal=TemporalConfig(start_year=2016, end_year=2026, spinup_years=spinup),
         targets=[Platform.PYTHIA, Platform.CRAFT],
         platform_config=PlatformConfigGroup(pythia=PythiaConfig(climate_end_date=end)),
     )
 
 
-def _series(cell, skip=(), unvalued=()):
-    first, last = date(2016, 1, 1), date(2026, 10, 10)   # 3,936 days a cell
-    days = (first + timedelta(days=i) for i in range((last - first).days + 1))
+def _series(cell, skip=(), unvalued=(), extra=(), twice=(), first=date(2016, 1, 1),
+            last=date(2026, 10, 10)):   # 3,936 days a cell by default
+    days = [first + timedelta(days=i) for i in range((last - first).days + 1)]
+    days = sorted([day for day in days if day not in skip] + list(extra) + list(twice))
     return ClimateTimeSeries(
         location_id=cell, lat=10.0, lon=3.5, source="nasa_power",
         records=[ClimateRecord(date=day, tmax=30.0, tmin=20.0, srad=20.0,
                                precip=None if day in unvalued else 2.0)  # type: ignore[arg-type]
-                 for day in days if day not in skip])
+                 for day in days])
 
 
 @pytest.mark.parametrize("end,platforms,series,result,summary", [
@@ -70,4 +71,30 @@ def test_completeness_counts_dates_through_a_pythia_only_packages_requested_end(
     check = _check_temporal_completeness(
         SimpleNamespace(climate={1: _series(1, **series), 2: _series(2)}), _config(end),
         enabled_platforms=platforms)
+    assert (check["result"], summary in check["summary"]) == (result, True), check["summary"]
+
+
+SPINUP_SPAN = {"first": date(2014, 1, 1), "last": date(2026, 12, 31)}   # 4,748 days a cell
+
+
+@pytest.mark.parametrize("platforms,spinup,first_cell,other_cell,result,summary", [
+    (["pythia"], 0, {"skip": {MISSED}, "extra": {date(2026, 10, 11)}}, {}, "warning",
+     "7871/7872 days present"),
+    (["pythia"], 0, {"skip": {MISSED}, "extra": {date(2015, 12, 31)}}, {}, "warning",
+     "7871/7872 days present"),
+    (["pythia"], 0, {"skip": {MISSED}, "twice": {date(2020, 3, 2)}}, {}, "warning",
+     "7871/7872 days present"),
+    (["pythia"], 0, {"extra": {date(2015, 12, 31), date(2026, 10, 11)}}, {}, "pass", ""),
+    (["acea"], 2, SPINUP_SPAN, SPINUP_SPAN, "pass", "9496/9496 days present (100.0%)"),
+], ids=["a missing date and one after the requested end",
+        "a missing date and one before the start",
+        "a missing date and a repeated date inside the window",
+        "no missing date and dates outside the window on both sides",
+        "a cell carrying its spin-up years, complete"])
+def test_a_date_outside_a_cells_window_never_stands_in_for_a_missing_date_inside_it(
+        platforms, spinup, first_cell, other_cell, result, summary):
+    end = "2026-10-10" if platforms == ["pythia"] else None
+    check = _check_temporal_completeness(
+        SimpleNamespace(climate={1: _series(1, **first_cell), 2: _series(2, **other_cell)}),
+        _config(end, spinup), enabled_platforms=platforms)
     assert (check["result"], summary in check["summary"]) == (result, True), check["summary"]

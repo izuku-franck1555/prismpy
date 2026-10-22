@@ -640,7 +640,6 @@ def _check_temporal_completeness(
             continue
         cells_with_records += 1
         actual_dates = {r.date for r in ts.records if hasattr(r, 'date')}
-        n_actual = len(actual_dates)
         # Per-cell discriminator: cells whose first record predates
         # the no-spinup start were fetched WITH spinup (ACEA-style);
         # the rest carry only the configured period (PYTHIA / CRAFT
@@ -648,11 +647,12 @@ def _check_temporal_completeness(
         # every conditional translator path enumerated in the
         # docstring above.
         if actual_dates and min(actual_dates) < expected_start_no_spinup:
-            expected_per_cell = expected_days_with_spinup
+            expected_per_cell, start = expected_days_with_spinup, expected_start_with_spinup
             n_with_spinup_cells += 1
         else:
-            expected_per_cell = expected_days_no_spinup
+            expected_per_cell, start = expected_days_no_spinup, expected_start_no_spinup
             n_no_spinup_cells += 1
+        n_actual = sum(start <= day <= expected_end for day in actual_dates)   # outside dates never fill a gap
         n_missing = expected_per_cell - n_actual
         total_present += n_actual
         total_expected += expected_per_cell
