@@ -96,7 +96,9 @@ def _grid() -> SpatialGrid:
         ("spam2020_V2r2_global_H_MAIZ_A.tif", ("2020", "V2r2")),
         ("spam2010V2r0_global_H_ACOF_H.tif", ("2010", "V2r0")),
         ("/abs/dir/spam2020_V2r2_global_H_COFF_I.tif", ("2020", "V2r2")),
-        ("spam2020_V2r0_global_H_MAIZ_A.tif", None),   # 2020/V2r0 is NOT a registered vintage
+        ("spam2020_V2r0_global_H_MAIZ_A.tif", ("2020", "V2r0")),   # one of 2020/V2r0's six crops
+        ("spam2020_V2r0_global_H_WHEA_A.tif", None),   # a crop 2020/V2r0 does not register
+        ("spam2005V3r2_global_H_MAIZ_A.tif", None),    # 2005/V3r2 is NOT a registered vintage
         ("spam2020_V2r2_global_H_ZZZZ_A.tif", None),   # code not in the 2020 inventory
         ("spam2020_V2r2_global_H_MAIZ_H.tif", None),   # H stratum absent in 2020 {A,I,R}
         ("spam2010V2r0_global_H_MAIZ_H.tif", ("2010", "V2r0")),  # H valid in 2010
@@ -129,10 +131,10 @@ def test_unrecognized_basename_fails_loud(tmp_path):
 
 def test_spam_named_but_unregistered_basename_fails_loud(tmp_path):
     # The masquerade case: a file that LOOKS like SPAM (spam20xx_… naming) but is not a
-    # registered provisioned vintage (2020/V2r0 here — only 2020/V2r2 + 2010/V2r0 are
-    # registered) must fail loud, never be silently mislabelled. spam_raster_path is SPAM-only
+    # registered provisioned vintage (2005/V3r2 here — no entry registers it) must fail
+    # loud, never be silently mislabelled. spam_raster_path is SPAM-only
     # by contract, so there is no custom-raster path to preserve.
-    masq = tmp_path / "spam2020_V2r0_global_H_MAIZ_A.tif"
+    masq = tmp_path / "spam2005V3r2_global_H_MAIZ_A.tif"
     masq.write_bytes(b"stub")  # exists + SPAM-named, but an unregistered vintage
     cfg = _cfg(tmp_path, spam_raster_path=masq)
     tr = CraftTranslator(cfg)

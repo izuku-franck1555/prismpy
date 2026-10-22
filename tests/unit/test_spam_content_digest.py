@@ -115,7 +115,7 @@ def test_a_crs_without_an_authority_code_is_refused(tmp_path):
 def test_every_registered_source_has_exactly_one_pinned_digest():
     expected = {(year, release, code, tech) for (year, release), spec in sv.SPAM_VINTAGES.items()
                 for code in spec.crops for tech in "RIA"}
-    assert len(expected) == 46 * 3 + 42 * 3 == 264
+    assert len(expected) == 46 * 3 + 42 * 3 + 6 * 3 == 282
     assert set(sv.SPAM_CONTENT_DIGESTS) == set(sv.SPAM_CONTENT_HEADERS) == expected
     assert all(len(d) == 64 and int(d, 16) >= 0 for d in sv.SPAM_CONTENT_DIGESTS.values())
     for header in sv.SPAM_CONTENT_HEADERS.values():
@@ -154,7 +154,7 @@ def test_each_crop_code_is_spelled_as_the_vintage_spells_it(code, vintage, spell
 
 def test_a_code_in_an_unregistered_vintage_is_refused():
     with pytest.raises(sv.VintageNotRegisteredError):
-        sv.code_for_vintage("MAIZ", "2020", "V2r0")
+        sv.code_for_vintage("MAIZ", "2005", "V3r2")
 
 
 def test_a_code_the_vintage_does_not_map_is_refused_when_resolved(tmp_path):
@@ -200,5 +200,5 @@ def test_an_installed_prismpy_loads_the_pinned_digests(tmp_path):
                          cwd=tmp_path, env={"PYTHONPATH": str(site), "PATH": "/usr/bin:/bin"})
     module, n, text = json.loads(out.stdout.strip().splitlines()[-1])
     assert Path(module).resolve().is_relative_to(site.resolve())
-    assert n == 264
+    assert n == 282
     assert text == (ROOT / "src/prismpy/sources/crop_areas/spam_content_digests.json").read_text()
