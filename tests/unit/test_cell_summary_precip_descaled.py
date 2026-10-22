@@ -40,6 +40,14 @@ def test_a_cells_descaling_record_is_copied_verbatim_into_its_cell_summary():
     assert _summary({7: _series(RECORD)})["cells"][0].get("climate_precip_descaled") == RECORD
 
 
+def test_a_cells_records_for_two_divided_years_are_kept_in_order_and_unchanged():
+    two_years = [{"year": 2025, "first_date": "2025-07-01", "last_date": "2025-12-31",
+                  "wet_days_divided": 1, "divided_dates": ["2025-08-09"], "factor": 24,
+                  "reason": "nasa_power_x24_response",
+                  "evidence": "the response's rain is 24 times a clean earlier window's"}, *RECORD]
+    assert _summary({7: _series(two_years)})["cells"][0].get("climate_precip_descaled") == two_years
+
+
 def test_a_cell_without_a_descaling_record_has_no_key():
     cells = _summary({1: _series(), 2: _series([])})["cells"]
     assert ["climate_precip_descaled" in cell for cell in cells] == [False, False]
