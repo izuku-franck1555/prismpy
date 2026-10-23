@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import numpy as np
 
 from prismpy.config.schema import Platform
+from prismpy.packaging.soil_declaration import BINDING_FILE
 from prismpy.validators.base import (
     BaseValidator,
     ValidationIssue,
@@ -135,7 +136,8 @@ class AceaValidator(BaseValidator):
             self.output_dir / "config", ['.py', '.json'], dir_label="config"
         ))
         issues.extend(self.validate_file_types(
-            self.output_dir / "soil", ['.nc', '.nc4', '.csv'], dir_label="soil"
+            self.output_dir / "soil", ['.nc', '.nc4', '.csv'], dir_label="soil",
+            allowed_names=(BINDING_FILE,),
         ))
         issues.extend(self.validate_file_types(
             self.output_dir / "crop_params", ['.nc', '.nc4', '.yaml', '.yml'], dir_label="crop_params"

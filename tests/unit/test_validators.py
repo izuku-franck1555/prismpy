@@ -19,6 +19,7 @@ from prismpy.validators.craft import CraftValidator
 from prismpy.validators.pythia import PythiaValidator
 from prismpy.validators.acea import AceaValidator
 from prismpy.config.schema import Platform
+from prismpy.packaging.soil_declaration import BINDING_FILE
 
 
 # =============================================================================
@@ -603,6 +604,36 @@ class TestAceaValidator:
         # Should have range error for cell ID (300000 > MAX_30ARCMIN_ID = 259199)
         range_errors = [i for i in result.issues if i.category == 'range']
         assert len(range_errors) > 0
+
+    def test_the_soil_binding_file_is_an_expected_soil_file(self, valid_acea_structure):
+        """The binding file prismpy writes beside the soil data is not an unexpected file."""
+        (valid_acea_structure / "soil" / BINDING_FILE).write_text("binding\n")
+        issues = AceaValidator(valid_acea_structure).validate_structure()
+        assert [i.message for i in issues if i.category == 'file_type'] == []
+
+    @pytest.mark.parametrize("names", [
+        pytest.param((BINDING_FILE, "notes.txt"), id="binding-and-notes"),
+        pytest.param(("notes.txt",), id="notes-alone"),
+        pytest.param(("other_" + BINDING_FILE,), id="name-inside-another"),
+        pytest.param((BINDING_FILE + ".bak",), id="name-with-a-suffix"),
+        pytest.param((BINDING_FILE.upper(),), id="name-in-capitals"),
+    ])
+    def test_any_other_file_in_soil_is_still_unexpected(self, valid_acea_structure, names):
+        """Only the binding file's exact name is allowed: no near name, no .txt extension."""
+        for name in names:
+            (valid_acea_structure / "soil" / name).write_text("x\n")
+        issues = AceaValidator(valid_acea_structure).validate_structure()
+        messages = [i.message for i in issues if i.category == 'file_type']
+        assert len(messages) == 1
+        assert messages[0].startswith("soil/ contains 1 unexpected file(s)")
+
+    def test_the_binding_name_is_allowed_in_soil_only(self, valid_acea_structure):
+        """Outside soil/ the binding file's name is as unexpected as any other file."""
+        (valid_acea_structure / "climate" / BINDING_FILE).write_text("binding\n")
+        issues = AceaValidator(valid_acea_structure).validate_structure()
+        messages = [i.message for i in issues if i.category == 'file_type']
+        assert len(messages) == 1
+        assert messages[0].startswith("climate/ contains 1 unexpected file(s)")
 
 
 # =============================================================================
