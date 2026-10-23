@@ -37,6 +37,9 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
+import subprocess
+import sys
 import threading
 import time
 import zipfile
@@ -1376,5 +1379,17 @@ def test_cached_cutout_live_multi_decade_real_fetch(tmp_path: Path) -> None:
 
 def test_the_live_isimip_fetch_is_outside_the_default_tier():
     """A live ISIMIP fetch can queue for minutes, so the default selection must skip it."""
+    # The project's own default selection, as pytest computes it, free of this session's options.
+    command = [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider"]
+    listed = subprocess.run(
+        command + [__file__],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert listed.returncode == 0, listed.stdout[-2000:] + listed.stderr[-2000:]
+    assert re.search(r"\btest_the_live_isimip_fetch_is_outside_the_default_tier\b", listed.stdout)
+    assert not re.search(r"\btest_cached_cutout_live_multi_decade_real_fetch\b", listed.stdout)
     live = test_cached_cutout_live_multi_decade_real_fetch
     assert "slow" in {mark.name for mark in getattr(live, "pytestmark", [])}
