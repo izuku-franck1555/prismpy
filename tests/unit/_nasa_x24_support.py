@@ -15,11 +15,12 @@ from unittest import mock
 
 import requests
 
-from prismpy.sources.climate import _availability
 from prismpy.sources.climate import nasa_power as np_mod
 from prismpy.sources.climate.nasa_power import NASAPowerConfig, NASAPowerSource
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "nasa_power_x24"
+# latest_available = today - LAG_DAYS in every guard test, whatever prismpy's default or floor.
+LAG_DAYS = 10
 # latest_available 2026-10-28, so REF ends 2026-06-30 (the banked Jan-Jun body).
 FROZEN_TODAY = date(2026, 11, 7)
 OTHER_VARIABLES = ("T2M_MAX", "T2M_MIN", "T2M", "T2MDEW", "WS2M", "ALLSKY_SFC_SW_DWN", "RH2M")
@@ -127,14 +128,14 @@ def run(
     config: Optional[NASAPowerConfig] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
 ):
-    """``retrieve`` with ``requests.get``, ``time.sleep`` and the
-    published-date estimate's ``today`` replaced (no network, no wall clock)."""
+    """``retrieve`` with ``requests.get``, ``time.sleep`` and the published-date
+    estimate replaced (``today - LAG_DAYS``; no network, no wall clock)."""
     source = NASAPowerSource(
         config=config or NASAPowerConfig(request_delay=0.0), cache_dir=cache_dir,
     )
 
-    def latest(lag_days=_availability.DEFAULT_LAG_DAYS, today_=None):
-        return _availability.nasa_power_latest_available_date(lag_days, today=today)
+    def latest(lag_days=None, today_=None):
+        return today - timedelta(days=LAG_DAYS)
 
     with mock.patch.object(np_mod, "nasa_power_latest_available_date", latest), \
             mock.patch.object(requests, "get", fake), \
