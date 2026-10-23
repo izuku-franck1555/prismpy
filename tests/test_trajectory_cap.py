@@ -67,7 +67,7 @@ _LOWER = 815
 #   Crop-presence roster rule: n_collected ≈ 3752 → ceil((3752 + 200) / 50) * 50 = 4000.
 #   Declared package soil: n_collected ≈ 3960 → ceil((3960 + 200) / 50) * 50 = 4200.
 #   USDA texture and boundary source: n_collected ≈ 4227 → ceil((4227 + 200) / 50) * 50 = 4450.
-#   NASA POWER x24 precipitation guard: n_collected ≈ 4410 → ceil((4410 + 200) / 50) * 50 = 4650.
+#   NASA POWER x24 precipitation guard: n_collected ≈ 4411 → ceil((4411 + 200) / 50) * 50 = 4650.
 _UPPER = 4650
 
 
