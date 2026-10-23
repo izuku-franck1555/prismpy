@@ -42,12 +42,13 @@ EXPECTED_DEP_PINS = (
     ("rasterio", ">=1.3,<2.0"),
     ("xarray",   ">=2023.1,<2025.0"),
     ("pydantic", ">=2.0,<3.0"),
+    ("netCDF4",  ">=1.6.0,<1.7.5"),
 )
 
 
 class TestPyprojectDependencyPins(unittest.TestCase):
-    """The four scientific deps must carry both a floor AND a
-    major-version upper bound so determinism is contractual."""
+    """These scientific deps must carry both a floor AND an
+    upper bound so determinism is contractual."""
 
     @classmethod
     def setUpClass(cls):
