@@ -70,7 +70,7 @@ def _frozen_params():
 
 def _fetch_from_frozen(frozen):
     def _fetch(self, lat, lon, start_date, end_date, parameters,
-               cancel_check=None, on_attempt=None):
+               cancel_check=None, on_attempt=None, latest_available=None, descaled=None):
         return {
             var: {k: v for k, v in days.items()
                   if start_date <= datetime.strptime(k, "%Y%m%d").date() <= end_date}
@@ -160,7 +160,7 @@ def test_cache_served_gap_fill_carries_into_cell_summary(tmp_path):
     # serves it from cache, re-derives the gap-fill, and the cell_summary
     # carries it — the cache path is not a provenance hole.
     def fake(self, lat, lon, start_date, end_date, parameters,
-             cancel_check=None, on_attempt=None):
+             cancel_check=None, on_attempt=None, latest_available=None, descaled=None):
         out = {p: {} for p in DEFAULT_PARAMETERS}
         day = start_date
         while day <= end_date:

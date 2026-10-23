@@ -33,7 +33,7 @@ def _fetch_from_frozen(frozen):
     """Serve the frozen recording sliced to each requested window, mirroring
     the per-year fetch the producer issues."""
     def _fetch(self, lat, lon, start_date, end_date, parameters,
-               cancel_check=None, on_attempt=None):
+               cancel_check=None, on_attempt=None, latest_available=None, descaled=None):
         served = {}
         for var, days in frozen.items():
             served[var] = {

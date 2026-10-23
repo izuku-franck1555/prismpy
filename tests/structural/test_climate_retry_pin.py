@@ -149,7 +149,9 @@ def test_nasa_power_call_site_uses_required_budget_floor() -> None:
     regardless of caller-supplied config. The floor lives in a
     ``max(N, self.config.retry_count)`` (and matching base-delay)
     expression that promotes config values above the contract
-    minimum but never below it."""
+    minimum but never below it. For a window the ×24 precipitation
+    guard checks, overrides are honoured only up to its combined cap
+    of 12 HTTP attempts per cell-year."""
     text = _NASA_POWER.read_text(encoding="utf-8")
     # Require the second operand to be a config-derived expression
     # (self.config.retry_count / retry_delay), NOT a constant. A
@@ -191,6 +193,15 @@ def test_nasa_power_call_site_uses_required_budget_floor() -> None:
         f"Cumulative retry budget MUST be ≥120 s to absorb a "
         f"transient external-API blip; got {budget:.1f}s "
         f"({n_sleeps} sleeps from base={floor_d}s)"
+    )
+    cap = re.search(r"^_GUARD_MAX_HTTP_ATTEMPTS\s*=\s*(\d+)\s*$", text, re.MULTILINE)
+    assert cap and int(cap.group(1)) == 12, (
+        "nasa_power.py MUST cap a guarded window's combined HTTP attempts "
+        "at `_GUARD_MAX_HTTP_ATTEMPTS = 12`"
+    )
+    assert re.search(r"min\(\s*max_attempts\s*,\s*_GUARD_MAX_HTTP_ATTEMPTS\b", text), (
+        "a guarded request MUST honour the configured attempts only up to "
+        "the cap: `min(max_attempts, _GUARD_MAX_HTTP_ATTEMPTS - ...)`"
     )
 
 

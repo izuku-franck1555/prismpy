@@ -52,7 +52,7 @@ def _fake_api(served_through):
     calls = []
 
     def _fetch(self, lat, lon, start_date, end_date, parameters,
-               cancel_check=None, on_attempt=None):
+               cancel_check=None, on_attempt=None, latest_available=None, descaled=None):
         calls.append((start_date, end_date))
         out = {p: {} for p in DEFAULT_PARAMETERS}
         day = start_date
@@ -116,7 +116,7 @@ def test_transient_failure_is_unavailable(tmp_path):
     start, end, latest = date(2025, 1, 1), date(2026, 3, 15), date(2026, 5, 15)
 
     def boom(self, lat, lon, start_date, end_date, parameters,
-             cancel_check=None, on_attempt=None):
+             cancel_check=None, on_attempt=None, latest_available=None, descaled=None):
         raise Exception("network down")
 
     result = _run(_make_source(tmp_path), start, end, latest, boom)
@@ -128,7 +128,7 @@ def test_cancel_propagates_not_swallowed(tmp_path):
     start, end, latest = date(2025, 1, 1), date(2026, 3, 15), date(2026, 5, 15)
 
     def cancel(self, lat, lon, start_date, end_date, parameters,
-               cancel_check=None, on_attempt=None):
+               cancel_check=None, on_attempt=None, latest_available=None, descaled=None):
         raise PipelineCancelled("user cancelled")
 
     with pytest.raises(PipelineCancelled):
@@ -143,7 +143,7 @@ def test_interior_srad_gap_is_recovered_with_provenance(tmp_path):
     fake = _fake_api(served_through=latest)
 
     def gapped(self, lat, lon, start_date, end_date, parameters,
-               cancel_check=None, on_attempt=None):
+               cancel_check=None, on_attempt=None, latest_available=None, descaled=None):
         served = fake(self, lat, lon, start_date, end_date, parameters)
         hole = date(2025, 2, 10).strftime("%Y%m%d")
         served["ALLSKY_SFC_SW_DWN"][hole] = -999
@@ -296,7 +296,7 @@ def test_interior_rain_gap_is_unavailable_no_fabrication(tmp_path):
     fake = _fake_api(served_through=latest)
 
     def rain_hole(self, lat, lon, start_date, end_date, parameters,
-                  cancel_check=None, on_attempt=None):
+                  cancel_check=None, on_attempt=None, latest_available=None, descaled=None):
         served = fake(self, lat, lon, start_date, end_date, parameters)
         served["PRECTOTCORR"][date(2025, 2, 10).strftime("%Y%m%d")] = -999
         return served
@@ -315,7 +315,7 @@ def test_no_sentinel_or_impossible_in_loaded_output(tmp_path):
     fake = _fake_api(served_through=latest)
 
     def gapped(self, lat, lon, start_date, end_date, parameters,
-               cancel_check=None, on_attempt=None):
+               cancel_check=None, on_attempt=None, latest_available=None, descaled=None):
         served = fake(self, lat, lon, start_date, end_date, parameters)
         served["ALLSKY_SFC_SW_DWN"][date(2025, 2, 10).strftime("%Y%m%d")] = -999
         return served
@@ -334,7 +334,7 @@ def test_temp_gap_boundary_five_loads_six_unavailable(tmp_path):
 
     def temp_holes(n):
         def _fetch(self, lat, lon, start_date, end_date, parameters,
-                   cancel_check=None, on_attempt=None):
+                   cancel_check=None, on_attempt=None, latest_available=None, descaled=None):
             served = fake(self, lat, lon, start_date, end_date, parameters)
             for k in range(n):
                 key = (date(2025, 2, 10) + timedelta(k)).strftime("%Y%m%d")
@@ -373,7 +373,7 @@ def test_impossible_srad_value_is_treated_as_missing_and_recovered(tmp_path):
     fake = _fake_api(served_through=latest)
 
     def neg_srad(self, lat, lon, start_date, end_date, parameters,
-                 cancel_check=None, on_attempt=None):
+                 cancel_check=None, on_attempt=None, latest_available=None, descaled=None):
         served = fake(self, lat, lon, start_date, end_date, parameters)
         served["ALLSKY_SFC_SW_DWN"][date(2025, 2, 10).strftime("%Y%m%d")] = -5.0
         return served
@@ -392,7 +392,7 @@ def test_real_zero_solar_radiation_loads_and_is_preserved(tmp_path):
     fake = _fake_api(served_through=latest)
 
     def zero_srad(self, lat, lon, start_date, end_date, parameters,
-                  cancel_check=None, on_attempt=None):
+                  cancel_check=None, on_attempt=None, latest_available=None, descaled=None):
         served = fake(self, lat, lon, start_date, end_date, parameters)
         for key in served["ALLSKY_SFC_SW_DWN"]:
             served["ALLSKY_SFC_SW_DWN"][key] = 0.0
