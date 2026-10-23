@@ -79,6 +79,17 @@ class TestPyprojectDependencyPins(unittest.TestCase):
                     f"'{dep}{spec}' as a dependency pin, with both bounds.",
                 )
 
+    def test_every_copy_of_the_netcdf4_pin_matches_pyproject(self):
+        """requirements.txt and the netCDF engine pin hold pyproject's netCDF4 range."""
+        from prismpy.standards.isimip_versions import NETCDF_FORMAT_ENGINE
+
+        spec = dict(EXPECTED_DEP_PINS)["netCDF4"]
+        requirements = (_REPO_ROOT / "requirements.txt").read_text(encoding="utf-8")
+        with self.subTest(copy="requirements.txt"):
+            self.assertRegex(requirements, rf"(?m)^netCDF4{re.escape(spec)}\s*(#.*)?$")
+        with self.subTest(copy="NETCDF_FORMAT_ENGINE"):
+            self.assertEqual(NETCDF_FORMAT_ENGINE["netcdf4"], spec)
+
     def test_numpy_floor_preserved_at_124(self):
         """Anti-mutation drill — the 1.24 floor was at risk
         of accidental drift to 1.22 during Draft 1 review (see
