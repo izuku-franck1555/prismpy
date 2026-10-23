@@ -459,7 +459,8 @@ def test_an_all_zero_region_keeps_all_technologies_and_says_so(tmp_path, caplog)
 def test_an_unregistered_vintage_still_raises(tmp_path):
     from prismpy.sources.crop_areas.spam_vintage import VintageNotRegisteredError
     tr, data = _build(tmp_path, CELLS, {"A": _pixels(lambda x, y: 1.0)}, run=False)
-    tr.config.platform_config.pythia.spam_release = "V2r0"   # 2020 V2r0 is not registered
+    tr.config.platform_config.pythia.spam_version = "2005"
+    tr.config.platform_config.pythia.spam_release = "V3r2"   # 2005 V3r2 is not registered
     with pytest.raises(VintageNotRegisteredError):
         tr._generate_crop_mask_raster(data)
 

@@ -132,7 +132,7 @@ def test_an_absent_source_fails_before_anything_is_written(tmp_path):
 
 def test_an_unregistered_vintage_fails_before_anything_is_written(tmp_path, monkeypatch):
     provision_spam(tmp_path / "spam", monkeypatch)
-    translator = _translator(tmp_path, vintage=("2020", "V2r0"))
+    translator = _translator(tmp_path, vintage=("2005", "V3r2"))
     with pytest.raises(sv.VintageNotRegisteredError):
         translator._write_harvested_area_layer()
     assert _layer_files(translator, 56) == []

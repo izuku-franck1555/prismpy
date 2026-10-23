@@ -24,6 +24,8 @@ present (self-contained). Regenerate deterministically with::
 Provisioned inventory (verified against Franck's files):
   * 2010 / V2r0 : 252 files, 42 crops, 6 strata {A,H,I,L,R,S}, no underscore after ``spam2010``
   * 2020 / V2r2 : 138 rasters (+6 .tif.ovr), 46 crops, 3 strata {A,I,R}, underscore after ``spam2020``
+  * 2020 / V2r0 : 18 rasters, 6 crops, 3 strata {A,I,R}, underscore after ``spam2020``: the
+    layers ACEA's own folder holds (its A layers are the official extract's), not the release
 Crop coverage DIFFERS between these two vintages (2010-only: ACOF, SMIL;
 2020-only: CITR, COFF, MILL, ONIO, RUBB, TOMA) — so "crop absent in the selected
 vintage" is already a real, reachable condition, not hypothetical.
@@ -77,6 +79,9 @@ _CROPS_2020_V2R2 = frozenset({  # 46 (adds CITR,COFF,MILL,ONIO,RUBB,TOMA; drops 
     "RCOF", "REST", "RICE", "RUBB", "SESA", "SORG", "SOYB", "SUGB", "SUGC",
     "SUNF", "SWPO", "TEAS", "TEMF", "TOBA", "TOMA", "TROF", "VEGE", "WHEA",
     "YAMS",
+})
+_CROPS_2020_V2R0 = frozenset({  # 6: the crops with all three strata in ACEA's provisioned folder
+    "COWP", "GROU", "MAIZ", "PMIL", "RICE", "SORG",
 })
 
 
@@ -135,6 +140,11 @@ SPAM_VINTAGES: dict = {
         pattern="spam2010V2r0_global_H_{code}_{tech}.tif",  # no underscore after 2010
         crops=_CROPS_2010_V2R0,
         strata=frozenset({"A", "H", "I", "L", "R", "S"}),
+    ),
+    ("2020", "V2r0"): VintageSpec(
+        pattern="spam2020_V2r0_global_H_{code}_{tech}.tif",  # underscore after 2020
+        crops=_CROPS_2020_V2R0,
+        strata=frozenset({"A", "I", "R"}),
     ),
 }
 

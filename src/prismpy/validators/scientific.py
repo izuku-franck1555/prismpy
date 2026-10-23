@@ -517,6 +517,14 @@ def _compute_summary_stats(unified_data, config) -> Dict[str, Any]:
 # Check 1: Temporal completeness
 # =============================================================================
 
+def _pythia_requested_end(config) -> Optional[date]:
+    """The end PYTHIA's own weather download requests (``platform_config.pythia.
+    climate_end_date``, the field the PYTHIA translator reads), or None when unset."""
+    pythia = getattr(getattr(config, "platform_config", None), "pythia", None)
+    end = getattr(pythia, "climate_end_date", None)
+    return date.fromisoformat(end) if end else None
+
+
 def _check_temporal_completeness(
     unified_data, config,
     enabled_platforms: Optional[List[str]] = None,
@@ -584,6 +592,9 @@ def _check_temporal_completeness(
     expected_start_no_spinup = date(start_year, 1, 1)
     crop_cal = config.crop.calendar if config.crop else None
     expected_end = config.temporal.get_climate_end_date(crop_cal)
+    requested = _pythia_requested_end(config)
+    if requested is not None and list(enabled_platforms or []) == ["pythia"]:
+        expected_end = requested   # PYTHIA's own download ends there; no other engine reads it
     expected_days_with_spinup = (expected_end - expected_start_with_spinup).days + 1
     expected_days_no_spinup = (expected_end - expected_start_no_spinup).days + 1
 
@@ -629,7 +640,6 @@ def _check_temporal_completeness(
             continue
         cells_with_records += 1
         actual_dates = {r.date for r in ts.records if hasattr(r, 'date')}
-        n_actual = len(actual_dates)
         # Per-cell discriminator: cells whose first record predates
         # the no-spinup start were fetched WITH spinup (ACEA-style);
         # the rest carry only the configured period (PYTHIA / CRAFT
@@ -637,11 +647,12 @@ def _check_temporal_completeness(
         # every conditional translator path enumerated in the
         # docstring above.
         if actual_dates and min(actual_dates) < expected_start_no_spinup:
-            expected_per_cell = expected_days_with_spinup
+            expected_per_cell, start = expected_days_with_spinup, expected_start_with_spinup
             n_with_spinup_cells += 1
         else:
-            expected_per_cell = expected_days_no_spinup
+            expected_per_cell, start = expected_days_no_spinup, expected_start_no_spinup
             n_no_spinup_cells += 1
+        n_actual = sum(start <= day <= expected_end for day in actual_dates)   # outside dates never fill a gap
         n_missing = expected_per_cell - n_actual
         total_present += n_actual
         total_expected += expected_per_cell

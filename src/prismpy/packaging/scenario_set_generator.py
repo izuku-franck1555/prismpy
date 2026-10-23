@@ -571,6 +571,7 @@ def _rewrite_projection_manifest(
     temporal = dict(manifest.get("temporal", {}))
     temporal["start_year"] = start_year
     temporal["end_year"] = end_year
+    temporal.pop("weather_end", None)   # the base package's recorded weather is not the projection's
     manifest["temporal"] = temporal
 
     data_sources = dict(manifest.get("data_sources", {}))
