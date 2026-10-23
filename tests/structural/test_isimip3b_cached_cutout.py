@@ -1318,6 +1318,7 @@ def test_cached_cutout_raises_when_cutout_job_is_none(
         )
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(
     bool(os.environ.get("PRISMPY_SKIP_LIVE_ISIMIP")),
     reason="live ISIMIP fetch disabled via PRISMPY_SKIP_LIVE_ISIMIP",
@@ -1371,3 +1372,9 @@ def test_cached_cutout_live_multi_decade_real_fetch(tmp_path: Path) -> None:
         assert ds.sizes.get("time", 0) > 3000
         assert int(min(years)) <= 2086, f"span starts too late: {min(years)}"
         assert int(max(years)) >= 2100, f"span ends too early: {max(years)}"
+
+
+def test_the_live_isimip_fetch_is_outside_the_default_tier():
+    """A live ISIMIP fetch can queue for minutes, so the default selection must skip it."""
+    live = test_cached_cutout_live_multi_decade_real_fetch
+    assert "slow" in {mark.name for mark in getattr(live, "pytestmark", [])}
