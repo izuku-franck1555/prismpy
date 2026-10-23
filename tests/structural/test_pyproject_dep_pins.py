@@ -42,12 +42,12 @@ EXPECTED_DEP_PINS = (
     ("rasterio", ">=1.3,<2.0"),
     ("xarray",   ">=2023.1,<2025.0"),
     ("pydantic", ">=2.0,<3.0"),
+    ("netCDF4",  ">=1.6.0,<1.7.5"),  # capped against a CI segfault, not for determinism
 )
 
 
 class TestPyprojectDependencyPins(unittest.TestCase):
-    """The four scientific deps must carry both a floor AND a
-    major-version upper bound so determinism is contractual."""
+    """Each pinned dependency keeps both its floor and its upper bound."""
 
     @classmethod
     def setUpClass(cls):
@@ -76,10 +76,19 @@ class TestPyprojectDependencyPins(unittest.TestCase):
                 self.assertRegex(
                     self.src, pattern,
                     f"pyproject.toml must declare "
-                    f"'{dep}{spec}' as a dependency pin. "
-                    f"Sprint E.0.5 AC-Q2-A1-d requires the "
-                    f"upper bound for byte-identical bound-gen.",
+                    f"'{dep}{spec}' as a dependency pin, with both bounds.",
                 )
+
+    def test_every_copy_of_the_netcdf4_pin_matches_pyproject(self):
+        """requirements.txt and the netCDF engine pin hold pyproject's netCDF4 range."""
+        from prismpy.standards.isimip_versions import NETCDF_FORMAT_ENGINE
+
+        spec = dict(EXPECTED_DEP_PINS)["netCDF4"]
+        requirements = (_REPO_ROOT / "requirements.txt").read_text(encoding="utf-8")
+        with self.subTest(copy="requirements.txt"):
+            self.assertRegex(requirements, rf"(?m)^netCDF4{re.escape(spec)}\s*(#.*)?$")
+        with self.subTest(copy="NETCDF_FORMAT_ENGINE"):
+            self.assertEqual(NETCDF_FORMAT_ENGINE["netcdf4"], spec)
 
     def test_numpy_floor_preserved_at_124(self):
         """Anti-mutation drill — the 1.24 floor was at risk

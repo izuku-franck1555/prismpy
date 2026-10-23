@@ -149,7 +149,7 @@ LONGITUDE_CONVENTION: Final[str] = "-180_to_180"
 # this stack is pinned and asserted via the structural pin.
 
 NETCDF_FORMAT_ENGINE: Final[Mapping[str, str]] = {
-    "netcdf4": ">=1.6.0,<2.0",  # matches pyproject.toml runtime pin
+    "netcdf4": ">=1.6.0,<1.7.5",  # matches pyproject.toml runtime pin
     "xarray": ">=2023.1,<2025.0",  # matches pyproject.toml runtime pin
     "cftime": ">=1.6.0,<2.0",  # transitive via netCDF4; pin captured here per LOW-Pass4-3
 }
