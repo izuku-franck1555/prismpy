@@ -11,14 +11,21 @@ requests through the full climate-source module.
 NASA POWER does not publish its recent days in order. Solar radiation, the
 slowest required parameter, trails real time, and a whole span can stay missing
 behind its published tail: on 2026-10-22, 2026-10-12..14 had no solar radiation
-at every point checked (Abuja, Niger State, Mopti) while later days did. So the
-default must end a request before such a hole, not merely behind the tail. The
-14 days below were chosen 2026-10-22 against the FLASHFlux hole of
-2026-10-12..14; re-probe before 2026-10-26. The estimate is deliberately
-conservative — claiming a date is published later than it truly is only makes a
-very recent season unavailable for a few extra days; it never reports missing
-data as present. The post-fetch coverage check is the real source of truth, so
-an imperfect lag can never produce a false success.
+at every point checked (Abuja, Niger State, Mopti) while later days did. The
+fetch fills a short gap of solar radiation or temperature (at most
+MAX_INTERP_GAP_DAYS days, never rain) only between two real days, so such a
+hole fails the coverage check only while a request ENDS inside it. The 14 days
+below were chosen 2026-10-22 against that hole: a default request ends before
+it through 2026-10-25, ends inside it from 2026-10-26 to 2026-10-28 (refused
+unless NASA fills it), and brackets it from 2026-10-29 (filled, with
+provenance); re-probe before 2026-10-26. The follow-up is a cached daily probe
+that sets the latest available date to the latest day on which every required
+parameter is present and before which every gap is fillable by that rule. The
+estimate is deliberately conservative — claiming a date is published later than
+it truly is only makes a very recent season unavailable for a few extra days.
+The post-fetch coverage check is the real source of truth, so an imperfect lag
+can never produce a false success; it counts filled days as covered, so it
+proves coverage after the gap fill, not raw NASA completeness.
 """
 from datetime import datetime, timedelta, timezone
 
